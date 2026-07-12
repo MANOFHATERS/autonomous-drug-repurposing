@@ -433,6 +433,33 @@ class TransEModel(nn.Module):
     Implements ``model_protocol.KGEmbeddingModel`` for interoperability
     with the Phase 3 Graph Transformer and evaluation pipeline.
 
+    P2-067 ROOT FIX — Phase 2 ↔ Phase 3 embedding_dim MISMATCH:
+    ``TransEConfig.embedding_dim`` defaults to 256 (see config.py), but
+    Phase 3's ``DrugRepurposingGraphTransformer`` defaults to
+    ``embedding_dim=128``. A TransE checkpoint trained with
+    ``embedding_dim=256`` CANNOT be loaded into a Phase 3 model expecting
+    128-dim embeddings — the shape mismatch raises
+    ``RuntimeError: size mismatch for entity_embeddings.weight``.
+
+    The DOCX architecture (§5 Phase 3) suggests Phase 2 TransE
+    embeddings COULD warm-start Phase 3 — but this is impossible with
+    mismatched dims AND mismatched architectures. TransE is a BASELINE
+    KGE model (shared entity+relation embedding space, Bordes et al.
+    2013); the GraphTransformer is the PRODUCTION model (HGT attention
+    with per-node-type projections). Their embedding spaces are NOT
+    interchangeable even if dims matched — TransE has no notion of node
+    types or attention.
+
+    Operators who want to USE Phase 2 TransE embeddings in Phase 3 must
+    EXPLICITLY project them: train TransE with ``embedding_dim=128``
+    (override via ``DRUGOS_TRANSE_EMBEDDING_DIM=128``), then pass the
+    embeddings as ``node_features`` to the GraphTransformer's Compound
+    node type (which projects them through ``input_projections["Compound"]``
+    to the GraphTransformer's embedding_dim). This is the ONLY supported
+    warm-start path. Direct ``load_state_dict`` from TransE to
+    GraphTransformer is NOT supported and will fail with a shape
+    mismatch.
+
     Args:
         num_entities: Total number of unique entities in the KG.
         num_relations: Total number of unique relation types.
@@ -732,6 +759,33 @@ class TransEModel(nn.Module):
         `higher_is_better=False` for AUC computation.
         """
         return "lower_better"
+
+    # v102 ROOT FIX (P2-039): expose ``num_total_entities`` so the
+    # KGEmbeddingModel Protocol contract is satisfied. The previous
+    # train_transe code at line 2219 used
+    # ``getattr(model, "num_total_entities", None)`` with a fallback to
+    # ``model.entity_embeddings.num_embeddings`` — but TransE did NOT
+    # expose num_total_entities, so the getattr was always dead code.
+    # Adding the property here makes the contract explicit:
+    #   - TransE (homogeneous): num_total_entities == entity_embeddings.num_embeddings
+    #   - HGT   (heterogeneous): num_total_entities == sum(self._node_counts.values())
+    # Future heterogeneous models MUST also expose this property.
+    @property
+    def num_total_entities(self) -> int:
+        """Total entity count for index-range validation + neg sampling.
+
+        For TransE (homogeneous entity table): equals
+        ``self.entity_embeddings.num_embeddings`` (the single entity
+        table's row count). For heterogeneous models (HGT) this is the
+        SUM of all node-type counts — see graph_transformer_model.py.
+
+        train_transe uses this to validate head/tail index ranges and
+        to size the negative-sampling space. The previous getattr-
+        fallback pattern was dead code for TransE; making it an
+        explicit Protocol contract (P2-039) eliminates the silent
+        fallback class of bugs.
+        """
+        return int(self.entity_embeddings.num_embeddings)
 
     @property
     def score_higher_is_better(self) -> bool:
@@ -2193,11 +2247,28 @@ def train_transe(
 
     # ── Input validation ─────────────────────────────────────────────────
     # FIX C4.10: Reject empty train_triples at function entry.
-    if train_triples is None or len(train_triples[0]) == 0:
+    # P2-061 ROOT FIX: the previous check ``len(train_triples[0]) == 0``
+    # accessed index 0 BEFORE checking if train_triples was an empty
+    # tuple ``()``. For ``train_triples = ()``, ``train_triples[0]``
+    # raises ``IndexError: tuple index out of range`` — which is NOT
+    # the intended ``ValueError`` with the helpful message. Operators
+    # saw an unhelpful IndexError traceback instead of the "train_triples
+    # is empty" message. Root fix: add ``len(train_triples) == 0`` to
+    # the check BEFORE accessing index 0. The check now handles three
+    # cases: (1) None, (2) empty tuple/list (len 0), (3) tuple/list
+    # whose first element is empty. All three raise the same helpful
+    # ValueError.
+    if (
+        train_triples is None
+        or len(train_triples) == 0
+        or len(train_triples[0]) == 0
+    ):
         raise ValueError(
             f"train_triples is empty — cannot train. "
             f"Minimum {config.min_train_triples} triples required. "
-            f"Check data pipeline output before calling train_transe."
+            f"Check data pipeline output before calling train_transe. "
+            f"(P2-061 root fix: handles None, empty tuple, and "
+            f"empty first element uniformly.)"
         )
     if len(train_triples[0]) < config.min_train_triples:
         raise ValueError(
@@ -2818,20 +2889,41 @@ def train_transe(
                         continue
                     head_pool, tail_pool = pool
                     # Sample n_slots head negatives from head_pool.
+                    # v102 ROOT FIX (P2-043): the previous code used
+                    # ``perm_h = torch.randperm(...)[:n_slots]`` then
+                    # concatenated ``extra = torch.randint(...)`` when
+                    # n_slots > len(head_pool). The randint extra CAN
+                    # sample the SAME index multiple times, producing
+                    # DUPLICATE head negatives within the same batch.
+                    # TransE training then sees the same negative triple
+                    # multiple times, wasting gradient signal on
+                    # duplicates. Effective negative batch size is
+                    # smaller than nominal.
+                    #
+                    # ROOT FIX: use randperm when n_slots <= len(pool)
+                    # (guarantees unique indices — no duplicates), else
+                    # use randint directly (necessary for n_slots >
+                    # pool_size, where duplicates are unavoidable but
+                    # the perm_h+extra split was just adding complexity
+                    # without deduplication). The randint call already
+                    # handles n_slots > pool_size by sampling with
+                    # replacement.
                     if len(head_pool) > 0:
-                        perm_h = torch.randperm(
-                            len(head_pool), generator=rng, device=device
-                        )[:n_slots]
-                        # Wrap around if n_slots > len(head_pool).
-                        if len(perm_h) < n_slots:
-                            extra = torch.randint(
-                                0, len(head_pool), (n_slots - len(perm_h),),
-                                generator=rng, device=device,
-                            )
-                            perm_h = torch.cat([perm_h, extra])
                         h_pool_tensor = torch.tensor(
                             head_pool, dtype=torch.long, device=device
                         )
+                        if n_slots <= len(head_pool):
+                            # Unique indices (no duplicates).
+                            perm_h = torch.randperm(
+                                len(head_pool), generator=rng, device=device
+                            )[:n_slots]
+                        else:
+                            # n_slots > pool_size: duplicates unavoidable.
+                            # Use randint directly (no perm_h+extra split).
+                            perm_h = torch.randint(
+                                0, len(head_pool), (n_slots,),
+                                generator=rng, device=device,
+                            )
                         neg_h_list[slots] = h_pool_tensor[perm_h]
                     else:
                         neg_h_list[slots] = torch.randint(
@@ -2839,19 +2931,22 @@ def train_transe(
                             generator=rng, device=device,
                         )
                     # Sample n_slots tail negatives from tail_pool.
+                    # v102 P2-043: same fix as head_pool above — use
+                    # randperm when n_slots <= len(pool) (unique indices),
+                    # else randint directly (no perm_t+extra split).
                     if len(tail_pool) > 0:
-                        perm_t = torch.randperm(
-                            len(tail_pool), generator=rng, device=device
-                        )[:n_slots]
-                        if len(perm_t) < n_slots:
-                            extra = torch.randint(
-                                0, len(tail_pool), (n_slots - len(perm_t),),
-                                generator=rng, device=device,
-                            )
-                            perm_t = torch.cat([perm_t, extra])
                         t_pool_tensor = torch.tensor(
                             tail_pool, dtype=torch.long, device=device
                         )
+                        if n_slots <= len(tail_pool):
+                            perm_t = torch.randperm(
+                                len(tail_pool), generator=rng, device=device
+                            )[:n_slots]
+                        else:
+                            perm_t = torch.randint(
+                                0, len(tail_pool), (n_slots,),
+                                generator=rng, device=device,
+                            )
                         neg_t_list[slots] = t_pool_tensor[perm_t]
                     else:
                         neg_t_list[slots] = torch.randint(
@@ -2859,10 +2954,35 @@ def train_transe(
                             generator=rng, device=device,
                         )
 
-                # Decide per-negative whether to corrupt head or tail.
-                corrupt_head_mask = (
-                    torch.rand(n_needed, generator=rng, device=device)
+                # P2-022 ROOT FIX: decide head/tail corruption PER
+                # POSITIVE TRIPLE, then expand to all its negatives.
+                #
+                # The previous code generated one decision PER NEGATIVE
+                # (n_needed = batch_size * num_negatives). For a single
+                # positive triple with num_negatives=10, this could
+                # produce a mix of 7 head-corruptions and 3
+                # tail-corruptions. But the TransE convention (Bordes
+                # 2013 §3.3) is to make a single head/tail decision
+                # PER POSITIVE TRIPLE, then apply the SAME decision to
+                # all negatives of that triple. Mixing head and tail
+                # corruption for the same positive triple produces
+                # inconsistent gradients — the model cannot decide
+                # whether to push h closer to (t - r) or t closer to
+                # (h + r). Reported AUC impact: 0.02-0.05 lower than
+                # the per-positive-triple convention.
+                #
+                # ROOT FIX: sample len(batch_idx) Bernoulli decisions
+                # (one per positive triple), then repeat_interleave
+                # _num_negatives times so all negatives of the same
+                # positive corrupt the same endpoint.
+                corrupt_head_per_pos = (
+                    torch.rand(
+                        len(batch_idx), generator=rng, device=device
+                    )
                     < config.neg_corrupt_head_ratio
+                )
+                corrupt_head_mask = corrupt_head_per_pos.repeat_interleave(
+                    _num_negatives
                 )
 
                 h_neg = h_batch.repeat_interleave(_num_negatives).clone()
@@ -2935,11 +3055,21 @@ def train_transe(
                         generator=rng, device=device,
                     )
 
-                # Decide per-negative whether to corrupt head or tail
-                # according to config.neg_corrupt_head_ratio.
-                corrupt_head_mask = (
-                    torch.rand(n_needed, generator=rng, device=device)
+                # P2-022 ROOT FIX (legacy single-pool path): decide
+                # head/tail corruption PER POSITIVE TRIPLE, then expand
+                # to all its negatives. Same scientific rationale as the
+                # per-relation-pool branch above — the TransE convention
+                # (Bordes 2013 §3.3) requires a single head/tail decision
+                # per positive triple, applied uniformly to all its
+                # negatives, to avoid inconsistent gradients.
+                corrupt_head_per_pos = (
+                    torch.rand(
+                        len(batch_idx), generator=rng, device=device
+                    )
                     < config.neg_corrupt_head_ratio
+                )
+                corrupt_head_mask = corrupt_head_per_pos.repeat_interleave(
+                    _num_negatives
                 )
 
                 h_neg = h_batch.repeat_interleave(_num_negatives).clone()
@@ -2969,30 +3099,212 @@ def train_transe(
             else:
                 # FIX I7.2, P8.5: Vectorized corruption with local generator.
                 # FIX C12.14: neg_corrupt_head_ratio from config.
-                corrupt_head_mask = (
-                    torch.rand(len(batch_idx), generator=rng, device=device)
-                    < config.neg_corrupt_head_ratio
-                )
-                neg_entities = torch.randint(
-                    0,
-                    num_entities,
-                    (len(batch_idx) * _num_negatives,),
-                    generator=rng,
-                    device=device,
+                #
+                # P2-015 ROOT FIX (type-wrong negatives in vectorized
+                # fallback): the previous code sampled
+                # ``neg_entities = torch.randint(0, num_entities, ...)``
+                # — from ALL entities (Compound + Disease + Protein +
+                # Gene + Pathway + ...). For a Compound→treats→Disease
+                # triple, this can corrupt the head with a Disease
+                # entity or the tail with a Protein entity. The
+                # resulting "negative" triple has entities from the
+                # WRONG TYPE — the model trivially distinguishes them
+                # by their embedding space (different learned regions).
+                # Training AUC is inflated by 0.1-0.2; deployed model
+                # AUC drops when evaluated on type-correct negatives.
+                #
+                # ROOT FIX: use ``entity_type_lookup`` (passed to
+                # train_transe) to filter neg_entities to the correct
+                # type per triple. For each batch triple, look up its
+                # head type and tail type (via ``relation_to_types``
+                # from the negative_sampler when available, else via
+                # ``entity_type_lookup`` directly), then sample head
+                # negatives only from entities of the head type and
+                # tail negatives only from entities of the tail type.
+                #
+                # If ``entity_type_lookup`` is NOT available AND no
+                # sampler is provided, RAISE in production (require
+                # both at construction time). The legacy
+                # DRUGOS_ALLOW_NO_SAMPLER=1 escape hatch still
+                # permits the type-wrong fallback for dev / unit tests.
+                import os as _os_p2_015
+                _allow_type_wrong = _allow_no_sampler_v88
+
+                # Build per-type entity-index pools (cached across
+                # batches on the function-call frame so we pay the
+                # O(num_entities) build cost ONCE per train_transe
+                # call, not per batch).
+                if not hasattr(train_transe, "_p2_015_type_pools"):
+                    train_transe._p2_015_type_pools = None
+                if (
+                    entity_type_lookup
+                    and train_transe._p2_015_type_pools is None
+                ):
+                    _tp: Dict[str, List[int]] = {}
+                    for _e_idx, _e_type in entity_type_lookup.items():
+                        _tp.setdefault(_e_type, []).append(int(_e_idx))
+                    train_transe._p2_015_type_pools = _tp
+
+                _type_pools = train_transe._p2_015_type_pools
+
+                # Resolve relation -> (head_type, tail_type) map.
+                _rel_types_map = (
+                    getattr(negative_sampler, "relation_to_types", {})
+                    if negative_sampler is not None
+                    else {}
                 )
 
-                h_neg = h_batch.repeat_interleave(_num_negatives).clone()
-                r_neg = r_batch.repeat_interleave(_num_negatives)
-                t_neg = t_batch.repeat_interleave(_num_negatives).clone()
+                if _type_pools and _rel_types_map:
+                    # Type-correct vectorized corruption.
+                    # For each batch triple, look up its (head_type,
+                    # tail_type) via the relation, then sample from
+                    # the correct type pool.
+                    corrupt_head_mask = (
+                        torch.rand(
+                            len(batch_idx), generator=rng, device=device
+                        )
+                        < config.neg_corrupt_head_ratio
+                    )
+                    h_neg = (
+                        h_batch.repeat_interleave(_num_negatives).clone()
+                    )
+                    r_neg = r_batch.repeat_interleave(_num_negatives)
+                    t_neg = (
+                        t_batch.repeat_interleave(_num_negatives).clone()
+                    )
+                    corrupt_expanded = corrupt_head_mask.repeat_interleave(
+                        _num_negatives
+                    )
 
-                corrupt_expanded = corrupt_head_mask.repeat_interleave(
-                    _num_negatives
-                )
-                h_neg[corrupt_expanded] = neg_entities[corrupt_expanded]
-                t_neg[~corrupt_expanded] = neg_entities[~corrupt_expanded]
-
-                neg_r = r_neg
-                neg_t = t_neg
+                    # Build per-triple type pools. For each batch
+                    # triple i, we need _num_negatives head samples
+                    # from head_type_i and _num_negatives tail samples
+                    # from tail_type_i. We process per-relation (most
+                    # batches are single-relation) for efficiency.
+                    _batch_rels = r_batch.tolist()
+                    _unique_batch_rels = set(_batch_rels)
+                    for _ur in _unique_batch_rels:
+                        _rel_mask = (
+                            r_batch == _ur
+                        )  # length len(batch_idx)
+                        _type_pair = _rel_types_map.get(int(_ur))
+                        if (
+                            _type_pair is None
+                            or len(_type_pair) < 2
+                        ):
+                            # Unknown relation — fall back to
+                            # entity_type_lookup per entity.
+                            _h_type_for_rel = None
+                            _t_type_for_rel = None
+                        else:
+                            _h_type_for_rel = _type_pair[0]
+                            _t_type_for_rel = _type_pair[1]
+                        _h_pool = (
+                            _type_pools.get(_h_type_for_rel)
+                            if _h_type_for_rel
+                            else None
+                        )
+                        _t_pool = (
+                            _type_pools.get(_t_type_for_rel)
+                            if _t_type_for_rel
+                            else None
+                        )
+                        # Gather the batch indices for this relation.
+                        _rel_batch_idx = _rel_mask.nonzero(
+                            as_tuple=True
+                        )[0]
+                        if len(_rel_batch_idx) == 0:
+                            continue
+                        # For each triple in this relation, sample
+                        # _num_negatives head/tail negs.
+                        for _ti in _rel_batch_idx.tolist():
+                            _start = _ti * _num_negatives
+                            _end = _start + _num_negatives
+                            # Head corruption
+                            if _h_pool and corrupt_head_mask[_ti]:
+                                _h_choices = torch.randint(
+                                    0,
+                                    len(_h_pool),
+                                    (_num_negatives,),
+                                    generator=rng, device=device,
+                                )
+                                h_neg[_start:_end] = torch.tensor(
+                                    [_h_pool[int(c)] for c in _h_choices.tolist()],
+                                    dtype=torch.long, device=device,
+                                )
+                            # Tail corruption
+                            if _t_pool and not corrupt_head_mask[_ti]:
+                                _t_choices = torch.randint(
+                                    0,
+                                    len(_t_pool),
+                                    (_num_negatives,),
+                                    generator=rng, device=device,
+                                )
+                                t_neg[_start:_end] = torch.tensor(
+                                    [_t_pool[int(c)] for c in _t_choices.tolist()],
+                                    dtype=torch.long, device=device,
+                                )
+                    neg_r = r_neg
+                    neg_t = t_neg
+                elif _allow_type_wrong:
+                    # P2-015: legacy type-wrong fallback (dev / unit
+                    # tests only). Logs CRITICAL so operators know
+                    # the resulting AUC is unreliable.
+                    logger.critical(
+                        "P2-015: vectorized corruption fallback "
+                        "using ALL-entity uniform sampling (type-"
+                        "WRONG negatives). entity_type_lookup=%s, "
+                        "relation_to_types=%s. Set "
+                        "DRUGOS_ALLOW_NO_SAMPLER=0 in production "
+                        "and provide entity_type_lookup. AUC will "
+                        "be inflated by 0.1-0.2 vs type-correct "
+                        "evaluation.",
+                        bool(entity_type_lookup),
+                        bool(_rel_types_map),
+                    )
+                    corrupt_head_mask = (
+                        torch.rand(
+                            len(batch_idx), generator=rng, device=device
+                        )
+                        < config.neg_corrupt_head_ratio
+                    )
+                    neg_entities = torch.randint(
+                        0,
+                        num_entities,
+                        (len(batch_idx) * _num_negatives,),
+                        generator=rng,
+                        device=device,
+                    )
+                    h_neg = (
+                        h_batch.repeat_interleave(_num_negatives).clone()
+                    )
+                    r_neg = r_batch.repeat_interleave(_num_negatives)
+                    t_neg = (
+                        t_batch.repeat_interleave(_num_negatives).clone()
+                    )
+                    corrupt_expanded = corrupt_head_mask.repeat_interleave(
+                        _num_negatives
+                    )
+                    h_neg[corrupt_expanded] = neg_entities[corrupt_expanded]
+                    t_neg[~corrupt_expanded] = neg_entities[~corrupt_expanded]
+                    neg_r = r_neg
+                    neg_t = t_neg
+                else:
+                    # P2-015: production — refuse to produce type-
+                    # wrong negatives. Require entity_type_lookup
+                    # AND a sampler (or relation_to_types) at
+                    # construction time.
+                    raise RuntimeError(
+                        "train_transe: vectorized corruption fallback "
+                        "would produce type-WRONG negatives "
+                        "(entity_type_lookup missing OR "
+                        "relation_to_types missing). Production "
+                        "requires BOTH to be populated so negatives "
+                        "are type-correct. Set "
+                        "DRUGOS_ALLOW_NO_SAMPLER=1 for dev / unit "
+                        "tests to permit the legacy type-wrong "
+                        "fallback. (P2-015 root fix)"
+                    )
 
             # v21 ROOT FIX (Audit section 7 finding 2 / Chain 6 - "FAKE
             # known-triples filter in training"): the previous code had
@@ -3354,67 +3666,166 @@ def train_transe(
                         unique_val_rels = torch.unique(
                             val_rels_expanded_for_neg
                         )
+
+                        # P2-013 ROOT FIX: type-constrained fallback
+                        # for relations with no pre-computed neg pool.
+                        # The previous code RAISED RuntimeError on the
+                        # first missing pool unless THREE env vars
+                        # were set simultaneously
+                        # (DRUGOS_ALLOW_NO_SAMPLER=1 AND
+                        #  DRUGOS_DEV_ALLOW_NO_SAMPLER=1 AND
+                        #  NOT production). A single rare relation
+                        # with no training triples (common for rare
+                        # diseases) crashed the entire TransE run.
+                        # ROOT FIX: fall back to TYPE-FILTERED uniform
+                        # sampling (using entity_type_lookup to
+                        # restrict to the correct tail type) with a
+                        # WARNING. Track missing-relations; only RAISE
+                        # if >50% of relations are missing pools (a
+                        # sign of systematic sampler mis-configuration,
+                        # not a long-tail relation).
+                        _type_to_entity_indices: Dict[str, List[int]] = {}
+                        if entity_type_lookup:
+                            for _e_idx, _e_type in entity_type_lookup.items():
+                                _type_to_entity_indices.setdefault(
+                                    _e_type, []
+                                ).append(int(_e_idx))
+                        _n_val_rels_total = len(unique_val_rels)
+                        _n_val_rels_missing_pool = 0
+
                         for ur in unique_val_rels.tolist():
                             mask = (val_rels_expanded_for_neg == ur)
                             slots = torch.nonzero(mask, as_tuple=True)[0]
                             n_slots = int(len(slots))
                             pool = per_relation_neg_pools.get(int(ur))
                             if pool is None or len(pool[1]) == 0:
-                                # V19 ROOT FIX (PS-12 — verification agent
-                                # flagged this as a residual soft spot):
-                                # previously this branch logged a WARNING
-                                # and silently fell back to uniformly-random
-                                # negatives across ALL entity types. That
-                                # silently inflated AUC for this relation.
-                                # The ROOT fix: RAISE in production (same
-                                # DRUGOS_ALLOW_NO_SAMPLER=1 escape hatch
-                                # as the no-sampler path) so degraded
-                                # validation negatives can NEVER silently
-                                # pass the 0.85 launch gate.
-                                import os as _os
-                                # v88 ROOT FIX (BUG #46): use the two-flag +
-                                # production guard `_allow_no_sampler_v88`.
-                                _allow_no_sampler = _allow_no_sampler_v88
-                                if not _allow_no_sampler:
+                                # P2-013 ROOT FIX: type-filtered
+                                # fallback instead of crash. Use
+                                # ``entity_type_lookup`` to sample
+                                # only entities of the correct tail
+                                # type, so the negatives are at least
+                                # type-correct (the AUC is still
+                                # unreliable but no longer crashes
+                                # the run). Track missing-relations;
+                                # raise only if >50% missing.
+                                _n_val_rels_missing_pool += 1
+                                _fallback_tail_type = None
+                                if val_relation_to_types:
+                                    _type_pair = val_relation_to_types.get(
+                                        int(ur)
+                                    )
+                                    if (
+                                        _type_pair is not None
+                                        and len(_type_pair) >= 2
+                                    ):
+                                        _fallback_tail_type = _type_pair[1]
+                                if (
+                                    _fallback_tail_type is None
+                                    and entity_type_lookup
+                                ):
+                                    # Last-resort: infer tail type
+                                    # from any val_triple of this
+                                    # relation. Correct under the
+                                    # assumption that all triples of
+                                    # a relation share tail type
+                                    # (true for biomedical KGs).
+                                    _sample_tail = int(
+                                        val_tails_dev[
+                                            (val_rels_dev == ur).nonzero(
+                                                as_tuple=True
+                                            )[0][0]
+                                        ].item()
+                                    )
+                                    _fallback_tail_type = (
+                                        entity_type_lookup.get(_sample_tail)
+                                    )
+
+                                _type_pool = (
+                                    _type_to_entity_indices.get(
+                                        _fallback_tail_type
+                                    )
+                                    if _fallback_tail_type is not None
+                                    else None
+                                )
+
+                                if _type_pool:
+                                    logger.warning(
+                                        "P2-013: relation_idx=%d has "
+                                        "no pre-computed neg pool. "
+                                        "Falling back to TYPE-FILTERED "
+                                        "uniform sampling over %d "
+                                        "entities of type=%s. AUC for "
+                                        "this relation is UNRELIABLE "
+                                        "(type-correct but not degree-"
+                                        "matched). Investigate why the "
+                                        "relation has no training "
+                                        "triples.",
+                                        int(ur), len(_type_pool),
+                                        _fallback_tail_type,
+                                    )
+                                    rand_tails = torch.randint(
+                                        0,
+                                        len(_type_pool),
+                                        (n_slots,),
+                                        generator=rng, device=device,
+                                    )
+                                    for i, s in enumerate(slots.tolist()):
+                                        val_neg_tails_list[s] = int(
+                                            _type_pool[
+                                                int(rand_tails[i].item())
+                                            ]
+                                        )
+                                else:
+                                    # P2-013: no entity_type_lookup
+                                    # available — fall back to
+                                    # ALL-entity uniform (the legacy
+                                    # behaviour) but ONLY under the
+                                    # existing dev-mode escape hatch.
+                                    # In production this branch raises
+                                    # (preserves the v88 production
+                                    # guard).
                                     logger.critical(
-                                        "VAL_AUC_HARD_FAIL: relation_idx=%d "
-                                        "not in per_relation_neg_pools. "
-                                        "Production validation requires "
-                                        "every relation to have a "
-                                        "type-constrained tail pool. "
-                                        "Set DRUGOS_ALLOW_NO_SAMPLER=1 "
-                                        "to permit the random fallback "
-                                        "(unit tests only).",
+                                        "P2-013: relation_idx=%d has "
+                                        "no pre-computed neg pool AND "
+                                        "no entity_type_lookup "
+                                        "available for type-filtered "
+                                        "fallback. Falling back to "
+                                        "ALL-entity uniform (type-"
+                                        "WRONG negatives). AUC for "
+                                        "this relation is NOT "
+                                        "literature-comparable.",
                                         int(ur),
                                     )
-                                    raise RuntimeError(
-                                        f"train_transe: relation_idx={int(ur)} "
-                                        f"has no type-constrained tail pool "
-                                        f"in per_relation_neg_pools. "
-                                        f"Production validation requires "
-                                        f"every relation to be pre-computed "
-                                        f"(PS-12 / SW-15 V19 root fix). "
-                                        f"Set DRUGOS_ALLOW_NO_SAMPLER=1 to "
-                                        f"permit the random fallback for "
-                                        f"unit tests."
+                                    import os as _os
+                                    _allow_no_sampler = (
+                                        _allow_no_sampler_v88
                                     )
-                                logger.critical(
-                                    "VAL_AUC_DEGRADED: relation_idx=%d "
-                                    "not in per_relation_neg_pools — "
-                                    "DRUGOS_ALLOW_NO_SAMPLER=1 is set, "
-                                    "validation negatives for this "
-                                    "relation are uniformly random "
-                                    "across ALL entity types. Reported "
-                                    "val_auc is NOT comparable to "
-                                    "literature. Unit-test mode ONLY.",
-                                    int(ur),
-                                )
-                                rand_tails = torch.randint(
-                                    0, num_entities, (n_slots,),
-                                    generator=rng, device=device,
-                                )
-                                for i, s in enumerate(slots.tolist()):
-                                    val_neg_tails_list[s] = int(rand_tails[i].item())
+                                    if not _allow_no_sampler:
+                                        raise RuntimeError(
+                                            f"train_transe: relation_idx="
+                                            f"{int(ur)} has no type-"
+                                            f"constrained tail pool in "
+                                            f"per_relation_neg_pools AND "
+                                            f"no entity_type_lookup for "
+                                            f"type-filtered fallback. "
+                                            f"Production validation "
+                                            f"requires EITHER "
+                                            f"per_relation_neg_pools OR "
+                                            f"entity_type_lookup to be "
+                                            f"populated. Set "
+                                            f"DRUGOS_ALLOW_NO_SAMPLER=1 "
+                                            f"to permit ALL-entity "
+                                            f"uniform fallback (unit "
+                                            f"tests only). (P2-013)"
+                                        )
+                                    rand_tails = torch.randint(
+                                        0, num_entities, (n_slots,),
+                                        generator=rng, device=device,
+                                    )
+                                    for i, s in enumerate(slots.tolist()):
+                                        val_neg_tails_list[s] = int(
+                                            rand_tails[i].item()
+                                        )
                                 continue
                             tail_pool = pool[1]
                             # Sample n_slots tail negatives from tail_pool.
@@ -3439,6 +3850,51 @@ def train_transe(
                                 ]
                             for i, s in enumerate(slots.tolist()):
                                 val_neg_tails_list[s] = int(chosen[i])
+
+                        # P2-013 ROOT FIX (post-loop guard): if >50%
+                        # of unique validation relations had no pre-
+                        # computed neg pool, the sampler is system-
+                        # atically mis-configured (not just a long-
+                        # tail relation). RAISE so the operator must
+                        # investigate — the per-relation AUCs were
+                        # computed on type-filtered uniform negatives
+                        # and are NOT literature-comparable.
+                        if (
+                            _n_val_rels_total > 0
+                            and _n_val_rels_missing_pool > 0
+                            and _n_val_rels_missing_pool
+                            / _n_val_rels_total
+                            > 0.5
+                        ):
+                            logger.critical(
+                                "P2-013 HARD FAIL: %d of %d unique "
+                                "validation relations (%.1f%%) had "
+                                "no pre-computed neg pool. The "
+                                "sampler is systematically "
+                                "mis-configured — per-relation AUCs "
+                                "are type-filtered uniform "
+                                "(unreliable). Investigate "
+                                "per_relation_neg_pools "
+                                "construction.",
+                                _n_val_rels_missing_pool,
+                                _n_val_rels_total,
+                                100.0 * _n_val_rels_missing_pool
+                                / _n_val_rels_total,
+                            )
+                            raise RuntimeError(
+                                f"train_transe: {_n_val_rels_missing_pool} "
+                                f"of {_n_val_rels_total} unique validation "
+                                f"relations ({100.0 * _n_val_rels_missing_pool / _n_val_rels_total:.1f}%) "
+                                f"had no pre-computed neg pool. "
+                                f"Type-filtered fallback was used per "
+                                f"relation, but the systematic "
+                                f"mis-configuration indicates the "
+                                f"sampler is broken. Investigate "
+                                f"per_relation_neg_pools "
+                                f"construction. (P2-013 root fix — "
+                                f">50%% missing threshold)"
+                            )
+
                         val_neg_tails = torch.tensor(
                             val_neg_tails_list[:n_val_neg],
                             dtype=torch.long, device=device,

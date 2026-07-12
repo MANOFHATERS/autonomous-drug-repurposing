@@ -1,12 +1,12 @@
 """
-DrugOS Graph Module — Graph Statistics & Validation (v3.0.0, Institutional-Grade)
+DrugOS Graph Module -- Graph Statistics & Validation (v3.0.0, Institutional-Grade)
 ===================================================================================
-PATIENT-SAFETY CRITICAL — This module is the validation gate between Phase 2
+PATIENT-SAFETY CRITICAL -- This module is the validation gate between Phase 2
 (knowledge graph construction) and Phase 3 (Graph Transformer training).
 
 If this module green-lights a corrupt or incomplete graph, the downstream
 Graph Transformer trains on bad data, the RL ranker promotes wrong drug-disease
-pairs, and a clinician may prescribe a drug that does not work — or worse,
+pairs, and a clinician may prescribe a drug that does not work -- or worse,
 kills a patient. There is absolutely no room for 'it ran without errors'
 reasoning here. Every fix must be treated as a patient-safety intervention.
 
@@ -14,60 +14,60 @@ CANONICAL STATS MODULE
 ----------------------
 This module is the CANONICAL external API for graph statistics used by
 ``run_pipeline.py`` for Week 2 exit criteria validation. Do NOT use
-``kg_builder.GraphStatsCollector`` directly from pipeline code — that is an
+``kg_builder.GraphStatsCollector`` directly from pipeline code -- that is an
 internal implementation detail of the graph builder. GraphStatsCollector
 provides quick builder-time counts; GraphStats provides the full validation
 suite with patient-safety gates.
 
 Public API (backward-compatible with run_pipeline.py):
-    GraphStats                  — Main statistics class (implements StatsProvider)
-    StatsProvider               — Runtime-checkable Protocol
-    compute_full_stats()        — Comprehensive graph statistics
-    check_exit_criteria(week)   — Week 1/2 exit gate
-    run_sanity_checks()         — 15+ patient-safety sanity checks
-    generate_data_readme()      — Markdown README generation
-    label_distribution_report() — Deterministic node-label distribution
+    GraphStats                  -- Main statistics class (implements StatsProvider)
+    StatsProvider               -- Runtime-checkable Protocol
+    compute_full_stats()        -- Comprehensive graph statistics
+    check_exit_criteria(week)   -- Week 1/2 exit gate
+    run_sanity_checks()         -- 15+ patient-safety sanity checks
+    generate_data_readme()      -- Markdown README generation
+    label_distribution_report() -- Deterministic node-label distribution
 
 Typed Schemas:
-    StatsReport             — Full statistics output (JSON-serializable)
-    ExitCriterionResult     — Single exit-criterion result
-    ExitCriteriaReport      — Full exit-criteria report with summary
-    SanityCheckResult       — Single sanity-check result
-    SanityCheckReport       — Full sanity-check report with summary
-    QueryRecord             — Auditable query execution record
+    StatsReport             -- Full statistics output (JSON-serializable)
+    ExitCriterionResult     -- Single exit-criterion result
+    ExitCriteriaReport      -- Full exit-criteria report with summary
+    SanityCheckResult       -- Single sanity-check result
+    SanityCheckReport       -- Full sanity-check report with summary
+    QueryRecord             -- Auditable query execution record
 
 Data Dictionary (StatsReport fields):
-    timestamp              : str  — UTC ISO-8601 when stats were computed
-    total_nodes            : int  — Total node count (0 if empty graph)
-    total_edges            : int  — Total edge count (0 if empty graph)
-    node_counts_by_type    : dict[str, int] — Per-label node counts (UNWIND)
-    edge_counts_by_type    : dict[str, int] — Per-type edge counts
-    avg_out_degree         : float — Average out-degree (0.0 if empty)
-    max_out_degree         : int  — Maximum out-degree (0 if empty)
-    min_out_degree         : int  — Minimum out-degree (0 if empty)
-    isolated_nodes         : int  — Nodes with zero edges (-1 if query failed)
-    density_homogeneous_naive : float — Naive density (for reference only)
-    density_per_edge_type  : dict[str, float] — Per-type density [0, 1]
-    compound_name_coverage : float — Fraction of Compounds with non-null name
-    compound_smiles_coverage: float — Fraction of Compounds with non-null SMILES
-    disease_name_coverage  : float — Fraction of Diseases with non-null name
-    canonical_id_coverage  : dict[str, float] — Per-type canonical ID coverage
-    compound_safety_coverage: dict[str, float] — withdrawn/toxicity field coverage
-    withdrawn_with_treats   : int  — Withdrawn compounds with treats edges (SAFETY)
-    edge_direction_violations : int — Edges violating CORE_EDGE_TYPES schema
-    warnings               : list[str] — Non-fatal issues encountered
-    query_timings          : dict[str, float] — Per-query wall-clock seconds
-    queries_run            : list[QueryRecord] — Auditable query log
-    lineage                : dict — Pipeline run ID, versions, fingerprint
+    timestamp              : str  -- UTC ISO-8601 when stats were computed
+    total_nodes            : int  -- Total node count (0 if empty graph)
+    total_edges            : int  -- Total edge count (0 if empty graph)
+    node_counts_by_type    : dict[str, int] -- Per-label node counts (UNWIND)
+    edge_counts_by_type    : dict[str, int] -- Per-type edge counts
+    avg_out_degree         : float -- Average out-degree (0.0 if empty)
+    max_out_degree         : int  -- Maximum out-degree (0 if empty)
+    min_out_degree         : int  -- Minimum out-degree (0 if empty)
+    isolated_nodes         : int  -- Nodes with zero edges (-1 if query failed)
+    density_homogeneous_naive : float -- Naive density (for reference only)
+    density_per_edge_type  : dict[str, float] -- Per-type density [0, 1]
+    compound_name_coverage : float -- Fraction of Compounds with non-null name
+    compound_smiles_coverage: float -- Fraction of Compounds with non-null SMILES
+    disease_name_coverage  : float -- Fraction of Diseases with non-null name
+    canonical_id_coverage  : dict[str, float] -- Per-type canonical ID coverage
+    compound_safety_coverage: dict[str, float] -- withdrawn/toxicity field coverage
+    withdrawn_with_treats   : int  -- Withdrawn compounds with treats edges (SAFETY)
+    edge_direction_violations : int -- Edges violating CORE_EDGE_TYPES schema
+    warnings               : list[str] -- Non-fatal issues encountered
+    query_timings          : dict[str, float] -- Per-query wall-clock seconds
+    queries_run            : list[QueryRecord] -- Auditable query log
+    lineage                : dict -- Pipeline run ID, versions, fingerprint
 
 Changelog
 ---------
-v3.0.0 — Institutional-grade rewrite. 169 issues fixed across 16 domains.
+v3.0.0 -- Institutional-grade rewrite. 169 issues fixed across 16 domains.
   - Fixes 3.1: Compound-binds-Protein (was Compound-binds-Gene, BIOLOGICALLY IMPOSSIBLE)
   - Fixes 5.11: Withdrawn drug treats-edge check (PATIENT-SAFETY gate)
   - Fixes 5.8: Edge direction validation against CORE_EDGE_TYPES
-  - Fixes 4.1: round(None) crash on empty graph → defensive None-safe math
-  - Fixes 4.2: Silent exception swallowing → logger.exception on all failures
+  - Fixes 4.1: round(None) crash on empty graph -> defensive None-safe math
+  - Fixes 4.2: Silent exception swallowing -> logger.exception on all failures
   - Fixes 7.2: Deterministic UNWIND labels(n) pattern (was labels(n)[0])
   - Fixes 7.1: UTC timestamps (was naive local time)
   - Fixes 2.5/4.13: Stable dict keys (was f-string keys)
@@ -95,6 +95,7 @@ from typing import (
     Mapping,
     Optional,
     Protocol,
+    Tuple,
     TypedDict,
     Union,
     runtime_checkable,
@@ -180,7 +181,7 @@ STATS_SCHEMA_VERSION: str = "3.0.0"
 
 # ── Sanity check reference compounds (Domain 12: Configurable) ──────────
 # Fixes 12.2: Hardcoded DrugBank IDs replaced with InChIKey-based config.
-# Fixes 3.1: Uses CORRECT biology — Compound-binds-Protein, NOT Gene.
+# Fixes 3.1: Uses CORRECT biology -- Compound-binds-Protein, NOT Gene.
 # Fixes 3.2/3.3: Uses InChIKeys (canonical IDs), not DrugBank IDs.
 
 SANITY_CHECK_COMPOUNDS: List[Dict[str, str]] = [
@@ -204,7 +205,7 @@ SANITY_CHECK_COMPOUNDS: List[Dict[str, str]] = [
         "target_type": "Protein",
         "description": (
             "Metformin should bind at least one protein target "
-            "(NOT gene — drugs bind PROTEINS, gene products)"
+            "(NOT gene -- drugs bind PROTEINS, gene products)"
         ),
     },
 ]
@@ -213,7 +214,7 @@ logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Typed Schemas (Domain 2: Design — typed output contracts)
+# Typed Schemas (Domain 2: Design -- typed output contracts)
 # ═══════════════════════════════════════════════════════════════════════════
 # Fixes 1.5, 4.14, 7.8, 14.3, 15.3: Stable TypedDict output schemas.
 
@@ -234,7 +235,7 @@ class QueryRecord(TypedDict, total=False):
 class ExitCriterionResult(TypedDict):
     """Result of a single exit-criterion check.
 
-    Keys are STABLE strings — no f-string interpolation (Fixes 2.5, 4.13).
+    Keys are STABLE strings -- no f-string interpolation (Fixes 2.5, 4.13).
     """
     criterion: str
     passed: bool
@@ -285,10 +286,10 @@ class SanityCheckReport(TypedDict):
 
 
 class StatsReport(TypedDict, total=False):
-    """Full statistics report — the output of compute_full_stats().
+    """Full statistics report -- the output of compute_full_stats().
 
     Every field is documented in the module docstring DATA DICTIONARY.
-    All numeric fields are int or float — never 'N/A' or None (Fixes 4.7, 15.1).
+    All numeric fields are int or float -- never 'N/A' or None (Fixes 4.7, 15.1).
 
     This TypedDict uses total=False because not all profiles compute
     all fields. The _validate_stats_report() function verifies required
@@ -721,7 +722,7 @@ class GraphStats:
     def _get_session(self):
         """Create a read-only Neo4j session.
 
-        Fixes 9.4: Uses READ_ACCESS for all sessions — stats computation
+        Fixes 9.4: Uses READ_ACCESS for all sessions -- stats computation
         never writes to the graph.
         """
         self._ensure_connected()
@@ -739,7 +740,7 @@ class GraphStats:
     ) -> Any:
         """Run a Neo4j query with timing, logging, and error handling.
 
-        Fixes 6.2: Per-query error handling — single query failure does
+        Fixes 6.2: Per-query error handling -- single query failure does
         not crash the entire stats computation.
         Fixes 11.6/11.7: Query timing and logging for debugging.
         Fixes 16.4: Auditable query records for lineage.
@@ -835,7 +836,7 @@ class GraphStats:
                 from environment.
 
         Returns:
-            StatsReport dict — fully JSON-serializable, no None values
+            StatsReport dict -- fully JSON-serializable, no None values
             in numeric fields, UTC timestamps.
 
         Side Effects:
@@ -854,12 +855,12 @@ class GraphStats:
             - Empty graph: returns zeros, never crashes (Fix 4.1).
 
         Fixes:
-            4.1: round(None) crash → _safe_round/_safe_int helpers
-            4.7: isolated_nodes='N/A' → int (-1 if query failed)
-            7.1: naive datetime → UTC timezone
-            7.2: labels(n)[0] → UNWIND labels(n) AS lbl
-            7.3: No run ID → lineage metadata added
-            16.1: No provenance → lineage dict added
+            4.1: round(None) crash -> _safe_round/_safe_int helpers
+            4.7: isolated_nodes='N/A' -> int (-1 if query failed)
+            7.1: naive datetime -> UTC timezone
+            7.2: labels(n)[0] -> UNWIND labels(n) AS lbl
+            7.3: No run ID -> lineage metadata added
+            16.1: No provenance -> lineage dict added
         """
         if stats_profile not in ("quick", "standard", "full"):
             stats_profile = "standard"
@@ -884,7 +885,7 @@ class GraphStats:
         warnings: List[str] = []
 
         with self._get_session() as session:
-            # ── Quick node count (logged first for context — Fix 11.9) ──
+            # ── Quick node count (logged first for context -- Fix 11.9) ──
             records = self._run_query(
                 session,
                 "MATCH (n) RETURN count(n) AS total",
@@ -993,7 +994,7 @@ class GraphStats:
                     warnings.append(
                         "Isolated-nodes query failed or timed out. "
                         "Value set to -1 (unknown). "
-                        "This is non-critical — isolated nodes are "
+                        "This is non-critical -- isolated nodes are "
                         "cosmetic, not a data-quality issue."
                     )
 
@@ -1010,7 +1011,99 @@ class GraphStats:
                 )
 
                 # ── Per-edge-type density (Domain 3, 8) ──
+                # P2-011 + P2-012 ROOT FIX (density computation):
+                # The previous code had TWO scientific bugs:
+                #
+                #   P2-011: For symmetric / biologically-undirected
+                #           relations (Protein-interacts_with-Protein
+                #           per STRING, Gene-interacts_with-Gene per
+                #           DRKG, Compound-interacts_with-Compound DDI),
+                #           it used the DIRECTED-graph denominator
+                #           ``n*(n-1)`` instead of the undirected
+                #           ``n*(n-1)/2``. PPI density was reported at
+                #           HALF its true value (0.5% instead of 1.0%),
+                #           biasing ML hyperparameter tuning and
+                #           masking duplicate-edge bugs.
+                #
+                #   P2-012: ``n_src = count(DISTINCT startNode(r))``
+                #           counted ONLY compounds (or diseases) that
+                #           participate in at least one edge of this
+                #           type. The TRUE density should use the
+                #           TOTAL Compound / Disease node count (all
+                #           possible pairs), not just the
+                #           participating-node count. Reported density
+                #           was INFLATED (12% treats density when the
+                #           true density against all possible
+                #           drug-disease pairs is 0.5%), masking the
+                #           sparsity that motivates link prediction.
+                #
+                # ROOT FIX:
+                #   1. Look up the (src_type, dst_type) for each
+                #      rel_type via CORE_EDGE_TYPES (the canonical
+                #      schema). This is O(E) per rel_type but E is
+                #      small (the schema is finite).
+                #   2. Query the TOTAL node count for each endpoint
+                #      type via ``MATCH (n:Type) RETURN count(n)``.
+                #      These counts are cached so each type is queried
+                #      at most once across the entire stats run.
+                #   3. For symmetric same-type relations in
+                #      SYMMETRIC_RELATIONS, use
+                #      ``denom = n * (n - 1) // 2`` (undirected). For
+                #      directed cross-type relations, use
+                #      ``denom = n_src * n_dst``. For directed
+                #      same-type relations not in SYMMETRIC_RELATIONS
+                #      (e.g. hypothetical Compound-inhibits-Compound
+                #      enzyme-enzyme interactions), use
+                #      ``denom = n * (n - 1)``.
+                #   4. Also compute and store
+                #      ``density_per_edge_type_participating`` (the
+                #      legacy metric) for backward compatibility —
+                #      operators can compare the two to see how much
+                #      of the graph the edge type actually covers.
+                from .config import (
+                    CORE_EDGE_TYPES,
+                    SYMMETRIC_RELATIONS,
+                )
+
+                # Build a rel_name -> set of (src_type, dst_type) map
+                # from CORE_EDGE_TYPES so we can look up the endpoint
+                # types for each rel_type in the density loop.
+                _rel_to_endpoint_types: Dict[str, List[Tuple[str, str]]] = {}
+                for _src_t, _rel_n, _dst_t in CORE_EDGE_TYPES:
+                    _rel_to_endpoint_types.setdefault(_rel_n, []).append(
+                        (_src_t, _dst_t)
+                    )
+
+                # Cache for TOTAL node counts per node type, so we
+                # don't re-query Neo4j for the same type twice.
+                _total_node_count_cache: Dict[str, int] = {}
+
+                def _total_node_count(node_type: str) -> int:
+                    """Return ``MATCH (n:Type) RETURN count(n)``.
+
+                    Cached per node_type. On query failure, returns
+                    -1 (sentinel) so the caller can fall back to the
+                    participating-node count and emit a warning.
+                    """
+                    if node_type in _total_node_count_cache:
+                        return _total_node_count_cache[node_type]
+                    _safe_nt = sanitize_identifier(node_type, "node label")
+                    _recs = self._run_query(
+                        session,
+                        f"MATCH (n:{_safe_nt}) RETURN count(n) AS cnt",
+                        f"total_node_count_{node_type}",
+                    )
+                    if _recs is None or not _recs or _recs[0] is None:
+                        _total_node_count_cache[node_type] = -1
+                        return -1
+                    _cnt = _safe_int(_recs[0]["cnt"])
+                    _total_node_count_cache[node_type] = _cnt
+                    return _cnt
+
                 per_type_density: Dict[str, float] = {}
+                # P2-012: legacy participating-node density, kept for
+                # backward compatibility / operator comparison.
+                per_type_density_participating: Dict[str, float] = {}
                 for rel_type, cnt in stats.get(
                     "edge_counts_by_type", {},
                 ).items():
@@ -1018,6 +1111,8 @@ class GraphStats:
                         safe_rel = sanitize_identifier(
                             rel_type, "rel type",
                         )
+
+                        # ── P2-012 legacy participating-node counts ──
                         recs = self._run_query(
                             session,
                             f"MATCH ()-[r:{safe_rel}]->() "
@@ -1028,46 +1123,121 @@ class GraphStats:
                         )
                         # v20 SF-8 ROOT FIX: mirror the SF-9 pattern.
                         # _run_query SWALLOWS exceptions and returns None.
-                        # The previous "REM-26 ROOT FIX" comment claimed to
-                        # store None on failure via the outer except, but the
-                        # outer except NEVER FIRED because _run_query already
-                        # swallowed the exception. The else-branch at line
-                        # ~1035 then set per_type_density[rel_type] = 0.0,
-                        # which falsely passed sanity check #7.
                         if recs is None:
-                            # Query CRASHED (e.g. Neo4j timeout).
-                            # FIX-P2-P2-6: store the sentinel float -1.0
-                            # instead of None so the Dict[str, float] type
-                            # contract is honoured and downstream formatters
-                            # (e.g. ``f"{density:.2%}"``) do not raise
-                            # ``TypeError``. ``-1.0`` is distinguishable
-                            # from legitimate 0.0 density and from "no
-                            # edges" (which is 0.0 by convention).
                             per_type_density[rel_type] = -1.0
+                            per_type_density_participating[rel_type] = -1.0
                             warnings.append(
                                 f"{rel_type}: per-type density query "
-                                f"CRASHED — value set to -1.0 (sentinel, "
+                                f"CRASHED -- value set to -1.0 (sentinel, "
                                 f"not 0.0). Investigate Neo4j connectivity "
                                 f"/ timeout."
                             )
                             continue
-                        if recs and recs[0] is not None:
-                            n_src = _safe_int(recs[0]["n_src"])
-                            n_dst = _safe_int(recs[0]["n_dst"])
-                            if n_src == n_dst and n_src > 0:
-                                # Same-type edges: denominator is n*(n-1)/2
-                                # for undirected, or n*(n-1) for directed
-                                denom = n_src * (n_src - 1)
-                            elif n_src > 0 and n_dst > 0:
-                                denom = n_src * n_dst
-                            else:
-                                denom = 1
-                            per_type_density[rel_type] = round(
-                                cnt / denom, 12,
-                            )
-                        else:
+
+                        if not (recs and recs[0] is not None):
                             # Empty result set (legitimate 0 density).
                             per_type_density[rel_type] = 0.0
+                            per_type_density_participating[rel_type] = 0.0
+                            continue
+
+                        n_src_part = _safe_int(recs[0]["n_src"])
+                        n_dst_part = _safe_int(recs[0]["n_dst"])
+
+                        # ── P2-012 participating-node density (legacy) ──
+                        if n_src_part == n_dst_part and n_src_part > 0:
+                            # P2-011: respect SYMMETRIC_RELATIONS for
+                            # the legacy metric too (so the two metrics
+                            # are directly comparable).
+                            if rel_type in SYMMETRIC_RELATIONS:
+                                _denom_part = n_src_part * (n_src_part - 1) // 2
+                            else:
+                                _denom_part = n_src_part * (n_src_part - 1)
+                        elif n_src_part > 0 and n_dst_part > 0:
+                            _denom_part = n_src_part * n_dst_part
+                        else:
+                            _denom_part = 1
+                        per_type_density_participating[rel_type] = round(
+                            cnt / _denom_part, 12,
+                        ) if _denom_part > 0 else 0.0
+
+                        # ── P2-012 true global density (against ALL
+                        # possible endpoint-type pairs, not just
+                        # participating nodes) ──
+                        # Look up the (src_type, dst_type) for this
+                        # rel_type. If multiple (src, dst) tuples
+                        # exist for the same rel_name (e.g.
+                        # "interacts_with" maps to (Gene, Gene),
+                        # (Protein, Protein), and (Compound, Compound)),
+                        # we pick the FIRST one for the density
+                        # denominator — the global density is the
+                        # maximum-coverage denominator. Operators who
+                        # need per-(src, dst) density should query
+                        # the per-relation density directly.
+                        _endpoint_pairs = _rel_to_endpoint_types.get(
+                            rel_type, []
+                        )
+                        if not _endpoint_pairs:
+                            # Unknown rel_type (not in CORE_EDGE_TYPES).
+                            # Fall back to participating-node count
+                            # and warn.
+                            warnings.append(
+                                f"{rel_type}: not in CORE_EDGE_TYPES — "
+                                f"cannot determine endpoint node types "
+                                f"for true global density. Falling back "
+                                f"to participating-node density (legacy "
+                                f"P2-012 metric). Register the edge "
+                                f"type in CORE_EDGE_TYPES for accurate "
+                                f"global density."
+                            )
+                            per_type_density[rel_type] = (
+                                per_type_density_participating[rel_type]
+                            )
+                            continue
+
+                        _src_t, _dst_t = _endpoint_pairs[0]
+                        _n_src_total = _total_node_count(_src_t)
+                        _n_dst_total = _total_node_count(_dst_t)
+
+                        if _n_src_total < 0 or _n_dst_total < 0:
+                            # Total-node-count query failed for at
+                            # least one endpoint. Fall back to
+                            # participating-node density and warn.
+                            warnings.append(
+                                f"{rel_type}: total node count query "
+                                f"failed for "
+                                f"{_src_t}={_n_src_total} / "
+                                f"{_dst_t}={_n_dst_total}. Falling "
+                                f"back to participating-node density "
+                                f"(legacy P2-012 metric)."
+                            )
+                            per_type_density[rel_type] = (
+                                per_type_density_participating[rel_type]
+                            )
+                            continue
+
+                        if (
+                            _src_t == _dst_t
+                            and _n_src_total == _n_dst_total
+                            and _n_src_total > 0
+                        ):
+                            # Same-type relation.
+                            if rel_type in SYMMETRIC_RELATIONS:
+                                # P2-011: undirected — n*(n-1)/2.
+                                denom = (
+                                    _n_src_total * (_n_src_total - 1) // 2
+                                )
+                            else:
+                                # P2-011: directed same-type — n*(n-1).
+                                denom = _n_src_total * (_n_src_total - 1)
+                        elif _n_src_total > 0 and _n_dst_total > 0:
+                            # Cross-type relation — n_src * n_dst.
+                            denom = _n_src_total * _n_dst_total
+                        else:
+                            denom = 1
+
+                        per_type_density[rel_type] = round(
+                            cnt / denom, 12,
+                        ) if denom > 0 else 0.0
                     except Exception as exc:
                         # Defensive: this branch is unreachable in practice
                         # because _run_query swallows exceptions, but kept
@@ -1081,12 +1251,22 @@ class GraphStats:
                         # FIX-P2-P2-6: use the sentinel float -1.0 (not
                         # None) to keep the Dict[str, float] contract.
                         per_type_density[rel_type] = -1.0
+                        per_type_density_participating[rel_type] = -1.0
                         warnings.append(
                             f"{rel_type}: per-type density computation "
-                            f"raised {type(exc).__name__} — value set to "
+                            f"raised {type(exc).__name__} -- value set to "
                             f"-1.0 (sentinel, not 0.0)."
                         )
                 stats["density_per_edge_type"] = per_type_density
+                # P2-012: expose the legacy participating-node density
+                # alongside the new global density. Operators compare
+                # the two to see how much of the graph the edge type
+                # actually covers (a large gap means the edge type
+                # touches only a small fraction of possible endpoint
+                # nodes — useful for sparsity analysis).
+                stats["density_per_edge_type_participating"] = (
+                    per_type_density_participating
+                )
 
                 # ── Data completeness: Compound name & SMILES ──
                 records = self._run_query(
@@ -1126,7 +1306,7 @@ class GraphStats:
 
                 # ── Canonical ID coverage (Fix 5.1: per CANONICAL_IDS) ──
                 # For each entity type, checks the CORRECT canonical
-                # property — not just 'id'.
+                # property -- not just 'id'.
                 canonical_coverage: Dict[str, float] = {}
                 for entity_type, canonical_prop in CANONICAL_IDS.items():
                     safe_label = sanitize_identifier(
@@ -1145,12 +1325,12 @@ class GraphStats:
                     if recs is None:
                         # v16 ROOT FIX (SF-9): _run_query returns None
                         # on exception. The previous code put 0.0 in
-                        # the canonical_coverage dict — making it
+                        # the canonical_coverage dict -- making it
                         # indistinguishable from "0% coverage" (which
                         # is a legitimate, alarming measurement).
                         # Downstream consumers reading stats would
                         # see 0.0 and trigger a "low canonical
-                        # coverage" alert — a FALSE POSITIVE because
+                        # coverage" alert -- a FALSE POSITIVE because
                         # the real problem was a query crash (e.g.
                         # Neo4j timeout), not actual missing IDs.
                         # FIX-P2-P2-6: store the sentinel float -1.0
@@ -1162,7 +1342,7 @@ class GraphStats:
                         canonical_coverage[entity_type] = -1.0
                         warnings.append(
                             f"{entity_type}: canonical coverage query "
-                            f"CRASHED — value set to -1.0 (sentinel, "
+                            f"CRASHED -- value set to -1.0 (sentinel, "
                             f"not 0.0). Investigate Neo4j connectivity "
                             f"/ timeout."
                         )
@@ -1183,7 +1363,7 @@ class GraphStats:
                                 f"('{canonical_prop}')"
                             )
                     else:
-                        # Empty result set (no rows returned) — distinct
+                        # Empty result set (no rows returned) -- distinct
                         # from query crash. Legitimate 0% coverage.
                         canonical_coverage[entity_type] = 0.0
                 stats["canonical_id_coverage"] = canonical_coverage
@@ -1210,7 +1390,7 @@ class GraphStats:
                 # ── PATIENT-SAFETY: Withdrawn drugs with treats edges ──
                 # Fix 5.11: A withdrawn drug (e.g., Valdecoxib) must NOT
                 # have treats edges. If it does, the model recommends a
-                # withdrawn drug → direct patient harm.
+                # withdrawn drug -> direct patient harm.
                 recs = self._run_query(
                     session,
                     "MATCH (c:Compound)-[r:treats]->(d:Disease) "
@@ -1241,7 +1421,7 @@ class GraphStats:
                         f"CRITICAL: {violations} edges violate "
                         f"CORE_EDGE_TYPES direction schema. "
                         f"Gene-treats-Disease edges mean the model "
-                        f"learns nonsense → wrong predictions."
+                        f"learns nonsense -> wrong predictions."
                     )
 
             # Full profile adds:
@@ -1347,11 +1527,11 @@ class GraphStats:
         verify that all edges of that type connect nodes with the correct
         labels. Returns count of violations.
 
-        Fixes 5.8: Gene-treats-Disease edges → model learns nonsense.
+        Fixes 5.8: Gene-treats-Disease edges -> model learns nonsense.
         """
         total_violations = 0
 
-        # Build a set of (rel_type → (expected_src, expected_dst))
+        # Build a set of (rel_type -> (expected_src, expected_dst))
         edge_schema: Dict[str, set] = {}
         for src, rel, dst in CORE_EDGE_TYPES:
             if rel not in edge_schema:
@@ -1461,7 +1641,7 @@ class GraphStats:
             with open(log_file, "a") as f:
                 f.write(json.dumps(audit_entry) + "\n")
         except Exception as exc:
-            # Non-critical — don't fail stats for audit log issues
+            # Non-critical -- don't fail stats for audit log issues
             logger.warning("Audit log write failed: %s", exc)
 
     # ─── Exit Criteria Checks ──────────────────────────────────────────
@@ -1494,7 +1674,7 @@ class GraphStats:
         min_nodes = MIN_NODES_W1 if week == 1 else MIN_NODES_W2
         min_edges = MIN_EDGES_W1 if week == 1 else MIN_EDGES_W2
 
-        # Fix 2.5, 4.13: STABLE keys — no f-string interpolation
+        # Fix 2.5, 4.13: STABLE keys -- no f-string interpolation
         criteria: List[ExitCriterionResult] = [
             {
                 "criterion": "min_nodes",
@@ -1573,7 +1753,7 @@ class GraphStats:
         for crit in criteria:
             if not crit["passed"]:
                 logger.warning(
-                    "Criterion FAILED: %s — got %s, need %s",
+                    "Criterion FAILED: %s -- got %s, need %s",
                     crit["criterion"],
                     crit["actual"],
                     crit["threshold"],
@@ -1621,11 +1801,11 @@ class GraphStats:
             8.  Disease nodes have names or canonical IDs
             9.  Withdrawn drugs have NO treats edges (PATIENT-SAFETY)
             10. Edge direction matches CORE_EDGE_TYPES (PATIENT-SAFETY)
-            11. No Compound-binds-Gene edges (PATIENT-SAFETY — biologically
+            11. No Compound-binds-Gene edges (PATIENT-SAFETY -- biologically
                 impossible; drugs bind PROTEINS)
 
         v35 ROOT FIX (L-4): the previous docstring listed checks 9 and
-        10 as "10,000+ compound nodes" and "15,000+ gene nodes" — but
+        10 as "10,000+ compound nodes" and "15,000+ gene nodes" -- but
         the actual implementation (see ``total_checks = 13`` below and
         the body of this function) does NOT perform node-count
         threshold checks. Node/edge count thresholds are checked by
@@ -1985,7 +2165,7 @@ class GraphStats:
                 checks.append({
                     "check": (
                         "No Compound-binds-Gene edges "
-                        "(drugs bind PROTEINS, not genes — "
+                        "(drugs bind PROTEINS, not genes -- "
                         "PATIENT-SAFETY)"
                     ),
                     "check_number": check_num,
@@ -2018,7 +2198,7 @@ class GraphStats:
         for check in checks:
             if not check["passed"]:
                 logger.warning(
-                    "Sanity check FAILED [%s]: %s — %s",
+                    "Sanity check FAILED [%s]: %s -- %s",
                     check.get("severity", "unknown"),
                     check["check"],
                     check["detail"],
@@ -2112,7 +2292,7 @@ class GraphStats:
                 "error": False,
             }
         except Exception as exc:
-            # Fix 4.2, 11.1, 11.4: Log exception — never swallow silently
+            # Fix 4.2, 11.1, 11.4: Log exception -- never swallow silently
             logger.exception(
                 "Sanity check failed: %s",
                 description,
@@ -2146,7 +2326,7 @@ class GraphStats:
 
         Fixes:
             13.1: Method referenced in utils.py but didn't exist.
-            10.11: Same — now implemented.
+            10.11: Same -- now implemented.
         """
         labels: Dict[str, int] = {}
         total = 0
@@ -2184,7 +2364,7 @@ class GraphStats:
         Args:
             output_path: If provided, write README to this file and
                 return the path. If None, return the string content
-                (backward-compatible — Fix 15.8).
+                (backward-compatible -- Fix 15.8).
             stats: Pre-computed stats dict. If None, computes fresh.
 
         Returns:
@@ -2202,7 +2382,7 @@ class GraphStats:
         criteria_list = criteria_report.get("criteria", [])
 
         readme_lines = [
-            "# DrugOS Knowledge Graph — Data README",
+            "# DrugOS Knowledge Graph -- Data README",
             f"Generated: {stats.get('computed_at', 'unknown')} "
             f"(UTC)",
             "",

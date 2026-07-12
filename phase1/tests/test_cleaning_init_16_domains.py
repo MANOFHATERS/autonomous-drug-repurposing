@@ -88,7 +88,7 @@ class TestArchitecture:
 
         for name, module_path in cleaning._LAZY_IMPORTS.items():
             assert module_path.startswith("."), (
-                f"_LAZY_IMPORTS[{name!r}] = {module_path!r} — should use "
+                f"_LAZY_IMPORTS[{name!r}] = {module_path!r} -- should use "
                 f"relative import (start with '.')"
             )
 
@@ -429,7 +429,7 @@ class TestDataQuality:
 
         # First pass should record cleaning-step metadata in df.attrs
         # (P2-5 v82 root fix: the schema-polluting _cleaning_applied
-        # COLUMN is no longer added to df.columns by default — the
+        # COLUMN is no longer added to df.columns by default -- the
         # canonical metadata store is df.attrs["_cleaning_steps_applied"],
         # which is invisible to DB loaders / fingerprint computation /
         # phase2 graph ingestion. The column is opt-in via

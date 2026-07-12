@@ -24,19 +24,43 @@ export interface DrugCandidate {
   genericName: string;
   compositeScore: number;
   kgScore: number;
-  molSimScore: number;
+  /**
+   * FE-049 ROOT FIX: molSimScore is nullable. When the underlying data
+   * source (RL ranker, KG, etc.) has not computed a molecular-similarity
+   * score for this candidate, the field is `null` — NOT a fabricated `0`.
+   * A fabricated `0` is actively misleading: a researcher seeing
+   * "Mol Similarity: 0" may interpret it as "no similarity to known drugs"
+   * (a negative signal), when in reality the field is just not populated.
+   * The UI renders "N/A" when the value is null.
+   */
+  molSimScore: number | null;
   safetyScore: number;
   clinicalScore: number;
   safetyTier: 'green' | 'yellow' | 'red';
   mechanism: string;
   clinicalPhase: string;
-  ipStatus: string;
+  /**
+   * FE-049 ROOT FIX: ipStatus is nullable. When patent status has not been
+   * looked up yet, the field is `null` — NOT a fabricated "Unknown" string.
+   * The previous code rendered "IP Status: Unknown" in the UI, which
+   * researchers could mistake for an authoritative "we checked and the
+   * status is unknown" — vs. the truth, which is "we have not checked".
+   * The UI renders "N/A" when the value is null.
+   */
+  ipStatus: string | null;
   diseaseId: string;
   // FE-001: added diseaseName + rank for real RL candidate mapping.
   diseaseName?: string;
   rank?: number;
-  targets: string[];
-  pathways: string[];
+  /**
+   * FE-049 ROOT FIX: targets/pathways are nullable. The previous code
+   * fabricated `[]` (empty arrays) for RL candidates — which renders as
+   * "no targets / no pathways" in the UI and is indistinguishable from
+   * "we checked and there are none". The truth is "we have not populated
+   * them yet". The UI renders "N/A" when the value is null.
+   */
+  targets: string[] | null;
+  pathways: string[] | null;
 }
 
 export interface ClinicalTrial {
@@ -198,13 +222,22 @@ export const notifications: Notification[] = [
 ];
 
 // === AUDIT LOG ===
+// FE-057 ROOT FIX: Removed the `PHI_ACCESSED` entry (and the
+// "Patient Dataset #PD-2026-789" resource) — the platform is a drug-
+// repurposing tool that operates on PUBLIC biomedical data (ChEMBL,
+// DrugBank, UniProt, STRING, DisGeNET, OMIM, PubChem) per the project
+// docx Section 3. It does NOT handle Protected Health Information (PHI),
+// so including fake PHI audit entries was misleading and would subject
+// the platform to HIPAA scrutiny it does not need. If PHI handling is
+// ever added in the future, HIPAA controls (BAA, encryption at rest,
+// audit controls) must be implemented BEFORE re-introducing this entry.
 export const auditLogs: AuditLogEntry[] = [
   { id: 'AL001', action: 'QUERY_EXECUTED', user: 'Dr. Sarah Chen', resource: 'Disease Search: Huntington\'s', timestamp: '2026-06-10 09:15:32', ip: '192.168.1.45', details: 'Searched for Huntington\'s Disease candidates' },
   { id: 'AL002', action: 'REPORT_DOWNLOADED', user: 'James Miller', resource: 'Report #R-2026-0456', timestamp: '2026-06-10 08:45:12', ip: '10.0.0.23', details: 'Downloaded PDF report for Alzheimer\'s candidates' },
   { id: 'AL003', action: 'USER_INVITED', user: 'Alex Thompson', resource: 'rkim@startup.co', timestamp: '2026-06-10 08:30:00', ip: '192.168.1.10', details: 'Invited Robert Kim as CTO' },
-  { id: 'AL004', action: 'PHI_ACCESSED', user: 'Dr. Maria Garcia', resource: 'Patient Dataset #PD-2026-789', timestamp: '2026-06-10 07:15:45', ip: '10.0.1.56', details: 'Accessed PHI records for CRO project' },
-  { id: 'AL005', action: 'API_KEY_GENERATED', user: 'James Miller', resource: 'API Key: dk_prod_***xyz', timestamp: '2026-06-09 16:22:10', ip: '10.0.0.23', details: 'Generated production API key' },
-  { id: 'AL006', action: 'ROLE_CHANGED', user: 'Alex Thompson', resource: 'Tom Anderson', timestamp: '2026-06-09 14:00:00', ip: '192.168.1.10', details: 'Changed role from User to Suspended' },
+  { id: 'AL004', action: 'API_KEY_GENERATED', user: 'James Miller', resource: 'API Key: dk_prod_***xyz', timestamp: '2026-06-09 16:22:10', ip: '10.0.0.23', details: 'Generated production API key' },
+  { id: 'AL005', action: 'ROLE_CHANGED', user: 'Alex Thompson', resource: 'Tom Anderson', timestamp: '2026-06-09 14:00:00', ip: '192.168.1.10', details: 'Changed role from User to Suspended' },
+  { id: 'AL006', action: 'HYPOTHESIS_CREATED', user: 'Dr. Sarah Chen', resource: 'Hypothesis: Metformin for Breast Cancer', timestamp: '2026-06-09 11:20:00', ip: '192.168.1.45', details: 'Created new repurposing hypothesis' },
 ];
 
 // === BILLING ===

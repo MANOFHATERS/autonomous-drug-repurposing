@@ -274,7 +274,7 @@ def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
         logger.error(
             "Bridge produced 0 nodes. Phase 1 outputs are likely missing "
             "or empty. The embedded sample fallback should have written "
-            "data — check the Phase 1 logs above."
+            "data -- check the Phase 1 logs above."
         )
     return builder, staged
 
@@ -423,14 +423,54 @@ def main() -> int:
 
         # ─── Bridge ────────────────────────────────────────────────────
         builder, staged = run_bridge(phase1_dir)
-        if builder.total_nodes == 0:
-            logger.error("Phase 1 + Bridge produced 0 nodes. Aborting.")
+        # ORCH-004 ROOT FIX: defensive total_nodes check.
+        # The previous code accessed ``builder.total_nodes`` directly. If the
+        # Phase 2 RecordingGraphBuilder (or any future builder class) uses a
+        # different attribute name (e.g. ``n_nodes`` or doesn't expose one at
+        # all), this line would crash with AttributeError, masking the real
+        # problem ("the bridge produced no data") behind a Python traceback.
+        # We now try multiple known attribute names and fall back to
+        # computing the total from ``node_loads`` if none of them exist.
+        total_nodes = (
+            getattr(builder, "total_nodes", None)
+            or getattr(builder, "n_nodes", None)
+            or getattr(builder, "num_nodes", None)
+        )
+        if total_nodes is None:
+            # Fall back to summing node counts across staged loads.
+            # ``node_loads`` is the canonical Phase 2 builder attribute that
+            # records per-batch node inserts.
+            node_loads = getattr(builder, "node_loads", None) or []
+            try:
+                total_nodes = sum(
+                    len(load.get("nodes", [])) if isinstance(load, dict)
+                    else len(getattr(load, "nodes", []))
+                    for load in node_loads
+                )
+            except Exception:
+                logger.warning(
+                    "ORCH-004: could not determine builder node count via "
+                    "total_nodes / n_nodes / num_nodes / node_loads. "
+                    "Falling back to staged.total_nodes."
+                )
+                total_nodes = getattr(staged, "total_nodes", 0)
+        if total_nodes == 0:
+            logger.error(
+                "Phase 1 + Bridge produced 0 nodes (total_nodes=%s). "
+                "Aborting. Check that Phase 1 produced CSVs and the "
+                "bridge is wired correctly.",
+                total_nodes,
+            )
             return 2
+        logger.info(
+            "ORCH-004: builder total_nodes=%s (defensive check passed).",
+            total_nodes,
+        )
 
         # ─── Phase 2 -> Phase 3 Schema Adapter ─────────────────────────
         # R-INT-005 / R-STUB-003: this output is now consumed (was
         # previously overwritten by a second call to run_phase2_kg_builder
-        # that crashed with NameError on `seed` — R-INT-002).
+        # that crashed with NameError on `seed` -- R-INT-002).
         graph_data = run_schema_adapter(builder, seed=args.seed)
         node_features, edge_indices, node_maps, known_pairs = graph_data
         if len(node_maps.get("drug", {})) == 0:
@@ -450,7 +490,7 @@ def main() -> int:
 
         # ─── Summary (R-022: removed duplicate 9-line block) ───────────
         print("\n" + "=" * 70)
-        print("v100 4-PHASE PIPELINE COMPLETE — SUMMARY")
+        print("v100 4-PHASE PIPELINE COMPLETE -- SUMMARY")
         print("=" * 70)
         print(f"  Phase 1 CSVs:            {len(phase1_csvs)}")
         print(f"  Phase 2 nodes (staged):  {staged.total_nodes}")

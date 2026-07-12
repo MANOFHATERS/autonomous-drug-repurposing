@@ -1,5 +1,5 @@
 """
-Test #2 — All 14 Files Integration Test (v3.0.0)
+Test #2 -- All 14 Files Integration Test (v3.0.0)
 
 This is the combined integration test for the 14 files that have been
 upgraded to institutional-grade v3.0.0 standard:
@@ -20,17 +20,17 @@ upgraded to institutional-grade v3.0.0 standard:
    13. cleaning/missing_values.py
 
   Plus the newly-fixed file:
-   14. cleaning/deduplicator.py  (v3.0.0 — 138 issues, 16 domains)
+   14. cleaning/deduplicator.py  (v3.0.0 -- 138 issues, 16 domains)
 
 This test verifies that:
   - All 14 files import successfully.
   - All 14 files interoperate cleanly (no broken connections).
-  - The end-to-end data pipeline (clean → load → query) works.
+  - The end-to-end data pipeline (clean -> load -> query) works.
   - The scientific correctness contract is preserved: dedup picks the
     truly most-potent interaction record (verifies the connections
-    between normalizer.normalize_activity_value → dedup_interactions →
+    between normalizer.normalize_activity_value -> dedup_interactions ->
     database.loaders.bulk_upsert_dpi).
-  - Provenance flows from raw input → loaded DB rows.
+  - Provenance flows from raw input -> loaded DB rows.
   - Backward compatibility: existing call sites still work.
 
 Run: pytest tests/test_all_14_files_integration_v3.py -v
@@ -53,7 +53,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 
 # ============================================================================
-# Section 1 — All 14 files exist and import
+# Section 1 -- All 14 files exist and import
 # ============================================================================
 
 class TestAll14FilesExist:
@@ -116,7 +116,7 @@ class TestAll14FilesExist:
 
 
 # ============================================================================
-# Section 2 — Package-level contracts
+# Section 2 -- Package-level contracts
 # ============================================================================
 
 class TestPackageContracts:
@@ -179,7 +179,7 @@ class TestPackageContracts:
 
 
 # ============================================================================
-# Section 3 — Backward compatibility (existing call sites work)
+# Section 3 -- Backward compatibility (existing call sites work)
 # ============================================================================
 
 class TestBackwardCompatibility:
@@ -213,7 +213,7 @@ class TestBackwardCompatibility:
         assert len(result) == 2
 
     def test_dedup_interactions_no_activity_value_column(self):
-        """v1.0.0 fallback: no activity_value column → plain drop_duplicates."""
+        """v1.0.0 fallback: no activity_value column -> plain drop_duplicates."""
         from cleaning.deduplicator import dedup_interactions
         df = pd.DataFrame({
             "drug_id": [1, 1, 2],
@@ -257,7 +257,7 @@ class TestBackwardCompatibility:
 
 
 # ============================================================================
-# Section 4 — Scientific correctness pipeline (normalizer → dedup → loaders)
+# Section 4 -- Scientific correctness pipeline (normalizer -> dedup -> loaders)
 # ============================================================================
 
 class TestScientificCorrectnessPipeline:
@@ -290,7 +290,7 @@ class TestScientificCorrectnessPipeline:
             df, keys=["drug_id", "protein_id", "source", "source_id"]
         )
         assert len(result) == 1
-        # The HIGHER pIC50 (more potent) must win — v1.0.0 was wrong.
+        # The HIGHER pIC50 (more potent) must win -- v1.0.0 was wrong.
         assert float(result.iloc[0]["activity_value"]) == 8.5
 
     def test_ic50_lower_wins_through_pipeline(self):
@@ -309,7 +309,7 @@ class TestScientificCorrectnessPipeline:
         assert float(result.iloc[0]["activity_value"]) == 50.0
 
     def test_ic50_and_ki_not_collapsed(self):
-        """Different activity_types → different measurements → both kept."""
+        """Different activity_types -> different measurements -> both kept."""
         from cleaning.deduplicator import dedup_interactions
         df = pd.DataFrame([
             {"drug_id": 1, "protein_id": 10, "source": "chembl", "source_id": "a",
@@ -363,11 +363,11 @@ class TestScientificCorrectnessPipeline:
 
 
 # ============================================================================
-# Section 5 — End-to-end pipeline: clean_drugs → bulk_upsert_drugs
+# Section 5 -- End-to-end pipeline: clean_drugs -> bulk_upsert_drugs
 # ============================================================================
 
 class TestEndToEndPipeline:
-    """End-to-end test: raw data → clean → load → DB query."""
+    """End-to-end test: raw data -> clean -> load -> DB query."""
 
     def test_clean_drugs_runs_all_steps(self):
         """clean_drugs should invoke all 5 default steps including dedup."""
@@ -394,7 +394,7 @@ class TestEndToEndPipeline:
         assert "_output_fingerprint" in result.attrs
 
     def test_clean_drugs_reproducible(self):
-        """Same input → same _output_fingerprint across two runs."""
+        """Same input -> same _output_fingerprint across two runs."""
         import cleaning
         df = pd.DataFrame({
             "inchikey": ["AAA", "AAA", "BBB"],
@@ -437,7 +437,7 @@ class TestEndToEndPipeline:
         })
         deduped = dedup_by_inchikey(df)
         assert len(deduped) == 2
-        # Load into DB — should not raise
+        # Load into DB -- should not raise
         try:
             result = bulk_upsert_drugs(db_session, deduped)
             # If the loader returns a result, verify it inserted 2 rows
@@ -450,11 +450,11 @@ class TestEndToEndPipeline:
 
 
 # ============================================================================
-# Section 6 — Cross-module dependency graph integrity
+# Section 6 -- Cross-module dependency graph integrity
 # ============================================================================
 
 class TestDependencyGraphIntegrity:
-    """Verify the column → function dependency graph is consistent."""
+    """Verify the column -> function dependency graph is consistent."""
 
     def test_inchikey_dependencies(self):
         import cleaning
@@ -481,7 +481,7 @@ class TestDependencyGraphIntegrity:
 
 
 # ============================================================================
-# Section 7 — Idempotency across the pipeline
+# Section 7 -- Idempotency across the pipeline
 # ============================================================================
 
 class TestPipelineIdempotency:
@@ -533,7 +533,7 @@ class TestPipelineIdempotency:
 
 
 # ============================================================================
-# Section 8 — Data lineage / provenance flow
+# Section 8 -- Data lineage / provenance flow
 # ============================================================================
 
 class TestProvenanceFlow:
@@ -582,7 +582,7 @@ class TestProvenanceFlow:
 
 
 # ============================================================================
-# Section 9 — Observability across modules
+# Section 9 -- Observability across modules
 # ============================================================================
 
 class TestObservabilityAcrossModules:
@@ -620,7 +620,7 @@ class TestObservabilityAcrossModules:
 
 
 # ============================================================================
-# Section 10 — Source-literal invariants
+# Section 10 -- Source-literal invariants
 # ============================================================================
 
 class TestSourceLiterals:
@@ -643,7 +643,7 @@ class TestSourceLiterals:
 
 
 # ============================================================================
-# Section 11 — No-file-removed invariant
+# Section 11 -- No-file-removed invariant
 # ============================================================================
 
 class TestNoFilesRemoved:
@@ -691,7 +691,7 @@ class TestNoFilesRemoved:
 
 
 # ============================================================================
-# Section 12 — Version coherence
+# Section 12 -- Version coherence
 # ============================================================================
 
 class TestVersionCoherence:
@@ -720,7 +720,7 @@ class TestVersionCoherence:
 
 
 # ============================================================================
-# Section 13 — Edge cases across modules
+# Section 13 -- Edge cases across modules
 # ============================================================================
 
 class TestEdgeCasesAcrossModules:
@@ -739,7 +739,7 @@ class TestEdgeCasesAcrossModules:
         assert len(result) == 1
 
     def test_all_null_inchikey_column(self):
-        """4 rows with null inchikey → all 4 preserved (v1.0.0 bug fix)."""
+        """4 rows with null inchikey -> all 4 preserved (v1.0.0 bug fix)."""
         from cleaning.deduplicator import dedup_by_inchikey
         df = pd.DataFrame([
             {"inchikey": None, "name": "A"},
@@ -765,7 +765,7 @@ class TestEdgeCasesAcrossModules:
         assert len(single) == len(chunked)
 
     def test_mixed_activity_types_in_same_call(self):
-        """Mixed IC50 and pIC50 in same DataFrame — each deduplicated correctly."""
+        """Mixed IC50 and pIC50 in same DataFrame -- each deduplicated correctly."""
         from cleaning.deduplicator import dedup_interactions
         df = pd.DataFrame([
             {"drug_id": 1, "protein_id": 10, "source": "chembl", "source_id": "a",
@@ -780,7 +780,7 @@ class TestEdgeCasesAcrossModules:
         result = dedup_interactions(
             df, keys=["drug_id", "protein_id", "source", "source_id"]
         )
-        # 2 unique composite keys → 2 rows
+        # 2 unique composite keys -> 2 rows
         assert len(result) == 2
         # IC50 = 50.0 (lower wins)
         ic50_row = result[result["drug_id"] == 1].iloc[0]
@@ -791,7 +791,7 @@ class TestEdgeCasesAcrossModules:
 
 
 # ============================================================================
-# Section 14 — Connection correctness (no silent wrong predictions)
+# Section 14 -- Connection correctness (no silent wrong predictions)
 # ============================================================================
 
 class TestConnectionCorrectness:
@@ -849,7 +849,7 @@ class TestConnectionCorrectness:
         result = dedup_interactions(
             df, keys=["drug_id", "protein_id", "source", "source_id"]
         )
-        # Both equal after normalization → 1 row, first wins
+        # Both equal after normalization -> 1 row, first wins
         assert len(result) == 1
 
     def test_completeness_ranking_correctness(self):
@@ -876,7 +876,7 @@ class TestConnectionCorrectness:
             {"inchikey": None, "name": "Drug 3"},
         ])
         result = dedup_by_inchikey(df)
-        # All 3 must survive — v1.0.0 had a NaN==NaN data-loss bug here
+        # All 3 must survive -- v1.0.0 had a NaN==NaN data-loss bug here
         assert len(result) == 3
         # Verify all 3 names are present
         result_names = set(result["name"].tolist())
@@ -884,7 +884,7 @@ class TestConnectionCorrectness:
 
 
 # ============================================================================
-# Section 15 — Module health check
+# Section 15 -- Module health check
 # ============================================================================
 
 class TestModuleHealthCheck:
@@ -908,7 +908,7 @@ class TestModuleHealthCheck:
 
 
 # ============================================================================
-# Section 16 — Documentation cross-references
+# Section 16 -- Documentation cross-references
 # ============================================================================
 
 class TestDocumentationCrossReferences:
@@ -922,7 +922,7 @@ class TestDocumentationCrossReferences:
     def test_migration_md_has_v3_section(self):
         migration = (_PROJECT_ROOT / "cleaning" / "MIGRATION.md").read_text(encoding="utf-8")
         assert "cleaning.deduplicator" in migration
-        assert "v1.0.0 → v3.0.0" in migration or "v1.0.0 → v3.0.0" in migration.replace(" → ", " → ")
+        assert "v1.0.0 -> v3.0.0" in migration or "v1.0.0 -> v3.0.0" in migration.replace(" -> ", " -> ")
 
     def test_changelog_has_v3_entry(self):
         changelog = (_PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")

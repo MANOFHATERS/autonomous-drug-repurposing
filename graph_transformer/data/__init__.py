@@ -41,13 +41,44 @@ NODE_TYPES: List[str] = [
 # other sub-modules. Single source of truth -- see B7 fix.
 DEFAULT_NODE_TYPES: List[str] = NODE_TYPES
 
-# 14 edge types (7 forward + 7 reverse). Every node type receives at least
+# 18 edge types (9 forward + 9 reverse). Every node type receives at least
 # one incoming edge type, which is required for heterogeneous message
 # passing in the Graph Transformer.
+#
+# P3-001/P3-002/P3-009 ROOT FIX (Team Member 9, forensic root fix):
+# The original schema had 14 edge types (7 forward + 7 reverse) and ONLY
+# supported "inhibits"/"activates" for drug→protein edges. This forced the
+# Phase 2→3 adapter to map ("Compound","targets","Protein") → "inhibits"
+# (WRONG — "targets" means "binds to, direction UNKNOWN", not inhibition)
+# and ("Compound","allosterically_modulates","Protein") → "activates"
+# (WRONG — allosteric modulators can be PAM or NAM). The scientifically
+# correct fix is to add TWO new neutral forward edge types — "binds"
+# (direction-unknown binding) and "modulates" (allosteric modulation
+# without PAM/NAM disambiguation) — plus their reverse counterparts
+# "bound_by" and "modulated_by". This:
+#   1. Preserves the binding/modulation signal (institutional-grade —
+#      do not silently drop potentially useful drug-protein interactions).
+#   2. Keeps the drug→protein→pathway→disease 3-hop pattern CONNECTED
+#      for drugs whose only Phase 2 action is "targets" or
+#      "allosterically_modulates" (dropping those edges would disconnect
+#      the drug from the protein layer, breaking the core scientific
+#      requirement per the DOCX).
+#   3. Does NOT teach the GT model that all binding = inhibition
+#      (the original bug corrupted the multi-hop signal).
+#   4. Lets future PAM/NAM disambiguation (via ChEMBL standard_type/
+#      standard_relation) split "modulates" into "activates"/"inhibits"
+#      without another schema change — just remap the Phase 2 relation.
+# ("Compound","unknown","Protein") is intentionally NOT mapped to any
+# Phase 3 edge type — unknown mechanisms must NEVER be mapped to a
+# specific mechanism (per the P3-001 issue mandate). The adapter DROPS
+# unknown edges with an INFO log.
 EDGE_TYPES: List[Tuple[str, str, str]] = [
     # Forward edges
     ("drug", "inhibits", "protein"),
     ("drug", "activates", "protein"),
+    # P3-001/P3-002 root fix: neutral binding + modulation edge types.
+    ("drug", "binds", "protein"),
+    ("drug", "modulates", "protein"),
     ("protein", "part_of", "pathway"),
     ("pathway", "disrupted_in", "disease"),
     ("drug", "treats", "disease"),
@@ -56,6 +87,9 @@ EDGE_TYPES: List[Tuple[str, str, str]] = [
     # Reverse edges (ensure every node type receives incoming messages)
     ("protein", "inhibited_by", "drug"),
     ("protein", "activated_by", "drug"),
+    # P3-001/P3-002 root fix: reverse of binds + modulates.
+    ("protein", "bound_by", "drug"),
+    ("protein", "modulated_by", "drug"),
     ("pathway", "has_member", "protein"),
     ("disease", "disrupted_by", "pathway"),
     ("disease", "treated_by", "drug"),
@@ -64,8 +98,8 @@ EDGE_TYPES: List[Tuple[str, str, str]] = [
 ]
 
 # Forward edge types only (used by graph builder for reverse-edge synthesis).
-FORWARD_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES[:7]
-REVERSE_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES[7:]
+FORWARD_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES[:9]
+REVERSE_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES[9:]
 
 # Canonical default edge types -- re-exported for use by other sub-modules
 # (B7 fix: single source of truth).
@@ -75,6 +109,9 @@ DEFAULT_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES
 REVERSE_RELATION_MAP: Dict[str, str] = {
     "inhibits": "inhibited_by",
     "activates": "activated_by",
+    # P3-001/P3-002 root fix: reverse relations for the new neutral types.
+    "binds": "bound_by",
+    "modulates": "modulated_by",
     "part_of": "has_member",
     "disrupted_in": "disrupted_by",
     "treats": "treated_by",
@@ -97,21 +134,21 @@ REVERSE_RELATION_MAP: Dict[str, str] = {
 #
 # P3-040 ROOT FIX (comment accuracy): the previous comment claimed the set
 # covers "ALL 4 direct label-leaking relations × 2 directions = 8 edge
-# types". That was FALSE — the frozenset contains only 4 tuples (2
+# types". That was FALSE -- the frozenset contains only 4 tuples (2
 # forward + 2 reverse), not 8. The "× 2 directions" was already accounted
 # for by listing both forward and reverse tuples explicitly. The comment
 # made a reviewer think half the set was missing. We've corrected the
 # comment to match the actual contents (4 tuples: 2 forward + 2 reverse).
-# Multi-hop leakage (via drug→protein→pathway→disease) is NOT in this
+# Multi-hop leakage (via drug->protein->pathway->disease) is NOT in this
 # set because those edges carry legitimate biological signal that the
-# model SHOULD learn from — they only become leakage if a guaranteed
+# model SHOULD learn from -- they only become leakage if a guaranteed
 # path is injected for every KP (the W-02 bug, now removed in
 # graph_builder.py).
 LABEL_LEAKING_EDGES: frozenset = frozenset({
-    # Direct drug→disease therapeutic relationships (forward, 2 tuples)
+    # Direct drug->disease therapeutic relationships (forward, 2 tuples)
     ("drug", "treats", "disease"),
     ("drug", "tested_for", "disease"),
-    # Direct disease→drug reverse relationships (2 tuples)
+    # Direct disease->drug reverse relationships (2 tuples)
     ("disease", "treated_by", "drug"),
     ("disease", "tested_on", "drug"),
     # V30 ROOT FIX (1.3): the 4-tuple set above covers BOTH directions
@@ -145,22 +182,28 @@ DEFAULT_FEATURE_DIMS: Dict[str, int] = {
 # on held-out drug-disease pairs").
 # This threshold is for PRODUCTION-scale graphs (10K drugs, millions of pairs).
 # For demo-scale graphs (<100 drugs), achieving 0.85 AUC is scientifically
-# unrealistic — the model has too few training pairs to generalize. The
+# unrealistic -- the model has too few training pairs to generalize. The
 # get_auc_threshold_for_scale() function returns the appropriate threshold
 # based on graph size.
 V1_AUC_THRESHOLD: float = 0.85
-# P3-034 ROOT FIX: V1_AUC_THRESHOLD_DEMO was 0.50 — EXACTLY random.
-# A random classifier scores AUC = 0.5, so a threshold of 0.50 allowed
-# EXACTLY random models to pass the demo-scale validation gate. This
-# made the gate meaningless on demo graphs: any model (even one that
-# scored every pair identically) would pass. We raise the threshold to
-# 0.55 — above random by a small but meaningful margin. On tiny demo
-# graphs (<100 drugs, ~15 val pairs), AUC is discrete (step size 1/(n_pos*n_neg)
-# ≈ 0.07 for 5 pos / 10 neg), so 0.55 effectively means "at least 2-3
-# ranks better than random". This is the minimum bar for "the model
-# learned SOMETHING" on a demo graph. Production graphs use V1_AUC_THRESHOLD
-# (0.85) per the DOCX V1 contract.
-V1_AUC_THRESHOLD_DEMO: float = 0.55  # above-random for demo-scale graphs
+# P3-026 ROOT FIX (SCIENTIFIC — RAISED FROM 0.55 TO 0.65): the P3-034 fix
+# raised the demo threshold from 0.50 (exactly random) to 0.55, but 0.55
+# is STILL too low for a meaningful validation gate. On a 30-drug demo
+# graph with ~15 val pairs, AUC is discrete (step size 1/(n_pos*n_neg)
+# ≈ 0.07 for 5 pos / 10 neg). A model that ranks just ONE extra pair
+# correctly gets AUC ≈ 0.57, which passes the 0.55 threshold. This is
+# essentially random — the model didn't "learn" anything, it got lucky
+# on a single pair. The 0.55 threshold gave false confidence that the
+# model was learning when it was actually at chance level.
+#
+# The fix raises the threshold to 0.65 — at least 2 ranks better than
+# random on a 15-pair val set. This is the minimum bar for "the model
+# learned a REAL signal" on a demo graph. Models that cannot clear 0.65
+# on the demo graph are NOT ready for the pilot scale and should be
+# debugged (check feature quality, edge density, training convergence)
+# before scaling up. Production graphs use V1_AUC_THRESHOLD (0.85) per
+# the DOCX V1 contract.
+V1_AUC_THRESHOLD_DEMO: float = 0.65  # raised from 0.55 (P3-026): meaningful bar
 V1_AUC_THRESHOLD_PILOT: float = 0.70  # for pilot-scale (100-1000 drugs)
 
 
@@ -172,19 +215,22 @@ def get_auc_threshold_for_scale(num_drugs: int) -> float:
     of training pairs). On smaller graphs, the threshold is lowered to reflect
     the statistical reality:
 
-      - < 100 drugs (demo): 0.50 (above random — the model has ~100 training
-        pairs, too few for high AUC. The pipeline's CORRECTNESS is verified by
-        KP recovery and RL AUC, not GT AUC alone.)
+      - < 100 drugs (demo): 0.65 (P3-026: raised from 0.50/0.55 — the model
+        has ~100 training pairs, too few for high AUC. 0.65 = at least 2
+        ranks better than random on a 15-pair val set, a meaningful bar.
+        The pipeline's CORRECTNESS is verified by KP recovery and RL AUC,
+        not GT AUC alone.)
       - 100-1000 drugs (pilot): 0.70 (medium capacity — the model has ~1K-10K
         training pairs, enough for moderate generalization.)
-      - >= 1000 drugs (production): 0.85 (full V1 launch contract — the model
+      - >= 1000 drugs (production): 0.85 (full V1 launch contract -- the model
         has 100K+ training pairs, enough for high AUC.)
 
-    This is NOT "lowering the bar" — it's using the SCIENTIFICALLY CORRECT
+    This is NOT "lowering the bar" -- it's using the SCIENTIFICALLY CORRECT
     threshold for each scale. A 30-drug demo graph CANNOT achieve 0.85 AUC
     by mathematical construction (the test set has ~30 pairs, and AUC on 30
-    pairs has variance > 0.1). The 0.50 threshold for demos means "better than
-    random", which is the correct bar for a proof-of-concept.
+    pairs has variance > 0.1). The 0.65 threshold for demos (P3-026) means
+    "at least 2 ranks better than random", a meaningful proof-of-concept
+    bar that filters out lucky-on-one-pair random models.
 
     Args:
         num_drugs: Number of drug nodes in the graph.
@@ -247,11 +293,12 @@ def self_check() -> Dict[str, bool]:
     """Run a smoke test of the data package."""
     checks: Dict[str, bool] = {}
     checks["node_types_defined"] = len(NODE_TYPES) == 5
-    checks["edge_types_14"] = len(EDGE_TYPES) == 14
+    # P3-001/P3-002 root fix: 18 edge types (9 forward + 9 reverse) — was 14.
+    checks["edge_types_18"] = len(EDGE_TYPES) == 18
     checks["feature_dims_complete"] = set(DEFAULT_FEATURE_DIMS.keys()) == set(NODE_TYPES)
     checks["all_edge_types_valid"] = (
         all(validate_edge_type(et) is None for et in EDGE_TYPES)
-        if checks["edge_types_14"]
+        if checks["edge_types_18"]
         else False
     )
     checks["label_leaking_edges_subset_of_edge_types"] = LABEL_LEAKING_EDGES.issubset(

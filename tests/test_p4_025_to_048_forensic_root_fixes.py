@@ -1,7 +1,7 @@
 """
 Forensic root-level test suite for P4-025 through P4-028 bug fixes.
 
-Each test verifies a SPECIFIC bug fix at the root level — not a smoke
+Each test verifies a SPECIFIC bug fix at the root level -- not a smoke
 test, not a grep test, but a behavioral test that exercises the actual
 fixed code path. If any test fails, the corresponding P4 fix is
 incomplete or broken.
@@ -29,7 +29,7 @@ def test_p4_025_auc_computed_with_single_drug_multiple_diseases():
     """P4-025: AUC must be computed when test set has 1 drug + multiple diseases.
 
     The previous code skipped AUC computation if the test set had <2 unique
-    drugs. The fix removes this overly restrictive check — a test set with
+    drugs. The fix removes this overly restrictive check -- a test set with
     1 drug and multiple diseases can still have a meaningful AUC because
     the agent must distinguish good disease pairs from bad ones for that
     drug. We verify by inspecting the source code (the unique-drug gate
@@ -84,7 +84,7 @@ def test_p4_026_kp_set_not_cached_in_reward_function():
     import rl.rl_drug_ranker as mod
     original_kp = list(mod.KNOWN_POSITIVES)
     try:
-        # Add a new KP that's also in VALIDATED_HYPOTHESES — the bonus
+        # Add a new KP that's also in VALIDATED_HYPOTHESES -- the bonus
         # should NOT be applied (disjointness check).
         mod.KNOWN_POSITIVES.append(("testdrug_p4_026", "testdisease_p4_026"))
         mod._recompute_known_positives_set()
@@ -99,7 +99,7 @@ def test_p4_027_validate_input_schema_clips_out_of_range():
     """P4-027: validate_input_schema must CLIP out-of-range values, not just warn.
 
     The previous code warned "These will be clipped to [0,1]" but did NOT
-    actually clip — the clipping happened later in preprocess_data. If a
+    actually clip -- the clipping happened later in preprocess_data. If a
     caller used validate_input_schema directly, the warning was a lie.
     The fix clips inline so the warning is accurate.
     """
@@ -158,7 +158,7 @@ def test_p4_028_pipeline_metrics_summary_includes_training_loss():
 def test_p4_028_train_agent_populates_metrics_via_callback():
     """P4-028: train_agent must populate metrics.training_loss via SB3 callback.
 
-    This is the FULL integration test — it actually trains a PPO agent
+    This is the FULL integration test -- it actually trains a PPO agent
     and verifies that the callback captures training loss values.
     """
     os.environ.setdefault("RL_RUN_ENV_CHECK", "0")
@@ -310,7 +310,7 @@ def test_p4_033_reward_function_does_not_transform_gnn_score():
     """P4-033: RewardFunction must NOT apply z-score+sigmoid to gnn_score only.
 
     The previous code transformed ONLY gnn_score via z-score+sigmoid while
-    leaving other features raw — creating an inconsistency in the weighted
+    leaving other features raw -- creating an inconsistency in the weighted
     sum. The fix removes the transformation so all features use raw [0,1] values.
     """
     import inspect
@@ -585,7 +585,7 @@ def test_p4_047_disease_names_use_spaced_format():
     ("type 2 diabetes"), matching the format used by KNOWN_POSITIVES
     and US_PREVALENCE for the diseases that DO appear in those tables.
     Not all KP diseases (e.g., "inflammation", "pain") need to be in
-    DISEASE_NAMES — those are general categories injected separately by
+    DISEASE_NAMES -- those are general categories injected separately by
     the KP oversampling logic, not part of the fake-data disease pool.
     """
     from rl.rl_drug_ranker import DISEASE_NAMES, KNOWN_POSITIVES, US_PREVALENCE
@@ -596,7 +596,7 @@ def test_p4_047_disease_names_use_spaced_format():
     )
     # For diseases that appear in BOTH DISEASE_NAMES (old underscored form)
     # AND US_PREVALENCE (spaced form), verify the spaced form is now used.
-    # This is the core consistency check — the bug was that "type_2_diabetes"
+    # This is the core consistency check -- the bug was that "type_2_diabetes"
     # in DISEASE_NAMES didn't match "type 2 diabetes" in US_PREVALENCE.
     for dis in US_PREVALENCE:
         if " " in dis:  # spaced form in US_PREVALENCE

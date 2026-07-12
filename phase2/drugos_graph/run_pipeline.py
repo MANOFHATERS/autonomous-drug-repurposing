@@ -7046,7 +7046,25 @@ def step11b_train_graph_transformer(
 
     # Node-disjoint split (same as step11 v29 fix).
     import random as _random
-    _rng = _random.Random(42)
+    # v102 ROOT FIX (P2-047): the previous code hardcoded the seed to
+    # 42 (and 42 + 2 for the validation RNG), ignoring config.seed.
+    # HGT training was reproducible across runs with the SAME code but
+    # NOT correlated with the global seed. An operator running a
+    # multi-seed ensemble (config.seed = 42, 43, 44) for HGT variance
+    # estimation got the SAME result for all three runs — defeating
+    # the purpose of multi-seed ensembling. TransE respected
+    # config.seed (via train_transe); HGT did not. The DOCX
+    # reproducibility requirement (FDA 21 CFR Part 11) was partially
+    # violated: multi-seed runs that should have produced variance
+    # produced identical results, masking model instability.
+    #
+    # ROOT FIX: replace ``42`` with ``getattr(cfg, "seed", 42)`` and
+    # ``42 + 2`` with ``getattr(cfg, "seed", 42) + 2``. The default of
+    # 42 preserves backward compat for callers that don't set cfg.seed.
+    # The GraphTransformerConfig.seed field (graph_transformer_model.py:158)
+    # defaults to 42, so existing single-seed runs are bit-identical.
+    _hgt_seed = getattr(cfg, "seed", 42)
+    _rng = _random.Random(_hgt_seed)
     # v72 ROOT FIX (P2C-023): separate validation RNG for HGT negative
     # sampling. train_transe uses a separate _val_rng seeded from
     # config.seed + 2 for validation negatives (the v43 P1 fix to
@@ -7058,34 +7076,121 @@ def step11b_train_graph_transformer(
     # did/did-not perform validation. The DOCX reproducibility
     # requirement (FDA 21 CFR Part 11) was violated for HGT. TransE
     # was reproducible (separate _val_rng), HGT was not. ROOT FIX:
-    # create a separate _val_rng seeded from 42 + 2 (mirroring the
-    # train_transe pattern) and use it for validation + test negatives.
-    # The training _rng is used ONLY for training negatives and batch
-    # shuffling, so its state is not contaminated by validation.
-    _val_rng = _random.Random(42 + 2)
+    # create a separate _val_rng seeded from _hgt_seed + 2 (mirroring
+    # the train_transe pattern) and use it for validation + test
+    # negatives. The training _rng is used ONLY for training negatives
+    # and batch shuffling, so its state is not contaminated by
+    # validation.
+    # v102 P2-047: derived from _hgt_seed (which respects cfg.seed),
+    # not the hardcoded 42.
+    _val_rng = _random.Random(_hgt_seed + 2)
+
+    # P2-008 ROOT FIX (CRITICAL — disease-side leakage in HGT split):
+    # The previous code partitioned ONLY ``compound_indices`` (the
+    # Compound / src side of treats edges) and assigned each triple
+    # to a split based on its Compound endpoint. The Disease endpoint
+    # was IGNORED — a single Disease could appear as the tail of a
+    # train triple AND a val triple AND a test triple (different
+    # drugs treating the same disease in different splits). For an
+    # HGT message-passing model, the Disease node embedding is
+    # updated by BOTH train and val/test gradients via the encoder.
+    # The Disease's representation is "contaminated" by train signal
+    # during val/test eval — inflating AUC by 0.05-0.10 per
+    # Hu et al. 2020. The DOCX V1 launch criterion (0.85 AUC) may
+    # be met on a leaky split but fail on a truly disjoint holdout.
+    #
+    # ROOT FIX: partition BOTH Compound and Disease endpoint sets,
+    # then assign each triple to a split IFF BOTH its endpoints are
+    # in that split. Triples whose endpoints span partitions are
+    # DROPPED (they would leak information across the split, exactly
+    # as PyGBuilder.node_disjoint_split does at pyg_builder.py:1951+).
+    # The dropped-triple rate is logged so operators can see the
+    # leakage-prevention cost (typically 10-30% of edges — the same
+    # trade-off PyGBuilder.node_disjoint_split documents).
     compound_indices = list(set(src_list))
+    disease_indices = list(set(dst_list))
     _rng.shuffle(compound_indices)
-    n_total = len(compound_indices)
-    n_train = int(n_total * 0.8)
-    n_val = int(n_total * 0.1)
-    train_compounds = set(compound_indices[:n_train])
-    val_compounds = set(compound_indices[n_train:n_train + n_val])
-    test_compounds = set(compound_indices[n_train + n_val:])
+    # Use a separate seed offset for the disease shuffle so the
+    # permutation is independent of the compound permutation (else
+    # the same RNG state would correlate the two partitions, biasing
+    # which disease each compound is paired with in each split).
+    # v102 P2-047: use _hgt_seed + 1 (not hardcoded 42 + 1) so the
+    # disease partition respects config.seed (multi-seed ensemble works).
+    _disease_rng = _random.Random(_hgt_seed + 1)
+    _disease_rng.shuffle(disease_indices)
+
+    def _partition_indices(idx_list, ratio_train=0.8, ratio_val=0.1):
+        n_total = len(idx_list)
+        n_train = int(n_total * ratio_train)
+        n_val = int(n_total * ratio_val)
+        return (
+            set(idx_list[:n_train]),
+            set(idx_list[n_train:n_train + n_val]),
+            set(idx_list[n_train + n_val:]),
+        )
+
+    train_compounds, val_compounds, test_compounds = _partition_indices(
+        compound_indices
+    )
+    train_diseases, val_diseases, test_diseases = _partition_indices(
+        disease_indices
+    )
 
     train_idx, val_idx, test_idx = [], [], []
-    for i, c in enumerate(src_list):
-        if c in train_compounds:
+    _dropped_cross_partition = 0
+    for i, (c, d) in enumerate(zip(src_list, dst_list)):
+        in_train = c in train_compounds and d in train_diseases
+        in_val = c in val_compounds and d in val_diseases
+        in_test = c in test_compounds and d in test_diseases
+        if in_train:
             train_idx.append(i)
-        elif c in val_compounds:
+        elif in_val:
             val_idx.append(i)
-        elif c in test_compounds:
+        elif in_test:
             test_idx.append(i)
+        else:
+            # Edge spans partitions (e.g. Compound in train but
+            # Disease in val). Drop it — it would leak signal across
+            # the split. This is the same trade-off
+            # PyGBuilder.node_disjoint_split makes.
+            _dropped_cross_partition += 1
+
     logger.info(
-        "Step 11b: node-disjoint split — train=%d, val=%d, test=%d "
-        "(compounds: train=%d, val=%d, test=%d)",
+        "Step 11b: node-disjoint split (BOTH Compound AND Disease "
+        "endpoints partitioned — P2-008 root fix). train=%d, val=%d, "
+        "test=%d (compounds: train=%d, val=%d, test=%d; diseases: "
+        "train=%d, val=%d, test=%d). Dropped %d of %d triples whose "
+        "endpoints span partitions (leakage prevention — see "
+        "PyGBuilder.node_disjoint_split docstring).",
         len(train_idx), len(val_idx), len(test_idx),
         len(train_compounds), len(val_compounds), len(test_compounds),
+        len(train_diseases), len(val_diseases), len(test_diseases),
+        _dropped_cross_partition, n_triples,
     )
+
+    # P2-008: safety — if the disjoint split produced empty train or
+    # empty val/test, log CRITICAL and fall back to the legacy
+    # compound-only split (preserving prior behaviour) so the pipeline
+    # does not silently no-op. The operator can investigate why the
+    # graph is too small for a true node-disjoint split.
+    if len(train_idx) == 0 or (len(val_idx) == 0 and len(test_idx) == 0):
+        logger.critical(
+            "Step 11b P2-008 ROOT FIX: node-disjoint split on BOTH "
+            "endpoints produced train=%d / val=%d / test=%d — too "
+            "sparse to train. Falling back to legacy compound-only "
+            "split (disease-side leakage may persist). Investigate "
+            "the graph density — production should have enough "
+            "compounds × diseases for a true node-disjoint split.",
+            len(train_idx), len(val_idx), len(test_idx),
+        )
+        train_idx, val_idx, test_idx = [], [], []
+        for i, c in enumerate(src_list):
+            if c in train_compounds:
+                train_idx.append(i)
+            elif c in val_compounds:
+                val_idx.append(i)
+            elif c in test_compounds:
+                test_idx.append(i)
 
     # Train the model end-to-end (both HGT encoder and bilinear decoder
     # receive gradients). v35 ROOT FIX (N-2): the previous comment
@@ -7255,23 +7360,45 @@ def step11b_train_graph_transformer(
     _disease_degree: dict = {}
     for _t in dst_list:
         _disease_degree[_t] = _disease_degree.get(_t, 0) + 1
-    # Build weighted pool for sampling (each disease appears
-    # proportionally to 1/(1+degree)).
-    _weighted_disease_pool: list = []
+    # v102 ROOT FIX (P2-041): the previous code built a materialized
+    # weighted pool via
+    #   _weight = max(1, int(1000 / (1 + _deg)))
+    #   _weighted_disease_pool.extend([_t] * _weight)
+    # The ``int()`` truncation SATURATED weights at 1 for any disease
+    # with degree >= 999 — hubs (DOID:4 "disease", TP53-linked cancers
+    # with thousands of edges) got weight 1, identical to mid-tier
+    # diseases with degree 999. The Bernoulli weighting FLATTENED to
+    # uniform for hubs, defeating Wang et al. 2014's prescription that
+    # hubs be sampled LESS often (their negatives are easy → weaker
+    # learning signal). Hub diseases were over-sampled as negatives,
+    # inflating HGT AUC because hub negatives are easy.
+    #
+    # ROOT FIX: build a FLOAT weight list (no int truncation) and use
+    # ``random.choices(population, weights=weights, k=1)[0]`` instead
+    # of materializing the pool. This preserves the true 1/(1+deg)
+    # Bernoulli distribution even for hubs with degree 1000+ (weight
+    # 0.001 vs 1.0 for degree 0 — a 1000x sampling ratio that the
+    # int-truncation form collapsed to 1x).
+    _disease_weights: list = []
     for _t in all_disease_indices:
         _deg = _disease_degree.get(_t, 0)
-        _weight = max(1, int(1000 / (1 + _deg)))  # inverse-degree weight
-        _weighted_disease_pool.extend([_t] * _weight)
-    # Fall back to uniform if the weighted pool is empty (no diseases).
-    if not _weighted_disease_pool:
-        _weighted_disease_pool = list(all_disease_indices)
+        # Float weight = 1 / (1 + degree). Wang et al. 2014 Bernoulli.
+        # No int truncation — preserves the true inverse-degree curve.
+        _disease_weights.append(1.0 / (1.0 + float(_deg)))
+    # Fall back to uniform (all-equal weights) if the population is
+    # non-empty but all weights are zero (degenerate: all diseases have
+    # infinite degree — impossible in practice but defensive).
+    if all(_w == 0.0 for _w in _disease_weights) and all_disease_indices:
+        _disease_weights = [1.0] * len(all_disease_indices)
     logger.info(
         "Step 11b: negative sampling — %d diseases, %d known_positives, "
         "%d held_out_pairs (val+test), Bernoulli degree-weighted "
-        "(pool_size=%d). Fixes P2C-011 (held_out contamination + "
-        "degree bias).",
+        "(float_weights, min=%.6f, max=%.6f). Fixes P2C-011 + P2-041 "
+        "(held_out contamination + degree bias, no int-truncation).",
         len(all_disease_indices), len(known_positives),
-        len(held_out_pairs), len(_weighted_disease_pool),
+        len(held_out_pairs),
+        min(_disease_weights) if _disease_weights else 0.0,
+        max(_disease_weights) if _disease_weights else 0.0,
     )
 
     def _make_negatives(positive_indices, rng=None) -> Dict[int, Tuple[int, int]]:
@@ -7306,7 +7433,22 @@ def step11b_train_graph_transformer(
             found = False
             while attempts < 50:
                 # v71 P2C-011: Bernoulli degree-weighted sampling.
-                t = _neg_rng.choice(_weighted_disease_pool)
+                # v102 P2-041: use random.choices with FLOAT weights
+                # instead of _neg_rng.choice on a materialized pool.
+                # The previous int-truncated pool saturated at weight 1
+                # for hubs (degree >= 999), flattening Bernoulli to
+                # uniform. random.choices accepts float weights directly,
+                # preserving the true 1/(1+deg) curve even for hubs.
+                if all_disease_indices and _disease_weights:
+                    t = _neg_rng.choices(
+                        all_disease_indices,
+                        weights=_disease_weights,
+                        k=1,
+                    )[0]
+                else:
+                    # No diseases available — skip this positive.
+                    n_skipped_no_neg += 1
+                    break
                 # v71 P2C-011: reject known_positives AND held_out_pairs.
                 if (h, t) in known_positives:
                     tried.add(t)

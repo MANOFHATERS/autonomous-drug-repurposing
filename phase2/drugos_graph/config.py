@@ -3117,6 +3117,39 @@ class TransEConfig:
     # KGs (per DRKG paper, Huang et al., 2020). Smaller dims lose
     # expressiveness; larger dims increase GPU memory and overfitting risk.
     # FIX C12.2: embedding_dim — was hardcoded in TransEModel.__init__.
+    #
+    # P2-067 ROOT FIX (Phase 2 ↔ Phase 3 embedding_dim MISMATCH):
+    # This TransEConfig.embedding_dim defaults to 256, but Phase 3's
+    # DrugRepurposingGraphTransformer defaults to embedding_dim=128
+    # (see graph_transformer/models/graph_transformer.py and the Phase 3
+    # config). A TransE checkpoint trained with embedding_dim=256 CANNOT
+    # be loaded into a Phase 3 model expecting 128-dim embeddings — the
+    # shape mismatch raises ``RuntimeError: Error(s) in loading
+    # state_dict for GraphTransformerModel: size mismatch for
+    # entity_embeddings.weight``.
+    #
+    # The DOCX architecture (§5 Phase 3) suggests Phase 2 TransE
+    # embeddings COULD warm-start Phase 3 — but this is IMPOSSIBLE with
+    # mismatched dims. We have two options:
+    #   (a) Align the defaults (both 256 OR both 128).
+    #   (b) Document that Phase 2 TransE and Phase 3 GraphTransformer
+    #       are SEPARATE models with NO warm-start path.
+    #
+    # We choose (b) because it is more HONEST about the architectural
+    # differences: TransE is a BASELINE KGE model (Bordes et al. 2013,
+    # shared entity+relation embedding space), while the GraphTransformer
+    # is the PRODUCTION model (HGT attention with per-node-type
+    # projections). Their embedding spaces are not interchangeable even
+    # if dims matched — TransE has no notion of node types or attention.
+    # Pretending they could warm-start each other would be misleading.
+    #
+    # Operators who want to USE Phase 2 TransE embeddings in Phase 3
+    # must EXPLICITLY project them: train TransE with embedding_dim=128
+    # (override the default via DRUGOS_TRANSE_EMBEDDING_DIM=128), then
+    # pass the embeddings as ``node_features`` to the GraphTransformer's
+    # Compound node type (which projects them through
+    # ``input_projections["Compound"]`` to the GraphTransformer's
+    # embedding_dim). This is the ONLY supported warm-start path.
     embedding_dim: int = field(
         default_factory=lambda: int(os.environ.get("DRUGOS_TRANSE_EMBEDDING_DIM", "256"))
     )
@@ -3836,6 +3869,17 @@ CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
     # diseases (not yet approved). Using "treats" for these would be
     # scientifically incorrect — the drug has not been proven to treat.
     ("Compound", "tested_for", "Disease"),
+    # v102 ROOT FIX (P2-042): "failed_for" edge for clinical trials that
+    # completed but FAILED their primary endpoint (drug proven INEFFECTIVE
+    # in Phase 3). The previous pipeline emitted these as "tested_for" —
+    # a WEAK POSITIVE signal in the RL ranker — so known-failed drugs
+    # got a small positive bump in repurposing score, OPPOSITE of correct.
+    # The new "failed_for" edge is an explicit NEGATIVE signal:
+    # downstream training can filter out "failed_for" drug-disease pairs
+    # from positive labels AND use them as hard negatives for contrastive
+    # training. See clinicaltrials_loader.py:_classify_trial_status for
+    # the canonical status classifier that drives this rel_type.
+    ("Compound", "failed_for", "Disease"),
     # Fixes audit issue 3.3 — protein-disease associations (GWAS/PheWAS)
     # RATIONALE: GWAS associate gene PRODUCTS (proteins) with disease
     # risk. The Gene-associated_with-Disease edge captures the genetic
@@ -3900,6 +3944,54 @@ CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
 
 # Fixes audit issue 2.1 — CORE_EDGE_TYPES_SET for O(1) lookup
 CORE_EDGE_TYPES_SET: frozenset[Tuple[str, str, str]] = frozenset(CORE_EDGE_TYPES)
+
+
+# P2-011 ROOT FIX (symmetric / biologically-undirected relations):
+# The per-edge-type density computation in graph_stats.py needs to
+# distinguish DIRECTED edges (Compound→treats→Disease — only one
+# direction is biologically meaningful) from SYMMETRIC edges
+# (Protein-interacts_with-Protein — the edge is biologically
+# undirected; STRING PPI is symmetric by construction). For
+# symmetric same-type relations, the directed-graph denominator
+# ``n*(n-1)`` double-counts each undirected edge — the correct
+# denominator is ``n*(n-1)/2``. Without this distinction, PPI
+# density reports at HALF its true value (e.g. 0.5% instead of
+# 1.0%), biasing ML hyperparameter tuning (sparse vs dense message
+# passing) and masking duplicate-edge bugs ("PPI density > 5%
+# suggests duplicates" — the threshold is now meaningful).
+#
+# Membership rule: a relation is symmetric IFF the edge is
+# biologically undirected AND the source and destination node
+# types are identical (so the n*(n-1)/2 form is well-defined).
+# Cross-type relations like (Compound, treats, Disease) are NEVER
+# symmetric even when semantically bidirectional — they use the
+# n_src * n_dst denominator.
+#
+# Sources:
+#   - STRING PPI: "interactions are undirected" (Szklarczyk et al.
+#     2023, STRING database paper §2).
+#   - DRKG Gene-Gene: same as STRING (DRKG collects PPIs from
+#     multiple sources, all undirected).
+#   - Compound-Compound drug-drug interactions: pharmacologically
+#     symmetric (if A interacts with B, B interacts with A) — see
+#     DrugBank DDI documentation. The (Compound, interacts_with,
+#     Compound) edge is included here.
+SYMMETRIC_RELATIONS: frozenset[str] = frozenset({
+    "interacts_with",  # PPI (Protein-Protein, Gene-Gene) AND DDI (Compound-Compound)
+})
+
+
+# P2-011 helper: predicate form (used by graph_stats.py density
+# computation and by the schema validator).
+def is_symmetric_relation(rel_name: str) -> bool:
+    """Return True if ``rel_name`` is a biologically-undirected relation.
+
+    See ``SYMMETRIC_RELATIONS`` for the rationale and source
+    citations. Used by ``graph_stats.compute_density_per_type`` to
+    pick the correct density denominator:
+    ``n*(n-1)/2`` for symmetric, ``n*(n-1)`` for directed.
+    """
+    return rel_name in SYMMETRIC_RELATIONS
 
 
 # Fixes audit issue 2.13 — is_core_edge() helper
@@ -4755,6 +4847,64 @@ DRKG_GENE_DISEASE_BIOMARKER_RELATIONS: frozenset[str] = frozenset({
     "Md",  # GNBR biomarker (MedDRA-coded)
     "X",   # GNBR overexpressed
 })
+
+# ── P2-021 ROOT FIX: canonical case for DRKG relation-code fields ──────
+# SINGLE SOURCE OF TRUTH for the case convention of the four relation-code
+# columns emitted by ``drkg_loader.parse_drkg_tsv``:
+#   relation            — the full relation code, e.g. "drugbank::treats::compound:disease"
+#   relation_source     — "drugbank"
+#   relation_name       — "treats"
+#   relation_dst_type   — "compound:disease"
+#
+# All four are LOWERCASED so that round-trip reconstruction
+# (``relation_source + "::" + relation_name + "::" + relation_dst_type``)
+# equals the stored ``relation`` column byte-for-byte. The previous code
+# lowercased only the first three and preserved ``relation_dst_type`` in
+# PascalCase ("Compound:Disease") — producing a mixed convention where
+# reconstruction yielded "drugbank::treats::Compound:Disease" ≠ the stored
+# "drugbank::treats::compound:disease". Any maintainer who assumed
+# consistency wrote ``WHERE rel = 'drugbank::treats::Compound:Disease'``
+# and got ZERO results.
+#
+# NOTE: ``head_type`` and ``tail_type`` are SEPARATELY kept PascalCase
+# (e.g. "Compound", "Disease") because ``EDGE_EVIDENCE_STRENGTH`` and
+# ``DRKG_VALID_TRIPLE_SCHEMAS`` use PascalCase entity-type keys. The
+# BUG 3.5 cross-check therefore compares LOWERCASED versions of both
+# ``relation_dst_type`` tokens AND ``head_type``/``tail_type``.
+DRKG_RELATION_CODE_CANONICAL_CASE: str = "lower"
+
+# DRKG_ENTITY_TYPE_CANONICAL_CASE — entity-type tokens (head_type, tail_type
+# and the tokens inside relation_dst_type) are PascalCase in the raw DRKG
+# file ("Compound", "Disease", "Gene", "Anatomy"). We preserve this for
+# the head_type/tail_type columns (consumed by EDGE_EVIDENCE_STRENGTH).
+# relation_dst_type is lowercased per DRKG_RELATION_CODE_CANONICAL_CASE.
+DRKG_ENTITY_TYPE_CANONICAL_CASE: str = "pascal"
+
+
+def reconstruct_relation_code(
+    relation_source: str,
+    relation_name: str,
+    relation_dst_type: str,
+) -> str:
+    """Reconstruct the canonical (lowercase) DRKG relation code from parts.
+
+    Single source of truth for round-trip reconstruction. All three inputs
+    are lowercased before joining so the output is always canonical
+    regardless of the caller's case. This guarantees::
+
+        reconstruct_relation_code(
+            df.relation_source, df.relation_name, df.relation_dst_type
+        ) == df.relation
+
+    P2-021 ROOT FIX — eliminates the maintenance trap where callers had to
+    remember which fields were lowercased and which were PascalCase.
+    """
+    return "::".join((
+        str(relation_source).strip().lower(),
+        str(relation_name).strip().lower(),
+        str(relation_dst_type).strip().lower(),
+    ))
+
 
 # DRKG_RELATION_ABBREV_TO_NAME — codebook mapping the DRKG abbreviation
 # (middle token of the relation string) to its human-readable name.

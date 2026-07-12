@@ -893,6 +893,7 @@ class NegativeSampler:
         num_negatives: int,
         ratio: float = 5.0,
         rng: Optional[np.random.Generator] = None,
+        degree_weighted: bool = True,
     ) -> List[Dict]:
         """Strategy (a): Random drug-disease pairs not in positive set.
 
@@ -902,12 +903,49 @@ class NegativeSampler:
 
         Uses batch rejection sampling (Fix 8.4) for better performance.
 
+        P2-020 ROOT FIX (Bernoulli degree-weighting per Wang et al. 2014):
+            The previous implementation used UNIFORM sampling over
+            drugs and diseases. Biomedical KGs have hub diseases
+            (DOID:4 "disease", TP53-linked cancers) with thousands
+            of edges — uniform sampling produces "easy" negatives
+            for hub diseases (a hub disease has so many positive
+            pairs that any specific drug-disease pair is "obviously"
+            negative), which the model learns to identify WITHOUT
+            learning the actual biological relation. TransE AUC
+            reported during training is inflated by 0.05-0.15
+            relative to type-correct, degree-matched evaluation.
+
+            ROOT FIX: when ``degree_weighted=True`` (default), sample
+            tail entities with probability proportional to
+            ``1/(1+degree)`` using the precomputed
+            ``_disease_degree_counter`` / ``_drug_degree_counter``
+            (already built in ``__init__`` at lines 378-382). This
+            UNDER-weights hubs (high-degree entities) and OVER-weights
+            low-degree entities — producing HARDER negatives that
+            force the model to learn the biological relation, not
+            just the degree distribution. Mirrors the
+            ``KGNegativeSampler`` implementation used by HGT.
+
+            When ``degree_weighted=False`` (legacy), falls back to
+            uniform sampling. Useful for ablation studies comparing
+            degree-weighted vs uniform negative sampling.
+
+            Note: this REPLACES the P2-007 fix, which used
+            degree-PROPORTIONAL weighting (``degree + eps``) — the
+            OPPOSITE of what Wang et al. 2014 prescribes. The P2-007
+            fix made the problem worse by OVER-weighting hubs as
+            negatives. P2-020 corrects the formula to 1/(1+degree).
+
         Args:
             num_negatives: Number of negative samples to generate.
                 If 0, computed from ratio * self._positive_count (Fix 7.5).
             ratio: Target negative:positive ratio. Used as fallback when
                 num_negatives is 0.
             rng: Optional numpy random Generator for reproducibility.
+            degree_weighted: If True (default), sample tail entities
+                with probability proportional to 1/(1+degree) per
+                Wang et al. 2014 (P2-020 root fix). If False, use
+                uniform sampling (legacy behaviour for ablation).
 
         Returns:
             List of negative sample dicts.
@@ -976,54 +1014,81 @@ class NegativeSampler:
         # Fix 8.4: Batch rejection sampling
         batch_size = min(num_negatives, 1000)
 
-        # P2-007 ROOT FIX: Bernoulli degree-weighting for random_sampling.
-        # The legacy random_sampling used pure uniform sampling over
-        # drugs and diseases. Biomedical KGs have heavy-tailed degree
-        # distributions (TP53, EGFR, "disease" hub nodes with thousands
-        # of edges). Uniform sampling under-represents hub nodes as
-        # negatives — but the rejection filter then rejects the FEWER
-        # valid negatives for high-degree drugs (because most of their
-        # disease pairs are positives). Net effect: low-degree drugs
-        # are over-sampled as negatives, high-degree drugs are
-        # under-sampled. The KGNegativeSampler class correctly uses
-        # Bernoulli degree-weighting per Wang et al. 2014 — but this
-        # legacy random_sampling (used by combined_sampling for the
-        # random strategy, which gets 50% of the budget by default)
-        # did NOT.
+        # P2-020 ROOT FIX: Bernoulli degree-weighting for random_sampling
+        # per Wang et al. 2014. REPLACES the P2-007 fix (which used
+        # degree-PROPORTIONAL weighting — the OPPOSITE of what Wang
+        # et al. prescribes). The P2-020 form is 1/(1+degree), which
+        # UNDER-weights hubs (high-degree entities) and OVER-weights
+        # low-degree entities — producing HARDER negatives that force
+        # the model to learn the biological relation, not just the
+        # degree distribution.
         #
-        # Root fix: build degree-weighted probability arrays once,
-        # cache on the instance, and use rng.choice(p=probs) instead
-        # of rng.integers(). Mirrors KGNegativeSampler's
-        # _bernoulli_probs_cache pattern.
-        if not hasattr(self, "_p2_007_drug_probs"):
-            _drug_degrees = np.zeros(n_drugs, dtype=np.float64)
-            _disease_degrees = np.zeros(n_diseases, dtype=np.float64)
-            _drug_idx = {d: i for i, d in enumerate(self.all_drug_ids)}
-            _disease_idx = {d: i for i, d in enumerate(self.all_disease_ids)}
-            for (d, dis) in self._rejection_pairs:
-                if d in _drug_idx:
-                    _drug_degrees[_drug_idx[d]] += 1.0
-                if dis in _disease_idx:
-                    _disease_degrees[_disease_idx[dis]] += 1.0
-            # Add uniform smoothing (epsilon) so zero-degree entities
-            # still have non-zero probability. Mirrors KGNegativeSampler.
-            _eps = 1.0
-            self._p2_007_drug_probs = (
-                _drug_degrees + _eps
-            ) / (_drug_degrees.sum() + _eps * n_drugs)
-            self._p2_007_disease_probs = (
-                _disease_degrees + _eps
-            ) / (_disease_degrees.sum() + _eps * n_diseases)
-            logger.info(
-                "P2-007 root fix: built Bernoulli degree-weighted "
-                "probabilities for random_sampling — "
-                "drug_degree_max=%.0f, disease_degree_max=%.0f, "
-                "drug_probs_sum=%.4f, disease_probs_sum=%.4f. "
-                "Mirrors KGNegativeSampler (Wang et al. 2014).",
-                float(_drug_degrees.max()), float(_disease_degrees.max()),
-                float(self._p2_007_drug_probs.sum()),
-                float(self._p2_007_disease_probs.sum()),
-            )
+        # We build the probability arrays ONCE per instance and cache
+        # them. The arrays are indexed by the position of the entity
+        # ID in ``self.all_drug_ids`` / ``self.all_disease_ids`` (so
+        # ``rng.choice(n_drugs, p=probs)`` returns indices that map
+        # directly to ``self.all_drug_ids[idx]``).
+        #
+        # When ``degree_weighted=False`` (legacy ablation mode), we
+        # skip the probability arrays entirely and use uniform
+        # ``rng.choice`` (no ``p`` argument) — the pre-P2-007
+        # behaviour.
+        _use_uniform = not degree_weighted
+        if _use_uniform:
+            _drug_probs = None
+            _disease_probs = None
+        else:
+            # Cache key includes the degree_weighted flag so that
+            # switching between modes rebuilds the arrays. (The
+            # arrays themselves are cheap to build — O(n_drugs +
+            # n_diseases) — but caching avoids rebuilding per call.)
+            _cache_key = "_p2_020_inverse_degree_probs"
+            if not hasattr(self, _cache_key):
+                _drug_degrees = np.zeros(n_drugs, dtype=np.float64)
+                _disease_degrees = np.zeros(n_diseases, dtype=np.float64)
+                _drug_idx = {d: i for i, d in enumerate(self.all_drug_ids)}
+                _disease_idx = {
+                    d: i for i, d in enumerate(self.all_disease_ids)
+                }
+                # P2-020: use the precomputed _drug_degree_counter /
+                # _disease_degree_counter (built in __init__ from
+                # positive_pairs). These are Counters keyed by
+                # entity_id (string), so we map to index-based arrays.
+                for _d_id, _deg in self._drug_degree_counter.items():
+                    if _d_id in _drug_idx:
+                        _drug_degrees[_drug_idx[_d_id]] = float(_deg)
+                for _dis_id, _deg in self._disease_degree_counter.items():
+                    if _dis_id in _disease_idx:
+                        _disease_degrees[_disease_idx[_dis_id]] = float(_deg)
+                # P2-020: 1/(1+degree) weighting per Wang et al. 2014.
+                # Add uniform smoothing (epsilon) so zero-degree
+                # entities still have non-zero probability (else they
+                # could never be sampled, biasing the negative pool
+                # toward high-degree entities — the opposite of the
+                # intended effect). The smoothing is small (eps=1.0)
+                # so the 1/(1+degree) shape is preserved.
+                _eps = 1.0
+                _drug_inv = 1.0 / (1.0 + _drug_degrees + _eps)
+                _disease_inv = 1.0 / (1.0 + _disease_degrees + _eps)
+                _drug_probs = _drug_inv / _drug_inv.sum()
+                _disease_probs = _disease_inv / _disease_inv.sum()
+                setattr(self, _cache_key, (_drug_probs, _disease_probs))
+                logger.info(
+                    "P2-020 root fix: built Bernoulli 1/(1+degree) "
+                    "inverse-degree-weighted probabilities for "
+                    "random_sampling — "
+                    "drug_degree_max=%.0f, disease_degree_max=%.0f, "
+                    "drug_probs_sum=%.4f, disease_probs_sum=%.4f. "
+                    "Under-weights hubs per Wang et al. 2014. "
+                    "(Replaces the P2-007 degree-proportional fix "
+                    "which over-weighted hubs.)",
+                    float(_drug_degrees.max()),
+                    float(_disease_degrees.max()),
+                    float(_drug_probs.sum()),
+                    float(_disease_probs.sum()),
+                )
+            else:
+                _drug_probs, _disease_probs = getattr(self, _cache_key)
 
         while len(negatives) < num_negatives and attempts < max_attempts:
             actual_batch = min(
@@ -1034,19 +1099,22 @@ class NegativeSampler:
             if actual_batch <= 0:
                 break
 
-            # P2-007 ROOT FIX: use degree-weighted choice instead of
-            # uniform integers. rng.choice with p=probs samples indices
-            # proportional to degree, so hubs (TP53, etc.) are sampled
-            # as negatives in proportion to their degree — preventing
-            # the systematic under-representation of hub pairs that
-            # depressed AUC on hub-heavy test sets.
+            # P2-020 ROOT FIX: use 1/(1+degree) inverse-degree-weighted
+            # choice (when degree_weighted=True) instead of uniform
+            # integers. rng.choice with p=probs samples indices with
+            # probability proportional to 1/(1+degree), so hubs
+            # (TP53, DOID:4, etc.) are UNDER-sampled as negatives —
+            # producing harder negatives that force the model to
+            # learn the biological relation, not just the degree
+            # distribution. When degree_weighted=False, p=None falls
+            # back to uniform sampling (legacy ablation mode).
             drug_indices = rng.choice(
                 n_drugs, size=actual_batch, replace=True,
-                p=self._p2_007_drug_probs,
+                p=_drug_probs,
             )
             disease_indices = rng.choice(
                 n_diseases, size=actual_batch, replace=True,
-                p=self._p2_007_disease_probs,
+                p=_disease_probs,
             )
 
             for drug_idx, disease_idx in zip(drug_indices, disease_indices):

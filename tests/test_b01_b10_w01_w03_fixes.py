@@ -3,12 +3,12 @@
 V27 FORENSIC FIX VERIFICATION SUITE
 ====================================
 This suite verifies EVERY fix from the V27 audit (B-01..B-10, W-01..W-03)
-by ACTUALLY EXERCISING the code path — not by inspecting docstrings.
+by ACTUALLY EXERCISING the code path -- not by inspecting docstrings.
 
 A test that says "the docstring mentions val_loss" passes for the wrong
 reason. This suite says "train the model, check that best_val_loss is
 tracked, check that the restored checkpoint is the one with lowest val
-loss" — which only passes when the fix is real.
+loss" -- which only passes when the fix is real.
 
 Run:  python tests/test_b01_b10_w01_w03_fixes.py
    or pytest tests/test_b01_b10_w01_w03_fixes.py -v
@@ -58,7 +58,7 @@ def _fail(name: str, reason: str = "") -> None:
 def test_b01_safe_load_input_non_strict_default():
     """B-01: safe_load_input must default to NON-strict mode so symlinked
     parent directories (common in production: NAS, K8s mounts) don't crash
-    the bridge → RL handoff."""
+    the bridge -> RL handoff."""
     from rl.rl_drug_ranker import safe_load_input
 
     # Make sure RL_STRICT_SYMLINK_CHECK is not set
@@ -90,7 +90,7 @@ def test_b01_safe_load_input_strict_mode_opt_in():
         try:
             os.symlink(real_dir, link_dir)
         except (OSError, NotImplementedError):
-            _ok("B-01: symlink creation not supported on this OS — skipping strict mode test")
+            _ok("B-01: symlink creation not supported on this OS -- skipping strict mode test")
             return
 
         csv_path = os.path.join(link_dir, "test_input.csv")
@@ -132,7 +132,7 @@ def test_b02_safe_batchnorm_state_sync():
 
     bn = _SafeBatchNorm1d(8)
 
-    # Case 1: wrapper in train mode, batch_size=1 — should use eval mode
+    # Case 1: wrapper in train mode, batch_size=1 -- should use eval mode
     # temporarily, then restore TRAIN mode (the prior state).
     bn.train()
     assert bn.training is True
@@ -142,7 +142,7 @@ def test_b02_safe_batchnorm_state_sync():
     assert bn.bn.training is True, "BN should be back in train mode after batch_size=1 forward"
     _ok("B-02: BN.training stays True after batch_size=1 forward in train mode")
 
-    # Case 2: wrapper in EVAL mode, batch_size=1 — should NOT enter the
+    # Case 2: wrapper in EVAL mode, batch_size=1 -- should NOT enter the
     # special path at all (self.training is False), but if it did, the
     # finally block must NOT re-enable training.
     bn.eval()
@@ -152,7 +152,7 @@ def test_b02_safe_batchnorm_state_sync():
     assert bn.bn.training is False, "BN must stay in eval mode after forward in eval mode"
     _ok("B-02: BN.training stays False after forward in eval mode")
 
-    # Case 3: batch_size=2 in train mode — normal path, no state change
+    # Case 3: batch_size=2 in train mode -- normal path, no state change
     bn.train()
     x2 = torch.randn(2, 8)
     _ = bn(x2)
@@ -281,8 +281,8 @@ def test_b04_compute_graph_degrees_filtered_dict_works():
     from graph_transformer.utils import compute_graph_degrees
 
     # Build a fake edge_indices dict with two edge types
-    ei_ae = torch.tensor([[0, 1, 1, 2], [0, 1, 2, 0]], dtype=torch.long)  # drug→causes→outcome
-    ei_treats = torch.tensor([[0, 1, 2], [0, 1, 2]], dtype=torch.long)  # drug→treats→disease
+    ei_ae = torch.tensor([[0, 1, 1, 2], [0, 1, 2, 0]], dtype=torch.long)  # drug->causes->outcome
+    ei_treats = torch.tensor([[0, 1, 2], [0, 1, 2]], dtype=torch.long)  # drug->treats->disease
     edge_indices = {
         ("drug", "causes", "clinical_outcome"): ei_ae,
         ("drug", "treats", "disease"): ei_treats,
@@ -311,7 +311,7 @@ def test_b05_drug_level_features_stable_across_pairs():
     across all its disease pairs (they're DRUG properties).
 
     v89 ROOT FIX: efficacy_score is now PAIR-LEVEL (varies by disease),
-    NOT drug-level. This is scientifically correct — efficacy is a
+    NOT drug-level. This is scientifically correct -- efficacy is a
     (drug, disease) property. Only patent_score and adme_score remain
     drug-level.
     """
@@ -335,7 +335,7 @@ def test_b05_drug_level_features_stable_across_pairs():
             f"B-05 REGRESSION: drug '{drug_name}' has {len(patent_scores)} different patent_score values"
         assert len(adme_scores) == 1, \
             f"B-05 REGRESSION: drug '{drug_name}' has {len(adme_scores)} different adme_score values"
-    # v89: efficacy_score is PAIR-LEVEL (varies by disease) — NOT checked here
+    # v89: efficacy_score is PAIR-LEVEL (varies by disease) -- NOT checked here
     _ok(f"B-05: patent/adme are stable per-drug across {df['drug'].nunique()} drugs x {df['disease'].nunique()} diseases (v89: efficacy is now pair-level)")
 
 
@@ -344,8 +344,14 @@ def test_b05_drug_level_features_stable_across_pairs():
 # ---------------------------------------------------------------------------
 
 def test_b06_no_redundant_abs_diff():
-    """B-06: _construct_pair_features must NOT include abs_diff (it's a
-    deterministic function of signed_diff — pure parameter waste)."""
+    """P3-016 REVERTED B-06: _construct_pair_features MUST include abs_diff.
+
+    The B-06 fix removed abs_diff claiming the MLP can learn |·| from
+    signed_diff alone. P3-016 reverts this: abs_diff is a DISTINCT
+    magnitude-of-difference signal that the MLP should NOT have to
+    reconstruct (it wastes representational capacity). The input is
+    now 5*D (drug, disease, product, signed_diff, abs_diff).
+    """
     from graph_transformer.models.link_predictor import DrugDiseaseLinkPredictor
 
     predictor = DrugDiseaseLinkPredictor(embedding_dim=16, hidden_dims=[8])
@@ -353,21 +359,26 @@ def test_b06_no_redundant_abs_diff():
     disease_emb = torch.randn(4, 16)
 
     features = predictor._construct_pair_features(drug_emb, disease_emb)
-    # 4 components: drug_emb, disease_emb, product, signed_diff = 4 * 16 = 64
-    assert features.shape == (4, 64), \
-        f"B-06: expected (4, 64) for 4*D features, got {features.shape}"
+    # P3-016: 5 components: drug_emb, disease_emb, product, signed_diff, abs_diff = 5*16 = 80
+    assert features.shape == (4, 80), \
+        f"P3-016: expected (4, 80) for 5*D features, got {features.shape}"
 
-    # Verify the MLP input dimension matches
-    # First layer of the MLP should accept 4*D = 64 inputs
+    # Verify the MLP input dimension matches (5*D = 80)
     first_linear = None
     for module in predictor.mlp:
         if isinstance(module, nn.Linear):
             first_linear = module
             break
     assert first_linear is not None
-    assert first_linear.in_features == 64, \
-        f"B-06: first linear layer in_features should be 64 (4*16), got {first_linear.in_features}"
-    _ok("B-06: link_predictor uses 4*D features (abs_diff removed), input layer is 4*D not 5*D")
+    assert first_linear.in_features == 80, \
+        f"P3-016: first linear layer in_features should be 80 (5*16), got {first_linear.in_features}"
+
+    # P3-016: verify the last D columns ARE abs_diff = |signed_diff|
+    signed_diff = drug_emb - disease_emb
+    abs_diff = torch.abs(signed_diff)
+    assert torch.allclose(features[:, -16:], abs_diff, atol=1e-6), \
+        "P3-016: last D columns must be abs_diff = |signed_diff|"
+    _ok("P3-016: link_predictor uses 5*D features (abs_diff RESTORED), input layer is 5*D")
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +492,7 @@ def test_b10_tests_use_dynamic_root():
         # NOTE: this file (test_b01_b10_w01_w03_fixes.py) intentionally
         # references the hardcoded path STRING in its assertions for
         # regression detection. It is excluded from the B-10 check
-        # because it is the test that ENFORCES B-10 — including it
+        # because it is the test that ENFORCES B-10 -- including it
         # would be circular.
     ]
     for tf in test_files:
@@ -605,7 +616,7 @@ def test_w02_no_per_kp_signal_injection():
     reason="V90 ROOT FIX (BUG #2, P0): the KP multi-hop path injection was "
            "REMOVED because it was label leakage via topology (every KP got "
            "a guaranteed 3-hop path, so KP recovery was 100% by construction "
-           "— the model just detected the injected path, it did not generalize). "
+           "-- the model just detected the injected path, it did not generalize). "
            "This test verified the OLD injected-path behavior; it is now "
            "intentionally skipped because the behavior it tested is a bug "
            "that has been fixed."
@@ -613,15 +624,15 @@ def test_w02_no_per_kp_signal_injection():
 def test_w02_kps_have_multihop_connectivity():
     """v89 P0 ROOT FIX: KPs must NOT have guaranteed multi-hop connectivity.
 
-    The previous V31 "fix" (W-02) injected a GUARANTEED drug→protein→
-    pathway→disease path for every KP. This was the ROOT CAUSE of the
+    The previous V31 "fix" (W-02) injected a GUARANTEED drug->protein->
+    pathway->disease path for every KP. This was the ROOT CAUSE of the
     AUC fraud chain: LABEL_LEAKING_EDGES only strips the direct treats
     edge, not the injected path, so the GT model learned "3-hop path
-    exists → positive" trivially → val AUC = 1.0 (fraudulent).
+    exists -> positive" trivially -> val AUC = 1.0 (fraudulent).
 
     The v89 fix REMOVED the 3-hop path injection entirely. The GT model
-    now learns from NATURAL TOPOLOGY only (random drug→protein,
-    protein→pathway, pathway→disease edges created by the demo graph
+    now learns from NATURAL TOPOLOGY only (random drug->protein,
+    protein->pathway, pathway->disease edges created by the demo graph
     builder). KPs are added as "treats" edges (the prediction target)
     but NO synthetic 3-hop path is injected for them.
 
@@ -629,7 +640,7 @@ def test_w02_kps_have_multihop_connectivity():
     (the label) but should NOT have guaranteed 3-hop paths (which was
     the leakage). The number of KPs with natural 3-hop paths should be
     <= len(KNOWN_POSITIVES) (some may have natural paths by chance,
-    but NOT all of them — that would indicate injection).
+    but NOT all of them -- that would indicate injection).
     """
     from graph_transformer.gt_rl_bridge import GTRLBridge
     from rl.rl_drug_ranker import KNOWN_POSITIVES
@@ -665,7 +676,7 @@ def test_w02_kps_have_multihop_connectivity():
         for pw, d in zip(ei[0].tolist(), ei[1].tolist()):
             pathway_to_diseases.setdefault(pw, set()).add(d)
 
-    # Check each KP for multi-hop path (NATURAL only — no injection).
+    # Check each KP for multi-hop path (NATURAL only -- no injection).
     kps_with_paths = 0
     for drug_name, disease_name in KNOWN_POSITIVES:
         d_idx = drug_map.get(drug_name)
@@ -688,23 +699,23 @@ def test_w02_kps_have_multihop_connectivity():
     # injection REMOVED, only KPs that happen to have natural paths
     # (by chance from the random topology) will have them. The exact
     # count depends on graph size and seed, but it should be STRICTLY
-    # LESS than len(KNOWN_POSITIVES) — if ALL KPs have paths, the
+    # LESS than len(KNOWN_POSITIVES) -- if ALL KPs have paths, the
     # injection bug is back.
     assert kps_with_paths < len(KNOWN_POSITIVES), \
         f"v89 P0 REGRESSION: all {kps_with_paths}/{len(KNOWN_POSITIVES)} KPs have " \
-        f"multi-hop paths — the 3-hop injection bug is BACK. The GT model " \
-        f"would learn '3-hop path exists → positive' trivially → val AUC = 1.0 " \
+        f"multi-hop paths -- the 3-hop injection bug is BACK. The GT model " \
+        f"would learn '3-hop path exists -> positive' trivially -> val AUC = 1.0 " \
         f"(fraudulent). The v89 fix REMOVED the injection; KPs should have " \
         f"NATURAL topology only."
     _ok(f"v89 P0: only {kps_with_paths}/{len(KNOWN_POSITIVES)} KPs have natural "
-        f"multi-hop paths (3-hop injection REMOVED — no AUC fraud)")
+        f"multi-hop paths (3-hop injection REMOVED -- no AUC fraud)")
 
 
 def test_w02_pathway_signal_propagated_to_drugs():
     """W-02 / S-05: _enrich_features_with_graph_signal is now a NO-OP.
 
     The original W-02 fix propagated pathway signals into drugs via the
-    drug→protein→pathway chain. The S-05 audit finding SUPERSEDED this:
+    drug->protein->pathway chain. The S-05 audit finding SUPERSEDED this:
     the entire enrichment approach was scientifically wrong because it
     created an artificial correlation between drug and disease features
     that does NOT exist in production (where drug features = Morgan
@@ -781,7 +792,7 @@ def test_w03_recovery_denominator_is_test_set():
         f"W-03: denominator_basis should be 'test_set', got {result['denominator_basis']}"
     assert result["total"] == 2, \
         f"W-03: total (denominator) should be 2 (KPs in test set), got {result['total']}"
-    # We recovered 1 of 2 test KPs → 50%
+    # We recovered 1 of 2 test KPs -> 50%
     assert result["recovery_rate"] == 0.5, \
         f"W-03: recovery_rate should be 0.5 (1 of 2 test KPs), got {result['recovery_rate']}"
     _ok("W-03: recovery denominator = KPs in test set (2), not all KPs (5); 50% recovery achievable")

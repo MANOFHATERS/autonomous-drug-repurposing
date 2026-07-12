@@ -7,19 +7,19 @@ connection.py eliminates the circular-import risk identified in ARCH-02.
 
 Architecture
 ------------
-``database.base``  →  ``database.connection`` (imports Base)
-                  →  ``database.models``    (imports Base, mixins)
+``database.base``  ->  ``database.connection`` (imports Base)
+                  ->  ``database.models``    (imports Base, mixins)
 
 No module imports from a downstream consumer, so the dependency graph is
 strictly acyclic.
 
 Mixins Provided
 ---------------
-- **IDMixin**         — Auto-incrementing integer primary key.
-- **TimestampMixin**  — ``created_at`` and ``updated_at`` with server-side
+- **IDMixin**         -- Auto-incrementing integer primary key.
+- **TimestampMixin**  -- ``created_at`` and ``updated_at`` with server-side
   defaults and a PostgreSQL trigger for ``updated_at`` (onupdate does NOT
-  fire for bulk operations — IDEM-02).
-- **SoftDeleteMixin** — ``is_deleted`` and ``deleted_at`` for reversible
+  fire for bulk operations -- IDEM-02).
+- **SoftDeleteMixin** -- ``is_deleted`` and ``deleted_at`` for reversible
   deletes without cascade destruction (DES-08, REL-01).
 
 Naming Convention (CMP-04)
@@ -48,7 +48,7 @@ from sqlalchemy import Boolean, DateTime, Integer, MetaData, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # ---------------------------------------------------------------------------
-# Schema version — auto-derived from migration file names at import time.
+# Schema version -- auto-derived from migration file names at import time.
 # v35 ROOT FIX (issue 32): previously this was a hardcoded constant that
 # had to be bumped manually whenever a new migration file was added. The
 # v29 ROOT FIX bumped it from 6 to 9, but if a new migration ``010_*.sql``
@@ -60,7 +60,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 # (excluding rollback files ``*_rollback.sql``) and take the max NNN.
 # This is O(N) at import time where N = number of migrations (~9), so the
 # cost is negligible. The migrations directory is resolved relative to
-# this file (``database/base.py`` → ``database/migrations/``) so the
+# this file (``database/base.py`` -> ``database/migrations/``) so the
 # derivation works regardless of the current working directory.
 # ---------------------------------------------------------------------------
 def _derive_schema_version() -> int:
@@ -88,11 +88,11 @@ def _derive_schema_version() -> int:
 
 
 SCHEMA_VERSION: int = _derive_schema_version()
-# FIX-P3-8: Safety floor — if the migrations dir was missing or empty
+# FIX-P3-8: Safety floor -- if the migrations dir was missing or empty
 # (e.g., test isolation with a stripped-down install), fall back to a
 # named constant instead of an inline magic number. Previously the
 # fallback was hardcoded as `9`, which silently stayed at 9 even after
-# migration 010 was added — making the safety floor itself a source of
+# migration 010 was added -- making the safety floor itself a source of
 # drift. The named constant makes the bump-on-new-migration contract
 # explicit and discoverable via grep.
 #
@@ -100,7 +100,24 @@ SCHEMA_VERSION: int = _derive_schema_version()
 # > SCHEMA_VERSION_FALLBACK, ALSO bump SCHEMA_VERSION_FALLBACK to NNN so
 # the safety floor stays correct for stripped-down installs (test
 # isolation, docker images without the migrations/ directory, etc.).
-SCHEMA_VERSION_FALLBACK: int = 9
+# P1-048 FORENSIC ROOT FIX (Team 4 -- stale SCHEMA_VERSION_FALLBACK):
+# The migrations directory contains files 001 through 013 (13 migrations
+# after the P1-049 fix added migration 013). The auto-derivation
+# ``_derive_schema_version()`` (line 66-87) correctly returns 13. But the
+# ``SCHEMA_VERSION_FALLBACK = 9`` was used ONLY when
+# ``_derive_schema_version()`` returned 0 (migrations dir missing or empty
+# -- e.g. stripped-down Docker image, test isolation). Migrations 010, 011,
+# 012, 013 were added but the fallback was NOT bumped. In a stripped-down
+# install (no migrations/ dir), ``SCHEMA_VERSION`` fell back to 9 instead
+# of 13. ``check_migrations()`` reported ``schema_version_matches=False``
+# forever -- operators saw a false-positive schema drift warning on every
+# pipeline run.
+#
+# ROOT FIX: bump ``SCHEMA_VERSION_FALLBACK`` to 13 (the current max
+# migration version). The BUMP INSTRUCTIONS in the comment above are now
+# backed by a CI check (test_schema_version_fallback_matches_migrations)
+# that asserts ``SCHEMA_VERSION_FALLBACK == max(migration_version_numbers)``.
+SCHEMA_VERSION_FALLBACK: int = 13
 if SCHEMA_VERSION == 0:
     SCHEMA_VERSION = SCHEMA_VERSION_FALLBACK
 
@@ -179,7 +196,7 @@ class SoftDeleteMixin:
     ``is_deleted = True`` and optionally record ``deleted_at``.  Downstream
     queries should filter ``WHERE is_deleted = FALSE``.
 
-    Applied to ``Drug`` and ``Protein`` — the two primary entity tables
+    Applied to ``Drug`` and ``Protein`` -- the two primary entity tables
     where accidental data loss is most impactful.
     """
 

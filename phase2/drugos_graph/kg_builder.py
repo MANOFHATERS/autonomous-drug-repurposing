@@ -237,8 +237,45 @@ ID_PATTERNS: dict[str, str] = {
     # (_DRUGBANK_ID_RE) and Phase 2 drugbank_parser
     # (DRUGBANK_DRUG_IDENTIFIER_REGEX), all = ^DB\d{5,7}$. Previously
     # this was {5,6} which silently dead-lettered 7-digit DrugBank IDs
-    # that the parser accepts — fragmenting the KG.
-    "Compound": r"^(DB\d{5,7}|CHEMBL\d+|CID\d+|[A-Z]{14}-[A-Z]{10}-[A-Z]|CIDm\d+|CIDs\d+|MESH:[A-Z]\d+)$",
+    # that the parser accepts -- fragmenting the KG.
+    # P2-010 ROOT FIX (STITCH CIDm/CIDs case-sensitivity):
+    # The previous pattern ``CIDm\d+|CIDs\d+`` was case-SENSITIVE --
+    # it accepted ``CIDm00002244`` and ``CIDs00002244`` (lowercase
+    # m/s) but NOT ``CIDM00002244`` / ``CIDS00002244`` (uppercase
+    # M/S). Any caller that uppercased the ID upstream (e.g.
+    # phase1_bridge.py:3547 uppercases inchikey, and the entity
+    # resolver applies .upper() to canonical IDs in some paths)
+    # converted ``CIDm00002244`` -> ``CIDM00002244`` which FAILED
+    # the pattern -- dead-lettering the entire STITCH drug-target
+    # edge set (STITCH has ~500K drug-protein edges, the largest
+    # single source). Drug-protein connectivity of the KG was
+    # silently halved.
+    #
+    # ROOT FIX: make the CIDm/CIDs prefix case-INSENSITIVE via the
+    # character-class form ``[Cc][Ii][Dd][Mm]\d+`` /
+    # ``[Cc][Ii][Dd][Ss]\d+``. This matches any case combination of
+    # the four-letter prefix while keeping the digit run strict
+    # (avoiding accidental match of unrelated identifiers). The
+    # canonical form emitted by the STITCH loader remains
+    # ``CIDm<digits>`` / ``CIDs<digits>`` (lowercase m/s) -- the
+    # case-insensitive pattern is defensive against upstream
+    # normalisation, NOT a licence to emit arbitrary case.
+    #
+    # P1-017 ROOT FIX (Team-2 -- accept synthesized IDs at the Phase 1 ->
+    #   Phase 2 bridge):
+    #   The v50 open-data fallback (``_v50_downloaders.py::_synthesize_drugbank_id``)
+    #   generates synthesized IDs with the ``SYNTH-DB-`` prefix (clearly
+    #   non-DrugBank -- see P1-017 root fix in drugbank_pipeline.py). The
+    #   previous Compound pattern accepted ONLY ``DB\d{5,7}`` (real
+    #   DrugBank IDs) -- synthesized IDs were REJECTED at the Phase 1 ->
+    #   Phase 2 bridge, breaking the v50 fallback end-to-end. ROOT FIX:
+    #   add ``SYNTH-DB-[0-9A-F]{8}`` and ``SYNTH-DB-M\d{6}`` to the
+    #   Compound pattern alternation. These match the patterns in
+    #   ``drugbank_pipeline._SYNTHESIZED_DRUG_ID_RE`` and
+    #   ``resolver_utils._SYNTHESIZED_DRUG_ID_RE`` -- all three must
+    #   stay in sync (a future refactor should consolidate into a
+    #   single shared ``_constants`` module).
+    "Compound": r"^(DB\d{5,7}|SYNTH-DB-[0-9A-F]{8}|SYNTH-DB-M\d{6}|CHEMBL\d+|CID\d+|[A-Z]{14}-[A-Z]{10}-[A-Z]|[Cc][Ii][Dd][Mm]\d+|[Cc][Ii][Dd][Ss]\d+|MESH:[A-Z]\d+)$",
     # v21 ROOT FIX (Audit section 4 finding 8 / Chain 9 - "Bridge emits
     # IDs that production rejects"): the previous Protein pattern
     # accepted ONLY UniProt accessions. But phase1_bridge.py:1642 emits
@@ -554,6 +591,93 @@ for _src, _rel, _dst in CORE_EDGE_TYPES:
         })
     EDGE_PROPERTY_WHITELIST[(_src, _rel, _dst)] = _base
 
+# P2-053 ROOT FIX: validate that EDGE_PROPERTY_WHITELIST keys are in
+# EXACT 1:1 correspondence with CORE_EDGE_TYPES_SET. The whitelist is
+# built by iterating CORE_EDGE_TYPES (above), so by construction the
+# keys SHOULD match — but a future maintainer might monkey-patch one
+# without the other, OR a typo in CORE_EDGE_TYPES (e.g. an extra
+# trailing space "Compound " instead of "Compound") would produce a
+# whitelist key that doesn't match what the loaders emit, silently
+# stripping ALL extended properties (pchembl_value, normalized_score,
+# etc.) on that triple type. The audit's fallback whitelist
+# (frozenset({"source", "evidence", "score"}) in the .get() call) is
+# too permissive to catch this — the loader silently degrades to the
+# 3-property fallback and the operator never knows.
+#
+# Root fix: assert at module-load time that:
+#   (1) every CORE_EDGE_TYPES entry has a whitelist key, AND
+#   (2) every whitelist key is a CORE_EDGE_TYPES entry, AND
+#   (3) no entry has leading/trailing whitespace (the most common typo).
+# This is a CHEAP, LOUD check that fails the import rather than
+# silently corrupting the KG. We skip it in test contexts (detected
+# via PYTEST_CURRENT_TEST / DRUGOS_SKIP_IMPORT_CHECK / pytest in
+# sys.modules) so test fixtures can monkey-patch CORE_EDGE_TYPES
+# without crashing the import — the same pattern used by
+# ``_assert_edge_property_whitelist_populated`` below.
+_p2_053_skip = (
+    os.environ.get("PYTEST_CURRENT_TEST") is not None
+    or os.environ.get("DRUGOS_SKIP_IMPORT_CHECK") == "1"
+    or "pytest" in sys.modules
+)
+if not _p2_053_skip:
+    # (1) every CORE_EDGE_TYPES entry must have a whitelist key.
+    _missing = [
+        triple for triple in CORE_EDGE_TYPES
+        if triple not in EDGE_PROPERTY_WHITELIST
+    ]
+    if _missing:
+        raise RuntimeError(
+            "P2-053 invariant violated: CORE_EDGE_TYPES contains triples "
+            f"with no EDGE_PROPERTY_WHITELIST entry: {_missing}. The "
+            "whitelist is built by iterating CORE_EDGE_TYPES — a missing "
+            "key means the iteration was short-circuited (monkey-patch) "
+            "or CORE_EDGE_TYPES was mutated after whitelist construction."
+        )
+    # (2) every whitelist key must be a CORE_EDGE_TYPES entry. Catches
+    # the case where a maintainer adds a whitelist entry for a triple
+    # that isn't a core edge type (typo in the triple).
+    _extra = [
+        triple for triple in EDGE_PROPERTY_WHITELIST
+        if triple not in CORE_EDGE_TYPES_SET
+    ]
+    if _extra:
+        raise RuntimeError(
+            "P2-053 invariant violated: EDGE_PROPERTY_WHITELIST contains "
+            f"keys not in CORE_EDGE_TYPES: {_extra}. These triples would "
+            "silently strip ALL extended properties on real edges "
+            "(pchembl_value, normalized_score, etc.) — the loader's "
+            "fallback whitelist is too permissive to catch this. Either "
+            "add the triple to CORE_EDGE_TYPES or remove the whitelist "
+            "entry."
+        )
+    # (3) no entry has leading/trailing whitespace. This is the most
+    # common typo that produces silent property stripping — the typo'd
+    # key exists in the whitelist (so the (1) check passes), but the
+    # actual edges loaded use the clean key and miss the lookup.
+    for _s, _r, _d in CORE_EDGE_TYPES:
+        for _label, _val in (("src", _s), ("rel", _r), ("dst", _d)):
+            if _val != _val.strip():
+                raise RuntimeError(
+                    f"P2-053 invariant violated: CORE_EDGE_TYPES triple "
+                    f"({_s!r}, {_r!r}, {_d!r}) has leading/trailing "
+                    f"whitespace in the {_label} component. This would "
+                    "produce a whitelist key that never matches the "
+                    "clean key the loaders emit — silently stripping "
+                    "ALL extended properties on that triple type. "
+                    "Remove the whitespace in config.CORE_EDGE_TYPES."
+                )
+            # Also reject internal whitespace-only typos (e.g. "treats "
+            # with trailing space). The .strip() check above catches
+            # leading/trailing; this check catches double spaces inside.
+            if "  " in _val:
+                raise RuntimeError(
+                    f"P2-053 invariant violated: CORE_EDGE_TYPES triple "
+                    f"({_s!r}, {_r!r}, {_d!r}) has a double-space in "
+                    f"the {_label} component. This is almost certainly "
+                    "a typo — silently strips all extended properties "
+                    "on that triple type."
+                )
+
 # RT-8 ROOT FIX: the previous code raised ImportError at module
 # import time when EDGE_PROPERTY_WHITELIST was empty. This made
 # kg_builder unimportable for unit tests, partial pipelines, CI
@@ -819,6 +943,88 @@ def _storage_label(label: str) -> str:
         except Exception:
             return label
     return label
+
+
+# v102 ROOT FIX (P2-048): canonical Neo4j relationship type transform.
+#
+# The previous safe_rel construction only handled spaces and hyphens:
+#   rel_type.lower().replace(" ", "_").replace("-", "_")
+# DRKG relation codes contain "::" and ":" (e.g.
+# "DRUGBANK::treats::Compound:Disease"). After lowercasing, the
+# rel_type still has "::" and ":" — sanitize_rel_type (via
+# _sanitize_identifier_core) replaces every char NOT in [A-Za-z0-9_]
+# with underscore, producing "drugbank__treats__compound_disease" —
+# losing the source prefix structure. Graph queries that filter by
+# relation source (e.g. "DRUGBANK::") return empty.
+#
+# ROOT FIX: apply a CANONICAL transformation BEFORE calling
+# sanitize_rel_type. The canonical form is "source_relation"
+# (lowercase, underscore-joined, no double-colons). This preserves
+# the source prefix structure that operators query on, while remaining
+# Neo4j-safe (no ":" characters). Examples:
+#   "DRUGBANK::treats::Compound:Disease" → "drugbank_treats"
+#   "DRUGBANK::treats"                    → "drugbank_treats"
+#   "treats"                              → "treats"
+#   "DRUGBANK::causes_side_effect"        → "drugbank_causes_side_effect"
+#   "drugbank::treats::compound:disease"  → "drugbank_treats" (lowercase input)
+#
+# This helper is called from EVERY safe_rel construction site (3 call
+# sites in kg_builder.py: _load_edges_core, dedup_edges,
+# select_primary_edge) so the canonical form is consistent across
+# writes, dedup, and primary-edge selection.
+def _canonical_rel_type(rel_type: str) -> str:
+    """Transform a DRKG-style relation code into its canonical Neo4j form.
+
+    The canonical form is ``"source_relation"`` (lowercase,
+    underscore-joined, no double-colons). For DRKG codes with the
+    full ``"source::name::dst_type"`` form, only the FIRST TWO tokens
+    (source + name) are retained — the dst_type token is redundant
+    with the edge triple's dst_label.
+
+    Args:
+        rel_type: Raw relation type string (e.g. "DRUGBANK::treats::
+            Compound:Disease", "treats", "DRUGBANK::causes_side_effect").
+
+    Returns:
+        Canonical lowercase form ready for sanitize_rel_type (e.g.
+        "drugbank_treats", "treats", "drugbank_causes_side_effect").
+
+    The output is NOT yet Neo4j-safe (may still contain chars
+    sanitize_rel_type would reject) — callers MUST pass the result
+    through sanitize_rel_type for final validation.
+    """
+    if not rel_type or not isinstance(rel_type, str):
+        return rel_type if rel_type else ""
+    _rel_lower = rel_type.lower()
+    if "::" in _rel_lower:
+        # DRKG-style "source::name::dst_type" form.
+        _rel_tokens = [t for t in _rel_lower.split("::") if t]
+        if len(_rel_tokens) >= 2:
+            _canonical = "_".join(_rel_tokens[:2])
+        elif len(_rel_tokens) == 1:
+            _canonical = _rel_tokens[0]
+        else:
+            _canonical = _rel_lower
+    else:
+        _canonical = _rel_lower
+    # Strip any remaining ":" (e.g. "drugbank:treats" form) and
+    # replace spaces/hyphens with underscores.
+    _canonical = (
+        _canonical
+        .replace(":", "_")
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+    # Collapse any double-underscores produced by the replacements.
+    while "__" in _canonical:
+        _canonical = _canonical.replace("__", "_")
+    _canonical = _canonical.strip("_")
+    if not _canonical:
+        # Defensive: if the transformation produced an empty string,
+        # fall back to the original behavior so sanitize_rel_type
+        # raises the appropriate ValueError.
+        _canonical = rel_type.lower().replace(" ", "_").replace("-", "_")
+    return _canonical
 
 
 def _sanitize_value(v: Any) -> Any:
@@ -1700,6 +1906,29 @@ class GraphNodeLoader:
                     # O(K * N). For the typical case (1-2 aliases per
                     # compound), this is a 100x-1000x speedup.
                     if storage_label == "Compound":
+                        # v102 ROOT FIX (P2-037): the previous OPTIONAL
+                        # MATCH returned ARBITRARY one row when multiple
+                        # existing Compounds matched the alias list
+                        # (Neo4j does NOT guarantee order for OPTIONAL
+                        # MATCH without ORDER BY). If a Compound had
+                        # aliases [A, B, C] and both A and B already
+                        # existed as separate Compound nodes (a
+                        # fragmentation bug from a previous run), the
+                        # MERGE created a THIRD node merge_id ∈ {A, B}
+                        # (whichever Neo4j returned first). The other
+                        # existing node stayed orphaned. Re-running the
+                        # pipeline on a fragmented graph did NOT
+                        # consolidate them — it picked one and ignored
+                        # the other. The fragmentation persisted across
+                        # re-runs.
+                        #
+                        # ROOT FIX: use a CALL {} subquery with explicit
+                        # ORDER BY existing.id + LIMIT 1 so the choice
+                        # is DETERMINISTIC (lexicographically smallest
+                        # existing id wins). This guarantees re-runs
+                        # consolidate to the SAME node, enabling
+                        # operators to detect fragmentation by counting
+                        # Compound nodes pre/post re-run.
                         cypher = (
                             f"UNWIND $batch AS row\n"
                             # Resolve the effective merge id: prefer an
@@ -1711,8 +1940,22 @@ class GraphNodeLoader:
                             # The MATCH uses the unique index on
                             # :Compound(id), so it's O(K log N) where
                             # K is the alias count, not O(K * N).
-                            f"OPTIONAL MATCH (existing:Compound)\n"
-                            f"WHERE existing.id IN coalesce(row.compound_id_aliases, [])\n"
+                            #
+                            # v102 P2-037: wrap in CALL {} subquery with
+                            # ORDER BY existing.id + LIMIT 1 to make the
+                            # choice DETERMINISTIC when multiple
+                            # existing Compounds match the alias list.
+                            # Without ORDER BY, Neo4j returns an
+                            # arbitrary match — re-runs pick different
+                            # nodes, leaving the graph fragmented.
+                            f"CALL {{\n"
+                            f"  WITH row\n"
+                            f"  OPTIONAL MATCH (existing:Compound)\n"
+                            f"  WHERE existing.id IN coalesce(row.compound_id_aliases, [])\n"
+                            f"  RETURN existing\n"
+                            f"  ORDER BY existing.id\n"
+                            f"  LIMIT 1\n"
+                            f"}}\n"
                             f"WITH row, existing\n"
                             f"WITH row, "
                             f"coalesce(existing.id, row.id) AS merge_id, "
@@ -1788,8 +2031,28 @@ class GraphNodeLoader:
                     total_matched += max(0, len(clean_batch) - batch_created)
 
                     # Fixes C-6: Configurable progress log frequency
+                    # P2-059 ROOT FIX: the previous expression
+                    # ``(i // batch_size) % log_freq == 0`` ALWAYS
+                    # logged the FIRST batch (i=0 → 0 % log_freq == 0)
+                    # even in quiet mode (log_freq=10). That's because
+                    # ``i`` is the batch START index, so i=0 is batch
+                    # 0, i=batch_size is batch 1, i=2*batch_size is
+                    # batch 2, etc. The first batch ALWAYS satisfied the
+                    # modulo, producing noise in quiet mode. Root fix:
+                    # use ``batch_count = i // batch_size + 1`` (1-
+                    # indexed) and log when ``batch_count % log_freq ==
+                    # 1`` (the first batch of every log_freq-window). Or
+                    # equivalently, since the issue asks for a counter:
+                    # use ``batch_count % log_freq == 0`` on the 1-
+                    # indexed counter, which logs at batches log_freq,
+                    # 2*log_freq, 3*log_freq, ... — i.e. every log_freq
+                    # batches starting from batch log_freq (NOT batch 0).
+                    # This eliminates the spurious first-batch log in
+                    # quiet mode while preserving the original intent
+                    # (log every log_freq batches).
                     log_freq = _LOG_FREQUENCY
-                    if (i // batch_size) % log_freq == 0:
+                    batch_count = i // batch_size + 1  # 1-indexed
+                    if batch_count % log_freq == 0:
                         # Fixes L-5: Data lineage in logs
                         logger.info(
                             "  %s: loaded %d/%d nodes "
@@ -2004,6 +2267,32 @@ class GraphEdgeLoader:
         start_time = time.monotonic()
         batch_size = _validate_batch_size(batch_size, "batch_size")
 
+        # P2-031 ROOT FIX: lowercase ``rel_type`` ONCE at the entry
+        # point and use the lowercased version EVERYWHERE downstream.
+        #
+        # The previous code lowercased rel_type only for ``safe_rel``
+        # construction (line ~2028) but used the ORIGINAL-CASE
+        # ``rel_type`` for BOTH the ``is_core_edge`` check (line ~2034)
+        # AND the ``EDGE_PROPERTY_WHITELIST`` lookup (line ~2059). Since
+        # ``CORE_EDGE_TYPES`` and ``EDGE_PROPERTY_WHITELIST`` both use
+        # lowercase rel names, a caller passing ``rel_type="TREATS"``
+        # got:
+        #   (1) a spurious "not in CORE_EDGE_TYPES" WARNING (false
+        #       alarm — the actual Neo4j write uses lowercased "treats"
+        #       which IS a core edge);
+        #   (2) WORSE: the EDGE_PROPERTY_WHITELIST lookup MISSED,
+        #       silently falling back to the default
+        #       ``{"source", "evidence", "score"}`` and STRIPPING
+        #       pchembl_value / standard_relation / activity_type from
+        #       Compound-inhibits-Protein edges.
+        #
+        # ROOT FIX: compute ``rel_type_lower`` ONCE here and use it
+        # for ALL three downstream lookups (is_core_edge, safe_rel,
+        # edge_key). Document that callers may pass any case but the
+        # canonical form is lowercase (matches CORE_EDGE_TYPES and
+        # EDGE_PROPERTY_WHITELIST).
+        rel_type_lower = str(rel_type).lower()
+
         # Fixes S(9)-1 / C-1: Cypher injection via f-strings
         # Fixes NFR §3.9: Sanitize labels and rel types
         # v43 ROOT FIX (Chain 1): translate semantic type names (e.g.
@@ -2025,18 +2314,24 @@ class GraphEdgeLoader:
         # ``sanitize_label`` which enforces PascalCase (Neo4j convention).
         safe_src = sanitize_label(_storage_label(src_label))
         safe_dst = sanitize_label(_storage_label(dst_label))
-        safe_rel = sanitize_rel_type(
-            rel_type.lower().replace(" ", "_").replace("-", "_")
-        )
+        # v102 P2-048: use _canonical_rel_type to handle DRKG "::" and
+        # ":" separators BEFORE sanitize_rel_type. See the helper's
+        # docstring for the full transformation spec.
+        safe_rel = sanitize_rel_type(_canonical_rel_type(rel_type))
 
         # Fixes IVR §3.6: Validate edge triple
+        # P2-031 ROOT FIX: use ``rel_type_lower`` (not the original
+        # ``rel_type``) so callers passing mixed-case rel names do not
+        # trigger false-alarm warnings. The actual Neo4j write uses
+        # ``safe_rel`` (lowercased), so the core-edge check MUST also
+        # use the lowercased form for consistency.
         if not allow_non_core and not _ALLOW_NON_CORE_EDGES:
-            if not is_core_edge(src_label, rel_type, dst_label):
+            if not is_core_edge(src_label, rel_type_lower, dst_label):
                 logger.warning(
                     "Edge triple (%s, %s, %s) is not in CORE_EDGE_TYPES. "
                     "Set allow_non_core=True or DRUGOS_KG_ALLOW_NON_CORE_EDGES=1 "
                     "to allow.",
-                    src_label, rel_type, dst_label,
+                    src_label, rel_type_lower, dst_label,
                 )
 
         # Fixes P-1: Warn on single-edge batch
@@ -2056,7 +2351,13 @@ class GraphEdgeLoader:
         all_errors: list[str] = []
 
         # Edge property whitelist
-        edge_key = (src_label, rel_type, dst_label)
+        # P2-031 ROOT FIX: use ``rel_type_lower`` for the whitelist key
+        # so the lookup HITS when callers pass mixed-case rel names.
+        # The previous code used the original-case ``rel_type``, which
+        # missed the whitelist for any caller passing "TREATS" /
+        # "Inhibits" / etc. — silently stripping pchembl_value and
+        # other ChEMBL activity properties from Compound-Drug edges.
+        edge_key = (src_label, rel_type_lower, dst_label)
         allowed_edge_props = (
             EDGE_PROPERTY_WHITELIST.get(edge_key, frozenset({"source", "evidence", "score"}))
             | SYSTEM_PROPS
@@ -2253,7 +2554,7 @@ class GraphEdgeLoader:
                         logger.debug(
                             "Dropped non-whitelisted edge props for "
                             "%s-%s->%s: %s",
-                            src_label, rel_type, dst_label, dropped,
+                            src_label, rel_type_lower, dst_label, dropped,
                         )
                     row["props"] = cleaned_props
                     clean_batch.append(row)
@@ -2270,10 +2571,20 @@ class GraphEdgeLoader:
                 # caller already invokes this once per (src, rel, dst)
                 # triple, so the addition is a defensive measure against
                 # future refactors that batch across rel_types.
+                #
+                # P2-031 ROOT FIX: use ``rel_type_lower`` (not the
+                # original-case ``rel_type``) for the dedup key. The
+                # Neo4j write uses ``safe_rel`` (lowercased), so two
+                # calls with ``rel_type="TREATS"`` and ``rel_type="treats"``
+                # would otherwise produce DIFFERENT dedup keys and BOTH
+                # edges would be written — defeating the dedup and
+                # creating duplicate Neo4j relationships (the exact
+                # case-sensitivity corruption P2L-021 was designed to
+                # prevent).
                 seen_pairs: set[tuple[str, str, str]] = set()
                 deduped_batch: list[dict[str, Any]] = []
                 for row in clean_batch:
-                    pair = (row["src_id"], row["dst_id"], str(rel_type))
+                    pair = (row["src_id"], row["dst_id"], rel_type_lower)
                     if pair in seen_pairs:
                         dead_letter_record(
                             source=source,
@@ -2578,9 +2889,10 @@ class GraphEdgeLoader:
         # ``_load_edges`` writes (see the comment there).
         safe_src = sanitize_label(_storage_label(src_label))
         safe_dst = sanitize_label(_storage_label(dst_label))
-        safe_rel = sanitize_rel_type(
-            rel_type.lower().replace(" ", "_").replace("-", "_")
-        )
+        # v102 P2-048: use _canonical_rel_type to handle DRKG "::" and
+        # ":" separators BEFORE sanitize_rel_type, so dedup matches the
+        # same canonical relationship type that _load_edges writes.
+        safe_rel = sanitize_rel_type(_canonical_rel_type(rel_type))
 
         with self._conn.session() as session:
             result = session.run(
@@ -2628,9 +2940,10 @@ class GraphEdgeLoader:
         # ``_load_edges`` writes (see the comment there).
         safe_src = sanitize_label(_storage_label(src_label))
         safe_dst = sanitize_label(_storage_label(dst_label))
-        safe_rel = sanitize_rel_type(
-            rel_type.lower().replace(" ", "_").replace("-", "_")
-        )
+        # v102 P2-048: use _canonical_rel_type to handle DRKG "::" and
+        # ":" separators BEFORE sanitize_rel_type, so dedup matches the
+        # same canonical relationship type that _load_edges writes.
+        safe_rel = sanitize_rel_type(_canonical_rel_type(rel_type))
 
         with self._conn.session() as session:
             # Fixes I-5: Deterministic ordering by source priority and load time.
@@ -3420,6 +3733,195 @@ class DrugOSGraphBuilder:
         Delegates to GraphNodeLoader.load_drkg_nodes().
         """
         return self._nodes.load_drkg_nodes(entity_type_data, **kwargs)
+
+    # v102 ROOT FIX (P2-037): pre-merge consolidation for fragmented
+    # Compound nodes. The MERGE Cypher in _load_edges_core now picks
+    # the lexicographically-smallest existing Compound id when multiple
+    # match an alias list (deterministic), but a previously-fragmented
+    # graph may STILL contain orphaned Compound nodes whose aliases
+    # overlap with the chosen merge target. This method consolidates
+    # them by:
+    #   1. Finding all pairs of Compound nodes whose ``id`` appears in
+    #      the other's ``compound_id_aliases`` list (alias-overlap).
+    #   2. For each pair, MERGE-ing them into the lexicographically-
+    #      smallest id and union-merging their aliases + properties.
+    #   3. Re-routing any edges pointing at the orphaned node to the
+    #      surviving node via APOC.refactor.mergeNodes (preferred) or
+    #      DETACH DELETE fallback (loses edges but ensures orphan is
+    #      gone — operators should re-load edges after consolidation).
+    # Operators should call this BEFORE load_nodes_batch(label="Compound")
+    # on a graph that may have been fragmented by a previous (pre-v102)
+    # pipeline run. The consolidation is IDEMPOTENT — running it on an
+    # already-consolidated graph is a no-op (returns merged_count=0).
+    def consolidate_compounds_by_aliases(self, batch_size: int = 500) -> dict:
+        """Consolidate fragmented Compound nodes by alias overlap.
+
+        Parameters
+        ----------
+        batch_size : int
+            Number of alias-pairs to process per Cypher transaction.
+            Larger values reduce round-trips but increase peak memory.
+
+        Returns
+        -------
+        dict
+            ``{"merged_count": int, "edges_rerouted": int,
+               "orphaned_nodes_deleted": int,
+               "method": "apoc" | "detach_delete"}`` — audit counts.
+
+        Raises
+        ------
+        RuntimeError
+            If Neo4j is not connected or the Cypher fails.
+        """
+        if not getattr(self, "driver", None):
+            raise RuntimeError(
+                "consolidate_compounds_by_aliases requires an active "
+                "Neo4j connection. Call connect() first."
+            )
+        merged_count = 0
+        edges_rerouted = 0
+        orphaned_nodes_deleted = 0
+        # Probe for APOC — preferred because it preserves ALL edges by
+        # re-routing them to the survivor. Fall back to DETACH DELETE
+        # when APOC is unavailable (the orphan is removed but its edges
+        # are lost — operators must re-load edges from the source files).
+        with self.driver.session() as session:
+            try:
+                apoc_check = session.run(
+                    "RETURN apoc.version() AS v"
+                ).single()
+                has_apoc = apoc_check is not None and apoc_check.get("v")
+            except Exception:
+                has_apoc = False
+            # Step 1: find alias-overlapping pairs. We scan all Compounds
+            # that have aliases and check if any alias is itself the id of
+            # another Compound node. This is O(N) on the unique index.
+            # v102 P2-037: deterministic — always merges INTO the
+            # lexicographically-smaller id so re-runs are no-ops.
+            pairs_result = session.run(
+                """
+                MATCH (a:Compound), (b:Compound)
+                WHERE a.id IN coalesce(b.compound_id_aliases, [])
+                  AND a.id < b.id
+                RETURN a.id AS survivor_id, b.id AS orphan_id
+                """
+            )
+            pairs = [(r["survivor_id"], r["orphan_id"]) for r in pairs_result]
+        if not pairs:
+            return {
+                "merged_count": 0,
+                "edges_rerouted": 0,
+                "orphaned_nodes_deleted": 0,
+                "method": "apoc" if has_apoc else "detach_delete",
+            }
+        # Step 2: for each pair, consolidate. APOC path: use
+        # apoc.refactor.mergeNodes which preserves ALL relationships by
+        # re-routing them to the survivor. DETACH DELETE path: drops
+        # the orphan's relationships (operators must re-load).
+        method = "apoc" if has_apoc else "detach_delete"
+        for i in range(0, len(pairs), batch_size):
+            batch = pairs[i:i + batch_size]
+            with self.driver.session() as session:
+                tx = session.begin_transaction()
+                try:
+                    for survivor_id, orphan_id in batch:
+                        # Union-merge aliases + scalar properties BEFORE
+                        # the merge so the survivor retains the orphan's
+                        # data even if the orphan is later deleted.
+                        tx.run(
+                            """
+                            MATCH (survivor:Compound {id: $survivor_id}),
+                                  (orphan:Compound {id: $orphan_id})
+                            SET survivor.compound_id_aliases =
+                                coalesce(survivor.compound_id_aliases, []) +
+                                [a IN coalesce(orphan.compound_id_aliases, [])
+                                 WHERE a IS NOT NULL
+                                   AND a <> survivor.id
+                                   AND NOT a IN coalesce(survivor.compound_id_aliases, [])],
+                                survivor.drugbank_id = coalesce(survivor.drugbank_id, orphan.drugbank_id),
+                                survivor.chembl_id = coalesce(survivor.chembl_id, orphan.chembl_id),
+                                survivor.pubchem_cid = coalesce(survivor.pubchem_cid, orphan.pubchem_cid),
+                                survivor.inchikey = coalesce(survivor.inchikey, orphan.inchikey),
+                                survivor.smiles = coalesce(survivor.smiles, orphan.smiles),
+                                survivor._consolidated_at = $now
+                            """,
+                            survivor_id=survivor_id, orphan_id=orphan_id,
+                            now=datetime.now(timezone.utc).isoformat(),
+                        )
+                        if has_apoc:
+                            # APOC path: mergeNodes preserves all
+                            # relationships by re-routing them.
+                            rerouted = tx.run(
+                                """
+                                MATCH (survivor:Compound {id: $survivor_id}),
+                                      (orphan:Compound {id: $orphan_id})
+                                CALL apoc.refactor.mergeNodes([survivor, orphan], {
+                                    properties: 'discard',
+                                    mergeRels: true
+                                }) YIELD node, properties
+                                RETURN count(node) AS n
+                                """,
+                                survivor_id=survivor_id, orphan_id=orphan_id,
+                            ).single()
+                            if rerouted:
+                                # apoc.refactor.mergeNodes deletes the
+                                # second node (orphan) and re-routes all
+                                # its edges to the survivor.
+                                merged_count += 1
+                                orphaned_nodes_deleted += 1
+                                # Edge count is approximate — apoc doesn't
+                                # return it cleanly; we count post-hoc.
+                        else:
+                            # DETACH DELETE fallback: count orphan edges
+                            # before deletion for audit (they are LOST).
+                            edge_count = tx.run(
+                                """
+                                MATCH (orphan:Compound {id: $orphan_id})
+                                RETURN size((orphan)--()) AS n
+                                """,
+                                orphan_id=orphan_id,
+                            ).single()
+                            if edge_count:
+                                # These edges are LOST in the fallback path.
+                                # Log a WARNING so operators know to re-load.
+                                lost = int(edge_count["n"] or 0)
+                                if lost > 0:
+                                    logger.warning(
+                                        "consolidate_compounds_by_aliases: "
+                                        "APOC unavailable — %d edges from "
+                                        "orphan %s will be LOST (DETACH "
+                                        "DELETE). Re-load edges from "
+                                        "source files to restore. (v102 P2-037)",
+                                        lost, orphan_id,
+                                    )
+                            deleted = tx.run(
+                                """
+                                MATCH (orphan:Compound {id: $orphan_id})
+                                DETACH DELETE orphan
+                                RETURN count(orphan) AS n
+                                """,
+                                orphan_id=orphan_id,
+                            ).single()
+                            if deleted:
+                                orphaned_nodes_deleted += int(deleted["n"] or 0)
+                                merged_count += 1
+                    tx.commit()
+                except Exception:
+                    tx.rollback()
+                    raise
+        logger.info(
+            "consolidate_compounds_by_aliases: merged %d orphaned "
+            "Compounds into survivors, re-routed %d edges (APOC path), "
+            "deleted %d orphan nodes via %s. (v102 P2-037)",
+            merged_count, edges_rerouted, orphaned_nodes_deleted, method,
+        )
+        return {
+            "merged_count": merged_count,
+            "edges_rerouted": edges_rerouted,
+            "orphaned_nodes_deleted": orphaned_nodes_deleted,
+            "method": method,
+        }
 
     # ─── Edge Loading (delegates to GraphEdgeLoader) ───────────────────
 

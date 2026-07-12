@@ -34,7 +34,7 @@ class TestV59DiseaseIdContradiction:
         sql = mig.read_text()
         assert "disease_id      VARCHAR(50) NOT NULL DEFAULT ''" not in sql, (
             "v59 ROOT FIX INCOMPLETE: migration 001 still has "
-            "`disease_id VARCHAR(50) NOT NULL DEFAULT ''` — this "
+            "`disease_id VARCHAR(50) NOT NULL DEFAULT ''` -- this "
             "contradicts the CHECK (disease_id <> '') constraint and "
             "crashes INSERTs on PostgreSQL."
         )
@@ -45,7 +45,7 @@ class TestV59DiseaseIdContradiction:
         sql = mig.read_text()
         assert "CHECK (disease_id <> '')" in sql, (
             "v59 ROOT FIX REGRESSION: CHECK (disease_id <> '') was "
-            "removed — disease_id must be non-empty (scientifically "
+            "removed -- disease_id must be non-empty (scientifically "
             "meaningless to associate a gene with an empty disease ID)."
         )
 
@@ -63,7 +63,7 @@ class TestV59DiseaseIdContradiction:
         assert m, "disease_id column definition not found in GeneDiseaseAssociation"
         assert 'server_default=""' not in m.group(0), (
             f"v59 ROOT FIX INCOMPLETE: ORM disease_id still has "
-            f"server_default=\"\" — contradicts the CHECK constraint. "
+            f"server_default=\"\" -- contradicts the CHECK constraint. "
             f"Definition: {m.group(0)[:200]}"
         )
 
@@ -84,7 +84,7 @@ class TestV59DiseaseIdContradiction:
             if 'df["disease_id"] = ""' in stripped:
                 pytest.fail(
                     f"v59 ROOT FIX INCOMPLETE: loaders.py line {i} still "
-                    f"sets df['disease_id'] = '' — this crashes PostgreSQL "
+                    f"sets df['disease_id'] = '' -- this crashes PostgreSQL "
                     f"(CHECK constraint rejects empty string). Line: {line}"
                 )
 
@@ -95,7 +95,7 @@ class TestV59DiseaseIdContradiction:
         assert 'df["disease_id"] = None' in sql, (
             "v59 ROOT FIX INCOMPLETE: loaders.py should set "
             "df['disease_id'] = None (and quarantine) when the column "
-            "is missing — mirrors the gene_symbol fix pattern."
+            "is missing -- mirrors the gene_symbol fix pattern."
         )
 
 
@@ -140,7 +140,7 @@ class TestV59MigrationRunner:
         sql = runner.read_text()
         assert "class StatementExecutionError" in sql, (
             "v59 ROOT FIX INCOMPLETE: StatementExecutionError class "
-            "not found — needed for per-statement error reporting."
+            "not found -- needed for per-statement error reporting."
         )
 
 
@@ -176,7 +176,7 @@ class TestV59AirflowCatchup:
             content = dag_file.read_text()
             assert "catchup=False" in content, (
                 f"v59 ROOT FIX INCOMPLETE: {dag_file.name} does not have "
-                f"catchup=False — daily backfill would cause 7×N runs on "
+                f"catchup=False -- daily backfill would cause 7×N runs on "
                 f"first deploy."
             )
 
@@ -195,7 +195,7 @@ class TestV59ChemblV50Filename:
         content = pipeline.read_text()
         assert 'chembl_activities.csv.gz' in content, (
             "v59 ROOT FIX INCOMPLETE: chembl_pipeline.py does not reference "
-            "chembl_activities.csv.gz — DPI edge generation never fires."
+            "chembl_activities.csv.gz -- DPI edge generation never fires."
         )
 
 

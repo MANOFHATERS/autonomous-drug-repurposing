@@ -2,7 +2,7 @@
 Cleaning sub-package for the Drug Repurposing ETL Platform.
 
 .. warning::
-    **v29 ROOT FIX (audit C-12): 2377 lines of re-exports — significant
+    **v29 ROOT FIX (audit C-12): 2377 lines of re-exports -- significant
     import-time cost.** This file is a mega-export ``__init__.py`` that
     re-exports ~80+ public symbols from four sub-modules
     (``normalizer``, ``deduplicator``, ``missing_values``, ``confidence``)
@@ -15,12 +15,12 @@ Cleaning sub-package for the Drug Repurposing ETL Platform.
     tables (each ~100+ lines, each mirroring the same symbol list).
 
     Future cleanup (out of scope for v29): split this file into
-    sub-packages — e.g. ``cleaning.api``, ``cleaning.internals``,
-    ``cleaning.registry`` — and let consumers import from those. The
+    sub-packages -- e.g. ``cleaning.api``, ``cleaning.internals``,
+    ``cleaning.registry`` -- and let consumers import from those. The
     current single-file design was acceptable when there were ~12
     symbols; at 80+ it has become a maintenance and import-time
     liability (importing ``cleaning`` parses ~2400 lines of module
-    body). For now, the bloat is documented but unchanged — deleting
+    body). For now, the bloat is documented but unchanged -- deleting
     re-exports would break downstream pipelines (``omim_pipeline.py``,
     ``drugbank_pipeline.py``, etc.) and the existing
     ``__getattr__``/``_LAZY_IMPORTS`` machinery already defers the
@@ -37,7 +37,7 @@ consumers can import functions directly from the ``cleaning`` namespace::
     from cleaning import convert_to_inchikey, dedup_by_inchikey
 
 Re-exported symbols are listed in ``__all__``.  Every public name from
-each sub-module's own ``__all__`` is re-exported here — this package
+each sub-module's own ``__all__`` is re-exported here -- this package
 does NOT selectively exclude any public name.
 
 Sub-modules
@@ -55,20 +55,20 @@ Recommended Processing Order
 ----------------------------
 For drug DataFrames, apply cleaning in this order to ensure correctness:
 
-1. ``standardize_inchikey`` — normalize InChIKey format FIRST
-2. ``handle_missing_inchikey`` — recover missing InChIKeys from SMILES
-3. ``fill_missing_drug_fields`` — fill default values for missing fields
-4. ``standardize_drug_record`` — normalize drug type, FDA approval, etc.
-5. ``dedup_by_inchikey`` — deduplicate AFTER normalization (order matters!)
+1. ``standardize_inchikey`` -- normalize InChIKey format FIRST
+2. ``handle_missing_inchikey`` -- recover missing InChIKeys from SMILES
+3. ``fill_missing_drug_fields`` -- fill default values for missing fields
+4. ``standardize_drug_record`` -- normalize drug type, FDA approval, etc.
+5. ``dedup_by_inchikey`` -- deduplicate AFTER normalization (order matters!)
 
 For protein DataFrames:
 
-1. ``handle_missing_protein_fields`` — drop null IDs, fill defaults,
+1. ``handle_missing_protein_fields`` -- drop null IDs, fill defaults,
    truncate sequences
 
 For GDA DataFrames:
 
-1. ``validate_gda_scores`` — clip scores to [0,1], fill missing disease names
+1. ``validate_gda_scores`` -- clip scores to [0,1], fill missing disease names
 
 **WARNING:** Calling ``dedup_by_inchikey`` before ``standardize_inchikey``
 will fail to detect duplicates that differ only in InChIKey formatting
@@ -77,7 +77,7 @@ will fail to detect duplicates that differ only in InChIKey formatting
 Scientific Note on InChIKey Normalization
 ------------------------------------------
 InChIKeys use the format [A-Z]{14}-[A-Z]{10}-[A-Z] (27 characters total).
-The first 14 characters represent the molecular connectivity layer — two
+The first 14 characters represent the molecular connectivity layer -- two
 molecules with the same connectivity block share the same molecular skeleton.
 The remaining characters encode stereochemistry and protonation.
 
@@ -106,7 +106,7 @@ classic example is thalidomide: one enantiomer is therapeutic, the other is
 teratogenic.  The ``standardize_inchikey`` function validates the FULL 27-char
 InChIKey, preserving stereochemistry information.  When comparing drugs for
 deduplication, only drugs with IDENTICAL full InChIKeys are considered
-duplicates.  Drugs that share only the connectivity block are NOT duplicates —
+duplicates.  Drugs that share only the connectivity block are NOT duplicates --
 they may have different pharmacological profiles.
 
 .. note::
@@ -157,7 +157,7 @@ Scientific Assumptions & Limitations
 
 5. ``convert_to_inchikey`` uses RDKit which only handles small-molecule
    SMILES.  Antibodies, proteins, and cell-based therapies do not have
-   SMILES representations and will return None.  This is not a bug — it
+   SMILES representations and will return None.  This is not a bug -- it
    reflects a fundamental limitation of the SMILES/InChIKey system for
    biologics.
 
@@ -192,33 +192,33 @@ The cleaning package can be configured through:
 
 1. **Environment variables:**
 
-   - ``CLEANING_LAZY_IMPORTS=1`` — Enable lazy imports (default: 1)
-   - ``CLEANING_SKIP_RDKIT=1`` — Skip RDKit import entirely (default: 0)
-   - ``CLEANING_LOG_LEVEL=DEBUG`` — Set package-wide log level
+   - ``CLEANING_LAZY_IMPORTS=1`` -- Enable lazy imports (default: 1)
+   - ``CLEANING_SKIP_RDKIT=1`` -- Skip RDKit import entirely (default: 0)
+   - ``CLEANING_LOG_LEVEL=DEBUG`` -- Set package-wide log level
 
 2. **Programmatic configuration:**
 
-   - ``cleaning.configure(fuzzy_threshold=0.8)`` — Override defaults
-   - ``cleaning.configure(max_sequence_length=5000)`` — Override defaults
+   - ``cleaning.configure(fuzzy_threshold=0.8)`` -- Override defaults
+   - ``cleaning.configure(max_sequence_length=5000)`` -- Override defaults
 
 3. **Health and validation:**
 
-   - ``cleaning.check_health()`` — Check which features are available
-   - ``cleaning.validate_environment()`` — Check runtime requirements
-   - ``cleaning.validate_all_exports()`` — Verify all exports are valid
+   - ``cleaning.check_health()`` -- Check which features are available
+   - ``cleaning.validate_environment()`` -- Check runtime requirements
+   - ``cleaning.validate_all_exports()`` -- Verify all exports are valid
 
 Scalability Characteristics
 ---------------------------
-- ``dedup_by_inchikey``: O(n log n) — sorts the entire DataFrame by InChIKey.
+- ``dedup_by_inchikey``: O(n log n) -- sorts the entire DataFrame by InChIKey.
   Memory: 2x input (working copy + sort).  Tested up to 1M rows.
 - ``handle_missing_inchikey``: O(n) with expensive RDKit call per row
   (10-100ms per SMILES).  For 10K rows with missing InChIKeys, expect
   100-1000 seconds.  Consider batching for larger datasets.
 - ``convert_to_inchikey``: O(1) per call, but 10-100ms per SMILES.
-  Not vectorized — each call creates a new RDKit Mol object.
-- ``dedup_interactions``: O(n log n) — sorts by composite key + activity.
-- ``fill_missing_drug_fields``: O(n) — single pass per column.
-- ``validate_gda_scores``: O(n) — vectorized clip operation.
+  Not vectorized -- each call creates a new RDKit Mol object.
+- ``dedup_interactions``: O(n log n) -- sorts by composite key + activity.
+- ``fill_missing_drug_fields``: O(n) -- single pass per column.
+- ``validate_gda_scores``: O(n) -- vectorized clip operation.
 
 Memory: All functions create a copy of the input DataFrame.
 For datasets >1M rows, consider processing in chunks.
@@ -243,7 +243,7 @@ Design Decisions
 
 4. **Why does ``fill_missing_drug_fields`` use ``None`` for max_phase
    instead of 0?**
-   None means "unknown" — we don't know if the drug has clinical data.
+   None means "unknown" -- we don't know if the drug has clinical data.
    0 means "confirmed no clinical data."  These are semantically different.
    Using None preserves this distinction for downstream consumers.
 
@@ -302,7 +302,7 @@ Required DataFrame schemas for cleaning functions:
 
 API Stability
 -------------
-Names in ``__all__`` are considered STABLE — they will not be removed or
+Names in ``__all__`` are considered STABLE -- they will not be removed or
 have their behavior changed in a backward-incompatible way without:
 
 1. A deprecation warning for at least one minor version
@@ -323,10 +323,10 @@ Platform Compatibility
 ----------------------
 - **Linux x86_64**: Fully supported (including RDKit)
 - **macOS x86_64**: Fully supported (including RDKit)
-- **macOS ARM (Apple Silicon)**: Partial — RDKit may not be available
+- **macOS ARM (Apple Silicon)**: Partial -- RDKit may not be available
   via pip; install via conda or use CLEANING_SKIP_RDKIT=1
 - **Windows**: Not officially tested; path handling may have issues
-- **AWS Graviton (ARM)**: Partial — same RDKit limitation as Apple Silicon
+- **AWS Graviton (ARM)**: Partial -- same RDKit limitation as Apple Silicon
 
 Access Control Note
 -------------------
@@ -337,7 +337,7 @@ values with defaults.
 
 In regulated environments (FDA 21 CFR Part 11, GxP), record deletion operations
 must be auditable and restricted to authorized personnel.  This package does NOT
-enforce access control — it relies on the calling pipeline to enforce permissions.
+enforce access control -- it relies on the calling pipeline to enforce permissions.
 
 Recommended practice: Wrap the cleaning package in a permission-gated facade
 in production environments.
@@ -404,15 +404,15 @@ Structured Logging Convention
 -----------------------------
 All cleaning package log messages follow this format::
 
-  FUNCTION_NAME: description — detail (N rows in, M rows out)
+  FUNCTION_NAME: description -- detail (N rows in, M rows out)
 
 Log levels:
 
-  DEBUG   — Internal state, skipped steps, empty DataFrames
-  INFO    — Operations completed, rows affected, metrics
-  WARNING — Anomalies that don't stop processing (missing columns, bad values)
-  ERROR   — Operations that failed (import failures, dependency issues)
-  CRITICAL — System-level failures that make the package unusable
+  DEBUG   -- Internal state, skipped steps, empty DataFrames
+  INFO    -- Operations completed, rows affected, metrics
+  WARNING -- Anomalies that don't stop processing (missing columns, bad values)
+  ERROR   -- Operations that failed (import failures, dependency issues)
+  CRITICAL -- System-level failures that make the package unusable
 
 Every operation log MUST include:
 
@@ -424,12 +424,12 @@ Coding Standards
 ----------------
 This package follows:
 
-- **PEP 8** — Style Guide for Python Code
-- **PEP 257** — Docstring Conventions
-- **PEP 328** — Imports: Multi-Line and Absolute/Relative (using relative imports)
-- **PEP 562** — Module __getattr__ and __dir__ (lazy loading)
-- **PEP 561** — Distributing and Packaging Type Information (py.typed marker)
-- **numpydoc** — Docstring format (Parameters, Returns, Examples sections)
+- **PEP 8** -- Style Guide for Python Code
+- **PEP 257** -- Docstring Conventions
+- **PEP 328** -- Imports: Multi-Line and Absolute/Relative (using relative imports)
+- **PEP 562** -- Module __getattr__ and __dir__ (lazy loading)
+- **PEP 561** -- Distributing and Packaging Type Information (py.typed marker)
+- **numpydoc** -- Docstring format (Parameters, Returns, Examples sections)
 
 Examples
 --------
@@ -510,7 +510,7 @@ if _LOG_LEVEL:
 
 if _SKIP_RDKIT:
     _logger.info(
-        "CLEANING_SKIP_RDKIT=1 — RDKit-dependent functions will return None"
+        "CLEANING_SKIP_RDKIT=1 -- RDKit-dependent functions will return None"
     )
 
 # Idempotency note: Sub-modules are imported lazily on first access.
@@ -569,11 +569,11 @@ _LAZY_IMPORTS: dict[str, str] = {
     # module-level ``__getattr__`` below, implements the lazy-import
     # pattern demanded by audit C-12. Sub-modules (``normalizer``,
     # ``deduplicator``, ``missing_values``, ``confidence``) are NOT
-    # imported at package import time — only when a consumer actually
+    # imported at package import time -- only when a consumer actually
     # accesses one of the names below. ``import cleaning`` is therefore
     # near-instant; the real cost is parsing this ~2400-line module
     # body (see the top-of-file warning). Splitting this file into
-    # sub-packages would shrink the parse cost — that is future work.
+    # sub-packages would shrink the parse cost -- that is future work.
     # normalizer
     "ALLOWED_TYPES": ".normalizer",
     "FUZZY_THRESHOLD": ".normalizer",
@@ -612,7 +612,7 @@ _LAZY_IMPORTS: dict[str, str] = {
     "WITHDRAWN_GROUP_KEYWORDS": ".normalizer",
     "STEREO_POLICY": ".normalizer",
     "RECORD_SCHEMA": ".normalizer",
-    # deduplicator — v1.0.0 stable + v3.0.0 new public API
+    # deduplicator -- v1.0.0 stable + v3.0.0 new public API
     "ActivityDirection": ".deduplicator",
     "CompletenessWeight": ".deduplicator",
     "DEFAULT_COMPLETENESS_WEIGHTS": ".deduplicator",
@@ -661,7 +661,7 @@ _LAZY_IMPORTS: dict[str, str] = {
     "handle_missing_inchikey": ".missing_values",
     "handle_missing_protein_fields": ".missing_values",
     "validate_gda_scores": ".missing_values",
-    # confidence — institutional-grade confidence-tier classifier (ARCH-7)
+    # confidence -- institutional-grade confidence-tier classifier (ARCH-7)
     "DEFAULT_CONFIDENCE_TIERS": ".confidence",
     "CONFIDENCE_TIER_METHOD_VERSION": ".confidence",
     "classify_confidence": ".confidence",
@@ -885,12 +885,12 @@ def get_dead_letters() -> list[dict[str, Any]]:
     dropping dead letters raised inside the deduplicator (e.g., dropped
     duplicates from ``dedup_interactions``) and missing-value handlers
     (e.g., rows that failed imputation). The audit (C-18) found three
-    parallel queues with no unified view — operators had to call
+    parallel queues with no unified view -- operators had to call
     ``deduplicator.get_dead_letters()`` and ``missing_values.get_dead_letters()``
     separately to see the full failure set. This function now returns
     the union so a single call captures every dead letter.
 
-    The aggregation is read-only — entries are NOT moved or copied
+    The aggregation is read-only -- entries are NOT moved or copied
     between queues. Each submodule keeps its own queue (preserving the
     per-module bounded-FIFO eviction semantics); this function simply
     concatenates snapshots.
@@ -906,12 +906,12 @@ def get_dead_letters() -> list[dict[str, Any]]:
     try:
         from .deduplicator import _dead_letters as _dedup_queue
         aggregated.extend(list(_dedup_queue))
-    except Exception:  # pragma: no cover — defensive: deduplicator import must not break DLQ reads
+    except Exception:  # pragma: no cover -- defensive: deduplicator import must not break DLQ reads
         pass
     try:
         from .missing_values import _dead_letters as _mv_queue
         aggregated.extend(list(_mv_queue))
-    except Exception:  # pragma: no cover — defensive
+    except Exception:  # pragma: no cover -- defensive
         pass
     return aggregated
 
@@ -1167,7 +1167,7 @@ def __getattr__(name: str):
     ``import cleaning`` becomes near-instant.  ``from cleaning import X``
     triggers the import only when X is accessed.
 
-    If a sub-module fails to import, the failure is isolated — only that
+    If a sub-module fails to import, the failure is isolated -- only that
     name is unavailable; the rest of the package still works.
     """
     # Handle deprecated name redirections
@@ -1281,7 +1281,7 @@ def check_health() -> dict:
         health["optional_deps"]["rapidfuzz"] = True
     except ImportError:
         health["optional_deps"]["rapidfuzz"] = False
-        # Not degraded — rapidfuzz is truly optional (fallback exists)
+        # Not degraded -- rapidfuzz is truly optional (fallback exists)
 
     return health
 
@@ -1652,7 +1652,7 @@ def _add_provenance(
 #     column contains per-row timestamps.
 #
 # The ROOT FIX stores cleaning-step metadata in ``df.attrs`` (the
-# pandas metadata dict) — a SIDE-CHANNEL that does NOT appear in
+# pandas metadata dict) -- a SIDE-CHANNEL that does NOT appear in
 # ``df.columns`` and is therefore invisible to schema-validation /
 # DB-loaders / fingerprint computation. ``df.attrs`` is the canonical
 # pandas mechanism for attaching metadata to a DataFrame.
@@ -1701,7 +1701,7 @@ def _mark_cleaned(df: Any, step_name: str) -> Any:
     P2-5 ROOT FIX (v82): the previous implementation ALWAYS added the
     ``_cleaning_applied`` column, polluting the output schema. The
     column is now opt-in (default OFF) and the canonical metadata
-    store is ``df.attrs`` — invisible to ``df.columns``, DB loaders,
+    store is ``df.attrs`` -- invisible to ``df.columns``, DB loaders,
     and fingerprint computation.
     """
     import pandas as pd
@@ -1751,7 +1751,7 @@ def _is_already_cleaned(df: Any, step_name: str) -> bool:
     if isinstance(steps, list) and step_name in steps:
         return True
     # Backward-compat fallback: the _cleaning_applied column (if present
-    # on the INPUT DataFrame — we no longer add it on output by default).
+    # on the INPUT DataFrame -- we no longer add it on output by default).
     if _CLEANING_METADATA_COL in df.columns:
         try:
             return df[_CLEANING_METADATA_COL].str.contains(step_name).any()
@@ -2005,7 +2005,7 @@ def clean_drugs(
         if step_name == "standardize_inchikey":
             # standardize_inchikey takes a string, returns a string.
             # Apply it element-wise to the 'inchikey' column.
-            # v66 ROOT FIX (P1C-022 — lambda skipped falsy strings):
+            # v66 ROOT FIX (P1C-022 -- lambda skipped falsy strings):
             #   The previous lambda was
             #   ``lambda x: func(x) if isinstance(x, str) and x.strip() else x``
             #   which SKIPPED calling func(x) for empty strings (because
@@ -2016,9 +2016,9 @@ def clean_drugs(
             #   ROOT FIX: call ``func(x)`` for ALL strings (including
             #   empty strings). ``standardize_inchikey`` is DESIGNED to
             #   handle empty strings (returns None after
-            #   strip+upper+validate) and None (returns None) — see
+            #   strip+upper+validate) and None (returns None) -- see
             #   cleaning/normalizer.py:2596. Non-string values (None,
-            #   NaN, float) pass through unchanged (correct — they're
+            #   NaN, float) pass through unchanged (correct -- they're
             #   not InChIKeys).
             if "inchikey" in out.columns:
                 out["inchikey"] = out["inchikey"].apply(
@@ -2026,11 +2026,11 @@ def clean_drugs(
                 )
             else:
                 _logger.warning(
-                    "clean_drugs: standardize_inchikey skipped — "
+                    "clean_drugs: standardize_inchikey skipped -- "
                     "'inchikey' column not found"
                 )
         elif step_name == "standardize_drug_record":
-            # v82 FORENSIC ROOT FIX (P1-7 — row-by-row Python iteration):
+            # v82 FORENSIC ROOT FIX (P1-7 -- row-by-row Python iteration):
             #   The previous code used ``out.apply(_apply_drug_record, axis=1)``
             #   which is an O(N) Python-level row iteration. For a 100K-row
             #   DataFrame, this meant 100K Python-level dict conversions +
@@ -2061,7 +2061,7 @@ def clean_drugs(
             if _fail_count:
                 _logger.warning(
                     "clean_drugs: standardize_drug_record failed for "
-                    "%d record(s) — they will retain their original values",
+                    "%d record(s) -- they will retain their original values",
                     _fail_count,
                 )
 
@@ -2072,7 +2072,7 @@ def clean_drugs(
                 # were not in the record.
                 # [v2.1.0] Skip _-prefixed metadata columns (e.g., _provenance,
                 # _cleaning_applied) to keep the output deterministic across
-                # runs — they contain per-row timestamps that break fingerprint
+                # runs -- they contain per-row timestamps that break fingerprint
                 # reproducibility (IDEM-7).  Provenance is still accessible via
                 # df.attrs["_provenance"] for callers that need it.
                 for col in result_rows.columns:
@@ -2123,7 +2123,7 @@ def clean_drugs(
     out.attrs["_output_fingerprint"] = output_fingerprint
     out.attrs["cleaning_metrics"] = dict(_metrics)
 
-    # P2-5 ROOT FIX (v82): SAFETY NET — even if the operator opted in
+    # P2-5 ROOT FIX (v82): SAFETY NET -- even if the operator opted in
     # to the ``_cleaning_applied`` column via the
     # ``CLEANING_TRACK_APPLIED_STEPS`` env var, strip it from the
     # FINAL output so downstream DB loaders / phase2 graph ingestion /
@@ -2444,14 +2444,14 @@ def _deprecated(
 # ===========================================================================
 # Public API declaration (BUG-D1, BUG-C1)
 # ===========================================================================
-# v29 ROOT FIX (audit C-12): 2377 lines of re-exports — significant
+# v29 ROOT FIX (audit C-12): 2377 lines of re-exports -- significant
 # import-time cost. Future cleanup: split into sub-packages. For now,
 # documented the bloat. The actual sub-module imports are deferred via
 # the ``_LAZY_IMPORTS`` dict + module-level ``__getattr__`` above so
 # that ``import cleaning`` does NOT eagerly load pandas/numpy/rdkit.
 
 __all__ = [
-    # normalizer — original + new public API (alphabetical, case-sensitive)
+    # normalizer -- original + new public API (alphabetical, case-sensitive)
     "ALLOWED_TYPES",
     "ActivityValue",
     "ConversionResult",
@@ -2487,7 +2487,7 @@ __all__ = [
     "standardize_inchikey",
     "validate_config",
     "validate_inchikey",
-    # deduplicator — alphabetical within section (v3.0.0)
+    # deduplicator -- alphabetical within section (v3.0.0)
     "ActivityDirection",
     "CompletenessWeight",
     "DEFAULT_COMPLETENESS_WEIGHTS",
@@ -2530,13 +2530,13 @@ __all__ = [
     "validate_config",
     "validate_environment",
     "validate_recovery_state",
-    # missing_values — alphabetical within section
+    # missing_values -- alphabetical within section
     "MAX_SEQUENCE_LENGTH",
     "fill_missing_drug_fields",
     "handle_missing_inchikey",
     "handle_missing_protein_fields",
     "validate_gda_scores",
-    # confidence — institutional-grade confidence-tier classifier (ARCH-7)
+    # confidence -- institutional-grade confidence-tier classifier (ARCH-7)
     "DEFAULT_CONFIDENCE_TIERS",
     "CONFIDENCE_TIER_METHOD_VERSION",
     "classify_confidence",

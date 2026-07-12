@@ -224,11 +224,11 @@ class TestNormalizeName:
     """Tests for ``entity_resolution.resolver_utils.normalize_name``."""
 
     def test_strips_punctuation(self):
-        """'Aspirin, (acetyl)' becomes 'aspirin' — parenthetical content
+        """'Aspirin, (acetyl)' becomes 'aspirin' -- parenthetical content
         is removed first, then punctuation and spaces are stripped."""
         result = normalize_name("Aspirin, (acetyl)")
         # "(acetyl)" is removed by the parentheses regex, then ", " is
-        # stripped by the non-alnum regex → "aspirin"
+        # stripped by the non-alnum regex -> "aspirin"
         assert result == "aspirin"
 
     def test_strips_hyphens_and_spaces(self):
@@ -292,7 +292,7 @@ class TestComputeMatchConfidence:
 
     def test_fuzzy(self):
         # v83: the v29 ROOT FIX inverted the buggy confidence values.
-        # ``fuzzy`` was 0.85 (stale) — the v29 fix lowered it to 0.65
+        # ``fuzzy`` was 0.85 (stale) -- the v29 fix lowered it to 0.65
         # so it sits BELOW NAME_NORMALIZED (0.80) and ABOVE
         # PROTEIN_NAME_FUZZY (0.60) in the confidence hierarchy. The
         # previous test expected the OLD 0.85 value (a stale assertion
@@ -518,9 +518,9 @@ class TestEntityMappingDataframeOutput:
             source="chembl",
         )
         df = resolver.to_dataframe()
-        # Audit C.17 — output columns expanded to include smiles,
+        # Audit C.17 -- output columns expanded to include smiles,
         # smiles_form, molecular_formula, molecular_weight, created_at,
-        # and data_quality_score.  Audit 2.7 — ``sources`` is JSON-encoded.
+        # and data_quality_score.  Audit 2.7 -- ``sources`` is JSON-encoded.
         expected_cols = [
             "canonical_inchikey",
             "canonical_name",

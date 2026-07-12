@@ -12,6 +12,14 @@
 
 import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import jwt from "jsonwebtoken";
+// FE-042 ROOT FIX: import the shared JWT secret resolver from auth/server.ts
+// so there is a SINGLE source of truth for JWT_SECRET handling. The previous
+// code had a divergent `getJwtSecret()` here that returned "" in dev (non-test)
+// mode, causing `issueMfaTicket` to throw "FATAL: JWT_SECRET is not set" and
+// breaking 2FA enrollment entirely in dev. The shared `resolveJwtSecret`
+// always returns a usable secret in dev (loudly-logged dev-only fallback) and
+// throws in prod if the env var is missing — which is the correct behavior.
+import { resolveJwtSecret, resolvePreviousJwtSecret } from "./server";
 
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -117,14 +125,6 @@ export function buildOtpAuthUri(opts: {
 
 const MFA_TICKET_TTL_SECONDS = 5 * 60; // 5 minutes
 
-function getJwtSecret(): string {
-  // Defer to the same resolver used by auth/server.ts. We re-import lazily to
-  // avoid a circular module dependency.
-  return process.env.JWT_SECRET || (process.env.NODE_ENV === "test"
-    ? "test-only-secret-do-not-use-in-production-32-bytes-minimum-aaaa"
-    : "");
-}
-
 export interface MfaTicketPayload {
   sub: string;
   email: string;
@@ -132,28 +132,33 @@ export interface MfaTicketPayload {
 }
 
 export function issueMfaTicket(opts: { userId: string; email: string }): string {
-  const secret = getJwtSecret();
-  if (!secret) {
-    throw new Error("FATAL: JWT_SECRET is not set — cannot issue MFA ticket.");
-  }
+  // FE-042: use the shared resolver. In dev this returns the loudly-logged
+  // dev-only fallback (so 2FA enrollment works); in prod it throws if
+  // JWT_SECRET is missing or too short — which is the desired fail-closed
+  // behavior.
   return jwt.sign(
     { sub: opts.userId, email: opts.email, type: "mfa_pending" } as MfaTicketPayload,
-    secret,
+    resolveJwtSecret(),
     { issuer: "drugos", expiresIn: MFA_TICKET_TTL_SECONDS, algorithm: "HS256" }
   );
 }
 
 export function verifyMfaTicket(token: string): MfaTicketPayload | null {
-  const secret = getJwtSecret();
-  if (!secret) return null;
-  try {
-    const decoded = jwt.verify(token, secret, {
-      issuer: "drugos",
-      algorithms: ["HS256"],
-    }) as MfaTicketPayload;
-    if (!decoded || decoded.type !== "mfa_pending" || !decoded.sub) return null;
-    return decoded;
-  } catch {
-    return null;
+  // FE-041/042: support hot-rotation by trying both current + previous secrets.
+  const candidates = [resolveJwtSecret(), resolvePreviousJwtSecret()].filter(
+    (s): s is string => !!s
+  );
+  for (const secret of candidates) {
+    try {
+      const decoded = jwt.verify(token, secret, {
+        issuer: "drugos",
+        algorithms: ["HS256"],
+      }) as MfaTicketPayload;
+      if (!decoded || decoded.type !== "mfa_pending" || !decoded.sub) continue;
+      return decoded;
+    } catch {
+      // try next candidate
+    }
   }
+  return null;
 }

@@ -8,6 +8,11 @@ import {
 } from "@/lib/auth/server";
 import { verifyTotp } from "@/lib/auth/totp";
 import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
+import {
+  checkTotpRateLimit,
+  recordFailedTotp,
+  clearTotpAttempts,
+} from "@/lib/auth/rate-limit";
 
 /**
  * POST /api/auth/2fa/login-verify
@@ -96,18 +101,64 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // FE-003 ROOT FIX: Per-user TOTP rate limit. A 6-digit code has only
+    // 1M combinations and the ±30s drift window expands it to ~3M; at
+    // 1000 req/s the keyspace falls in ~50 minutes. We block the 2FA
+    // path for this user after 5 wrong codes within 5 minutes.
+    const totpLock = checkTotpRateLimit(user.id);
+    if (totpLock.locked) {
+      return NextResponse.json(
+        {
+          error: "totp_locked",
+          message: `Too many incorrect 2FA codes. Try again in ${Math.ceil(
+            totpLock.retryAfterSeconds / 60
+          )} minute(s).`,
+          retryAfterSeconds: totpLock.retryAfterSeconds,
+        },
+        {
+          status: 429,
+          headers: { "Retry-After": String(totpLock.retryAfterSeconds) },
+        }
+      );
+    }
+
     // Verify the TOTP code with ±30s drift tolerance.
     if (!verifyTotp(user.mfaSecret, code)) {
+      // Record this failure in the sliding window. If the threshold is
+      // crossed, the user is locked for TOTP_LOCK_MINUTES.
+      const result = recordFailedTotp(user.id);
       await writeAuditLog({
         user: { userId: user.id, email: user.email, role: user.role },
         action: "login_mfa_failed",
         resource: `user:${user.id}`,
       });
+      if (result.locked) {
+        return NextResponse.json(
+          {
+            error: "totp_locked",
+            message: `Too many incorrect 2FA codes. 2FA is locked for ${Math.ceil(
+              result.retryAfterSeconds / 60
+            )} minute(s).`,
+            retryAfterSeconds: result.retryAfterSeconds,
+          },
+          {
+            status: 429,
+            headers: { "Retry-After": String(result.retryAfterSeconds) },
+          }
+        );
+      }
       return NextResponse.json(
-        { error: "invalid_code", message: "Invalid 6-digit code. Try again." },
+        {
+          error: "invalid_code",
+          message: `Invalid 6-digit code. ${result.attemptsRemaining} attempt(s) remaining before 2FA is locked.`,
+        },
         { status: 400 }
       );
     }
+
+    // Success — clear the TOTP attempt counter so a future failed session
+    // starts fresh.
+    clearTotpAttempts(user.id);
 
     // Success — issue the real access+refresh tokens.
     const membership = await db.organizationMember.findFirst({

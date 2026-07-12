@@ -177,7 +177,7 @@ class TestArchitecture:
         # v90 ROOT FIX (BUG #20 test alignment): Protein.ppi_as_protein_a/b
         # now use lazy='raise' to prevent N+1 query explosion under bulk
         # loads. Callers MUST eager-load via selectinload() before touching
-        # the .ppi_as_protein_a / .ppi_as_protein_b collections — including
+        # the .ppi_as_protein_a / .ppi_as_protein_b collections -- including
         # the .all_ppi_interactions / .all_ppi_partners properties that
         # iterate over them. The test now re-queries the protein with
         # selectinload to mirror the production pattern required by the
@@ -224,7 +224,7 @@ class TestArchitecture:
 class TestDesign:
     def test_gda_has_protein_id_fk(self, db_session):
         # K fix: per task description #10, the GDA model no longer has an
-        # integer protein_id column — it uses a string uniprot_id FK to
+        # integer protein_id column -- it uses a string uniprot_id FK to
         # proteins.uniprot_id (the canonical cross-source key).
         assert hasattr(GeneDiseaseAssociation, "uniprot_id")
         col = GeneDiseaseAssociation.__table__.c.uniprot_id

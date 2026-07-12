@@ -1,4 +1,4 @@
-"""STRING Pipeline — protein-protein interaction network from STRING DB.
+"""STRING Pipeline -- protein-protein interaction network from STRING DB.
 
 REGULATORY COMPLIANCE:
     - FDA 21 CFR Part 11: Audit trails. This pipeline records
@@ -12,27 +12,27 @@ REGULATORY COMPLIANCE:
 
 LINEAGE CHAIN:
     STRING URL
-      → downloaded .gz (SHA-256 recorded for links, aliases, detailed)
-      → parsed DataFrame (transformation log: filter, map, dedup, swap, merge)
-      → cleaned CSV (SHA-256 sidecar + metadata.json + transform.json)
-      → DB rows (pipeline_run_id FK on every PPI row)
-      → Neo4j edges (via exporter — separate lineage)
-      → Graph Transformer input (via exporter — separate lineage)
+      -> downloaded .gz (SHA-256 recorded for links, aliases, detailed)
+      -> parsed DataFrame (transformation log: filter, map, dedup, swap, merge)
+      -> cleaned CSV (SHA-256 sidecar + metadata.json + transform.json)
+      -> DB rows (pipeline_run_id FK on every PPI row)
+      -> Neo4j edges (via exporter -- separate lineage)
+      -> Graph Transformer input (via exporter -- separate lineage)
 
 Download:
-    - 9606.protein.links.v{VERSION}.txt.gz         → interaction scores (required)
-    - 9606.protein.aliases.v{VERSION}.txt.gz        → STRING→UniProt mapping (required)
-    - 9606.protein.links.detailed.v{VERSION}.txt.gz → sub-scores (optional,
+    - 9606.protein.links.v{VERSION}.txt.gz         -> interaction scores (required)
+    - 9606.protein.aliases.v{VERSION}.txt.gz        -> STRING->UniProt mapping (required)
+    - 9606.protein.links.detailed.v{VERSION}.txt.gz -> sub-scores (optional,
       configurable via ``STRING_DETAILED_MODE``)
 
 Clean:
-    - Validate organism (9606 prefix) — quarantines cross-species contamination
+    - Validate organism (9606 prefix) -- quarantines cross-species contamination
     - Filter ``combined_score >= STRING_MIN_COMBINED_SCORE`` (700 in production
       per Szklarczyk et al. 2023, Nucleic Acids Research)
     - Map STRING IDs to UniProt via aliases (source == 'UniProt_AC' EXACT,
-      excludes BLAST_UniProt_AC which has ~5–10% error vs <1% for curated)
+      excludes BLAST_UniProt_AC which has ~5-10% error vs <1% for curated)
     - Validate UniProt IDs against the canonical pattern (UniProt help/accession)
-    - Uppercase all UniProt IDs (canonical form — UniProt help/accession)
+    - Uppercase all UniProt IDs (canonical form -- UniProt help/accession)
     - Separate canonical from isoform accessions (UniProt help/isoforms)
     - Drop rows where either protein fails to map (dead-letter the unmapped IDs)
     - Canonical-order at STRING-ID level FIRST (so the detailed-merge keys match)
@@ -42,18 +42,18 @@ Clean:
     - Validate output against ``schema/v1.json`` before returning
 
 Load:
-    - Resolve ``uniprot_id`` → ``protein.id`` via ``get_uniprot_to_protein_id_map``
+    - Resolve ``uniprot_id`` -> ``protein.id`` via ``get_uniprot_to_protein_id_map``
       (filtered to the unique set for performance)
     - Drop rows where FK lookup fails (dead-letter the unmapped UniProt IDs)
     - Ensure ``protein_a_id < protein_b_id`` (defense-in-depth with
       ``_pre_validate_ppi`` in ``loaders.py``)
     - Drop self-interactions with WARNING + dead-letter (DB constraint;
-      ``TODO(schema-migration)``: allow homodimers — they are biologically
+      ``TODO(schema-migration)``: allow homodimers -- they are biologically
       real and clinically critical, e.g. EGFR/HER2/p53 dimerization)
     - Bulk upsert via ``bulk_upsert_ppi`` with ``pipeline_run_id`` and
       ``input_checksum``
     - Return ``inserted + updated`` (NOT ``int(UpsertResult)`` which is
-      ``total_input`` — see ``GAP-2.3``)
+      ``total_input`` -- see ``GAP-2.3``)
 
 Scientific references:
     - Szklarczyk D. et al. The STRING database in 2023: protein-protein
@@ -65,13 +65,13 @@ Scientific references:
     - UniProt accession help: https://www.uniprot.org/help/accession
 
 Changelog:
-    v2.0.0 (2025) — Institutional-grade rewrite addressing 149 catalogued
+    v2.0.0 (2025) -- Institutional-grade rewrite addressing 149 catalogued
         defects across 16 quality domains. See
         ``docs/audits/STRING_PIPELINE_FIX_REPORT.md`` for the full fix
         matrix.
-    v1.0.0 — Initial implementation (421 lines, deprecated).
+    v1.0.0 -- Initial implementation (421 lines, deprecated).
 
-License: MIT — Team Cosmic / VentureLab.
+License: MIT -- Team Cosmic / VentureLab.
 """
 
 from __future__ import annotations
@@ -165,7 +165,7 @@ UNIPROT_ID_PATTERN: re.Pattern[str] = re.compile(
 EXPECTED_TAXON: str = "9606"
 
 # ---------------------------------------------------------------------------
-# Constants — sub-score column mapping. The basic links file has ONLY
+# Constants -- sub-score column mapping. The basic links file has ONLY
 # protein1, protein2, combined_score. The detailed file adds 7 sub-scores
 # (Szklarczyk et al. 2023).
 # ---------------------------------------------------------------------------
@@ -199,7 +199,7 @@ ALL_DETAILED_COLS: tuple[str, ...] = DETAILED_SUBSCORE_COLS
 
 # ---------------------------------------------------------------------------
 # Expected output columns (for the cleaned CSV / DataFrame). Reconciled
-# with pipelines/schema/v1.json — required: string_id_a, string_id_b,
+# with pipelines/schema/v1.json -- required: string_id_a, string_id_b,
 # combined_score. Optional: uniprot_id_a, uniprot_id_b. Provenance cols
 # (created_at, string_version, pipeline_run_id, source_url, source_sha256)
 # are NOT part of the DB load but ARE part of the CSV for audit.
@@ -289,7 +289,7 @@ def _is_isoform(accession: str) -> bool:
 class StringPipeline(BasePipeline):
     """STRING DB pipeline for protein-protein interaction (PPI) data.
 
-    This pipeline is fully deterministic — it performs no stochastic
+    This pipeline is fully deterministic -- it performs no stochastic
     operations.  The base-class ``seed`` parameter has no effect on
     output but is recorded in the audit trail for consistency with
     other pipelines (GAP-7.7).
@@ -355,10 +355,10 @@ class StringPipeline(BasePipeline):
         super().__init__(*args, **kwargs)
         self._freeze_version: Optional[str] = freeze_version
 
-        # FIX BUG-3.4 / GAP-12.9 — production-override threshold.
+        # FIX BUG-3.4 / GAP-12.9 -- production-override threshold.
         # In production (ENV=prod), STRING_MIN_COMBINED_SCORE must be >= 700
-        # (Szklarczyk et al. 2023: ≥700 → >80% precision on KEGG benchmarks;
-        # ≥400 → only ~50% — too permissive for clinical-decision-support).
+        # (Szklarczyk et al. 2023: ≥700 -> >80% precision on KEGG benchmarks;
+        # ≥400 -> only ~50% -- too permissive for clinical-decision-support).
         self._effective_score_threshold: int = self._compute_effective_threshold()
 
         # Per-run state (populated by download(), consumed by clean()).
@@ -375,7 +375,7 @@ class StringPipeline(BasePipeline):
         self._transformation_log: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
-    # Helpers — configuration, dead-letter, metrics
+    # Helpers -- configuration, dead-letter, metrics
     # ------------------------------------------------------------------
 
     def _is_production(self) -> bool:
@@ -466,7 +466,7 @@ class StringPipeline(BasePipeline):
             # operators don't waste 30 minutes of STRING API quota
             # before discovering the UniProt pipeline was never run.
             logger.error(
-                "[%s] P1-23 ROOT FIX: STRING pipeline cannot start — the "
+                "[%s] P1-23 ROOT FIX: STRING pipeline cannot start -- the "
                 "UniProt pipeline output is missing or empty. "
                 "proteins.csv present/nonempty=%s; proteins DB table "
                 "nonempty=%s. Run `python -m pipelines uniprot` BEFORE "
@@ -490,7 +490,7 @@ class StringPipeline(BasePipeline):
             if STRING_MIN_COMBINED_SCORE < prod_min:
                 logger.warning(
                     "[%s] STRING_MIN_COMBINED_SCORE=%d is below the production "
-                    "minimum %d. Using %d (Szklarczyk et al. 2023: ≥700 → "
+                    "minimum %d. Using %d (Szklarczyk et al. 2023: ≥700 -> "
                     ">80%% precision on KEGG benchmarks).",
                     self.source_name,
                     STRING_MIN_COMBINED_SCORE,
@@ -571,7 +571,7 @@ class StringPipeline(BasePipeline):
         }
         self._transformation_log.append(entry)
         logger.info(
-            "[%s] Transform: %s — %d → %d (%s)",
+            "[%s] Transform: %s -- %d -> %d (%s)",
             self.source_name,
             stage,
             before,
@@ -588,7 +588,7 @@ class StringPipeline(BasePipeline):
     # aliases file from the embedded sample PPI data when the v50
     # downloader is in sample mode and no real aliases file exists.
     # This allows clean()'s _build_string_uniprot_map to populate the
-    # STRING→UniProt cross-reference index even in sample mode.
+    # STRING->UniProt cross-reference index even in sample mode.
     def _synthesize_aliases_from_embedded(self, ppi_path: Path, aliases_path: Path) -> None:
         """Write a gzipped STRING aliases TSV from embedded PPI data.
 
@@ -637,16 +637,16 @@ class StringPipeline(BasePipeline):
         except (OSError, pd.errors.ParserError, ValueError) as exc:
             # v84 FORENSIC ROOT FIX (BUG #36): narrowed from broad
             # ``except Exception``. The previous code caught ALL
-            # exceptions — including programming bugs (AttributeError,
-            # KeyError) — and silently fell back to
+            # exceptions -- including programming bugs (AttributeError,
+            # KeyError) -- and silently fell back to
             # ``embedded_string_ppi()``. A bug in alias extraction was
-            # masked, and the aliases file was silently empty — breaking
-            # STRING→UniProt mapping and dropping PPI edges from the KG.
+            # masked, and the aliases file was silently empty -- breaking
+            # STRING->UniProt mapping and dropping PPI edges from the KG.
             # ROOT FIX: catch ONLY the expected I/O + parse + value
             # errors. Programming bugs propagate so they surface during
             # development instead of silently degrading the KG.
             logger.warning(
-                "[%s] Could not extract aliases from PPI file %s: %s — "
+                "[%s] Could not extract aliases from PPI file %s: %s -- "
                 "falling back to embedded_string_ppi()",
                 self.source_name, ppi_path.name, exc,
             )
@@ -667,8 +667,8 @@ class StringPipeline(BasePipeline):
                         pairs.append((p2, ub))
             except (OSError, ValueError, pd.errors.ParserError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.error(
-                    "[%s] Could not load embedded_string_ppi: %s — "
-                    "aliases file will be empty, STRING→UniProt mapping "
+                    "[%s] Could not load embedded_string_ppi: %s -- "
+                    "aliases file will be empty, STRING->UniProt mapping "
                     "will be empty (PPI edges will not merge into the "
                     "canonical Protein subgraph)",
                     self.source_name, exc,
@@ -689,9 +689,9 @@ class StringPipeline(BasePipeline):
             # Header (STRING aliases files start with "#string_protein_id").
             # v80 P0-D2 fix: use the EXACT column names that
             # _build_string_uniprot_map expects after normalization:
-            #   "#string_protein_id" → "string_protein_id"
-            #   "source"             → "source"
-            #   "alias"              → "alias"
+            #   "#string_protein_id" -> "string_protein_id"
+            #   "source"             -> "source"
+            #   "alias"              -> "alias"
             # The downstream reader uses usecols=lambda c: c in
             # ("#string_protein_id", "alias", "source") and then lowercases
             # + strips '#'. So we MUST emit exactly these 3 column names.
@@ -701,17 +701,17 @@ class StringPipeline(BasePipeline):
                 # (source_database column is not used by _build_string_uniprot_map)
                 fh.write(f"{string_id}\tUniProt_AC\t{uniprot_ac}\n")
         logger.info(
-            "[%s] Synthesized aliases file with %d unique STRING→UniProt pairs: %s",
+            "[%s] Synthesized aliases file with %d unique STRING->UniProt pairs: %s",
             self.source_name, len(unique_pairs), aliases_path.name,
         )
 
-    # v29 ROOT FIX (audit P1-20): was full-decompress into memory — OOM on 2GB files. Stream in 64KB chunks.
+    # v29 ROOT FIX (audit P1-20): was full-decompress into memory -- OOM on 2GB files. Stream in 64KB chunks.
     def _validate_gzip_integrity(self, dest: Path) -> bool:
         """Validate that a .gz file is not truncated (streaming, P1-20).
 
         The base-class implementation calls ``gzip.open(dest, "rb").seek(-1, 2)``
         which forces gzip to decompress the ENTIRE stream into memory before
-        seeking to the end — on STRING's 2 GB ``protein.links.v12.0.txt.gz``
+        seeking to the end -- on STRING's 2 GB ``protein.links.v12.0.txt.gz``
         this consumes ~12 GB of RAM (10x expansion factor) and OOM-kills the
         worker. This override streams the gzip stream through in 64 KB chunks
         so peak memory stays at ~64 KB regardless of file size while still
@@ -826,7 +826,7 @@ class StringPipeline(BasePipeline):
         v50 ROOT FIX: now delegates to `pipelines._v50_downloaders.download_string_full`
         which handles BOTH sample mode (10 PPIs via STRING API) AND full mode
         (downloads the full 9606.protein.links.full.vXX.txt.gz from
-        https://stringdb-downloads.org — no login required).
+        https://stringdb-downloads.org -- no login required).
 
         Downloads three files (Szklarczyk et al. 2023):
             - 9606.protein.links.v{VERSION}.txt.gz         (required)
@@ -861,7 +861,7 @@ class StringPipeline(BasePipeline):
                 # downloader returns ONLY the PPI file. But clean()
                 # REQUIRES the STRING aliases file
                 # (``9606.protein.aliases.vXX.txt.gz``) to build the
-                # STRING→UniProt cross-reference map. Without it,
+                # STRING->UniProt cross-reference map. Without it,
                 # clean() raises FileNotFoundError at line ~999 and
                 # the pipeline crashes in v50 mode (sample AND full).
                 #
@@ -888,14 +888,14 @@ class StringPipeline(BasePipeline):
                         # can parse them.
                         logger.info(
                             "[%s] v50 sample mode: synthesizing aliases "
-                            "file from embedded data → %s",
+                            "file from embedded data -> %s",
                             self.source_name, aliases_path.name,
                         )
                         self._synthesize_aliases_from_embedded(ppi_path, aliases_path)
                     else:
                         # Full / skip mode: download the real aliases file.
                         logger.info(
-                            "[%s] v50 full mode: downloading aliases file → %s",
+                            "[%s] v50 full mode: downloading aliases file -> %s",
                             self.source_name, aliases_path.name,
                         )
                         self._download_file(STRING_ALIASES_URL, aliases_path)
@@ -909,7 +909,7 @@ class StringPipeline(BasePipeline):
                 return ppi_path
         except (OSError, ValueError, pd.errors.ParserError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
-                "[%s] v50 downloader failed (%s) — falling back to v49 path",
+                "[%s] v50 downloader failed (%s) -- falling back to v49 path",
                 self.source_name, exc,
             )
 
@@ -979,18 +979,18 @@ class StringPipeline(BasePipeline):
         self._download_file(STRING_ALIASES_URL, aliases_path)
 
         # FIX GAP-7.4 / GAP-12.5: Detailed-file download is configurable.
-        # - "skip"     → don't even attempt download
-        # - "required" → download without try/except (failure raises)
-        # - "optional" → wrap in try/except (current behaviour, but loud)
+        # - "skip"     -> don't even attempt download
+        # - "required" -> download without try/except (failure raises)
+        # - "optional" -> wrap in try/except (current behaviour, but loud)
         if STRING_DETAILED_MODE == "skip":
             logger.info(
-                "[%s] STRING_DETAILED_MODE=skip — not downloading detailed file.",
+                "[%s] STRING_DETAILED_MODE=skip -- not downloading detailed file.",
                 self.source_name,
             )
         elif STRING_DETAILED_MODE == "required":
             self._download_file(STRING_PROTEIN_LINKS_DETAILED_URL, detailed_path)
             logger.info(
-                "[%s] STRING_DETAILED_MODE=required — detailed file downloaded.",
+                "[%s] STRING_DETAILED_MODE=required -- detailed file downloaded.",
                 self.source_name,
             )
         else:  # "optional"
@@ -1001,7 +1001,7 @@ class StringPipeline(BasePipeline):
                     self.source_name,
                 )
             except ssl.SSLError as exc:
-                # FIX GAP-9.3: TLS failure is a potential MITM — escalate to ERROR.
+                # FIX GAP-9.3: TLS failure is a potential MITM -- escalate to ERROR.
                 logger.error(
                     "[%s] TLS verification failed for detailed links download: "
                     "%s. Potential MITM attack. Skipping detailed file. Set "
@@ -1090,24 +1090,24 @@ class StringPipeline(BasePipeline):
         return links_path
 
     # ------------------------------------------------------------------
-    # Clean — orchestrator
+    # Clean -- orchestrator
     # ------------------------------------------------------------------
 
     def clean(self, raw_path: Path) -> pd.DataFrame:
         """Clean and normalize STRING PPI data.
 
         Orchestrates the following stages (each in its own method for
-        testability — GAP-1.6):
+        testability -- GAP-1.6):
 
-        1. ``_load_links_file``               — load gzipped space-separated links file
-        2. ``_filter_by_score``               — filter combined_score >= threshold
-        3. ``_build_string_uniprot_map``      — build STRING→UniProt mapping from aliases
-        3.5. ``_canonicalize_protein_order``  — canonical-order STRING IDs (P1-29 ROOT FIX: BEFORE mapping)
-        4. ``_map_to_uniprot``                — map protein1/protein2 to UniProt IDs
-        5. ``_canonicalize_and_dedup``        — dedup on (now-canonical) UniProt ID pairs
-        6. ``_merge_detailed_scores``         — merge sub-scores from detailed file (if present)
-        7. ``_build_output``                  — construct output DataFrame with schema-conformant columns
-        8. ``_validate_and_repair_output``    — schema validation + type repair
+        1. ``_load_links_file``               -- load gzipped space-separated links file
+        2. ``_filter_by_score``               -- filter combined_score >= threshold
+        3. ``_build_string_uniprot_map``      -- build STRING->UniProt mapping from aliases
+        3.5. ``_canonicalize_protein_order``  -- canonical-order STRING IDs (P1-29 ROOT FIX: BEFORE mapping)
+        4. ``_map_to_uniprot``                -- map protein1/protein2 to UniProt IDs
+        5. ``_canonicalize_and_dedup``        -- dedup on (now-canonical) UniProt ID pairs
+        6. ``_merge_detailed_scores``         -- merge sub-scores from detailed file (if present)
+        7. ``_build_output``                  -- construct output DataFrame with schema-conformant columns
+        8. ``_validate_and_repair_output``    -- schema validation + type repair
 
         Returns
         -------
@@ -1119,7 +1119,7 @@ class StringPipeline(BasePipeline):
         -----
         Per GAP-1.3, this method does NOT write the CSV directly. The
         base class ``_persist_cleaned_data`` writes it with
-        ``encoding="utf-8"``, ``QUOTE_MINIMAL`` (P1-26 ROOT FIX — was
+        ``encoding="utf-8"``, ``QUOTE_MINIMAL`` (P1-26 ROOT FIX -- was
         QUOTE_NONNUMERIC), and a SHA-256 sidecar.  Writing here would
         (a) double the I/O for 20M rows and (b) produce an un-audited
         file on the direct-call path.
@@ -1139,14 +1139,14 @@ class StringPipeline(BasePipeline):
             else self.raw_dir / self._url_safe_filename(STRING_PROTEIN_LINKS_DETAILED_URL)
         )
 
-        # Stage 1 — load links
+        # Stage 1 -- load links
         links_df = self._load_links_file(raw_path)
         self._emit_metric("string.raw_record_count", len(links_df))
         self._log_transform("load_links", 0, len(links_df), "raw PPI records loaded")
         if links_df.empty:
             return self._empty_output()
 
-        # Stage 2 — filter by score
+        # Stage 2 -- filter by score
         before_filter = len(links_df)
         links_df = self._filter_by_score(links_df)
         self._emit_metric("string.after_score_filter_count", len(links_df))
@@ -1163,7 +1163,7 @@ class StringPipeline(BasePipeline):
             )
             return self._empty_output()
 
-        # Stage 3 — build STRING → UniProt map
+        # Stage 3 -- build STRING -> UniProt map
         # FIX GAP-6.3: Missing/empty aliases file is a HARD failure.
         if not aliases_path.exists():
             raise FileNotFoundError(
@@ -1173,22 +1173,22 @@ class StringPipeline(BasePipeline):
         string_to_uniprot = self._build_string_uniprot_map(aliases_path)
         if not string_to_uniprot:
             raise RuntimeError(
-                f"STRING→UniProt mapping is empty. Aliases file: {aliases_path}. "
+                f"STRING->UniProt mapping is empty. Aliases file: {aliases_path}. "
                 "Check the file format and source column filtering."
             )
         self._emit_metric("string.uniprot_mapping_count", len(string_to_uniprot))
 
-        # Stage 3.5 — canonical-order STRING IDs BEFORE mapping (P1-29
-        # ROOT FIX). Doing the canonicalisation before the STRING→UniProt
+        # Stage 3.5 -- canonical-order STRING IDs BEFORE mapping (P1-29
+        # ROOT FIX). Doing the canonicalisation before the STRING->UniProt
         # mapping means the mapping naturally produces canonical-ordered
         # UniProt IDs (uniprot_a <= uniprot_b), eliminating the need for
         # a post-hoc UniProt swap that was fragile under many-to-one
-        # ENSP→UniProt mappings.
+        # ENSP->UniProt mappings.
         before_canon_protein = len(links_df)
         links_df = self._canonicalize_protein_order(links_df)
         self._emit_metric("string.after_canonical_protein_order", len(links_df))
 
-        # Stage 4 — map to UniProt
+        # Stage 4 -- map to UniProt
         before_map = len(links_df)
         links_df = self._map_to_uniprot(links_df, string_to_uniprot)
         retention_rate = (len(links_df) / before_map) if before_map > 0 else 0.0
@@ -1201,7 +1201,7 @@ class StringPipeline(BasePipeline):
             "rows with both proteins mapped to canonical UniProt",
         )
 
-        # FIX GAP-3.10 — surface low retention as WARNING/ERROR.
+        # FIX GAP-3.10 -- surface low retention as WARNING/ERROR.
         if retention_rate < 0.50:
             logger.error(
                 "[%s] UniProt mapping retention rate is %.1f%% (%d / %d). "
@@ -1229,7 +1229,7 @@ class StringPipeline(BasePipeline):
             )
             return self._empty_output()
 
-        # Stage 5 — dedup (post-mapping, post-canonicalisation).
+        # Stage 5 -- dedup (post-mapping, post-canonicalisation).
         # P1-29 ROOT FIX: canonicalisation now happens in Stage 3.5
         # (before the UniProt mapping), so this stage is pure dedup.
         before_canon = len(links_df)
@@ -1243,22 +1243,22 @@ class StringPipeline(BasePipeline):
         )
         if links_df.empty:
             logger.warning(
-                "[%s] All PPI records were duplicates — empty output.",
+                "[%s] All PPI records were duplicates -- empty output.",
                 self.source_name,
             )
             return self._empty_output()
 
-        # Stage 6 — merge detailed sub-scores
+        # Stage 6 -- merge detailed sub-scores
         links_df = self._merge_detailed_scores(links_df, detailed_path)
         self._emit_metric(
             "string.detailed_file_merged",
             int(detailed_path.exists() and self._verify_file_integrity(detailed_path)),
         )
 
-        # Stage 7 — build output
+        # Stage 7 -- build output
         output_df = self._build_output(links_df)
 
-        # Stage 8 — validate
+        # Stage 8 -- validate
         output_df = self._validate_and_repair_output(output_df)
 
         # FIX GAP-15.10 / GAP-16.4: Write a metadata sidecar next to the CSV
@@ -1285,7 +1285,7 @@ class StringPipeline(BasePipeline):
 
         elapsed = time.perf_counter() - t0
         logger.info(
-            "[%s] clean() completed in %.2fs — %d records",
+            "[%s] clean() completed in %.2fs -- %d records",
             self.source_name,
             elapsed,
             len(output_df),
@@ -1296,7 +1296,7 @@ class StringPipeline(BasePipeline):
         return output_df
 
     # ------------------------------------------------------------------
-    # Clean — stage 1: load links file
+    # Clean -- stage 1: load links file
     # ------------------------------------------------------------------
 
     def _load_links_file(self, raw_path: Path) -> pd.DataFrame:
@@ -1305,21 +1305,21 @@ class StringPipeline(BasePipeline):
         Validates that the required columns are present (BUG-4.16) and
         that the organism prefix matches 9606 (GAP-3.9).
 
-        v80 FORENSIC ROOT FIX (P0-C2 — BadGzipFile in v50 sample mode):
+        v80 FORENSIC ROOT FIX (P0-C2 -- BadGzipFile in v50 sample mode):
           The v50 downloader returns ONE of three formats depending on
           mode / fallback path:
-            1. ``.txt.gz``         — full / skip mode (gzipped, space-separated)
-            2. ``.tsv``            — sample mode (UNcompressed, tab-separated,
+            1. ``.txt.gz``         -- full / skip mode (gzipped, space-separated)
+            2. ``.tsv``            -- sample mode (UNcompressed, tab-separated,
                columns: protein1, protein2, combined_score, experimental_score,
                database_score, textmining_score)
-            3. ``.csv``            — embedded-sample fallback (UNcompressed,
+            3. ``.csv``            -- embedded-sample fallback (UNcompressed,
                comma-separated, same columns as #2 plus uniprot_ac_a/b)
 
           The previous code unconditionally passed ``compression="gzip"``
           to ``pd.read_csv``. For formats #2 and #3 (uncompressed),
           ``gzip.BadGzipFile`` was raised and the pipeline crashed.
           Only the v49 fallback path (which always produced .txt.gz)
-          worked — exactly matching the audit's "Only fallback works"
+          worked -- exactly matching the audit's "Only fallback works"
           finding.
 
           ROOT FIX: detect compression from the file extension and
@@ -1351,12 +1351,12 @@ class StringPipeline(BasePipeline):
             compression = None
             sep = ","
         else:
-            # Unknown extension — best-effort: try gzip first, fall back
+            # Unknown extension -- best-effort: try gzip first, fall back
             # to plain text with whitespace separator. This preserves
             # backward compat with any custom file the operator may
             # have placed manually.
             logger.warning(
-                "[%s] Unrecognized links file extension %r — attempting "
+                "[%s] Unrecognized links file extension %r -- attempting "
                 "gzip-then-plain detection",
                 self.source_name, suffix,
             )
@@ -1368,7 +1368,7 @@ class StringPipeline(BasePipeline):
                 "sep": sep,
                 "low_memory": STRING_LOW_MEMORY,
             }
-            # Only pass compression= when it's not None — passing
+            # Only pass compression= when it's not None -- passing
             # compression=None to pd.read_csv is equivalent to "infer"
             # which can mis-detect a .gz file as plain text on some
             # pandas versions. Explicit None here would be safe but
@@ -1381,7 +1381,7 @@ class StringPipeline(BasePipeline):
             # retry without compression as a last resort.
             if suffix not in (".gz",) and compression == "gzip":
                 logger.warning(
-                    "[%s] gzip read failed on non-.gz file %s (%s) — "
+                    "[%s] gzip read failed on non-.gz file %s (%s) -- "
                     "retrying without compression",
                     self.source_name, raw_path.name, exc,
                 )
@@ -1423,7 +1423,7 @@ class StringPipeline(BasePipeline):
         # textmining_score. Also accept the legacy uniprot_a/uniprot_b
         # columns (P0-D5) and the v50 sample's protein1/protein2 form.
         _COLUMN_ALIASES = {
-            # v50 sample mode emits these names directly — no rename needed,
+            # v50 sample mode emits these names directly -- no rename needed,
             # but normalize just in case.
             "string_protein_a": "protein1",
             "string_protein_b": "protein2",
@@ -1447,12 +1447,12 @@ class StringPipeline(BasePipeline):
                 f"Actual columns: {list(links_df.columns)}."
             )
 
-        # FIX BUG-4.3: astype(str) on NaN produces "nan" — drop NaN first.
+        # FIX BUG-4.3: astype(str) on NaN produces "nan" -- drop NaN first.
         # v83 FORENSIC ROOT FIX (P2-8): the previous code ran the wrong-taxon
         # quarantine FIRST (which used .astype(str) on protein1/protein2,
-        # converting NaN → "nan"), then ran dropna on the SAME columns
+        # converting NaN -> "nan"), then ran dropna on the SAME columns
         # afterwards. NaN rows were therefore BOTH quarantined as "wrong
-        # taxon" (misclassified — they're missing, not cross-species) AND
+        # taxon" (misclassified -- they're missing, not cross-species) AND
         # dropped. ROOT FIX: dropna FIRST, then run the wrong-taxon check
         # on the cleaned DataFrame. NaN rows are now cleanly dropped (not
         # misclassified as wrong-taxon), and the wrong-taxon quarantine
@@ -1468,7 +1468,7 @@ class StringPipeline(BasePipeline):
         # human-only KG. We quarantine any PPI where EITHER protein is
         # non-human (including cross-species human-mouse PPIs, which
         # would corrupt the human knowledge graph). ~A | ~B ≡ ~(A & B)
-        # by De Morgan's law — rows where BOTH proteins start with the
+        # by De Morgan's law -- rows where BOTH proteins start with the
         # expected taxon prefix are kept; all others are quarantined.
         wrong_taxon_mask = (
             ~links_df["protein1"].astype(str).str.startswith(f"{EXPECTED_TAXON}.")
@@ -1494,7 +1494,7 @@ class StringPipeline(BasePipeline):
         return links_df
 
     # ------------------------------------------------------------------
-    # Clean — stage 2: filter by score
+    # Clean -- stage 2: filter by score
     # ------------------------------------------------------------------
 
     def _filter_by_score(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -1502,7 +1502,7 @@ class StringPipeline(BasePipeline):
 
         Quarantines rows with NaN combined_score to a dead-letter file
         (rather than silently dropping them, which would conflate "no
-        evidence" with "missing data" — BUG-3.2).
+        evidence" with "missing data" -- BUG-3.2).
         """
         # FIX BUG-5.2: Count NaN scores BEFORE filtering and persist them
         # to a dead-letter file. NaN >= threshold is False, so NaN rows
@@ -1511,7 +1511,7 @@ class StringPipeline(BasePipeline):
         nan_score_count = int(nan_score_mask.sum())
         if nan_score_count > 0:
             logger.warning(
-                "[%s] %d PPI rows have NaN combined_score — will be dropped "
+                "[%s] %d PPI rows have NaN combined_score -- will be dropped "
                 "by the score filter (NaN >= threshold is False). Persisting "
                 "to dead-letter for inspection.",
                 self.source_name,
@@ -1542,20 +1542,20 @@ class StringPipeline(BasePipeline):
         return filtered
 
     # ------------------------------------------------------------------
-    # Clean — stage 3: build STRING → UniProt map
+    # Clean -- stage 3: build STRING -> UniProt map
     # ------------------------------------------------------------------
 
     def _build_string_uniprot_map(self, aliases_path: Path) -> Dict[str, str]:
         """Build a mapping from STRING protein ID to UniProt accession.
 
         Filters the aliases file to ``source == 'UniProt_AC'`` (exact
-        equality, NOT substring — see BUG-3.3). Excludes
-        ``BLAST_UniProt_AC`` entries (BLAST-inferred, ~5–10% error rate)
+        equality, NOT substring -- see BUG-3.3). Excludes
+        ``BLAST_UniProt_AC`` entries (BLAST-inferred, ~5-10% error rate)
         which would corrupt the protein identity layer.
 
         Validates UniProt IDs against the canonical pattern (BUG-3.6)
         and uppercases them (BUG-3.7). Separates canonical from isoform
-        accessions (GAP-3.8) — isoforms are recorded to a dead-letter
+        accessions (GAP-3.8) -- isoforms are recorded to a dead-letter
         file for downstream use.
 
         Returns
@@ -1569,14 +1569,14 @@ class StringPipeline(BasePipeline):
             aliases_path,
         )
         # STRING aliases file is tab-separated, gzipped. We only need 3
-        # of its many columns — use ``usecols`` to bound memory (GAP-8.2).
+        # of its many columns -- use ``usecols`` to bound memory (GAP-8.2).
         # v83 FORENSIC ROOT FIX (P1-3): the previous ``usecols`` lambda
         # received the RAW column name (before the normalization at the
         # next step which lowercases + strips '#'). If STRING changes the
         # header from ``#string_protein_id`` to ``string_protein_id``
         # (dropping the '#'), the old lambda returned False for that
-        # column → it was dropped → the normalization step couldn't
-        # recover it → SchemaValidationError at the missing-cols check
+        # column -> it was dropped -> the normalization step couldn't
+        # recover it -> SchemaValidationError at the missing-cols check
         # below. ROOT FIX: the ``usecols`` lambda normalizes the candidate
         # name the SAME WAY the post-read code does (strip + lstrip '#' +
         # lower), then checks membership in the normalized target set.
@@ -1626,7 +1626,7 @@ class StringPipeline(BasePipeline):
                 "may have changed."
             )
 
-        # FIX BUG-3.3: Sci — STRING aliases have TWO UniProt-related sources:
+        # FIX BUG-3.3: Sci -- STRING aliases have TWO UniProt-related sources:
         #   - "UniProt_AC"        : manually curated, <1% error (USE THIS)
         #   - "BLAST_UniProt_AC"  : BLAST-inferred, ~5-10% error (DO NOT USE)
         # Use exact equality, NOT substring.
@@ -1651,13 +1651,13 @@ class StringPipeline(BasePipeline):
             )
             return {}
 
-        # FIX BUG-4.3: Drop NaN BEFORE astype(str) — astype(str) on NaN
+        # FIX BUG-4.3: Drop NaN BEFORE astype(str) -- astype(str) on NaN
         # produces "nan" which then passes the != "" check.
         uniprot_aliases = uniprot_aliases.dropna(
             subset=[EXPECTED_STRING_ID_COL, EXPECTED_ALIAS_COL]
         ).copy()
 
-        # FIX BUG-3.7: Sci — UniProt accessions are canonically UPPERCASE.
+        # FIX BUG-3.7: Sci -- UniProt accessions are canonically UPPERCASE.
         # The UniProt pipeline writes UPPERCASE to Protein.uniprot_id. STRING
         # aliases may contain mixed-case entries. Normalize or FK lookup
         # fails silently.
@@ -1674,7 +1674,7 @@ class StringPipeline(BasePipeline):
             .str.upper()
         )
 
-        # FIX GAP-3.8: Sci — separate canonical from isoform accessions
+        # FIX GAP-3.8: Sci -- separate canonical from isoform accessions
         # FIRST. Isoforms have the form <canonical>-<N> (e.g. P04637-2 is
         # isoform 2 of p53). They can have different drug-binding profiles
         # (e.g. BRAF-V600K vs BRAF-V600E respond differently to vemurafenib).
@@ -1722,14 +1722,14 @@ class StringPipeline(BasePipeline):
         # via STRING_DEDUP_STRATEGY (GAP-3.11, GAP-12.7).
         #
         # v16 ROOT FIX (DC-6): the previous code made ``"max_score"`` and
-        # ``"first"`` branches byte-identical — both sorted by
+        # ``"first"`` branches byte-identical -- both sorted by
         # (string_id, alias) and kept ``keep="first"``. The operator
         # thought "max_score" was keeping the highest-scored mapping;
         # actually it kept the alphabetically-first alias. For STRING
         # aliases that means a TrEMBL ``A0A0...`` accession beats a
         # Swiss-Prot ``P23219`` accession (because "A" < "P"), even
         # though Swiss-Prot is the curated, canonical form. The result:
-        # STRING → UniProt mapping preferred unreviewed TrEMBL accessions
+        # STRING -> UniProt mapping preferred unreviewed TrEMBL accessions
         # over reviewed Swiss-Prot ones, fragmenting the protein index
         # and bypassing the curated cross-references STRING provides.
         #
@@ -1739,12 +1739,12 @@ class StringPipeline(BasePipeline):
         # chars), then alphabetical. Under ``"first"``, keep the legacy
         # alphabetical-first behavior for backward compatibility.
         #
-        # v93 ROOT FIX (P1-038 — Swiss-Prot detection heuristic flawed):
+        # v93 ROOT FIX (P1-038 -- Swiss-Prot detection heuristic flawed):
         #   The previous heuristic detected Swiss-Prot accessions ONLY
         #   by the 6-char format ([OPQ]\d[A-Z0-9]{3}\d). But UniProt
         #   10-char accessions (new format, e.g. A0A0K3AVT9) can ALSO
         #   be Swiss-Prot (reviewed). The 6-char format is NECESSARY
-        #   but NOT SUFFICIENT for Swiss-Prot — both 6-char and 10-char
+        #   but NOT SUFFICIENT for Swiss-Prot -- both 6-char and 10-char
         #   accessions are used for BOTH Swiss-Prot (reviewed) and
         #   TrEMBL (unreviewed). The correct approach is to query
         #   UniProt's ``reviewed`` status field, which requires a join
@@ -1764,19 +1764,19 @@ class StringPipeline(BasePipeline):
             # Compute a sort key: (reviewed_rank, length, alias).
             # reviewed_rank = 0 for 6-char Swiss-Prot-likely,
             #                  1 for 10-char Swiss-Prot-likely,
-            #                  2 for TrEMBL-likely — so 6-char Swiss-Prot
+            #                  2 for TrEMBL-likely -- so 6-char Swiss-Prot
             #   sorts first, then 10-char Swiss-Prot, then TrEMBL.
             def _accession_sort_key(ac: str) -> Tuple[int, int, str]:
                 ac_stripped = ac.strip()
-                # 6-char [OPQ]\d... — classic Swiss-Prot format.
+                # 6-char [OPQ]\d... -- classic Swiss-Prot format.
                 is_6char_swiss_prot = (
                     len(ac_stripped) == 6
                     and ac_stripped[0] in "OPQ"
                     and ac_stripped[1].isdigit()
                 )
-                # 10-char [OPQ]\d... — new format, MAY be Swiss-Prot
+                # 10-char [OPQ]\d... -- new format, MAY be Swiss-Prot
                 # (reviewed) or TrEMBL (unreviewed). The [OPQ] start is
-                # a weak signal — it's NECESSARY but not SUFFICIENT.
+                # a weak signal -- it's NECESSARY but not SUFFICIENT.
                 # Give it a small bonus (rank 1) over TrEMBL (rank 2)
                 # but NOT as strong as the 6-char signal (rank 0).
                 is_10char_swiss_prot_likely = (
@@ -1813,7 +1813,7 @@ class StringPipeline(BasePipeline):
         return mapping
 
     # ------------------------------------------------------------------
-    # Clean — stage 4: map STRING IDs to UniProt IDs
+    # Clean -- stage 4: map STRING IDs to UniProt IDs
     # ------------------------------------------------------------------
 
     def _map_to_uniprot(
@@ -1822,13 +1822,13 @@ class StringPipeline(BasePipeline):
         """Map protein1/protein2 STRING IDs to UniProt accessions.
 
         Drops rows where either protein fails to map (with dead-letter
-        of the unmapped STRING IDs — GAP-5.4).
+        of the unmapped STRING IDs -- GAP-5.4).
         """
         df = df.copy()
         df["uniprot_a"] = df["protein1"].map(mapping)
         df["uniprot_b"] = df["protein2"].map(mapping)
 
-        # FIX GAP-5.4 — surface unmapped STRING IDs and persist them.
+        # FIX GAP-5.4 -- surface unmapped STRING IDs and persist them.
         unmapped_a_mask = df["uniprot_a"].isna()
         unmapped_b_mask = df["uniprot_b"].isna()
         unmapped_a = df.loc[unmapped_a_mask, "protein1"].dropna().unique().tolist()
@@ -1857,17 +1857,17 @@ class StringPipeline(BasePipeline):
         return df
 
     # ------------------------------------------------------------------
-    # Clean — stage 4a: canonical-order at the STRING-ID level (P1-29)
+    # Clean -- stage 4a: canonical-order at the STRING-ID level (P1-29)
     # ------------------------------------------------------------------
 
     def _canonicalize_protein_order(self, df: pd.DataFrame) -> pd.DataFrame:
         """Canonical-order protein1/protein2 at the STRING-ID level (P1-29).
 
         P1-29 ROOT FIX: previously, canonical ordering was performed
-        AFTER the STRING→UniProt mapping (in ``_canonicalize_and_dedup``),
+        AFTER the STRING->UniProt mapping (in ``_canonicalize_and_dedup``),
         and the swap of ``uniprot_a``/``uniprot_b`` was tracked by
         comparing the original ``protein1`` to the canonicalised
-        ``protein1``. For one-to-one ENSP→UniProt mappings this is
+        ``protein1``. For one-to-one ENSP->UniProt mappings this is
         correct, but for many-to-one mappings (e.g. multiple ENSP
         isoforms map to the same UniProt accession) the per-row swap
         of UniProt IDs is fragile: the swap is decided at the
@@ -1892,8 +1892,30 @@ class StringPipeline(BasePipeline):
         # UniProt accessions after mapping. The DB loader's canonicalization
         # (on integer surrogate PKs) is the real enforcement point for the
         # UNIQUE(protein_a_id, protein_b_id) constraint. This method is
-        # effectively a no-op for the DB constraint — it is kept for
+        # effectively a no-op for the DB constraint -- it is kept for
         # logging/diagnostic value but is NOT a correctness guarantee.
+        #
+        # P1-023 ROOT FIX (Team-2 — clarify "canonical" is LEXICOGRAPHIC,
+        #   not biological):
+        #   The previous comment said "canonical (a ≤ b) ordering" without
+        #   specifying that ``min``/``max`` on STRING IDs (e.g.
+        #   ``9606.ENSP00000269305``) uses LEXICOGRAPHIC string comparison,
+        #   NOT biological ordering (e.g. by Ensembl numeric suffix). A
+        #   future maintainer could misread "canonical" as "biologically
+        #   canonical" (lower ENSP number first) and introduce a
+        #   non-deterministic ordering. ROOT FIX: clarify in the comment
+        #   AND in the log message that the ordering is LEXICOGRAPHIC
+        #   (sufficient for dedup — the same pair in either order
+        #   collapses to the same canonical form — but NOT a biological
+        #   ordering). This is a documentation-only fix; no code change.
+        # LEXICOGRAPHIC canonical ordering (a ≤ b by STRING comparison):
+        #   * Sufficient for dedup: the same pair in either order
+        #     collapses to the same canonical form.
+        #   * NOT a biological ordering: e.g. ``9606.ENSP00000269305``
+        #     < ``9606.ENSP00000357607`` lexicographically, but the
+        #     Ensembl numeric suffixes (269305 vs 357607) are NOT in
+        #     ascending order. This is fine for dedup but do NOT assume
+        #     the canonical form has biological meaning.
         df = df.copy()
         original_protein1 = df["protein1"].copy()
         canonical_a = df[["protein1", "protein2"]].min(axis=1)
@@ -1906,7 +1928,9 @@ class StringPipeline(BasePipeline):
                 "canonical_ordering_protein_ids",
                 len(df),
                 len(df),
-                f"swapped {swap_count} STRING-ID pairs to canonical (a ≤ b) ordering",
+                f"swapped {swap_count} STRING-ID pairs to canonical LEXICOGRAPHIC "
+                f"(a ≤ b by string comparison, NOT biological) ordering — "
+                f"sufficient for dedup, NOT a biological ordering (P1-023)",
                 sample=df.loc[
                     df["protein1"] != original_protein1,
                     ["protein1", "protein2"],
@@ -1915,7 +1939,7 @@ class StringPipeline(BasePipeline):
         return df
 
     # ------------------------------------------------------------------
-    # Clean — stage 5: dedup (post-mapping)
+    # Clean -- stage 5: dedup (post-mapping)
     # ------------------------------------------------------------------
 
     def _canonicalize_and_dedup(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -1923,7 +1947,7 @@ class StringPipeline(BasePipeline):
 
         P1-29 ROOT FIX: the canonical-ordering logic that used to live
         here has been moved to ``_canonicalize_protein_order`` which
-        runs BEFORE the STRING→UniProt mapping. With the protein IDs
+        runs BEFORE the STRING->UniProt mapping. With the protein IDs
         already in canonical order, the mapping naturally produces
         canonical-ordered UniProt IDs (``uniprot_a <= uniprot_b``),
         so no post-hoc UniProt swap is needed. This method now does
@@ -1936,15 +1960,32 @@ class StringPipeline(BasePipeline):
         (max_score / mean_score / first).
         """
         df = df.copy()
-        # FIX GAP-3.11 — dedup with configurable strategy.
+        # FIX GAP-3.11 -- dedup with configurable strategy.
         # Sci: When multiple STRING ENSP pairs collapse to one UniProt pair
         # (e.g. isoforms of the same protein), aggregate scores by MAX
         # (strongest evidence). Mean would dilute strong evidence with weak;
         # min would discard strong evidence entirely.
         before_dedup = len(df)
         if STRING_DEDUP_STRATEGY == "max_score":
+            # P1-044 FORENSIC ROOT FIX (Team 4 -- non-deterministic dedup):
+            # The previous code used ``df.sort_values("combined_score",
+            # ascending=False)`` which uses quicksort by default (UNSTABLE).
+            # For rows with the SAME ``combined_score``, the order after
+            # sort was implementation-defined. ``drop_duplicates(keep="first")``
+            # then kept whichever row happened to come first -- which could
+            # differ across pandas versions or DataFrame sizes. The same
+            # STRING input produced slightly different KG edges across runs.
+            # Downstream ML training was NOT reproducible.
+            #
+            # ROOT FIX: add ``kind="mergesort"`` (STABLE sort) so the
+            # pre-sort order is preserved for ties. Combined with the
+            # ``.copy()`` (which preserves the post-sort order), the dedup
+            # is now fully deterministic -- the same input ALWAYS produces
+            # the same output, regardless of pandas version or DataFrame
+            # size. This matches the OMIM pipeline's pattern (line 80
+            # uses ``kind="mergesort"`` for the same reason).
             df = (
-                df.sort_values("combined_score", ascending=False)
+                df.sort_values("combined_score", ascending=False, kind="mergesort")
                 .drop_duplicates(subset=["uniprot_a", "uniprot_b"], keep="first")
                 .copy()
             )
@@ -1958,7 +1999,7 @@ class StringPipeline(BasePipeline):
             # ``KeyError: 'protein1'`` because it tried to read
             # df["protein1"] which no longer existed (audit finding 7).
             # The fix includes protein1/protein2/source in the agg
-            # dict using the "first" aggregator — within a group (after
+            # dict using the "first" aggregator -- within a group (after
             # canonicalization), all rows have identical protein1/
             # protein2/source values, so "first" is a safe no-op
             # aggregator that preserves the columns.
@@ -1985,7 +2026,7 @@ class StringPipeline(BasePipeline):
         self._emit_metric("string.duplicates_collapsed", dedup_count)
         if dedup_count > 0:
             logger.info(
-                "[%s] Collapsed %d duplicate PPI pairs (%d → %d) using strategy %s.",
+                "[%s] Collapsed %d duplicate PPI pairs (%d -> %d) using strategy %s.",
                 self.source_name,
                 dedup_count,
                 before_dedup,
@@ -1996,7 +2037,7 @@ class StringPipeline(BasePipeline):
         return df
 
     # ------------------------------------------------------------------
-    # Clean — stage 6: merge detailed sub-scores
+    # Clean -- stage 6: merge detailed sub-scores
     # ------------------------------------------------------------------
 
     def _merge_detailed_scores(
@@ -2005,17 +2046,17 @@ class StringPipeline(BasePipeline):
         """Merge sub-scores from the detailed file if present & valid (BUG-P0-3).
 
         Sci: The basic links file (9606.protein.links.*.txt.gz) contains
-        ONLY protein1, protein2, combined_score — NO sub-score columns.
+        ONLY protein1, protein2, combined_score -- NO sub-score columns.
         The detailed file (protein.links.detailed.*.txt.gz) contains
         the 7 sub-scores.  The pre-fix code did
-        ``links_df[detailed_col].combine_first(links_df.get(col))`` —
+        ``links_df[detailed_col].combine_first(links_df.get(col))`` --
         ``links_df.get(col)`` returns None (the object, not a Series),
         and ``Series.combine_first(None)`` raises
         ``AttributeError: 'NoneType' object has no attribute 'dtype'``.
         """
         if not detailed_path.exists():
             logger.info(
-                "[%s] Detailed file not present — sub-scores will be NULL.",
+                "[%s] Detailed file not present -- sub-scores will be NULL.",
                 self.source_name,
             )
             # Still add the sub-score columns as NaN so the output schema is stable.
@@ -2027,7 +2068,7 @@ class StringPipeline(BasePipeline):
         # FIX GAP-9.1: Verify file integrity before reading.
         if not self._verify_file_integrity(detailed_path):
             logger.error(
-                "[%s] Detailed file failed integrity check — skipping sub-score merge.",
+                "[%s] Detailed file failed integrity check -- skipping sub-score merge.",
                 self.source_name,
             )
             self._emit_metric("string.detailed_file_corrupted", 1)
@@ -2086,7 +2127,7 @@ class StringPipeline(BasePipeline):
         ]
         if len(available_detail_cols) <= 2:
             logger.warning(
-                "[%s] Detailed file has no sub-score columns — skipping merge.",
+                "[%s] Detailed file has no sub-score columns -- skipping merge.",
                 self.source_name,
             )
             for col in DETAILED_SUBSCORE_COLS:
@@ -2101,7 +2142,7 @@ class StringPipeline(BasePipeline):
             suffixes=("", "_detailed"),
         )
         # FIX BUG-P0-3: The basic links file NEVER has sub-score columns.
-        # Don't use combine_first — just assign directly.
+        # Don't use combine_first -- just assign directly.
         for col in DETAILED_SUBSCORE_COLS:
             detailed_col = f"{col}_detailed"
             if detailed_col in df.columns:
@@ -2118,7 +2159,7 @@ class StringPipeline(BasePipeline):
         return df
 
     # ------------------------------------------------------------------
-    # Clean — stage 7: build output
+    # Clean -- stage 7: build output
     # ------------------------------------------------------------------
 
     def _build_output(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -2133,7 +2174,7 @@ class StringPipeline(BasePipeline):
             - experimental_score, database_score, textmining_score  (DB columns)
             - score_json                    (JSON-packed sub-scores)
             - created_at, string_version, pipeline_run_id, source_url, source_sha256
-              (provenance — NOT loaded to DB; for CSV audit only — GAP-14.3)
+              (provenance -- NOT loaded to DB; for CSV audit only -- GAP-14.3)
         """
         # FIX GAP-2.7: Use self.source_name (not hardcoded "string").
         # FIX GUARD-2.1: Output the schema-conformant column names
@@ -2147,7 +2188,7 @@ class StringPipeline(BasePipeline):
             "source": self.source_name,
         })
 
-        # FIX GAP-3.5 — pack the 4 sub-scores not in dedicated columns into
+        # FIX GAP-3.5 -- pack the 4 sub-scores not in dedicated columns into
         # score_json (database model has a Text field for this).
         subscore_cols = list(JSON_SCORE_COLUMNS)
 
@@ -2168,7 +2209,7 @@ class StringPipeline(BasePipeline):
             else:
                 output_df[col] = np.nan
         # v84 FORENSIC ROOT FIX (BUG #42): the previous code used
-        # ``df.apply(_pack_score_json, axis=1)`` — O(N) Python with N
+        # ``df.apply(_pack_score_json, axis=1)`` -- O(N) Python with N
         # function calls. On the 4M-row STRING human PPI network, this
         # took minutes to hours. ROOT FIX: vectorize the score_json
         # packing using a list comprehension over zipped columns. This
@@ -2206,14 +2247,14 @@ class StringPipeline(BasePipeline):
             else:
                 output_df[db_col] = np.nan
 
-        # FIX GAP-14.3 — provenance columns (CSV only, NOT loaded to DB).
+        # FIX GAP-14.3 -- provenance columns (CSV only, NOT loaded to DB).
         output_df["created_at"] = datetime.now(timezone.utc).isoformat()
         output_df["string_version"] = self.source_version
         output_df["pipeline_run_id"] = self.run_id
         output_df["source_url"] = STRING_PROTEIN_LINKS_URL
         output_df["source_sha256"] = getattr(self, "_sha256_raw", None)
 
-        # v29 ROOT FIX (audit P1-24): ID format divergence — normalize
+        # v29 ROOT FIX (audit P1-24): ID format divergence -- normalize
         # UniProt accessions to canonical form before writing. STRING's
         # alias file occasionally returns lowercase accessions (e.g.
         # ``"p23219"`` instead of ``"P23219"``); without this normalization
@@ -2231,7 +2272,7 @@ class StringPipeline(BasePipeline):
         return output_df
 
     # ------------------------------------------------------------------
-    # Clean — stage 8: validate + repair
+    # Clean -- stage 8: validate + repair
     # ------------------------------------------------------------------
 
     def _validate_and_repair_output(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -2245,12 +2286,12 @@ class StringPipeline(BasePipeline):
 
         # Type repair: combined_score must be int.
         # FIX BUG-3.2 / BUG-5.1: NaN combined_score is quarantined, NOT
-        # filled with 0 (which would mean "no interaction" — a false negative).
+        # filled with 0 (which would mean "no interaction" -- a false negative).
         missing_score_mask = df["combined_score"].isna()
         if missing_score_mask.any():
             missing_count = int(missing_score_mask.sum())
             logger.warning(
-                "[%s] %d PPI records have missing combined_score — quarantining "
+                "[%s] %d PPI records have missing combined_score -- quarantining "
                 "(NOT filling with 0, which would mean 'no interaction').",
                 self.source_name,
                 missing_count,
@@ -2299,7 +2340,7 @@ class StringPipeline(BasePipeline):
         return df
 
     # ------------------------------------------------------------------
-    # Clean — sidecar writers
+    # Clean -- sidecar writers
     # ------------------------------------------------------------------
 
     def _write_metadata_sidecar(self) -> Path:
@@ -2361,14 +2402,14 @@ class StringPipeline(BasePipeline):
         ``self.pipeline_name`` / ``self.run_id`` / ``self.correlation_id``.
 
         Stages:
-            1. Resolve ``uniprot_id`` → ``protein.id`` via
+            1. Resolve ``uniprot_id`` -> ``protein.id`` via
                ``get_uniprot_to_protein_id_map`` (filtered to the unique
-               set for performance — GAP-8.5).
+               set for performance -- GAP-8.5).
             2. Drop rows where FK lookup fails (dead-letter the unmapped
-               UniProt IDs — GAP-5.4, GAP-11.3).
+               UniProt IDs -- GAP-5.4, GAP-11.3).
             3. Ensure ``protein_a_id <= protein_b_id`` (defense-in-depth;
                ``_pre_validate_ppi`` in ``loaders.py`` also enforces this
-               and logs a WARNING for each swap — GAP-4.5). v91 ROOT FIX
+               and logs a WARNING for each swap -- GAP-4.5). v91 ROOT FIX
                (BUG #9): now allows a_id == b_id (homodimers) with
                is_homodimer=True flag.
             4. Self-interactions (homodimers) are kept with is_homodimer=True
@@ -2384,7 +2425,7 @@ class StringPipeline(BasePipeline):
         int
             ``inserted + updated`` (records that actually reached the DB),
             NOT ``int(UpsertResult)`` which is ``total_input``
-            (GAP-2.3 — total_input includes quarantined + failed).
+            (GAP-2.3 -- total_input includes quarantined + failed).
         """
         if df.empty:
             logger.info("[%s] No PPI records to load", self.source_name)
@@ -2436,7 +2477,7 @@ class StringPipeline(BasePipeline):
             if owns_session and session is not None:
                 # FIX-P1-B-1 (audit P1): the previous code called
                 #   ctx.__exit__(None, None, None)
-                # which signals "no exception" — so the context manager
+                # which signals "no exception" -- so the context manager
                 # COMMITTED partial data even when an exception was raised
                 # mid-load (and after the rollback above already ran).
                 # ROOT FIX: pass the actual exc_info so the context
@@ -2455,7 +2496,7 @@ class StringPipeline(BasePipeline):
                     pass
 
     def _load_with_session(self, df: pd.DataFrame, session: Session) -> int:
-        """Inner load logic — assumes session is already open."""
+        """Inner load logic -- assumes session is already open."""
         # FIX GAP-14.5: Verify DB schema before loading.
         self._verify_db_schema(session)
 
@@ -2472,7 +2513,7 @@ class StringPipeline(BasePipeline):
         # sets do NOT support), it raises ``TypeError: 'set' object is not
         # subscriptable``. ROOT FIX: materialize the set into a sorted list
         # before passing. Sorting makes the call deterministic (same input
-        # → same SQL bind-parameter order → same query plan cache hit),
+        # -> same SQL bind-parameter order -> same query plan cache hit),
         # which is a small but real win on Postgres pgbouncer.
         unique_uniprot = set(load_df["uniprot_id_a"].dropna().astype(str)).union(
             load_df["uniprot_id_b"].dropna().astype(str)
@@ -2486,7 +2527,7 @@ class StringPipeline(BasePipeline):
         # FIX GAP-15.8: Assert UniProt pipeline has run.
         if not uniprot_map:
             raise RuntimeError(
-                "UniProt→Protein.id mapping is empty. The UniProt pipeline "
+                "UniProt->Protein.id mapping is empty. The UniProt pipeline "
                 "must run before the STRING pipeline. Run: "
                 "python -m pipelines uniprot"
             )
@@ -2536,7 +2577,7 @@ class StringPipeline(BasePipeline):
         # with _pre_validate_ppi in loaders.py).
         swap_mask = load_df["protein_a_id"] > load_df["protein_b_id"]
         if swap_mask.any():
-            # GAP-4.11: .to_numpy() strips index alignment intentionally —
+            # GAP-4.11: .to_numpy() strips index alignment intentionally --
             # both sides use the same swap_mask index, so alignment is
             # preserved by position.
             load_df.loc[swap_mask, ["protein_a_id", "protein_b_id"]] = (
@@ -2567,7 +2608,7 @@ class StringPipeline(BasePipeline):
             if inconsistent.any():
                 count = int(inconsistent.sum())
                 logger.error(
-                    "[%s] %d PPI rows have inconsistent UniProt→Protein.id "
+                    "[%s] %d PPI rows have inconsistent UniProt->Protein.id "
                     "mapping after the swap. This is a swap-logic bug. Quarantining.",
                     self.source_name,
                     count,
@@ -2587,7 +2628,7 @@ class StringPipeline(BasePipeline):
         if dedup_count > 0:
             logger.warning(
                 "[%s] %d PPI rows had duplicate (protein_a_id, protein_b_id) "
-                "after FK resolution — kept first. This indicates two UniProt "
+                "after FK resolution -- kept first. This indicates two UniProt "
                 "accessions map to the same Protein.id, which should be investigated.",
                 self.source_name,
                 dedup_count,
@@ -2597,7 +2638,7 @@ class StringPipeline(BasePipeline):
         # FIX BUG-3.1: Drop self-interactions (homodimers) with WARNING +
         # dead-letter. The DB schema's chk_ppi_ordered constraint forbids
         # a_id == b_id. Homodimers are biologically real and clinically
-        # critical (receptor dimerization — EGFR, HER2, p53 tetramerization).
+        # critical (receptor dimerization -- EGFR, HER2, p53 tetramerization).
         # TODO(schema-migration): When the constraint is relaxed, set
         # STRING_DROP_SELF_INTERACTIONS=False and load homodimers with an
         # is_homodimer flag.
@@ -2641,22 +2682,22 @@ class StringPipeline(BasePipeline):
             if col in load_df.columns:
                 final_df[col] = load_df[col].values
             else:
-                # GAP-4.7: Use np.nan, not None — np.nan is float-dtype,
+                # GAP-4.7: Use np.nan, not None -- np.nan is float-dtype,
                 # CSV-compatible.
                 final_df[col] = np.nan
 
         # Type coercions.
         final_df["protein_a_id"] = final_df["protein_a_id"].astype(int)
         final_df["protein_b_id"] = final_df["protein_b_id"].astype(int)
-        # FIX BUG-3.2: Do NOT fillna(0) — NaN means "missing", 0 means
+        # FIX BUG-3.2: Do NOT fillna(0) -- NaN means "missing", 0 means
         # "no interaction". Quarantine was already done in clean().
         # Here we just coerce to int (NaN would have been dropped).
         final_df["combined_score"] = final_df["combined_score"].astype(int)
         # FIX GAP-2.7 / GAP-14.2: Use self.source_name (controlled vocab).
         final_df["source"] = self.source_name
 
-        # Range validation (defensive — _pre_validate_ppi also does this).
-        # v29 ROOT FIX (audit P1-18): was assert — stripped by python -O. Use raise for production validation.
+        # Range validation (defensive -- _pre_validate_ppi also does this).
+        # v29 ROOT FIX (audit P1-18): was assert -- stripped by python -O. Use raise for production validation.
         if not final_df["combined_score"].between(0, 1000).all():
             raise ValueError("combined_score out of [0, 1000]")
 
@@ -2731,7 +2772,7 @@ class StringPipeline(BasePipeline):
         return loaded_count
 
     # ------------------------------------------------------------------
-    # Load — DB schema verification
+    # Load -- DB schema verification
     # ------------------------------------------------------------------
 
     def _verify_db_schema(self, session: Session) -> None:
@@ -2786,7 +2827,7 @@ class StringPipeline(BasePipeline):
         CRITICAL FIX (scientific correctness / audit-trail integrity):
         The original implementation used ``datetime.now(timezone.utc)``
         instead of ``self.start_time``, which created a DIFFERENT row
-        than the one the base class later UPDATEs — resulting in
+        than the one the base class later UPDATEs -- resulting in
         duplicate audit rows and PPI lineage IDs pointing to orphan
         rows that never get a final status. Use ``self.start_time`` to
         match the base class keying exactly.
@@ -2796,7 +2837,7 @@ class StringPipeline(BasePipeline):
         int or None
             The integer ``pipeline_runs.id`` of the row for this run,
             or None if the lookup-or-create failed (in which case PPI
-            rows will have NULL pipeline_run_id — flagged in the audit
+            rows will have NULL pipeline_run_id -- flagged in the audit
             log but not fatal).
         """
         try:
@@ -2805,7 +2846,7 @@ class StringPipeline(BasePipeline):
             # Mirror the base class keying EXACTLY: source + run_date
             # where run_date == self.start_time (the moment run() started).
             # The base class uses `started_at if started_at is not None
-            # else now()` — we replicate that fallback here.
+            # else now()` -- we replicate that fallback here.
             if self.start_time is not None:
                 run_date = self.start_time
             else:
@@ -2813,7 +2854,7 @@ class StringPipeline(BasePipeline):
             # v83 FORENSIC ROOT FIX (P1-5): the previous code truncated
             # microseconds here (``run_date = run_date.replace(microsecond=0)``)
             # but the base class's ``_write_run_log`` (base_pipeline.py:4823)
-            # does NOT truncate — it queries with full microsecond precision.
+            # does NOT truncate -- it queries with full microsecond precision.
             # So the STRING-created row (microseconds=0) was NOT found by
             # the base-class query, and the base class INSERTed a SECOND
             # PipelineRun row with full microseconds. Result: two audit
@@ -2867,10 +2908,10 @@ class StringPipeline(BasePipeline):
 
         v83 FORENSIC ROOT FIX (P2-17): the previous code unconditionally
         subtracted 1 for the header line, then clamped with ``max(0, ...)``.
-        For an EMPTY file (0 lines), this produced ``max(0, -1) = 0`` —
+        For an EMPTY file (0 lines), this produced ``max(0, -1) = 0`` --
         correct by accident, but the ``-1`` was misleading. For a
-        HEADER-ONLY file (1 line), it produced ``max(0, 0) = 0`` — also
-        correct. ROOT FIX: explicit guard — if the file has 0 lines
+        HEADER-ONLY file (1 line), it produced ``max(0, 0) = 0`` -- also
+        correct. ROOT FIX: explicit guard -- if the file has 0 lines
         (empty) or 1 line (header only), return 0 directly without
         the subtraction. This makes the intent clear and avoids the
         confusing ``max(0, -1)`` pattern.

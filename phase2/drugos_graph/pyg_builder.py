@@ -95,10 +95,16 @@ Companion .meta.json:
     config (sanitized), input_checksums, node_type_counts,
     edge_type_counts, feature_provenance.
 
-# FIX(issue-56): comprehensive unit test suite for pyg_builder lives in tests/test_pyg_builder.py
-# FIX(issue-57): parametrized edge case tests live in tests/test_pyg_builder.py
-# FIX(issue-58): output schema validation tests live in tests/test_pyg_builder.py
-# FIX(issue-59): regression tests for safety-critical issues live in tests/test_pyg_builder.py
+# FIX(issue-56): comprehensive unit test suite for pyg_builder lives in
+# phase2/tests/test_pyg_builder.py (P2-049 ROOT FIX: the previous
+# docstring referenced "tests/test_pyg_builder.py" — a path that does
+# NOT exist in the repo. The misleading reference made maintainers
+# believe tests covered the code when they did not. Root fix: create
+# the actual test file at phase2/tests/test_pyg_builder.py and update
+# the docstring to point to the correct relative path.)
+# FIX(issue-57): parametrized edge case tests live in phase2/tests/test_pyg_builder.py
+# FIX(issue-58): output schema validation tests live in phase2/tests/test_pyg_builder.py
+# FIX(issue-59): regression tests for safety-critical issues live in phase2/tests/test_pyg_builder.py
 #
 # Optional dependencies
 # ---------------------
@@ -111,7 +117,8 @@ Audit status
 ------------
 All 89 findings from Forensic_Audit_pyg_builder.pdf are addressed.
 Each fix is marked ``# FIX(issue-<N>)`` in the code. Regression
-tests live in ``tests/test_pyg_builder.py``.
+tests live in ``phase2/tests/test_pyg_builder.py`` (P2-049 ROOT FIX:
+corrected path from "tests/test_pyg_builder.py" which did not exist).
 
 Security policy (FDA / HIPAA compliance):
     1. Default load uses weights_only=True.
@@ -123,10 +130,10 @@ Security policy (FDA / HIPAA compliance):
 # FIX(issue-76): documented security policy for FDA/HIPAA compliance.
 # FIX(issue-78): documented .pt file format spec.
 # FIX(issue-82): consolidated output format documentation.
-# FIX(issue-56): unit test suite lives in tests/test_pyg_builder.py
-# FIX(issue-57): edge case tests live in tests/test_pyg_builder.py
-# FIX(issue-58): output schema tests live in tests/test_pyg_builder.py
-# FIX(issue-59): regression tests live in tests/test_pyg_builder.py
+# FIX(issue-56): unit test suite lives in phase2/tests/test_pyg_builder.py
+# FIX(issue-57): edge case tests live in phase2/tests/test_pyg_builder.py
+# FIX(issue-58): output schema tests live in phase2/tests/test_pyg_builder.py
+# FIX(issue-59): regression tests live in phase2/tests/test_pyg_builder.py
 
 import copy
 import hashlib
@@ -1790,34 +1797,45 @@ class PyGBuilder(GraphBuilderProtocol):
                     if rev_key not in data.edge_types:
                         edge_index = data[et].edge_index
                         if edge_index.numel() > 0:
+                            # P2-017 ROOT FIX (latent edge_attr bug):
+                            # The manual ``torch.flip(edge_index, [0])``
+                            # below only reverses ``edge_index``
+                            # (swaps src/dst per edge), NOT ``edge_attr``.
+                            # If ``edge_attr`` is ever added (e.g. for
+                            # edge confidence scores, attention bias),
+                            # the forward ``edge_attr`` would be paired
+                            # with the reversed ``edge_index``, producing
+                            # edges with WRONG attributes — silent
+                            # corruption. The v100 comment acknowledged
+                            # this but did not enforce it. ROOT FIX:
+                            # runtime assertion that ``edge_attr`` is
+                            # absent. If the assertion fires, the
+                            # developer MUST migrate to ``ToUndirected()``
+                            # from ``torch_geometric.transforms`` which
+                            # handles both ``edge_index`` and
+                            # ``edge_attr``.
+                            _existing_edge_attr = data[et].get(
+                                "edge_attr", None
+                            )
+                            assert (
+                                _existing_edge_attr is None
+                            ), (
+                                f"P2-017 ROOT FIX: edge type {et} has "
+                                f"edge_attr set (shape "
+                                f"{_existing_edge_attr.shape}). The "
+                                f"manual torch.flip(edge_index, [0]) "
+                                f"would reverse edge_index but NOT "
+                                f"edge_attr, producing reverse edges "
+                                f"with WRONG attributes. Migrate to "
+                                f"ToUndirected() from "
+                                f"torch_geometric.transforms which "
+                                f"handles both. (P2-017 root fix — "
+                                f"latent edge_attr corruption guard)"
+                            )
                             data[
                                 dst,
                                 f"{REVERSE_EDGE_PREFIX}{rel}",
                                 src,
-                            # v100 ROOT FIX (BUG P2-043 — HGT / No
-                            # ToUndirected): the manual
-                            # ``torch.flip(edge_index, [0])`` below
-                            # only reverses ``edge_index`` (swaps
-                            # src/dst per edge), NOT ``edge_attr``.
-                            # HGTConv in PyG 2.6+ expects
-                            # ``edge_index_dict`` to contain BOTH
-                            # directions for each edge type, AND if
-                            # ``edge_attr`` is present it must also be
-                            # reversed for the reverse edge type.
-                            # ROOT FIX (documentation): a grep confirms
-                            # ``edge_attr`` does NOT appear anywhere in
-                            # pyg_builder.py outside comments, so this
-                            # pipeline never sets ``edge_attr`` — the
-                            # manual flip is functionally correct HERE.
-                            # If a future change adds ``edge_attr``,
-                            # replace BOTH ``torch.flip`` call sites
-                            # (here and ~line 1773) with
-                            # ``ToUndirected()`` from
-                            # ``torch_geometric.transforms`` which
-                            # handles both ``edge_index`` and
-                            # ``edge_attr``. We do NOT replace now to
-                            # avoid changing behavior and risking a
-                            # pipeline regression.
                             ].edge_index = torch.flip(edge_index, [0])
 
             # Also add reverse for target type (needed by RandomLinkSplit)
@@ -1826,20 +1844,33 @@ class PyGBuilder(GraphBuilderProtocol):
             if rev_key not in data.edge_types:
                 edge_index = data[target_edge_type].edge_index
                 if edge_index.numel() > 0:
+                    # P2-017 ROOT FIX (latent edge_attr bug — second
+                    # torch.flip call site): see the matching assertion
+                    # above the first torch.flip call site (~line 1790)
+                    # for the full rationale. The manual flip only
+                    # reverses edge_index, not edge_attr; if edge_attr
+                    # is ever added, the reverse edges would carry the
+                    # WRONG attributes. Runtime assertion enforces the
+                    # invariant.
+                    _existing_edge_attr_t = data[target_edge_type].get(
+                        "edge_attr", None
+                    )
+                    assert (
+                        _existing_edge_attr_t is None
+                    ), (
+                        f"P2-017 ROOT FIX: target edge type "
+                        f"{target_edge_type} has edge_attr set (shape "
+                        f"{_existing_edge_attr_t.shape}). The manual "
+                        f"torch.flip(edge_index, [0]) would reverse "
+                        f"edge_index but NOT edge_attr, producing "
+                        f"reverse edges with WRONG attributes. "
+                        f"Migrate to ToUndirected() from "
+                        f"torch_geometric.transforms which handles "
+                        f"both. (P2-017 root fix — latent edge_attr "
+                        f"corruption guard, second call site)"
+                    )
                     data[
                         dst, f"{REVERSE_EDGE_PREFIX}{rel}", src
-                    # v100 ROOT FIX (BUG P2-043 — HGT / No
-                    # ToUndirected): see the matching comment at the
-                    # first ``torch.flip`` call site (~line 1763) for
-                    # the full rationale. In short: the manual flip
-                    # only reverses ``edge_index``, not ``edge_attr``;
-                    # this pipeline does NOT set ``edge_attr``
-                    # (grep-verified), so the manual flip is correct
-                    # HERE. If ``edge_attr`` is ever added, replace
-                    # BOTH ``torch.flip`` call sites with
-                    # ``ToUndirected()`` from
-                    # ``torch_geometric.transforms`` which handles
-                    # both ``edge_index`` and ``edge_attr``.
                     ].edge_index = torch.flip(edge_index, [0])
 
             # FIX(issue-19): seeded RandomLinkSplit for
@@ -1856,20 +1887,42 @@ class PyGBuilder(GraphBuilderProtocol):
             # Build kwargs dict, only including parameters supported by
             # the installed PyG version. PyG >= 2.6 added
             # add_negative_val_samples / add_negative_test_samples.
+            #
+            # v102 ROOT FIX (P2-045): the previous code set
+            # ``edge_types=[target_edge_type]`` ONLY — splitting just the
+            # forward edge. The reverse edge (Disease, rev_treats,
+            # Compound) was added to the data BEFORE RandomLinkSplit
+            # (lines 1825-1843) but NOT in the edge_types list, so
+            # RandomLinkSplit did NOT split it. After the split, train_data
+            # had the FULL reverse edge set, val_data had the FULL reverse
+            # edge set, test_data had the FULL reverse edge set. The
+            # reverse edges LEAKED between splits — the GNN could "see"
+            # val/test treats information via the reverse edge during
+            # training. AUC was inflated.
+            #
+            # ROOT FIX: add the reverse edge type to the ``edge_types``
+            # list so RandomLinkSplit splits BOTH the forward AND reverse
+            # edges in parallel. Each split's message-passing edges will
+            # contain ONLY the train/val/test portion of BOTH directions —
+            # no leakage. The ``rev_edge_types`` parameter is RETAINED
+            # because PyG uses it to coordinate the splits (so the held-out
+            # forward edge's corresponding reverse is also held out from
+            # message passing in the same split).
+            _rev_edge_type_tuple = (
+                target_edge_type[2],
+                f"{REVERSE_EDGE_PREFIX}{target_edge_type[1]}",
+                target_edge_type[0],
+            )
             _rls_kwargs: Dict[str, Any] = {
                 "num_val": self.config.val_ratio,
                 "num_test": self.config.test_ratio,
                 "disjoint_train_ratio": self.config.disjoint_train_ratio,
                 "neg_sampling_ratio": self.config.neg_sampling_ratio,
                 "add_negative_train_samples": self.config.add_negative_train_samples,
-                "edge_types": [target_edge_type],
-                "rev_edge_types": [
-                    (
-                        target_edge_type[2],
-                        f"{REVERSE_EDGE_PREFIX}{target_edge_type[1]}",
-                        target_edge_type[0],
-                    )
-                ],
+                # v102 P2-045: split BOTH forward AND reverse edges so
+                # neither direction leaks between train/val/test splits.
+                "edge_types": [target_edge_type, _rev_edge_type_tuple],
+                "rev_edge_types": [_rev_edge_type_tuple],
             }
             import inspect as _rls_inspect
             _rls_params = set(_rls_inspect.signature(
@@ -2080,12 +2133,29 @@ class PyGBuilder(GraphBuilderProtocol):
                     "val": perm[n_train:n_train + n_val],
                     "test": perm[n_train + n_val:n_train + n_val + n_test],
                 }
-                self.logger.info(
-                    f"node_disjoint_split partition[{ntype}]: "
-                    f"train={n_nodes and n_train} ({n_nodes and n_train/n_nodes:.1%}), "
-                    f"val={n_nodes and n_val} ({n_nodes and n_val/n_nodes:.1%}), "
-                    f"test={n_nodes and n_test} ({n_nodes and n_test/n_nodes:.1%})"
-                )
+                # v102 ROOT FIX (P2-040): replace the cryptic
+                # ``n_nodes and n_train`` short-circuit (which evaluates
+                # to ``n_train`` when ``n_nodes > 0`` else ``0``) with
+                # explicit guards. The previous form produced
+                # "train=0 (0.0%)" when n_nodes=0, which was technically
+                # correct but unreadable — operators couldn't tell
+                # whether the split was empty because there were no
+                # nodes OR because of a partition bug. Now the log
+                # clearly distinguishes the two cases AND shows the
+                # total node count for context.
+                if n_nodes > 0:
+                    self.logger.info(
+                        f"node_disjoint_split partition[{ntype}]: "
+                        f"train={n_train} ({n_train/n_nodes:.1%} of {n_nodes}), "
+                        f"val={n_val} ({n_val/n_nodes:.1%} of {n_nodes}), "
+                        f"test={n_test} ({n_test/n_nodes:.1%} of {n_nodes})"
+                    )
+                else:
+                    self.logger.info(
+                        f"node_disjoint_split partition[{ntype}]: "
+                        f"train=0 (no nodes), val=0 (no nodes), "
+                        f"test=0 (no nodes)"
+                    )
 
             # Step 2: build the three HeteroData outputs. For each
             # edge type, assign an edge to a split IFF both its
@@ -2407,7 +2477,7 @@ class PyGBuilder(GraphBuilderProtocol):
             except Exception:
                 pass  # defensive — fall back to per-split filtering
 
-            def _make_split(mask_indices, generate_negatives: bool = False):
+            def _make_split(mask_indices, generate_negatives: bool = False, split_name: str = ""):
                 split_data = HeteroData()
                 # v72 ROOT FIX (P2C-013): CLONE node features per split.
                 # The previous code assigned ``split_data[nt].x = data[nt].x``
@@ -2587,20 +2657,99 @@ class PyGBuilder(GraphBuilderProtocol):
                         # indexing during sampling.
                         split_src_list = sorted(split_src_ids)
                         split_dst_list = sorted(split_dst_ids)
-                        # Defensive: fall back to full-graph range if
-                        # the split has too few unique entities to
-                        # support negative generation (e.g. a split
-                        # with only 1 unique drug would produce 0
-                        # valid negatives with the inductive pool).
+                        # P2-018 ROOT FIX (transductive negative
+                        # fallback via full-graph node count):
+                        # The previous code silently fell back to
+                        # ``split_src_list = list(range(data[...].num_nodes))``
+                        # when the split had < 2 unique src/dst
+                        # entities. This re-introduced the TRANSDUCTIVE
+                        # negative sampling that the v81 P0-F3 fix was
+                        # specifically designed to prevent: held-out
+                        # drugs with random-init embeddings become
+                        # trivially distinguishable negatives
+                        # (random init = large translational distance
+                        # = "negative" with high confidence), inflating
+                        # AUC by 0.1-0.3. The fallback undid the
+                        # inductive fix for the edge case that needs
+                        # it MOST (small splits).
+                        #
+                        # ROOT FIX: RAISE a clear error explaining
+                        # the problem and offering an env-var override
+                        # for dev runs (where small splits are
+                        # unavoidable and the operator accepts the
+                        # AUC inflation). The override is OFF by
+                        # default — production MUST NOT silently
+                        # fall back to transductive negatives.
                         _min_pool = 2
+                        _allow_small_split = (
+                            os.environ.get(
+                                "DRUGOS_ALLOW_SMALL_SPLIT_NEGATIVES", ""
+                            ) == "1"
+                        )
                         if len(split_src_list) < _min_pool:
-                            split_src_list = list(range(
-                                data[target_edge_type[0]].num_nodes
-                            ))
+                            if _allow_small_split:
+                                self.logger.warning(
+                                    "P2-018: split has only %d unique "
+                                    "source entities (< %d). "
+                                    "DRUGOS_ALLOW_SMALL_SPLIT_NEGATIVES=1 "
+                                    "is set — falling back to "
+                                    "TRANSDUCTIVE negatives (full-"
+                                    "graph node count). Val/test AUC "
+                                    "will be INFLATED by 0.1-0.3. "
+                                    "Dev mode ONLY.",
+                                    len(split_src_list), _min_pool,
+                                )
+                                split_src_list = list(range(
+                                    data[target_edge_type[0]].num_nodes
+                                ))
+                            else:
+                                raise RuntimeError(
+                                    f"temporal_split: split has only "
+                                    f"{len(split_src_list)} unique "
+                                    f"source entities (< {_min_pool}) "
+                                    f"for inductive negative sampling. "
+                                    f"Falling back to transductive "
+                                    f"(full-graph) negatives would "
+                                    f"inflate AUC by 0.1-0.3 (v81 "
+                                    f"P0-F3 root cause). Use a larger "
+                                    f"split OR set "
+                                    f"DRUGOS_ALLOW_SMALL_SPLIT_NEGATIVES=1 "
+                                    f"to permit the transductive "
+                                    f"fallback (dev mode only — AUC "
+                                    f"will be inflated). (P2-018 root fix)"
+                                )
                         if len(split_dst_list) < _min_pool:
-                            split_dst_list = list(range(
-                                data[target_edge_type[2]].num_nodes
-                            ))
+                            if _allow_small_split:
+                                self.logger.warning(
+                                    "P2-018: split has only %d unique "
+                                    "destination entities (< %d). "
+                                    "DRUGOS_ALLOW_SMALL_SPLIT_NEGATIVES=1 "
+                                    "is set — falling back to "
+                                    "TRANSDUCTIVE negatives (full-"
+                                    "graph node count). Val/test AUC "
+                                    "will be INFLATED by 0.1-0.3. "
+                                    "Dev mode ONLY.",
+                                    len(split_dst_list), _min_pool,
+                                )
+                                split_dst_list = list(range(
+                                    data[target_edge_type[2]].num_nodes
+                                ))
+                            else:
+                                raise RuntimeError(
+                                    f"temporal_split: split has only "
+                                    f"{len(split_dst_list)} unique "
+                                    f"destination entities (< {_min_pool}) "
+                                    f"for inductive negative sampling. "
+                                    f"Falling back to transductive "
+                                    f"(full-graph) negatives would "
+                                    f"inflate AUC by 0.1-0.3 (v81 "
+                                    f"P0-F3 root cause). Use a larger "
+                                    f"split OR set "
+                                    f"DRUGOS_ALLOW_SMALL_SPLIT_NEGATIVES=1 "
+                                    f"to permit the transductive "
+                                    f"fallback (dev mode only — AUC "
+                                    f"will be inflated). (P2-018 root fix)"
+                                )
                         # v43 Chain 6: use the FULL positive set, not
                         # just this split's positives. Falls back to
                         # per-split set if full set is empty (defensive).
@@ -2617,8 +2766,51 @@ class PyGBuilder(GraphBuilderProtocol):
                         max_attempts = n_pos * 50
                         attempts = 0
                         # Seed the local RNG for reproducibility.
+                        # P2-034 ROOT FIX: incorporate ``split_name`` into
+                        # the seed so val and test splits with the SAME
+                        # size produce DIFFERENT negative samples.
+                        #
+                        # The previous seed was
+                        # ``self.config.seed + len(mask_indices)`` — it
+                        # depended ONLY on the split size, not on which
+                        # split (train/val/test) it was. For a 10K-edge
+                        # graph with 10% val + 10% test, both val and
+                        # test have 1K edges → same seed → SAME negatives.
+                        # Val and test AUC were computed on overlapping
+                        # negative sets, biasing the comparison and
+                        # leading to mild overfitting to the test set
+                        # (the "best val epoch" selection was correlated
+                        # with test AUC).
+                        #
+                        # ROOT FIX: hash (split_name, len(mask_indices))
+                        # into the seed using a DETERMINISTIC hash
+                        # (``hashlib.sha256``, NOT Python's built-in
+                        # ``hash()`` which is randomized per-process via
+                        # PYTHONHASHSEED and would break reproducibility
+                        # across runs). This guarantees:
+                        #   (1) val and test with the same size get
+                        #       DIFFERENT seeds (independent RNG streams);
+                        #   (2) the same split with the same size gets
+                        #       the SAME seed across runs (reproducible);
+                        #   (3) changing val_ratio changes test negatives
+                        #       only if it changes the test SIZE (the
+                        #       split_name component is stable).
+                        # The ``& 0xFFFFFFFF`` masks to 32 bits because
+                        # ``torch.Generator.manual_seed`` requires a
+                        # uint32 (Python ints are arbitrary precision).
+                        _split_seed_str = f"{split_name}:{len(mask_indices)}".encode("utf-8")
+                        _split_seed_component = (
+                            int.from_bytes(
+                                hashlib.sha256(_split_seed_str).digest()[:4],
+                                byteorder="big",
+                                signed=False,
+                            )
+                            & 0xFFFFFFFF
+                        )
                         _neg_rng = torch.Generator()
-                        _neg_rng.manual_seed(self.config.seed + len(mask_indices))
+                        _neg_rng.manual_seed(
+                            (self.config.seed + _split_seed_component) & 0xFFFFFFFF
+                        )
                         # v81 P0-F3: sample from the per-split entity
                         # pools (inductive), not the full graph node
                         # count (transductive).
@@ -2666,12 +2858,72 @@ class PyGBuilder(GraphBuilderProtocol):
                                 target_edge_type
                             ].edge_label_index = combined_edge_index
                             if n_neg < n_pos:
+                                # P2-019 ROOT FIX (negative shortfall
+                                # warning does not raise):
+                                # The previous code only logged a
+                                # WARNING when ``n_neg < n_pos``. The
+                                # val/test split was then computed
+                                # with mismatched pos/neg counts, and
+                                # the downstream BCE loss computed on
+                                # unequal pos/neg sets — mathematically
+                                # valid but statistically biased (the
+                                # model's decision threshold is skewed
+                                # by the imbalance). Operators saw a
+                                # WARNING buried in logs and may not
+                                # realise the AUC is unreliable.
+                                #
+                                # ROOT FIX: RAISE RuntimeError when
+                                # ``n_neg < 0.5 * n_pos`` (less than
+                                # half the required negatives). The
+                                # AUC is genuinely uninterpretable
+                                # with insufficient negatives — the
+                                # V1 launch criterion (0.85 AUC) may
+                                # be met on a split with insufficient
+                                # negatives, giving false confidence
+                                # in a model that will fail in
+                                # production. Operators can override
+                                # with
+                                # DRUGOS_ALLOW_INSUFFICIENT_NEGATIVES=1
+                                # for dev runs.
+                                _allow_insufficient = (
+                                    os.environ.get(
+                                        "DRUGOS_ALLOW_INSUFFICIENT_NEGATIVES",
+                                        "",
+                                    ) == "1"
+                                )
+                                _shortfall_ratio = (
+                                    n_neg / n_pos if n_pos > 0 else 1.0
+                                )
+                                if (
+                                    _shortfall_ratio < 0.5
+                                    and not _allow_insufficient
+                                ):
+                                    raise RuntimeError(
+                                        f"temporal_split: only generated "
+                                        f"{n_neg}/{n_pos} negatives "
+                                        f"({100.0 * _shortfall_ratio:.1f}%) "
+                                        f"for split after {attempts} "
+                                        f"attempts (graph may be too "
+                                        f"dense). The AUC for this "
+                                        f"split is UNINTERPRETABLE with "
+                                        f"insufficient negatives — the "
+                                        f"V1 launch criterion (0.85 AUC) "
+                                        f"may be met on this split but "
+                                        f"fail in production. Set "
+                                        f"DRUGOS_ALLOW_INSUFFICIENT_NEGATIVES=1 "
+                                        f"to permit the run (dev mode "
+                                        f"only — AUC is unreliable). "
+                                        f"(P2-019 root fix)"
+                                    )
                                 self.logger.warning(
                                     f"temporal_split: only generated "
                                     f"{n_neg}/{n_pos} negatives for split "
-                                    f"after {attempts} attempts (graph "
+                                    f"({100.0 * _shortfall_ratio:.1f}% — "
+                                    f"after {attempts} attempts; graph "
                                     f"may be too dense). AUC for this "
-                                    f"split may be inflated."
+                                    f"split may be inflated. "
+                                    f"(P2-019 — shortfall below the 50% "
+                                    f"RAISE threshold was {'overridden' if _allow_insufficient else 'not triggered'})."
                                 )
                         else:
                             # Fall back to positive-only if neg gen failed.
@@ -2723,22 +2975,44 @@ class PyGBuilder(GraphBuilderProtocol):
 
             # H-8: train split stays positive-only; val/test get
             # negatives so AUC is computable on the held-out splits.
-            train_data = _make_split(train_mask, generate_negatives=False)
-            val_data = _make_split(val_mask, generate_negatives=True)
-            test_data = _make_split(test_mask, generate_negatives=True)
+            train_data = _make_split(train_mask, generate_negatives=False, split_name="train")
+            val_data = _make_split(val_mask, generate_negatives=True, split_name="val")
+            test_data = _make_split(test_mask, generate_negatives=True, split_name="test")
 
             # FIX(issue-80): temporal_split output compatible with PyG
             # training -- post-split assertion.
+            # P2-066 ROOT FIX: replace ``assert`` with explicit
+            # ``if not ...: raise RuntimeError(...)``. Python's ``assert``
+            # is a NO-OP when the interpreter runs with ``-O`` (optimize)
+            # flag — production deployments often run with ``-O`` for
+            # performance. The post-split integrity check is too
+            # important to be skipped in production: a malformed split
+            # (missing edge_label) would pass the check silently and
+            # crash later during training with a cryptic PyG error.
+            # Root fix: use a real ``if`` + ``raise RuntimeError`` so
+            # the check fires regardless of the ``-O`` flag. The error
+            # message is preserved verbatim so existing log-grep
+            # patterns still match.
             for name, sd in [
                 ("train", train_data),
                 ("val", val_data),
                 ("test", test_data),
             ]:
                 tgt = sd[target_edge_type]
-                assert hasattr(tgt, "edge_label") and tgt.edge_label is not None, \
-                    f"{name} split missing edge_label on {target_edge_type}"
-                assert hasattr(tgt, "edge_label_index") and tgt.edge_label_index is not None, \
-                    f"{name} split missing edge_label_index on {target_edge_type}"
+                if not (hasattr(tgt, "edge_label") and tgt.edge_label is not None):
+                    raise RuntimeError(
+                        f"{name} split missing edge_label on "
+                        f"{target_edge_type} (P2-066 root fix: assert "
+                        f"replaced with RuntimeError so the check "
+                        f"survives python -O mode)"
+                    )
+                if not (hasattr(tgt, "edge_label_index") and tgt.edge_label_index is not None):
+                    raise RuntimeError(
+                        f"{name} split missing edge_label_index on "
+                        f"{target_edge_type} (P2-066 root fix: assert "
+                        f"replaced with RuntimeError so the check "
+                        f"survives python -O mode)"
+                    )
 
             return train_data, val_data, test_data
 

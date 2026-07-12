@@ -1,5 +1,5 @@
 """
-V30 FORENSIC TEST SUITE — verifies all root-level fixes from the V29 audit.
+V30 FORENSIC TEST SUITE -- verifies all root-level fixes from the V29 audit.
 
 This test suite verifies EACH of the 4 critical compound issues identified
 in the FORENSIC_AUDIT_REPORT.txt has been fixed at the ROOT level:
@@ -46,7 +46,7 @@ def test_compound_1_no_circular_leakage():
     rf = RewardFunction()
     cfg = DEFAULT_CONFIG.reward
 
-    # Build a row for "aspirin, cardiovascular disease" — this pair is in
+    # Build a row for "aspirin, cardiovascular disease" -- this pair is in
     # BOTH KNOWN_POSITIVES and VALIDATED_HYPOTHESES.
     row = pd.Series({
         'drug': 'aspirin',
@@ -67,13 +67,13 @@ def test_compound_1_no_circular_leakage():
     # Restore
     rf._validated_hypotheses = set(VALIDATED_HYPOTHESES)
 
-    # The reward should be EQUAL — the bonus is SKIPPED because the pair
+    # The reward should be EQUAL -- the bonus is SKIPPED because the pair
     # is in KNOWN_POSITIVES (the AUC label set).
     assert abs(reward_with_check - reward_no_bonus) < 1e-6, (
         f"CIRCULAR LEAKAGE: bonus was applied to a KNOWN_POSITIVE pair! "
         f"with_check={reward_with_check}, no_bonus={reward_no_bonus}"
     )
-    print("PASS: Compound #1 — no circular leakage (bonus skipped for KP pairs)")
+    print("PASS: Compound #1 -- no circular leakage (bonus skipped for KP pairs)")
 
 
 def test_compound_1_known_positives_not_in_validated():
@@ -83,7 +83,7 @@ def test_compound_1_known_positives_not_in_validated():
     assert len(KNOWN_POSITIVES) > 0
     assert len(VALIDATED_HYPOTHESES) > 0
     # They are separate lists (the data may overlap, but the reward function
-    # filters the overlap — see test_compound_1_no_circular_leakage).
+    # filters the overlap -- see test_compound_1_no_circular_leakage).
     assert KNOWN_POSITIVES is not VALIDATED_HYPOTHESES
     print(f"PASS: KNOWN_POSITIVES ({len(KNOWN_POSITIVES)}) and VALIDATED_HYPOTHESES ({len(VALIDATED_HYPOTHESES)}) are separate lists")
 
@@ -98,7 +98,7 @@ def test_compound_2_gnn_score_weight_capped():
     The user's audit explicitly required: "Remove gnn_score from the
     reward function entirely, OR reduce its weight to < 0.05 AND remove
     the multiplicative gnn_factor gate. The RL agent must not be a
-    learned distillation of the GT model — that is circular."
+    learned distillation of the GT model -- that is circular."
 
     The old test checked that the config had gnn_score > 0.20 and the
     runtime capped it at 0.20. The v90 fix changes the config itself to
@@ -112,7 +112,7 @@ def test_compound_2_gnn_score_weight_capped():
     rf = RewardFunction()
     cfg = DEFAULT_CONFIG.reward
 
-    # v90: the config weight is now 0.04 (< 0.05) — NOT dominant.
+    # v90: the config weight is now 0.04 (< 0.05) -- NOT dominant.
     original_weight = cfg.reward_weights.get('gnn_score', 0)
     assert original_weight < 0.05, (
         f"v90 Compound #4: config gnn_score weight should be < 0.05, "
@@ -141,7 +141,7 @@ def test_compound_2_gnn_score_weight_capped():
     # Higher gnn_score gives higher reward (monotonic), but the contribution
     # is SMALL (gnn_score is a tie-breaker, not the dominant signal).
     assert diff > 0, f"Higher gnn_score should give higher reward, got diff={diff}"
-    print(f"PASS: Compound #2 — gnn_score weight = {original_weight} (< 0.05, diff={diff:.4f})")
+    print(f"PASS: Compound #2 -- gnn_score weight = {original_weight} (< 0.05, diff={diff:.4f})")
 
 
 def test_compound_2_d3_zscore_normalization():
@@ -156,7 +156,7 @@ def test_compound_2_d3_zscore_normalization():
     assert hasattr(rf, '_gnn_score_std')
     assert rf._gnn_score_mean == 0.3
     assert rf._gnn_score_std == 0.1
-    print("PASS: Compound #2 (10.10) — z-score normalization fields exist (replaces D3 no-op)")
+    print("PASS: Compound #2 (10.10) -- z-score normalization fields exist (replaces D3 no-op)")
 
 
 # ============================================================================
@@ -176,7 +176,7 @@ def test_compound_3_no_w02_injection():
     assert len(kp) == 2, f"Expected 2 KPs (named only), got {len(kp)}: {kp}"
     assert ('aspirin', 'cardiovascular disease') in kp
     assert ('metformin', 'type 2 diabetes') in kp
-    print(f"PASS: Compound #3 (3.10) — only {len(kp)} named KPs (no random KPs)")
+    print(f"PASS: Compound #3 (3.10) -- only {len(kp)} named KPs (no random KPs)")
 
 
 def test_compound_3_no_topology_memorization():
@@ -206,11 +206,11 @@ def test_compound_3_no_topology_memorization():
     # contains ONLY the KPs (not training positives).
     assert n_treats >= 2, f"Expected >=2 treats edges (KPs + training positives), got {n_treats}"
     # known_pairs should ONLY contain the 2 named KPs (training positives
-    # are NOT in the recovery test set — they're a separate training-only set).
+    # are NOT in the recovery test set -- they're a separate training-only set).
     assert len(kp) == 2, f"known_pairs should only contain KPs (2), got {len(kp)}: {kp}"
     assert ('aspirin', 'cardiovascular disease') in kp
     assert ('metformin', 'type 2 diabetes') in kp
-    print(f"PASS: Compound #3 (3.9) — {n_treats} treats edges (KPs + V31 training "
+    print(f"PASS: Compound #3 (3.9) -- {n_treats} treats edges (KPs + V31 training "
           f"positives, no W-02 random injection). known_pairs has {len(kp)} KPs only.")
 
 
@@ -229,7 +229,7 @@ def test_compound_4_gamma_zero_for_contextual_bandit():
     assert "ppo_gamma', 0.0" in source or "ppo_gamma=0.0" in source, (
         "Expected ppo_gamma default of 0.0 (contextual bandit) not found in source"
     )
-    print("PASS: Compound #4 (10.29) — PPO gamma defaults to 0.0 (contextual bandit)")
+    print("PASS: Compound #4 (10.29) -- PPO gamma defaults to 0.0 (contextual bandit)")
 
 
 # ============================================================================
@@ -243,7 +243,7 @@ def test_trainer_train_alias():
     assert GraphTransformerTrainer.train is GraphTransformerTrainer.fit, (
         "train() should be an alias for fit()"
     )
-    print("PASS: 8.1 — Trainer.train() is an alias for fit()")
+    print("PASS: 8.1 -- Trainer.train() is an alias for fit()")
 
 
 def test_trainer_evaluate_no_arg_path():
@@ -255,7 +255,7 @@ def test_trainer_evaluate_no_arg_path():
     assert sig.parameters['drug_indices'].default is None
     assert sig.parameters['disease_indices'].default is None
     assert sig.parameters['labels'].default is None
-    print("PASS: 8.2 — Trainer.evaluate() supports no-arg path")
+    print("PASS: 8.2 -- Trainer.evaluate() supports no-arg path")
 
 
 def test_trainer_device_aware_generator():
@@ -266,7 +266,7 @@ def test_trainer_device_aware_generator():
     assert "torch.Generator(device=device)" in source, (
         "Trainer should create generator with device=device (8.3 fix)"
     )
-    print("PASS: 8.3 — Trainer generator is device-aware")
+    print("PASS: 8.3 -- Trainer generator is device-aware")
 
 
 def test_trainer_drug_aware_split_enforcement():
@@ -277,7 +277,7 @@ def test_trainer_drug_aware_split_enforcement():
     assert "drug-aware split violation" in source, (
         "Trainer.fit() should raise on drug-aware split violation (8.5 fix)"
     )
-    print("PASS: 8.5 — Trainer enforces drug-aware split")
+    print("PASS: 8.5 -- Trainer enforces drug-aware split")
 
 
 def test_trainer_pos_weight():
@@ -286,7 +286,7 @@ def test_trainer_pos_weight():
     import inspect
     source = inspect.inspect if False else inspect.getsource(GraphTransformerTrainer.fit)
     assert "pos_weight" in source, "Trainer.fit() should compute pos_weight (8.6 fix)"
-    print("PASS: 8.6 — Trainer computes pos_weight from class balance")
+    print("PASS: 8.6 -- Trainer computes pos_weight from class balance")
 
 
 def test_trainer_checkpoint_schema():
@@ -297,7 +297,7 @@ def test_trainer_checkpoint_schema():
     assert "graph_schema" in source
     assert "package_version" in source
     assert "best_state_dict" in source
-    print("PASS: 8.14 — Checkpoint saves full schema (graph_schema, version, best_state_dict)")
+    print("PASS: 8.14 -- Checkpoint saves full schema (graph_schema, version, best_state_dict)")
 
 
 def test_trainer_unsafe_torch_load_fixed():
@@ -308,7 +308,7 @@ def test_trainer_unsafe_torch_load_fixed():
     assert "weights_only=True" in source, (
         "load_checkpoint should use weights_only=True (8.15 fix)"
     )
-    print("PASS: 8.15 — load_checkpoint uses weights_only=True")
+    print("PASS: 8.15 -- load_checkpoint uses weights_only=True")
 
 
 # ============================================================================
@@ -321,7 +321,7 @@ def test_model_embedding_init_std_002():
     import inspect
     source = inspect.getsource(DrugRepurposingGraphTransformer._init_weights)
     assert "std=0.02" in source, "Embedding init should use std=0.02 (7.1 fix)"
-    print("PASS: 7.1 — nn.Embedding init uses std=0.02 (was 1.0)")
+    print("PASS: 7.1 -- nn.Embedding init uses std=0.02 (was 1.0)")
 
 
 # ============================================================================
@@ -341,7 +341,7 @@ def test_predict_probability_preserves_training_state():
     lp.eval()
     _ = lp.predict_probability(d_emb, ds_emb)
     assert lp.training is False, "predict_probability should preserve training=False"
-    print("PASS: 6.1 — predict_probability saves/restores training state")
+    print("PASS: 6.1 -- predict_probability saves/restores training state")
 
 
 # ============================================================================
@@ -370,7 +370,7 @@ def test_cross_edge_type_normalization():
     expected = 1.0 / (2 ** 0.5)
     actual = float(attn.cross_type_norm)
     assert abs(actual - expected) < 1e-6, f"cross_type_norm = {actual}, expected {expected}"
-    print(f"PASS: 5.3 — cross_type_norm buffer present (value={actual:.4f})")
+    print(f"PASS: 5.3 -- cross_type_norm buffer present (value={actual:.4f})")
 
 
 def test_ffn_single_internal_dropout():
@@ -381,7 +381,7 @@ def test_ffn_single_internal_dropout():
     # Count nn.Dropout occurrences in the source
     dropout_count = source.count("nn.Dropout")
     assert dropout_count == 1, f"FFN should have 1 internal dropout, got {dropout_count} (5.5 fix)"
-    print("PASS: 5.5 — FFN has 1 internal dropout (was 2)")
+    print("PASS: 5.5 -- FFN has 1 internal dropout (was 2)")
 
 
 def test_self_loop_weight_init_05():
@@ -390,7 +390,8 @@ def test_self_loop_weight_init_05():
     The previous V30 5.4 fix set self_loop_weight to 0.5, claiming it
     gave self-loops "equal standing with a single edge-type message".
     The P3-S01 scientific audit found 0.5 was still TOO HIGH: combined
-    with cross_type_norm ~ 0.27 for 14 edge types, self-loops
+    with cross_type_norm ~ 0.27 for the original 14 edge types (now 18
+    after the P3-001/P3-002 schema fix added binds+modulates), self-loops
     contributed ~38% of the total message — disproportionately high
     for a "residual" connection. The P3-S01 fix initializes to 1.0
     (standard residual identity, He et al. 2016) and lets gradient
@@ -401,25 +402,34 @@ def test_self_loop_weight_init_05():
     assert abs(float(attn.self_loop_weight) - 1.0) < 1e-6, (
         f"self_loop_weight should be 1.0 (P3-S01 ROOT FIX), got {float(attn.self_loop_weight)}"
     )
-    print("PASS: P3-S01 — self_loop_weight init = 1.0 (was 0.5, originally 0.1)")
+    print("PASS: P3-S01 -- self_loop_weight init = 1.0 (was 0.5, originally 0.1)")
 
 
 # ============================================================================
 # FILE 3 (graph_builder.py) fixes
 # ============================================================================
 
-def test_finalize_emits_all_14_edge_types():
-    """finalize() must emit ALL 14 canonical edge types (3.1)."""
+def test_finalize_emits_all_18_edge_types():
+    """finalize() must emit ALL 18 canonical edge types (3.1).
+
+    P3-001/P3-002 ROOT FIX: the schema was expanded from 14 to 18 edge
+    types (added ('drug','binds','protein'), ('drug','modulates',
+    'protein') + their reverses ('protein','bound_by','drug'),
+    ('protein','modulated_by','drug')). This test was updated from 14
+    to 18 to match the new schema. The original 14-edge-types test
+    would have FAILED after the P3-001/P3-002 fix, masking the schema
+    change — this update keeps the test meaningful.
+    """
     from graph_transformer.data.graph_builder import BiomedicalGraphBuilder
     from graph_transformer.data import EDGE_TYPES
     nf, ei, nm, kp = BiomedicalGraphBuilder.build_demo_graph(
         num_drugs=5, num_diseases=5, num_known_treatments=2,
         known_positives=[('aspirin', 'cardiovascular disease')],
     )
-    assert len(ei) == 14, f"Expected 14 edge types, got {len(ei)}: {list(ei.keys())}"
+    assert len(ei) == 18, f"Expected 18 edge types, got {len(ei)}: {list(ei.keys())}"
     for et in EDGE_TYPES:
         assert et in ei, f"Missing edge type {et}"
-    print(f"PASS: 3.1 — finalize() emits all 14 edge types")
+    print(f"PASS: 3.1 — finalize() emits all 18 edge types")
 
 
 def test_reverse_edge_dedup():
@@ -438,7 +448,7 @@ def test_reverse_edge_dedup():
         # Check for duplicate (src, tgt) pairs
         pairs = set(zip(idx[0].tolist(), idx[1].tolist()))
         assert len(pairs) == idx.shape[1], f"Edge type {et} has duplicates"
-    print("PASS: 3.2 — reverse-edge synthesis deduplicates")
+    print("PASS: 3.2 -- reverse-edge synthesis deduplicates")
 
 
 # ============================================================================
@@ -456,7 +466,7 @@ def test_label_leaking_edges_comprehensive():
     }
     for et in expected:
         assert et in LABEL_LEAKING_EDGES, f"Missing {et} from LABEL_LEAKING_EDGES"
-    print(f"PASS: 1.3 — LABEL_LEAKING_EDGES covers all 4 direct relations ({len(LABEL_LEAKING_EDGES)} types)")
+    print(f"PASS: 1.3 -- LABEL_LEAKING_EDGES covers all 4 direct relations ({len(LABEL_LEAKING_EDGES)} types)")
 
 
 # ============================================================================
@@ -469,7 +479,7 @@ def test_bridge_uses_verified_auc():
     import inspect
     source = inspect.getsource(GTRLBridge.run_full_pipeline)
     assert "test_auc_verified" in source, "Bridge should reference test_auc_verified (9.4 fix)"
-    print("PASS: 9.4 — Bridge uses verified AUC for the scientific_validation gate")
+    print("PASS: 9.4 -- Bridge uses verified AUC for the scientific_validation gate")
 
 
 def test_bridge_raises_on_validation_failure():
@@ -479,7 +489,7 @@ def test_bridge_raises_on_validation_failure():
     source = inspect.getsource(GTRLBridge.run_full_pipeline)
     assert "V30 ROOT FIX (9.5)" in source, "Bridge should have 9.5 fix"
     assert "raise RuntimeError" in source, "Bridge should raise RuntimeError (9.5 fix)"
-    print("PASS: 9.5 — Bridge raises RuntimeError on validation failure (no 0.35 AUC hole)")
+    print("PASS: 9.5 -- Bridge raises RuntimeError on validation failure (no 0.35 AUC hole)")
 
 
 def test_bridge_version_check():
@@ -488,7 +498,7 @@ def test_bridge_version_check():
     import inspect
     source = inspect.getsource(GTRLBridge.__init__)
     assert "__version__" in source, "Bridge __init__ should check __version__ (9.7 fix)"
-    print("PASS: 9.7 — Bridge checks GT/RL package version compatibility")
+    print("PASS: 9.7 -- Bridge checks GT/RL package version compatibility")
 
 
 def test_bridge_loads_checkpoint():
@@ -498,7 +508,7 @@ def test_bridge_loads_checkpoint():
     source = inspect.getsource(GTRLBridge.train_model)
     assert "resume_from_checkpoint" in source, "train_model should have resume_from_checkpoint (9.8 fix)"
     assert "load_checkpoint" in source, "train_model should call load_checkpoint (9.8 fix)"
-    print("PASS: 9.8 — Bridge loads gt_checkpoint.pt (was save-only)")
+    print("PASS: 9.8 -- Bridge loads gt_checkpoint.pt (was save-only)")
 
 
 def test_bridge_efficacy_uses_target_diversity():
@@ -508,7 +518,7 @@ def test_bridge_efficacy_uses_target_diversity():
     source = inspect.getsource(GTRLBridge._compute_drug_level_features)
     assert "target_count_per_drug" in source, "efficacy should use target_count_per_drug (9.14 fix)"
     assert "inhibits" in source and "activates" in source, "Should use drug->protein edges (9.14 fix)"
-    print("PASS: 9.14 — efficacy_score uses target diversity (was circular treats count)")
+    print("PASS: 9.14 -- efficacy_score uses target diversity (was circular treats count)")
 
 
 # ============================================================================
@@ -521,7 +531,7 @@ def test_generate_fake_data_accepts_num_drugs_diseases():
     # Should NOT raise TypeError
     df = generate_fake_data(n_pairs=20, seed=42, num_drugs=5, num_diseases=3)
     assert len(df) == 20
-    print("PASS: 10.1 — generate_fake_data accepts num_drugs/num_diseases")
+    print("PASS: 10.1 -- generate_fake_data accepts num_drugs/num_diseases")
 
 
 def test_kp_oversampling_with_jitter():
@@ -531,7 +541,7 @@ def test_kp_oversampling_with_jitter():
     source = inspect.getsource(split_data)
     assert "jitter" in source.lower(), "split_data should use jitter (10.15 fix)"
     assert "FEATURE_COLS" in source, "split_data should iterate FEATURE_COLS (10.15 fix)"
-    print("PASS: 10.15 — KP oversampling uses feature jitter (no exact duplicates)")
+    print("PASS: 10.15 -- KP oversampling uses feature jitter (no exact duplicates)")
 
 
 def test_retry_logic_removed():
@@ -543,7 +553,7 @@ def test_retry_logic_removed():
     assert "retry_count < max_retries" not in source, (
         "Retry loop should be removed (10.16 fix)"
     )
-    print("PASS: 10.16 — Retry-on-low-AUC logic REMOVED (no selection bias)")
+    print("PASS: 10.16 -- Retry-on-low-AUC logic REMOVED (no selection bias)")
 
 
 # ============================================================================
@@ -573,7 +583,7 @@ def test_run_pipeline_exits_nonzero_on_failure():
     # At least one success-path pattern must be present
     assert "sys.exit(0)" in source or (has_return_0 and has_sys_exit_main), \
         "run_real_pipeline should exit zero on success (either sys.exit(0) or return 0 + sys.exit(main()))"
-    print("PASS: Phase I — run_real_pipeline exits non-zero on validation failure")
+    print("PASS: Phase I -- run_real_pipeline exits non-zero on validation failure")
 
 
 # ============================================================================
@@ -582,7 +592,7 @@ def test_run_pipeline_exits_nonzero_on_failure():
 
 def main():
     print("=" * 70)
-    print("V30 FORENSIC TEST SUITE — Root-Level Fix Verification")
+    print("V30 FORENSIC TEST SUITE -- Root-Level Fix Verification")
     print("=" * 70)
     print()
 
@@ -612,7 +622,7 @@ def main():
         ("5.5 FFN single dropout", test_ffn_single_internal_dropout),
         ("5.4 self_loop_weight=0.5", test_self_loop_weight_init_05),
         # File 3 (graph_builder)
-        ("3.1 all 14 edge types", test_finalize_emits_all_14_edge_types),
+        ("3.1 all 18 edge types", test_finalize_emits_all_18_edge_types),
         ("3.2 reverse edge dedup", test_reverse_edge_dedup),
         # File 2 (data/__init__)
         ("1.3 LABEL_LEAKING_EDGES", test_label_leaking_edges_comprehensive),
@@ -637,7 +647,7 @@ def main():
             test_fn()
             passed += 1
         except Exception as e:
-            print(f"FAIL: {name} — {type(e).__name__}: {e}")
+            print(f"FAIL: {name} -- {type(e).__name__}: {e}")
             failed += 1
 
     print()

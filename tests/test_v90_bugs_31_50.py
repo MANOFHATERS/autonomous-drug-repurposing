@@ -2,7 +2,7 @@
 
 This test suite verifies that the V90 root-level fixes for the audit's
 BUG #31 through BUG #50 (plus the three COMPOUND bug chains) are ACTUALLY
-present in the production code — not just claimed in docstrings.
+present in the production code -- not just claimed in docstrings.
 
 Each test reads the REAL source code (via inspect.getsource) or exercises
 the REAL runtime behavior. No mocks, no stubs, no false positives.
@@ -56,7 +56,7 @@ def test_bug_31_kp_recovery_threshold_raised():
         "BUG #31: run_full_pipeline must enforce min kp_recovery_threshold of 0.5"
     assert "V90 ROOT FIX (BUG #31)" in source, \
         "BUG #31: run_full_pipeline must have V90 ROOT FIX (BUG #31) comment"
-    print("  PASS: BUG #31 — kp_recovery_threshold raised to 0.5")
+    print("  PASS: BUG #31 -- kp_recovery_threshold raised to 0.5")
 
 
 def test_bug_32_early_stopping_unweighted():
@@ -71,7 +71,7 @@ def test_bug_32_early_stopping_unweighted():
     assert hasattr(GraphTransformerTrainer, "_eval_criterion") or "_eval_criterion" in \
         inspect.getsource(GraphTransformerTrainer.__init__), \
         "BUG #32: trainer.__init__ must initialize self._eval_criterion"
-    print("  PASS: BUG #32 — early stopping uses unweighted eval loss")
+    print("  PASS: BUG #32 -- early stopping uses unweighted eval loss")
 
 
 def test_bug_33_load_checkpoint_restores_best_epoch():
@@ -82,7 +82,7 @@ def test_bug_33_load_checkpoint_restores_best_epoch():
         "BUG #33: load_checkpoint must restore self.best_epoch"
     assert 'checkpoint.get("best_epoch"' in source, \
         "BUG #33: load_checkpoint must read best_epoch from checkpoint"
-    print("  PASS: BUG #33 — load_checkpoint restores best_epoch")
+    print("  PASS: BUG #33 -- load_checkpoint restores best_epoch")
 
 
 def test_bug_33_save_checkpoint_saves_actual_best_epoch():
@@ -113,7 +113,7 @@ def test_bug_33_save_checkpoint_saves_actual_best_epoch():
         if 'training_history[-1]' in stripped and 'epoch' in stripped:
             assert False, \
                 f"BUG #21: save_checkpoint has ACTIVE training_history[-1]['epoch'] (LAST, not BEST): {line.rstrip()}"
-    print("  PASS: BUG #33/#21 — save_checkpoint saves actual best_epoch")
+    print("  PASS: BUG #33/#21 -- save_checkpoint saves actual best_epoch")
 
 
 def test_bug_34_build_model_accepts_link_predictor_hidden_dims():
@@ -125,7 +125,7 @@ def test_bug_34_build_model_accepts_link_predictor_hidden_dims():
     source = inspect.getsource(GTRLBridge.build_model)
     assert "link_predictor_hidden_dims=link_predictor_hidden_dims" in source, \
         "BUG #34: build_model must pass link_predictor_hidden_dims to the model"
-    print("  PASS: BUG #34 — build_model accepts link_predictor_hidden_dims")
+    print("  PASS: BUG #34 -- build_model accepts link_predictor_hidden_dims")
 
 
 def test_bug_35_run_full_pipeline_passes_attention_dropout():
@@ -139,7 +139,7 @@ def test_bug_35_run_full_pipeline_passes_attention_dropout():
         "BUG #35: run_full_pipeline must compute model_attention_dropout"
     assert "attention_dropout=model_attention_dropout" in source, \
         "BUG #35: run_full_pipeline must pass attention_dropout to build_model"
-    print("  PASS: BUG #35 — run_full_pipeline passes gt_attention_dropout")
+    print("  PASS: BUG #35 -- run_full_pipeline passes gt_attention_dropout")
 
 
 def test_bug_36_verified_auc_uses_model_forward():
@@ -147,7 +147,7 @@ def test_bug_36_verified_auc_uses_model_forward():
 
     P3-017 ROOT FIX UPDATE: the previous version of this test asserted that
     evaluate_link_prediction called ``model.forward_logits(`` and
-    ``model.forward(`` per batch — the "genuinely independent path" that
+    ``model.forward(`` per batch -- the "genuinely independent path" that
     re-encoded the graph per batch. The P3-017 audit found that this path
     encoded the graph TWICE per batch (model.forward_logits encodes
     internally, then model.forward encodes AGAIN internally), doubling
@@ -155,7 +155,7 @@ def test_bug_36_verified_auc_uses_model_forward():
 
     The P3-017 fix changed the code to encode ONCE (via model.encode) and
     then call ``link_predictor.forward_logits`` and ``link_predictor.forward``
-    on the pre-computed embeddings — matching the trainer's evaluate()
+    on the pre-computed embeddings -- matching the trainer's evaluate()
     pattern. This is still an independent code path from the trainer (it
     uses a fresh BCEWithLogitsLoss and re-applies temperature), but it
     doesn't waste compute on double encoding.
@@ -180,7 +180,7 @@ def test_bug_36_verified_auc_uses_model_forward():
     # Ensure the OLD double-encoding calls are NOT present
     assert "model.forward_logits(" not in source, \
         "P3-017: evaluate_link_prediction must NOT call model.forward_logits (was double-encoding)"
-    print("  PASS: P3-017 — VERIFIED AUC uses single-encode + link_predictor path (no double encoding)")
+    print("  PASS: P3-017 -- VERIFIED AUC uses single-encode + link_predictor path (no double encoding)")
 
 
 def test_bug_37_run_real_pipeline_honest_print():
@@ -188,8 +188,8 @@ def test_bug_37_run_real_pipeline_honest_print():
 
     P3-017 follow-up: a parallel agent rewrote run_real_pipeline.py (v100
     forensic root fix). The 'V90 ROOT-LEVEL FIXES STATUS' header may no
-    longer be present in the new version. The CORE invariant — no active
-    print statement says 'VERIFIED IN THIS RUN' — is still checked.
+    longer be present in the new version. The CORE invariant -- no active
+    print statement says 'VERIFIED IN THIS RUN' -- is still checked.
     """
     with open(os.path.join(_ROOT, "..", "run_real_pipeline.py")) as f:
         lines = f.readlines()
@@ -206,10 +206,10 @@ def test_bug_37_run_real_pipeline_honest_print():
                 f"BUG #37: line {i+1} has an active print with 'VERIFIED IN THIS RUN': {line.rstrip()}"
     # P3-017 follow-up: the 'V90 ROOT-LEVEL FIXES STATUS' header was
     # removed by a parallel agent's rewrite. The core invariant (no
-    # 'VERIFIED IN THIS RUN' print) is checked above — that's the
+    # 'VERIFIED IN THIS RUN' print) is checked above -- that's the
     # scientific contract. The specific header text is a cosmetic
     # detail that may change between versions.
-    print("  PASS: BUG #37 — run_real_pipeline has no 'VERIFIED IN THIS RUN' print (core invariant)")
+    print("  PASS: BUG #37 -- run_real_pipeline has no 'VERIFIED IN THIS RUN' print (core invariant)")
 
 
 def test_bug_38_feature_rng_removed():
@@ -222,7 +222,7 @@ def test_bug_38_feature_rng_removed():
     source = inspect.getsource(GTRLBridge.__init__)
     assert "self._feature_rng" not in source or "REMOVE" in source, \
         "BUG #38: __init__ must not assign self._feature_rng (dead code removed)"
-    print("  PASS: BUG #38 — _feature_rng dead code removed")
+    print("  PASS: BUG #38 -- _feature_rng dead code removed")
 
 
 def test_bug_39_enrich_noop_call_removed():
@@ -237,11 +237,11 @@ def test_bug_39_enrich_noop_call_removed():
         # Skip comments
         if stripped.startswith("#"):
             continue
-        # Skip docstrings (lines inside triple-quotes — rough heuristic)
+        # Skip docstrings (lines inside triple-quotes -- rough heuristic)
         if 'builder._enrich_features_with_graph_signal' in stripped:
             assert False, \
                 f"BUG #39: line {i+1} has an ACTIVE call to _enrich_features_with_graph_signal: {line.rstrip()}"
-    print("  PASS: BUG #39 — _enrich_features_with_graph_signal NO-OP call removed from active code")
+    print("  PASS: BUG #39 -- _enrich_features_with_graph_signal NO-OP call removed from active code")
 
 
 def test_bug_40_x10_partial_config_exercised():
@@ -252,7 +252,7 @@ def test_bug_40_x10_partial_config_exercised():
         "BUG #40: run_full_pipeline must have the X-10 partial config check"
     assert "V90 BUG #40" in source, \
         "BUG #40: run_full_pipeline must document that the check is exercised by test"
-    print("  PASS: BUG #40 — X-10 partial config check present and documented")
+    print("  PASS: BUG #40 -- X-10 partial config check present and documented")
 
 
 def test_bug_40_x10_partial_config_raises():
@@ -274,7 +274,7 @@ def test_bug_40_x10_partial_config_raises():
         # Other exceptions are OK as long as they're not silent success
         assert "X-10" in str(e) or "PARTIAL" in str(e) or "ValueError" in type(e).__name__, \
             f"BUG #40: expected ValueError for partial config, got {type(e).__name__}: {e}"
-    print("  PASS: BUG #40 — X-10 partial config raises ValueError (runtime verified)")
+    print("  PASS: BUG #40 -- X-10 partial config raises ValueError (runtime verified)")
 
 
 def test_bug_41_save_checkpoint_skips_none_best_state_dict():
@@ -283,7 +283,7 @@ def test_bug_41_save_checkpoint_skips_none_best_state_dict():
     source = inspect.getsource(GraphTransformerTrainer.save_checkpoint)
     assert "if self.best_state_dict is not None" in source, \
         "BUG #41: save_checkpoint must check if best_state_dict is None before saving"
-    print("  PASS: BUG #41 — save_checkpoint skips None best_state_dict")
+    print("  PASS: BUG #41 -- save_checkpoint skips None best_state_dict")
 
 
 def test_bug_42_assertion_documented_as_defensive():
@@ -294,7 +294,7 @@ def test_bug_42_assertion_documented_as_defensive():
         "BUG #42: _calibrate_temperature assertion must be documented as DEFENSIVE insurance"
     assert "V90 BUG #42" in source, \
         "BUG #42: _calibrate_temperature must have V90 BUG #42 comment"
-    print("  PASS: BUG #42 — assertion documented as defensive insurance")
+    print("  PASS: BUG #42 -- assertion documented as defensive insurance")
 
 
 def test_bug_43_neg_ratio_documented():
@@ -305,7 +305,7 @@ def test_bug_43_neg_ratio_documented():
         "BUG #43: train_model must have V90 BUG #43 comment documenting neg_ratio"
     assert "NEG_RATIO" in source, \
         "BUG #43: train_model must use named constant NEG_RATIO (not magic 6)"
-    print("  PASS: BUG #43 — neg_ratio documented (was magic number)")
+    print("  PASS: BUG #43 -- neg_ratio documented (was magic number)")
 
 
 def test_bug_44_max_attempts_documented():
@@ -316,7 +316,7 @@ def test_bug_44_max_attempts_documented():
         "BUG #44: train_model must have V90 BUG #44 comment documenting max_attempts"
     assert "MAX_ATTEMPTS_MULTIPLIER" in source, \
         "BUG #44: train_model must use named constant MAX_ATTEMPTS_MULTIPLIER (not magic 50)"
-    print("  PASS: BUG #44 — max_attempts factor documented (was magic number)")
+    print("  PASS: BUG #44 -- max_attempts factor documented (was magic number)")
 
 
 def test_bug_45_streaming_threshold_100000():
@@ -327,7 +327,7 @@ def test_bug_45_streaming_threshold_100000():
         "BUG #45: run_full_pipeline must use STREAMING_THRESHOLD = 100_000"
     assert "V90 BUG #45" in source, \
         "BUG #45: run_full_pipeline must have V90 BUG #45 comment"
-    print("  PASS: BUG #45 — STREAMING_THRESHOLD raised to 100,000")
+    print("  PASS: BUG #45 -- STREAMING_THRESHOLD raised to 100,000")
 
 
 def test_bug_46_predict_drug_disease_scores_encodes_once():
@@ -341,7 +341,7 @@ def test_bug_46_predict_drug_disease_scores_encodes_once():
     # The OLD code called model(...) per batch which re-encodes. Verify it's gone.
     assert "probs = model(" not in source, \
         "BUG #46: predict_drug_disease_scores must NOT call model(...) per batch (re-encodes)"
-    print("  PASS: BUG #46 — predict_drug_disease_scores encodes graph once")
+    print("  PASS: BUG #46 -- predict_drug_disease_scores encodes graph once")
 
 
 def test_bug_47_apply_temperature_mismatch_fixed():
@@ -351,11 +351,11 @@ def test_bug_47_apply_temperature_mismatch_fixed():
     assert "apply_temperature=False" in source, \
         "BUG #47: get_top_k_novel_predictions must use apply_temperature=False (match candidate selection)"
     # P3-017 follow-up: the comment format was updated by a parallel agent
-    # to "V90 ROOT FIX (BUG #47)" — accept either the old "V90 BUG #47"
+    # to "V90 ROOT FIX (BUG #47)" -- accept either the old "V90 BUG #47"
     # or the new "V90 ROOT FIX (BUG #47)" format.
     assert "V90 BUG #47" in source or "V90 ROOT FIX (BUG #47)" in source, \
         "BUG #47: get_top_k_novel_predictions must have V90 BUG #47 comment"
-    print("  PASS: BUG #47 — apply_temperature mismatch fixed")
+    print("  PASS: BUG #47 -- apply_temperature mismatch fixed")
 
 
 def test_bug_48_frozenset_consistency():
@@ -365,7 +365,7 @@ def test_bug_48_frozenset_consistency():
     model = DrugRepurposingGraphTransformer(feature_dims=dict(DEFAULT_FEATURE_DIMS))
     assert isinstance(model.exclude_edges, frozenset), \
         f"BUG #48: model.exclude_edges must be frozenset, got {type(model.exclude_edges).__name__}"
-    print("  PASS: BUG #48 — exclude_edges is frozenset (consistent with LABEL_LEAKING_EDGES)")
+    print("  PASS: BUG #48 -- exclude_edges is frozenset (consistent with LABEL_LEAKING_EDGES)")
 
 
 def test_bug_49_node_features_iteration_order_sorted():
@@ -376,7 +376,7 @@ def test_bug_49_node_features_iteration_order_sorted():
         "BUG #49: NodeTypeProjection.forward must iterate sorted by _type_to_idx order"
     assert "self._type_to_idx.get(nt" in source, \
         "BUG #49: NodeTypeProjection.forward must use _type_to_idx for sorting key"
-    print("  PASS: BUG #49 — node_features dict iteration order sorted")
+    print("  PASS: BUG #49 -- node_features dict iteration order sorted")
 
 
 def test_bug_50_compute_graph_degrees_array_exists():
@@ -394,7 +394,7 @@ def test_bug_50_compute_graph_degrees_array_exists():
     assert len(arr) == 5, f"BUG #50: array length must be num_nodes=5, got {len(arr)}"
     assert arr[0] == 1 and arr[1] == 2, \
         f"BUG #50: degrees must be [1, 2, ...], got {arr}"
-    print("  PASS: BUG #50 — compute_graph_degrees_array returns vectorized numpy array")
+    print("  PASS: BUG #50 -- compute_graph_degrees_array returns vectorized numpy array")
 
 
 def test_compound_1_no_3hop_path_injection():
@@ -404,7 +404,7 @@ def test_compound_1_no_3hop_path_injection():
     # The v89 P0 fix removed the injection. Verify the removal comments exist.
     assert "REMOVED the" in source or "NO synthetic 3-hop" in source, \
         "COMPOUND #1: build_demo_graph must document removal of 3-hop path injection"
-    print("  PASS: COMPOUND #1 — 3-hop path injection removed (v89 P0)")
+    print("  PASS: COMPOUND #1 -- 3-hop path injection removed (v89 P0)")
 
 
 def test_compound_2_hash_replaced_with_sha256():
@@ -427,7 +427,7 @@ def test_compound_2_hash_replaced_with_sha256():
         if "hash(drug_name)" in stripped:
             assert False, \
                 f"COMPOUND #2: line {i+1} has ACTIVE hash(drug_name) (non-reproducible): {line.rstrip()}"
-    print("  PASS: COMPOUND #2 — hash() replaced with SHA-256 (_deterministic_name_seed) in active code")
+    print("  PASS: COMPOUND #2 -- hash() replaced with SHA-256 (_deterministic_name_seed) in active code")
 
 
 def test_compound_3_resume_re_evaluates_test():
@@ -442,11 +442,11 @@ def test_compound_3_resume_re_evaluates_test():
     assert 'return {' not in source.split("resumed_from_checkpoint")[0].split("try:")[0] or \
            "test_auc" in source, \
         "COMPOUND #3: resume path must not return early without test_auc"
-    print("  PASS: COMPOUND #3 — resume re-evaluates on test set (no early return)")
+    print("  PASS: COMPOUND #3 -- resume re-evaluates on test set (no early return)")
 
 
 def test_compound_3_resume_returns_test_auc():
-    """COMPOUND #3: runtime test — resume path must include test_auc in results."""
+    """COMPOUND #3: runtime test -- resume path must include test_auc in results."""
     import logging
     logging.disable(logging.WARNING)  # suppress noisy logs during test
     try:
@@ -459,7 +459,7 @@ def test_compound_3_resume_returns_test_auc():
             results1 = bridge.train_model(epochs=2, patience=2, resume_from_checkpoint=False)
             assert "test_auc" in results1, "First run must include test_auc"
             assert "test_auc_verified" in results1, "First run must include test_auc_verified"
-            # Second run (resumes from checkpoint) — must STILL have test_auc
+            # Second run (resumes from checkpoint) -- must STILL have test_auc
             results2 = bridge.train_model(epochs=2, patience=2, resume_from_checkpoint=True)
             assert "test_auc" in results2, \
                 "COMPOUND #3: resume run MUST include test_auc (was the bug)"
@@ -467,7 +467,7 @@ def test_compound_3_resume_returns_test_auc():
                 "COMPOUND #3: resume run MUST include test_auc_verified"
             assert results2["test_auc"] is not None, \
                 "COMPOUND #3: resume run test_auc must not be None"
-            print(f"  PASS: COMPOUND #3 — resume returns test_auc={results2['test_auc']:.4f}, "
+            print(f"  PASS: COMPOUND #3 -- resume returns test_auc={results2['test_auc']:.4f}, "
                   f"test_auc_verified={results2['test_auc_verified']:.4f}")
     finally:
         logging.disable(logging.NOTSET)
@@ -489,7 +489,7 @@ def test_v90_full_smoke_test():
             results = bridge.train_model(epochs=2, patience=2, resume_from_checkpoint=False)
             assert "test_auc" in results
             assert "best_epoch" in results or results.get("epochs_trained", 0) >= 0
-            print(f"  PASS: V90 smoke test — train_model completed. "
+            print(f"  PASS: V90 smoke test -- train_model completed. "
                   f"test_auc={results['test_auc']:.4f}, "
                   f"best_val_auc={results['best_val_auc']:.4f}")
     finally:

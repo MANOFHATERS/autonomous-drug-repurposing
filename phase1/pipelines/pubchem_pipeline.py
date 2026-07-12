@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
-# (c) 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# (c) 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 # See LICENSE file for full text.
 """
-PubChem enrichment pipeline — institutional-grade production-ready rewrite.
+PubChem enrichment pipeline -- institutional-grade production-ready rewrite.
 
 This module implements ``PubChemPipeline``, a child of :class:`BasePipeline`
 that enriches existing ``drugs`` table rows with physicochemical properties
@@ -37,12 +37,12 @@ Data flow
     3. Batch into groups of ``PUBCHEM_PIPELINE_BATCH_SIZE`` (default 95).
        POST each batch to PubChem PUG REST.  Save each batch's raw JSON
        response to ``raw_data/pubchem/pubchem_responses/batch_NNNN.json``
-       with a SHA-256 sidecar — supports replay without re-hitting PubChem.
+       with a SHA-256 sidecar -- supports replay without re-hitting PubChem.
     4. Cache the InChIKey list for ``PUBCHEM_PIPELINE_CACHE_TTL_SECONDS``
        (default 1 hour).  ``force_refresh=True`` always re-queries.
 
 ``clean(raw_path)``
-    Pure transformation — NO HTTP.  Loads the raw JSON archive produced by
+    Pure transformation -- NO HTTP.  Loads the raw JSON archive produced by
     ``download()``, parses each response, validates the InChIKey matches
     the request, deduplicates by InChIKey (lowest CID wins), sanitizes
     empty strings to ``None``, validates numeric ranges, converts floats
@@ -64,7 +64,7 @@ Data flow
 Configuration
 -------------
 All tunables live in ``config/settings.py``:
-``PUBCHEM_PIPELINE_BATCH_SIZE`` (default 95 — 5% safety margin under
+``PUBCHEM_PIPELINE_BATCH_SIZE`` (default 95 -- 5% safety margin under
 PubChem's 100-identifier hard limit), ``PUBCHEM_PIPELINE_MIN_BACKOFF``
 (2.0s), ``PUBCHEM_PIPELINE_MAX_BACKOFF`` (32.0s),
 ``PUBCHEM_PIPELINE_READ_TIMEOUT`` (30.0s),
@@ -78,7 +78,7 @@ PubChem's 100-identifier hard limit), ``PUBCHEM_PIPELINE_MIN_BACKOFF``
 ``PUBCHEM_CIRCUIT_BREAKER_RESET_SECONDS`` (60.0),
 ``PUBCHEM_PIPELINE_PROPERTIES`` (the 15 PubChem property names).
 Connection / retry / API key reuse the ``ENTITY_RESOLUTION_PUBCHEM_*``
-settings — single source of truth.
+settings -- single source of truth.
 
 Scientific caveats (see docs/pipelines/pubchem.md for full details)
 -------------------------------------------------------------------
@@ -90,12 +90,12 @@ Scientific caveats (see docs/pipelines/pubchem.md for full details)
 * **XLogP** is a PubChem XLogP3 QSAR prediction, NOT experimental logP.
   The ``xlogp_source = 'pubchem_xlogp3'`` flag makes this explicit.
 * **TPSA** is calculated from the 2D structure, not measured.
-* **CID** is the standardized (parent) CID — two different salt forms of
+* **CID** is the standardized (parent) CID -- two different salt forms of
   the same drug share the same parent CID.
 * **HeavyAtomCount** excludes hydrogen (PubChem convention).
 * **HBondDonorCount / HBondAcceptorCount** are Lipinski-style counts.
 * **molecular_weight** is average MW using natural-abundance atomic
-  weights.  **exact_mass** is monoisotopic mass — use this for
+  weights.  **exact_mass** is monoisotopic mass -- use this for
   mass-spectrometry.
 
 Schema contract
@@ -107,8 +107,8 @@ the same columns (no more, no less).
 
 Failure modes
 -------------
-* HTTP 4xx (except 429): permanent failure — dead-letter, no retry.
-* HTTP 429 / 5xx: transient — retry with jittered backoff, respect
+* HTTP 4xx (except 429): permanent failure -- dead-letter, no retry.
+* HTTP 429 / 5xx: transient -- retry with jittered backoff, respect
   ``Retry-After`` header, circuit breaker opens after 5 consecutive
   failures.
 * InChIKey mismatch (response ≠ request): dead-letter with reason
@@ -118,7 +118,7 @@ Failure modes
 * Out-of-range values (e.g. molecular_weight < 0): dead-letter with
   reason ``range_violation_<field>``, field set to None.
 * Empty strings from PubChem: converted to ``None`` (SQL NULL) before
-  persistence — never stored as ``""``.
+  persistence -- never stored as ``""``.
 
 References
 ----------
@@ -129,7 +129,7 @@ References
 
 from __future__ import annotations
 
-# Standard library imports — alphabetical.
+# Standard library imports -- alphabetical.
 import csv
 import email.utils
 import hashlib
@@ -198,8 +198,8 @@ from sqlalchemy import select
 # and DrugBank regardless of the case / format PubChem's PUG-REST returned.
 from cleaning._constants import normalize_inchikey, normalize_pubchem_cid
 
-# Optional OpenTelemetry — only imported when OTEL_ENABLED=True.
-if OTEL_ENABLED:  # pragma: no cover — exercised only in instrumented envs
+# Optional OpenTelemetry -- only imported when OTEL_ENABLED=True.
+if OTEL_ENABLED:  # pragma: no cover -- exercised only in instrumented envs
     try:
         from opentelemetry import trace
 
@@ -209,7 +209,7 @@ if OTEL_ENABLED:  # pragma: no cover — exercised only in instrumented envs
 else:
     _tracer = None
 
-# Optional Prometheus metrics — only imported when PROMETHEUS_ENABLED=True.
+# Optional Prometheus metrics -- only imported when PROMETHEUS_ENABLED=True.
 if PROMETHEUS_ENABLED:  # pragma: no cover
     try:
         from prometheus_client import Counter as PromCounter
@@ -251,7 +251,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Module-level constants — these are NOT configuration knobs (those live in
+# Module-level constants -- these are NOT configuration knobs (those live in
 # settings.py).  These are immutable scientific / protocol constants.
 # ---------------------------------------------------------------------------
 
@@ -260,17 +260,17 @@ logger = logging.getLogger(__name__)
 # cleaning._constants to ensure there is exactly ONE definition.
 from cleaning._constants import CANONICAL_INCHIKEY_REGEX as INCHIKEY_RE  # noqa: E402
 
-# PubChem PUG REST fault response shape — error responses have a ``Fault`` key.
+# PubChem PUG REST fault response shape -- error responses have a ``Fault`` key.
 # Detecting this prevents mis-parsing an error as a valid PropertyTable (INT-13).
 PUBCHEM_FAULT_KEY = "Fault"
 
-# HTTP status codes that are PERMANENT failures — never retried (REL-2, DESIGN-12).
+# HTTP status codes that are PERMANENT failures -- never retried (REL-2, DESIGN-12).
 # 429 is NOT in this set (it's a rate-limit signal, retried with Retry-After).
 PERMANENT_STATUS: frozenset[int] = frozenset(
     {400, 401, 403, 404, 405, 406, 410, 422}
 )
 
-# HTTP status codes that are TRANSIENT — retried with jittered backoff (REL-2).
+# HTTP status codes that are TRANSIENT -- retried with jittered backoff (REL-2).
 TRANSIENT_STATUS: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 # Network exceptions treated as retryable (REL-11).
@@ -313,7 +313,7 @@ COLUMN_ORDER: tuple[str, ...] = (
     "inchi",
     "iupac_name",
     "cas_number",
-    # Physicochemical (predicted/calculated — see source flags)
+    # Physicochemical (predicted/calculated -- see source flags)
     "xlogp",
     "xlogp_source",
     "tpsa",
@@ -349,12 +349,12 @@ COLUMN_ORDER: tuple[str, ...] = (
     "_source_response_sha256",
 )
 
-# Backward-compat column renames — when reading legacy CSVs produced by
+# Backward-compat column renames -- when reading legacy CSVs produced by
 # the old pipeline, rename to the new schema (COMP-8).
 COLUMN_RENAMES: dict[str, str] = {
     "hbond_donor_count": "h_bond_donor_count",
     "hbond_acceptor_count": "h_bond_acceptor_count",
-    "smiles": "isomeric_smiles",  # legacy singular smiles → isomeric
+    "smiles": "isomeric_smiles",  # legacy singular smiles -> isomeric
 }
 
 # String values that are treated as NULL by ``_sanitize_string`` (SCI-18, DQ-3).
@@ -362,38 +362,38 @@ NULL_STRING_VALUES: frozenset[str] = frozenset(
     {"", "nan", "none", "null", "n/a", "unknown", "-"}
 )
 
-# V19 ROOT FIX (PS-1 / SW-2 — patient safety, scientific correctness):
+# V19 ROOT FIX (PS-1 / SW-2 -- patient safety, scientific correctness):
 # The InChIKey's last character is NOT a 4-state protonation flag. Per the
 # official InChI Trust technical FAQ (https://www.inchi-trust.org/technical-faq/),
 # the InChIKey structure is:
 #   • chars 1-14: connectivity hash
 #   • chars 16-25: remaining-layers hash (stereo /b/t, isotope /i, charge /q,
-#     proton /p — all hashed together)
-#   • char 27 (last): version flag — 'S' = Standard InChI, 'N' = Non-standard
+#     proton /p -- all hashed together)
+#   • char 27 (last): version flag -- 'S' = Standard InChI, 'N' = Non-standard
 #     InChI. ONLY those two values are spec-defined.
 #
 # V18 (and the V11 audit's own parenthetical recommendation) BOTH misread
 # the standard: they treated the last char as a 4-state protonation flag
 # (N/M/P/S). Because real-world InChIKeys almost always end in 'S'
 # (Standard), V18's mapping labeled virtually every drug as
-# `salt_form="salt_form"` — including plain neutral molecules like aspirin,
+# `salt_form="salt_form"` -- including plain neutral molecules like aspirin,
 # caffeine, and paracetamol. This is the patient-safety residual the
 # V19 forensic re-audit flagged.
 #
 # Real protonation state is encoded in the InChI string's `/q` (formal
-# charge) and `/p` (proton balance) layers — NOT in the InChIKey. The
+# charge) and `/p` (proton balance) layers -- NOT in the InChIKey. The
 # V19 fix:
-#   1. Adds `_extract_inchikey_version_flag()` — returns 'S' or 'N' (the
+#   1. Adds `_extract_inchikey_version_flag()` -- returns 'S' or 'N' (the
 #      only spec-defined values). Stored as `inchikey_version_flag`.
-#   2. Adds `_extract_protonation_from_inchi()` — parses the InChI string's
+#   2. Adds `_extract_protonation_from_inchi()` -- parses the InChI string's
 #      `/p` and `/q` layers to derive the actual protonation state.
 #      Returns one of: 'neutral', 'protonated', 'deprotonated', 'zwitterion',
 #      'salt_form' (multi-component), or None when the InChI is unavailable.
-#   3. `_extract_salt_form()` is updated to take BOTH inchikey and inchi —
+#   3. `_extract_salt_form()` is updated to take BOTH inchikey and inchi --
 #      it derives salt_form from the InChI when available, and returns None
 #      (NOT a fabricated 4-state mapping) when only the InChIKey is present.
 #   4. `_extract_protonation_state()` is updated to take BOTH inchikey and
-#      inchi — same logic.
+#      inchi -- same logic.
 INCHIKEY_VERSION_FLAGS: frozenset[str] = frozenset({"S", "N"})
 
 # Default timeout for the synonym / CAS lookup endpoint (separate from the
@@ -401,7 +401,7 @@ INCHIKEY_VERSION_FLAGS: frozenset[str] = frozenset({"S", "N"})
 _SYNONYM_LOOKUP_TIMEOUT: tuple[float, float] = (10.0, 15.0)
 
 
-# ``__all__`` — explicit exports (DOC-11).  Prevents ``from
+# ``__all__`` -- explicit exports (DOC-11).  Prevents ``from
 # pipelines.pubchem_pipeline import *`` from exposing internal helpers.
 __all__ = [
     "PubChemPipeline",
@@ -438,14 +438,14 @@ class PubChemUnreachableError(PubChemPipelineError):
 class PubChemResponseSchemaError(PubChemPipelineError):
     """Raised when PubChem returns a response with an unexpected schema.
 
-    E.g., the ``PropertyTable.Properties`` key is missing — indicates
+    E.g., the ``PropertyTable.Properties`` key is missing -- indicates
     PubChem has changed its API response format.  Failing fast prevents
     silent data corruption.
     """
 
 
 # ---------------------------------------------------------------------------
-# Helper functions (module-level, free of side effects — easier to unit test).
+# Helper functions (module-level, free of side effects -- easier to unit test).
 # ---------------------------------------------------------------------------
 
 
@@ -460,7 +460,7 @@ def _sanitize_string(value: Any) -> Optional[str]:
     Why this matters: PubChem occasionally returns ``""`` for a field
     (e.g., ``MolecularFormula: ""``).  The legacy pipeline stored ``""``
     and the loader's ``COALESCE(:field, drugs.field)`` SQL treated ``""``
-    as non-NULL — **silently overwriting existing real data with empty
+    as non-NULL -- **silently overwriting existing real data with empty
     strings across the entire drugs table**.  This is silent data
     corruption.  Converting to ``None`` makes ``COALESCE(NULL, existing)``
     preserve existing data.
@@ -470,7 +470,7 @@ def _sanitize_string(value: Any) -> Optional[str]:
     if isinstance(value, str):
         s = value
     elif isinstance(value, bool):
-        # Booleans are not strings — reject explicitly to avoid
+        # Booleans are not strings -- reject explicitly to avoid
         # ``str(True) == "True"`` being persisted as a chemical name.
         return None
     else:
@@ -517,16 +517,16 @@ def _extract_protonation_from_inchi(inchi: Optional[str]) -> Optional[str]:
     InChI string's ``/p`` (proton balance) and ``/q`` (formal charge) layers.
 
     Returns one of:
-      - ``'neutral'``       — no /p layer, no /q layer (or /q0)
-      - ``'protonated'``    — /q with positive charge (e.g. /q+1, amine salt)
-      - ``'deprotonated'``  — /p with negative value (e.g. /p-1, carboxylate)
+      - ``'neutral'``       -- no /p layer, no /q layer (or /q0)
+      - ``'protonated'``    -- /q with positive charge (e.g. /q+1, amine salt)
+      - ``'deprotonated'``  -- /p with negative value (e.g. /p-1, carboxylate)
                               OR /q with negative charge (e.g. /q-1)
-      - ``'zwitterion'``    — /q0 explicitly AND /p present (internal balance)
-      - ``'salt_form'``     — InChI has multiple disconnected components
+      - ``'zwitterion'``    -- /q0 explicitly AND /p present (internal balance)
+      - ``'salt_form'``     -- InChI has multiple disconnected components
                               (detected by counting '.' in the formula layer)
-                              AND any component has /q≠0 — this is the only
+                              AND any component has /q≠0 -- this is the only
                               true "salt" case per IUPAC definition
-      - ``None``            — InChI string unavailable / unparseable
+      - ``None``            -- InChI string unavailable / unparseable
 
     Scientific basis:
       - InChI /p layer: https://www.inchi-trust.org/technical-faq/
@@ -534,7 +534,7 @@ def _extract_protonation_from_inchi(inchi: Optional[str]) -> Optional[str]:
         the neutral parent structure as supplied."
       - InChI /q layer: formal charge on the entire structure.
       - Multi-component InChI (salt vs covalent): the /formula layer
-        contains a '.' separator (e.g. "C6H8O6.HCl" → ascorbate HCl salt).
+        contains a '.' separator (e.g. "C6H8O6.HCl" -> ascorbate HCl salt).
     """
     if not isinstance(inchi, str) or not inchi.strip():
         return None
@@ -565,13 +565,13 @@ def _extract_protonation_from_inchi(inchi: Optional[str]) -> Optional[str]:
             formula_layer = after_prefix[1]
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         # v84 FORENSIC ROOT FIX (BUG #32): narrowed from broad
-        # ``except Exception  # noqa: BLE001 — defensive parsing``.
-        # The previous code caught ALL exceptions — including
+        # ``except Exception  # noqa: BLE001 -- defensive parsing``.
+        # The previous code caught ALL exceptions -- including
         # programming bugs (AttributeError, IndexError, RuntimeError)
-        # — and silently set ``formula_layer = ""``. A bug in the
+        # -- and silently set ``formula_layer = ""``. A bug in the
         # InChI splitting logic was masked, causing the protonation-
         # state detector to silently classify every multi-component
-        # InChI as "neutral" — corrupting the Drug salt/protonation
+        # InChI as "neutral" -- corrupting the Drug salt/protonation
         # signal the RL ranker uses for safety filtering.
         # ROOT FIX: catch ONLY the expected parsing exceptions. Any
         # other exception (programming bug) propagates so it surfaces
@@ -582,24 +582,24 @@ def _extract_protonation_from_inchi(inchi: Optional[str]) -> Optional[str]:
     # Decision tree (root-level, scientifically grounded):
     if is_multi_component and q_val != 0:
         # Multiple disconnected components with a net non-zero formal charge
-        # → ionic salt (e.g. NaCl, procaine-HCl).
+        # -> ionic salt (e.g. NaCl, procaine-HCl).
         return "salt_form"
     if p_val < 0:
-        # Protons removed → deprotonated (carboxylate, phenolate, etc.).
+        # Protons removed -> deprotonated (carboxylate, phenolate, etc.).
         return "deprotonated"
     if p_val > 0:
-        # Protons added → protonated (ammonium, protonated heterocycle).
+        # Protons added -> protonated (ammonium, protonated heterocycle).
         return "protonated"
     if q_val > 0:
-        # Net positive charge without /p → cation (e.g. quaternary ammonium).
+        # Net positive charge without /p -> cation (e.g. quaternary ammonium).
         return "protonated"
     if q_val < 0:
-        # Net negative charge without /p → anion (e.g. sulfate, deprotonated enolate).
+        # Net negative charge without /p -> anion (e.g. sulfate, deprotonated enolate).
         return "deprotonated"
     if p_match is not None and q_val == 0:
-        # /p present but /q=0 → internal proton transfer (zwitterion).
+        # /p present but /q=0 -> internal proton transfer (zwitterion).
         return "zwitterion"
-    # No /p, no /q (or /q0) → neutral.
+    # No /p, no /q (or /q0) -> neutral.
     return "neutral"
 
 
@@ -625,7 +625,7 @@ def _extract_protonation_state(
     V18 BACKWARD-COMPAT NOTE:
         The V18 4-state N/M/P/S mapping is REMOVED. Callers that previously
         received 'N'/'M'/'P'/'S' from this function now receive
-        'neutral'/'deprotonated'/'protonated'/'salt_form' (the full word) —
+        'neutral'/'deprotonated'/'protonated'/'salt_form' (the full word) --
         or None when the InChI is unavailable. The previous behavior of
         returning 'S' for virtually every drug (because real InChIKeys
         almost always end in 'S' = Standard) was a patient-safety bug.
@@ -634,7 +634,7 @@ def _extract_protonation_state(
     if inchi is not None:
         return _extract_protonation_from_inchi(inchi)
     # Fallback: InChI string unavailable. We can NOT derive protonation
-    # from the InChIKey alone — the last char is a version flag, not a
+    # from the InChIKey alone -- the last char is a version flag, not a
     # protonation flag. Return None rather than fabricating a wrong label.
     if inchikey is not None:
         logger.debug(
@@ -663,20 +663,20 @@ def _extract_salt_form(
 
     Returns:
         - ``'salt_form'``      when the InChI has multiple charged components
-                               (true ionic salt — e.g. NaCl, procaine·HCl)
+                               (true ionic salt -- e.g. NaCl, procaine·HCl)
         - ``'neutral'``        when the InChI is single-component, no /p, /q=0
         - ``'protonated'``     when /p>0 or /q>0 (cation)
         - ``'deprotonated'``   when /p<0 or /q<0 (anion)
         - ``'zwitterion'``     when /p present and /q=0
         - ``None``             when the InChI is unavailable (we will NOT
                                fabricate a label from the InChIKey's version
-                               flag — that was the V18 patient-safety bug)
+                               flag -- that was the V18 patient-safety bug)
 
     V18 BACKWARD-COMP NOTE:
-        The V18 4-state mapping (N→neutral, M→deprotonated, P→protonated,
-        S→salt_form) is REMOVED. Real-world InChIKeys almost always end
+        The V18 4-state mapping (N->neutral, M->deprotonated, P->protonated,
+        S->salt_form) is REMOVED. Real-world InChIKeys almost always end
         in 'S' (Standard), so V18 labeled plain neutral molecules like
-        aspirin as "salt_form" — selecting wrong formulations for wet-lab
+        aspirin as "salt_form" -- selecting wrong formulations for wet-lab
         trial. V19 returns None when the InChI is unavailable, which is
         safer than a fabricated label.
     """
@@ -727,16 +727,16 @@ def _extract_formal_charge(smiles: Optional[str]) -> Optional[int]:
     if not isinstance(smiles, str) or not smiles:
         return None
     if RDKIT_AVAILABLE:
-        try:  # pragma: no cover — exercised only when RDKit is installed
+        try:  # pragma: no cover -- exercised only when RDKit is installed
             from rdkit import Chem
 
             mol = Chem.MolFromSmiles(smiles)
             if mol is not None:
                 return int(Chem.GetFormalCharge(mol))
-        except (ImportError, ValueError, RuntimeError):  # noqa: BLE001 — RDKit errors are opaque  # v85 FORENSIC ROOT FIX (BUG #51)
+        except (ImportError, ValueError, RuntimeError):  # noqa: BLE001 -- RDKit errors are opaque  # v85 FORENSIC ROOT FIX (BUG #51)
             pass
-    # Heuristic fallback — count +/- inside atom brackets.
-    # ``[NH4+]`` → +1; ``[Cl-]`` → -1; ``[Ca+2]`` → +2; ``[O-2]`` → -2.
+    # Heuristic fallback -- count +/- inside atom brackets.
+    # ``[NH4+]`` -> +1; ``[Cl-]`` -> -1; ``[Ca+2]`` -> +2; ``[O-2]`` -> -2.
     total = 0
     found = False
     for token in re.findall(r"\[([^\]]+)\]", smiles):
@@ -792,7 +792,7 @@ class PubChemPipeline(BasePipeline):
         super().__init__(*args, **kwargs)
 
         # Pull all settings into instance attributes so tests can override.
-        # (ARCH-7, CONF-1 … CONF-9 — no module-level config constants.)
+        # (ARCH-7, CONF-1 ... CONF-9 -- no module-level config constants.)
         self.batch_size: int = PUBCHEM_PIPELINE_BATCH_SIZE
         self.max_retries: int = ENTITY_RESOLUTION_PUBCHEM_MAX_RETRIES
         self.min_backoff: float = PUBCHEM_PIPELINE_MIN_BACKOFF
@@ -808,11 +808,11 @@ class PubChemPipeline(BasePipeline):
         self.concurrency: int = max(1, PUBCHEM_PIPELINE_CONCURRENCY)
         self.fetch_synonyms: bool = PUBCHEM_PIPELINE_FETCH_SYNONYMS
         self.fetch_cas: bool = PUBCHEM_PIPELINE_FETCH_CAS
-        # FIX-P1-B-2 (audit P1 — ARCH-3 violation): ``clean()`` must be a
+        # FIX-P1-B-2 (audit P1 -- ARCH-3 violation): ``clean()`` must be a
         # pure transformation with NO HTTP calls. The previous code called
         # ``_fetch_cas_for_cid`` inside ``clean()`` whenever
         # ``fetch_cas=True``, which (a) broke the architecture contract,
-        # (b) made ``clean()`` non-idempotent — re-running it produced
+        # (b) made ``clean()`` non-idempotent -- re-running it produced
         # different ``cas_number`` values as PubChem's synonym table
         # evolved. The fix: CAS enrichment is gated behind
         # ``_allow_clean_http`` (default False) inside ``clean()`` and
@@ -844,7 +844,7 @@ class PubChemPipeline(BasePipeline):
         # Validate (CONF-8, CONF-12).
         self._validate_config()
 
-        # Per-run mutable state — reset at the start of ``download()``.
+        # Per-run mutable state -- reset at the start of ``download()``.
         self._api_call_count: int = 0
         self._retry_count: int = 0
         self._split_count: int = 0
@@ -857,13 +857,13 @@ class PubChemPipeline(BasePipeline):
         self._force_refresh: bool = False
         self._consecutive_connection_failures: int = 0
 
-        # User-Agent header — required by PubChem ToS for automated clients.
+        # User-Agent header -- required by PubChem ToS for automated clients.
         self._user_agent: str = (
             f"DrugRepurposingPlatform/1.0 (contact: {self.contact_email})"
         )
 
         logger.info(
-            "[%s] PubChemPipeline initialised — batch_size=%d, max_retries=%d, "
+            "[%s] PubChemPipeline initialised -- batch_size=%d, max_retries=%d, "
             "backoff=%.1f..%.1fs, timeout=(%.1f, %.1f), concurrency=%d, "
             "circuit_breaker=%d/%.1fs, fetch_cas=%s, fetch_synonyms=%s, "
             "rdkit=%s",
@@ -912,7 +912,7 @@ class PubChemPipeline(BasePipeline):
             # traffic is sent.
             raise PubChemPipelineError(
                 f"rate_limit_interval={self.rate_limit_interval:.3f} is below "
-                f"PubChem's 5 req/sec limit (0.2s) — refusing to start: this "
+                f"PubChem's 5 req/sec limit (0.2s) -- refusing to start: this "
                 f"would get the worker IP banned for 24 hours. Set "
                 f"ENTITY_RESOLUTION_PUBCHEM_CALL_DELAY >= 0.2."
             )
@@ -938,16 +938,16 @@ class PubChemPipeline(BasePipeline):
         # EMPTY STRING (misconfiguration), the ``verify=(self.ca_bundle
         # if self.ca_bundle else True)`` ternary silently falls back to
         # ``verify=True`` (system CA store) instead of the intended CA
-        # bundle — a TLS-interception bypass that defeats the purpose of
+        # bundle -- a TLS-interception bypass that defeats the purpose of
         # pinning a custom CA bundle. ROOT FIX: validate that if
         # ``ca_bundle`` is set, it is non-empty AND points to an existing
-        # readable file. Empty / non-existent / unreadable → raise.
+        # readable file. Empty / non-existent / unreadable -> raise.
         if self.ca_bundle is not None:
             ca_str = str(self.ca_bundle).strip()
             if not ca_str:
                 raise PubChemPipelineError(
                     "ENTITY_RESOLUTION_PUBCHEM_CA_BUNDLE is set to an empty "
-                    "string — this silently falls back to verify=True (system "
+                    "string -- this silently falls back to verify=True (system "
                     "CA store), bypassing the intended custom CA bundle. Set "
                     "it to a valid file path or unset it to use the system CA store."
                 )
@@ -980,7 +980,7 @@ class PubChemPipeline(BasePipeline):
         Steps
         -----
         1. Resolve ``raw_dir`` (base class lazy-inits it).
-        2. Check the cache for ``inchikeys_to_lookup.txt`` — return early
+        2. Check the cache for ``inchikeys_to_lookup.txt`` -- return early
            if fresh (within ``cache_ttl_seconds``) and SHA-256 sidecar
            verifies.  ``force_refresh`` bypasses the cache.
         3. Query ``drugs`` via the ORM (ARCH-12): soft-delete filter,
@@ -990,7 +990,7 @@ class PubChemPipeline(BasePipeline):
         5. Fetch PubChem responses in batches via ``_fetch_all_batches()``.
            Each batch's raw JSON is archived to
            ``raw_dir/pubchem_responses/batch_NNNN.json`` with its own
-           SHA-256 sidecar — supports replay without re-hitting PubChem.
+           SHA-256 sidecar -- supports replay without re-hitting PubChem.
 
         Returns
         -------
@@ -1019,16 +1019,16 @@ class PubChemPipeline(BasePipeline):
                 return enrichment_path
         except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
-                "[%s] v50 downloader failed (%s) — falling back to v49 path",
+                "[%s] v50 downloader failed (%s) -- falling back to v49 path",
                 self.source_name, exc,
             )
 
         # Lazy-init raw_dir (the base class inits it on first call to
         # ``run()`` / ``run_load_only()`` / ``run_download_and_clean_only()``
-        # — but ``download()`` can be called directly by tests).
+        # -- but ``download()`` can be called directly by tests).
         if self.raw_dir is None:
             self._ensure_directories()
-        assert self.raw_dir is not None  # noqa: S101 — invariant after _ensure
+        assert self.raw_dir is not None  # noqa: S101 -- invariant after _ensure
 
         # Reset per-run mutable state.
         self._api_call_count = 0
@@ -1040,7 +1040,7 @@ class PubChemPipeline(BasePipeline):
         self._accumulated_records = {}
         self._access_timestamp = None
         self._consecutive_connection_failures = 0
-        # Note: dead_letter_queue is shared with the base class — do not
+        # Note: dead_letter_queue is shared with the base class -- do not
         # reset it here; ``run()`` controls its lifecycle.
 
         dest = self.raw_dir / "inchikeys_to_lookup.txt"
@@ -1067,20 +1067,20 @@ class PubChemPipeline(BasePipeline):
                         dest.stat().st_size,
                         self._input_checksum,
                     )
-                    # Still need to fetch PubChem responses — they are
+                    # Still need to fetch PubChem responses -- they are
                     # not cached between runs (they could change if
                     # PubChem updates).
                     self._fetch_all_batches(dest)
                     return dest
                 logger.warning(
-                    "[%s] Cached file %s failed SHA-256 verification — "
+                    "[%s] Cached file %s failed SHA-256 verification -- "
                     "re-querying",
                     self.source_name,
                     dest,
                 )
             else:
                 logger.info(
-                    "[%s] Cached file stale (age=%ds > ttl=%ds) — re-querying",
+                    "[%s] Cached file stale (age=%ds > ttl=%ds) -- re-querying",
                     self.source_name,
                     int(age_seconds),
                     self.cache_ttl_seconds,
@@ -1097,12 +1097,12 @@ class PubChemPipeline(BasePipeline):
                 select(Drug.inchikey)
                 .where(Drug.pubchem_cid.is_(None))
                 .where(Drug.inchikey.isnot(None))
-                .where(Drug.is_deleted == False)  # noqa: E712 — ORM filter
+                .where(Drug.is_deleted == False)  # noqa: E712 -- ORM filter
                 .order_by(Drug.inchikey.asc())
             )
             if self.max_records is not None and self.max_records > 0:
                 stmt = stmt.limit(self.max_records)
-            # Use yield_per for streaming on PostgreSQL — on SQLite the
+            # Use yield_per for streaming on PostgreSQL -- on SQLite the
             # hint is ignored (PERF-10, PERF-11).
             for row in session.execute(stmt).yield_per(1000):
                 ik = row.inchikey
@@ -1114,7 +1114,7 @@ class PubChemPipeline(BasePipeline):
         inchikeys = list(dict.fromkeys(inchikeys))
         if len(inchikeys) < original_count:
             logger.info(
-                "[%s] Deduplicated %d → %d InChIKeys",
+                "[%s] Deduplicated %d -> %d InChIKeys",
                 self.source_name,
                 original_count,
                 len(inchikeys),
@@ -1124,7 +1124,7 @@ class PubChemPipeline(BasePipeline):
         dest.parent.mkdir(parents=True, exist_ok=True)
         with open(dest, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(
-                f"# inchikeys_to_lookup — generated "
+                f"# inchikeys_to_lookup -- generated "
                 f"{datetime.now(timezone.utc).isoformat()} by "
                 f"PubChemPipeline run_id={self.run_id}\n"
             )
@@ -1139,18 +1139,18 @@ class PubChemPipeline(BasePipeline):
 
         if not inchikeys:
             logger.warning(
-                "[%s] No drugs require PubChem enrichment — skipping run. "
+                "[%s] No drugs require PubChem enrichment -- skipping run. "
                 "Run ChEMBL/DrugBank pipelines before PubChem.",
                 self.source_name,
             )
         else:
             logger.info(
-                "[%s] Found %d InChIKeys without PubChem CID — fetching",
+                "[%s] Found %d InChIKeys without PubChem CID -- fetching",
                 self.source_name,
                 len(inchikeys),
             )
 
-        # Fetch PubChem responses (HTTP I/O — happens in download(), NOT
+        # Fetch PubChem responses (HTTP I/O -- happens in download(), NOT
         # in clean() per ARCH-3).
         self._fetch_all_batches(dest)
 
@@ -1208,7 +1208,7 @@ class PubChemPipeline(BasePipeline):
         missing = required_v50_cols - set(raw_df.columns)
         if missing:
             logger.error(
-                "[%s] v50 enrichment CSV missing required columns %s — "
+                "[%s] v50 enrichment CSV missing required columns %s -- "
                 "available: %s",
                 self.source_name, missing, list(raw_df.columns),
             )
@@ -1265,7 +1265,7 @@ class PubChemPipeline(BasePipeline):
                 # Identity
                 "inchikey": inchikey,
                 "pubchem_cid": pubchem_cid,
-                # Structural (not provided by v50 CSV — leave None)
+                # Structural (not provided by v50 CSV -- leave None)
                 "molecular_formula": None,
                 "molecular_weight": None,
                 "exact_mass": None,
@@ -1307,7 +1307,7 @@ class PubChemPipeline(BasePipeline):
         if invalid_count > 0:
             logger.warning(
                 "[%s] v50 enrichment CSV: %d / %d rows had invalid "
-                "InChIKeys — dead-lettered",
+                "InChIKeys -- dead-lettered",
                 self.source_name, invalid_count, len(raw_df),
             )
 
@@ -1332,19 +1332,19 @@ class PubChemPipeline(BasePipeline):
     def clean(self, raw_path: Path) -> pd.DataFrame:
         """Parse raw PubChem data into a cleaned DataFrame.
 
-        Pure transformation — NO HTTP calls (ARCH-3, ARCH-4).  Reads the
+        Pure transformation -- NO HTTP calls (ARCH-3, ARCH-4).  Reads the
         raw archive produced by ``download()`` and parses each record
         into structured rows.
 
-        v80 FORENSIC ROOT FIX (P0-C3 — PubChemPipelineError in v50 mode):
-          The v50 downloader returns ``pubchem_enrichment.csv`` — a
+        v80 FORENSIC ROOT FIX (P0-C3 -- PubChemPipelineError in v50 mode):
+          The v50 downloader returns ``pubchem_enrichment.csv`` -- a
           CSV with columns: inchikey, pubchem_cid, canonical_smiles,
           xlogp, tpsa, h_bond_donor_count, h_bond_acceptor_count,
           rotatable_bond_count. But the previous clean() expected
           ``raw_path`` to be an InChIKey LIST file
           (``inchikeys_to_lookup.txt``) AND expected a companion
           ``pubchem_responses/batch_*.json`` archive to exist. Neither
-          exists in v50 mode → clean() crashed with FileNotFoundError
+          exists in v50 mode -> clean() crashed with FileNotFoundError
           or returned an empty DataFrame, blocking the KG build.
 
           ROOT FIX: detect the input format from the file extension
@@ -1373,20 +1373,20 @@ class PubChemPipeline(BasePipeline):
         ------------
         * Appends invalid records to ``self.dead_letter_queue``.
         * Appends per-step transformations to ``self._transformation_log``.
-        * Does NOT write any files — the base class persists the returned
+        * Does NOT write any files -- the base class persists the returned
           DataFrame via ``_persist_cleaned_data()`` (ARCH-4, COMP-3,
           COMP-4, LIN-6, LIN-7, PERF-12).
         """
         # ARCH-3: clean() does NO HTTP.  Use ``responses`` library or a
         # network sentinel in tests to verify no requests are made.
-        # FIX-P1-B-2 (audit P1 — ARCH-3): when ``fetch_cas=True`` but the
+        # FIX-P1-B-2 (audit P1 -- ARCH-3): when ``fetch_cas=True`` but the
         # operator has not opted into HTTP during clean (the default,
         # ``_allow_clean_http=False``), CAS enrichment is skipped inside
         # ``clean()``. Emit a one-shot warning so operators know CAS
         # enrichment was deliberately deferred to ``enrich_cas()``.
         if self.fetch_cas and not self._allow_clean_http:
             logger.warning(
-                "[%s] fetch_cas=True but _allow_clean_http=False — CAS "
+                "[%s] fetch_cas=True but _allow_clean_http=False -- CAS "
                 "enrichment is SKIPPED inside clean() to preserve ARCH-3 "
                 "(pure transformation). Call enrich_cas(df) after clean() "
                 "to perform live PubChem synonym lookup.",
@@ -1429,14 +1429,14 @@ class PubChemPipeline(BasePipeline):
 
         # COMP-8: apply legacy column renames (no-op for fresh CSVs).
         # (This is a backward-compat shim for any CSVs produced by the
-        # old pipeline version — it doesn't apply to the raw_path file,
+        # old pipeline version -- it doesn't apply to the raw_path file,
         # which is an InChIKey list, not a CSV.)
 
         # Locate the raw JSON archive directory (ARCH-3).
         responses_dir = self.raw_dir / "pubchem_responses"
         if not responses_dir.exists():
             logger.warning(
-                "[%s] No raw response archive at %s — clean() will return "
+                "[%s] No raw response archive at %s -- clean() will return "
                 "an empty DataFrame",
                 self.source_name,
                 responses_dir,
@@ -1446,19 +1446,45 @@ class PubChemPipeline(BasePipeline):
         response_files = sorted(responses_dir.glob("batch_*.json"))
         if not response_files:
             logger.warning(
-                "[%s] No batch_*.json files in %s — clean() will return "
+                "[%s] No batch_*.json files in %s -- clean() will return "
                 "an empty DataFrame",
                 self.source_name,
                 responses_dir,
             )
             return pd.DataFrame(columns=list(COLUMN_ORDER))
 
-        # DQ-16: validate the raw_path file content — every non-comment
+        # DQ-16: validate the raw_path file content -- every non-comment
         # line must be a valid InChIKey.
+        # P1-025 ROOT FIX (Team-2 — document the div-by-zero invariant):
+        #   The division ``len(invalid_in_raw) / len(requested_inchikeys)``
+        #   below is guarded from div-by-zero by the LIST-COMPREHENSION
+        #   invariant: if ``requested_inchikeys`` is EMPTY, the list
+        #   comprehension ``[ik for ik in requested_inchikeys if ...]``
+        #   yields an EMPTY list → ``invalid_in_raw`` is empty → the
+        #   ``if invalid_in_raw:`` guard is False → the division is
+        #   NEVER reached. So ``len(requested_inchikeys) > 0`` whenever
+        #   the division executes. This is a subtle invariant — a future
+        #   refactor that changes the list comprehension (e.g. to a
+        #   generator or a filter) could break it. ROOT FIX: document
+        #   the invariant here so future maintainers know the division
+        #   is safe BY CONSTRUCTION, not by an explicit length check.
+        #   This is a documentation-only fix; no code change.
+        # INVARIANT: ``len(requested_inchikeys) > 0`` whenever the
+        # division below executes, because:
+        #   1. ``invalid_in_raw`` is built from a list comprehension
+        #      over ``requested_inchikeys``.
+        #   2. If ``requested_inchikeys`` is empty, ``invalid_in_raw``
+        #      is also empty (list comprehension over empty = empty).
+        #   3. The ``if invalid_in_raw:`` guard then evaluates False,
+        #      so the division is NEVER reached.
+        # Therefore: div-by-zero is impossible. If a future refactor
+        # breaks this invariant, add an explicit
+        # ``if not requested_inchikeys: return`` guard BEFORE this block.
         invalid_in_raw = [
             ik for ik in requested_inchikeys if not INCHIKEY_RE.match(ik)
         ]
         if invalid_in_raw:
+            # Safe: see INVARIANT above — len(requested_inchikeys) > 0 here.
             invalid_pct = (len(invalid_in_raw) / len(requested_inchikeys)) * 100
             for ik in invalid_in_raw[:50]:
                 self.dead_letter_queue.append(
@@ -1470,7 +1496,7 @@ class PubChemPipeline(BasePipeline):
                 )
             logger.warning(
                 "[%s] %d InChIKeys in raw file failed format validation "
-                "(%.1f%%) — dead-lettered",
+                "(%.1f%%) -- dead-lettered",
                 self.source_name,
                 len(invalid_in_raw),
                 invalid_pct,
@@ -1478,7 +1504,7 @@ class PubChemPipeline(BasePipeline):
             if invalid_pct > 50:
                 raise PubChemPipelineError(
                     f"{invalid_pct:.1f}% of InChIKeys in {raw_path} are "
-                    f"invalid — refusing to process garbage input"
+                    f"invalid -- refusing to process garbage input"
                 )
             requested_inchikeys = [
                 ik for ik in requested_inchikeys if INCHIKEY_RE.match(ik)
@@ -1498,7 +1524,7 @@ class PubChemPipeline(BasePipeline):
                     batch_data = json.load(fh)
             except (OSError, json.JSONDecodeError) as exc:
                 logger.error(
-                    "[%s] Could not read batch file %s: %s — dead-lettering "
+                    "[%s] Could not read batch file %s: %s -- dead-lettering "
                     "all InChIKeys in this batch",
                     self.source_name,
                     batch_file,
@@ -1512,7 +1538,7 @@ class PubChemPipeline(BasePipeline):
                 # Best-effort: dead-letter any InChIKey whose batch_idx
                 # matches this file's index.  The mapping is approximate
                 # because we don't have the original InChIKey list per
-                # batch stored separately — but the SHA-256 lets an
+                # batch stored separately -- but the SHA-256 lets an
                 # analyst trace back to the file.
                 self.dead_letter_queue.append(
                     {
@@ -1530,7 +1556,7 @@ class PubChemPipeline(BasePipeline):
             batch_sha256 = self._compute_sha256(batch_file)
 
             # Determine which InChIKeys were in this batch.  We use the
-            # batch_idx to slice the requested_inchikeys list — this
+            # batch_idx to slice the requested_inchikeys list -- this
             # requires the batches to be processed in order, which they
             # are (sorted glob).
             batch_start = batch_idx * self.batch_size
@@ -1557,13 +1583,13 @@ class PubChemPipeline(BasePipeline):
         # Build the DataFrame with the canonical column order (COMP-10, INT-8).
         if not all_records:
             logger.warning(
-                "[%s] No PubChem records parsed — returning empty DataFrame",
+                "[%s] No PubChem records parsed -- returning empty DataFrame",
                 self.source_name,
             )
             return pd.DataFrame(columns=list(COLUMN_ORDER))
 
         df = pd.DataFrame.from_records(all_records)
-        # Reindex to the canonical column order — missing columns become
+        # Reindex to the canonical column order -- missing columns become
         # all-NaN, extra columns are dropped.
         df = df.reindex(columns=list(COLUMN_ORDER))
 
@@ -1596,7 +1622,7 @@ class PubChemPipeline(BasePipeline):
         # LOG-8: summary log.
         logger.info(
             "[%s] PubChem API calls: %d (batches=%d, retries=%d, splits=%d, "
-            "avg_latency=%.2fs) — %d records parsed, %d dead-lettered",
+            "avg_latency=%.2fs) -- %d records parsed, %d dead-lettered",
             self.source_name,
             self._api_call_count,
             self._batch_count,
@@ -1607,7 +1633,7 @@ class PubChemPipeline(BasePipeline):
             len(self.dead_letter_queue),
         )
 
-        # v29 ROOT FIX (audit P1-24): ID format divergence — normalize to
+        # v29 ROOT FIX (audit P1-24): ID format divergence -- normalize to
         # canonical form before writing. ``inchikey`` is uppercased +
         # stripped; ``pubchem_cid`` is coerced to a plain Python ``int``
         # with leading zeros stripped. This guarantees downstream joins
@@ -1645,7 +1671,7 @@ class PubChemPipeline(BasePipeline):
     ) -> pd.DataFrame:
         """Live CAS-number enrichment via PubChem synonym lookup.
 
-        FIX-P1-B-2 (audit P1 — ARCH-3): the previous ``clean()``
+        FIX-P1-B-2 (audit P1 -- ARCH-3): the previous ``clean()``
         implementation made HTTP calls to PubChem whenever
         ``fetch_cas=True``, violating the architecture contract that
         ``clean()`` is a pure transformation. CAS enrichment is now
@@ -1683,7 +1709,7 @@ class PubChemPipeline(BasePipeline):
             return df
         if "pubchem_cid" not in df.columns:
             logger.warning(
-                "[%s] enrich_cas: pubchem_cid column missing — skipping",
+                "[%s] enrich_cas: pubchem_cid column missing -- skipping",
                 self.source_name,
             )
             return df
@@ -1701,7 +1727,7 @@ class PubChemPipeline(BasePipeline):
                 continue
             try:
                 cas_number = self._fetch_cas_for_cid(int(cid))
-            except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # noqa: BLE001 — enrichment must not abort  # v85 FORENSIC ROOT FIX (BUG #51)
+            except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # noqa: BLE001 -- enrichment must not abort  # v85 FORENSIC ROOT FIX (BUG #51)
                 logger.warning(
                     "[%s] enrich_cas: CAS lookup failed for CID=%s: %s",
                     self.source_name,
@@ -1754,15 +1780,15 @@ class PubChemPipeline(BasePipeline):
 
         Side effects
         ------------
-        * Calls ``bulk_update_drugs_from_pubchem(session, load_df)`` —
+        * Calls ``bulk_update_drugs_from_pubchem(session, load_df)`` --
           updates ``drugs.pubchem_cid``, ``molecular_formula``,
           ``molecular_weight``, ``smiles`` where ``pubchem_cid IS NULL``.
-        * Calls ``bulk_upsert_pubchem_compound_properties(session, df)`` —
+        * Calls ``bulk_upsert_pubchem_compound_properties(session, df)`` --
           upserts all 15+ physicochemical properties + lineage columns
           into the new ``pubchem_compound_properties`` table.
         * Appends to ``self.dead_letter_queue`` for any rows missing
           ``pubchem_cid`` (DQ-17).
-        * Does NOT call ``session.commit()`` — that is the caller's
+        * Does NOT call ``session.commit()`` -- that is the caller's
           responsibility (CODE-24).
         """
         if df.empty:
@@ -1782,7 +1808,7 @@ class PubChemPipeline(BasePipeline):
         #
         # P1-7: the previous finally block called
         #   session.__exit__(None, None, None)
-        # which signals "no exception" to the context manager — so it
+        # which signals "no exception" to the context manager -- so it
         # COMMITTED partial data even when an exception was raised
         # mid-load. ROOT FIX: capture the return value of __enter__()
         # AND pass the actual exc_info to __exit__ so the context
@@ -1800,21 +1826,21 @@ class PubChemPipeline(BasePipeline):
             # P1-24 ROOT FIX: reset the DataFrame index to a default
             # RangeIndex before extracting per-column arrays. Previously
             # the load_dict was built from `df["col"].values` for each
-            # column — if df had a non-default index (e.g. a slice of a
+            # column -- if df had a non-default index (e.g. a slice of a
             # larger frame with gaps, or a frame whose index was set by
             # an upstream groupby/merge), the per-column arrays were
             # extracted positionally and could end up at different
             # logical row positions when pandas re-aligned them by index
             # inside `pd.DataFrame(load_dict)`. The classic symptom is
             # "aspirin's InChIKey paired with ibuprofen's molecular
-            # weight" — a silent, hard-to-detect data corruption.
+            # weight" -- a silent, hard-to-detect data corruption.
             # Resetting the index up-front guarantees that every column
             # shares the same RangeIndex, so positional `.values`
             # extraction is safe.
             df = df.reset_index(drop=True)
 
             # --- Step 1: update the drugs table (existing loader) ---
-            # Build the load_df for bulk_update_drugs_from_pubchem — only
+            # Build the load_df for bulk_update_drugs_from_pubchem -- only
             # the columns it expects (CODE-4, CODE-5, CODE-22).
             load_dict: dict[str, Any] = {
                 "inchikey": df["inchikey"].values,
@@ -1822,7 +1848,7 @@ class PubChemPipeline(BasePipeline):
                     df["pubchem_cid"], errors="coerce"
                 ).astype("Int64").values,
             }
-            # Use isomeric_smiles (preferred — stereo preserved) or fall
+            # Use isomeric_smiles (preferred -- stereo preserved) or fall
             # back to canonical_smiles.  This populates drugs.smiles.
             smiles_col = (
                 df["isomeric_smiles"]
@@ -1898,7 +1924,7 @@ class PubChemPipeline(BasePipeline):
                     self.source_name,
                 )
                 return 0
-            # Convert Int64 → int64 (lowercase, non-nullable) for SQL
+            # Convert Int64 -> int64 (lowercase, non-nullable) for SQL
             # compatibility (CODE-11, CODE-12, CODE-21).
             load_df["pubchem_cid"] = load_df["pubchem_cid"].astype("int64")
 
@@ -1979,7 +2005,7 @@ class PubChemPipeline(BasePipeline):
         finally:
             # v29 ROOT FIX (audit P1-7): the previous code called
             #   session.__exit__(None, None, None)
-            # which signals "no exception" — so the context manager
+            # which signals "no exception" -- so the context manager
             # COMMITTED partial data even when an exception was raised
             # mid-load. ROOT FIX: pass the actual exc_info so the
             # context manager commits on success / rolls back on
@@ -1991,7 +2017,7 @@ class PubChemPipeline(BasePipeline):
                     _session_cm.__exit__(*_exc_info)
                 except (OSError, RuntimeError, ValueError) as _cleanup_exc:  # noqa: BLE001  # v85 FORENSIC ROOT FIX (BUG #51)
                     # v39 ROOT FIX (P1 #26): the previous code silently
-                    # swallowed ALL errors from __exit__ — including
+                    # swallowed ALL errors from __exit__ -- including
                     # rollback failures that should be surfaced. The
                     # comment said "cleanup must not mask" but the code
                     # did exactly that. The fix: log the cleanup error
@@ -2016,7 +2042,7 @@ class PubChemPipeline(BasePipeline):
 
         PubChem PUG REST has no explicit version field.  We record the
         access timestamp as ``"pubchem_pug_rest_as_of_<ISO 8601 UTC>"``
-        — supports reproducibility audits and impact analysis when
+        -- supports reproducibility audits and impact analysis when
         PubChem updates.
         """
         if self._access_timestamp is None:
@@ -2039,7 +2065,7 @@ class PubChemPipeline(BasePipeline):
         """
         try:
             self._write_dead_letters_file()
-        except (OSError, RuntimeError, ValueError) as exc:  # noqa: BLE001 — don't crash teardown  # v85 FORENSIC ROOT FIX (BUG #51)
+        except (OSError, RuntimeError, ValueError) as exc:  # noqa: BLE001 -- don't crash teardown  # v85 FORENSIC ROOT FIX (BUG #51)
             logger.warning(
                 "[%s] Could not write dead-letter file: %s",
                 self.source_name,
@@ -2070,7 +2096,7 @@ class PubChemPipeline(BasePipeline):
 
         if not inchikeys:
             logger.warning(
-                "[%s] No InChIKeys to look up — skipping PubChem fetch",
+                "[%s] No InChIKeys to look up -- skipping PubChem fetch",
                 self.source_name,
             )
             return
@@ -2090,7 +2116,7 @@ class PubChemPipeline(BasePipeline):
                 )
         if len(valid_inchikeys) < len(inchikeys):
             logger.warning(
-                "[%s] %d / %d InChIKeys failed format validation — "
+                "[%s] %d / %d InChIKeys failed format validation -- "
                 "dead-lettered",
                 self.source_name,
                 len(inchikeys) - len(valid_inchikeys),
@@ -2099,7 +2125,7 @@ class PubChemPipeline(BasePipeline):
         inchikeys = valid_inchikeys
         if not inchikeys:
             logger.warning(
-                "[%s] All InChIKeys invalid — no PubChem fetch performed",
+                "[%s] All InChIKeys invalid -- no PubChem fetch performed",
                 self.source_name,
             )
             return
@@ -2189,7 +2215,7 @@ class PubChemPipeline(BasePipeline):
         """Fetch batches concurrently with a thread pool (ARCH-13).
 
         Uses ``ThreadPoolExecutor(max_workers=self.concurrency)``.  Each
-        worker writes its own batch file — no shared mutable state.  A
+        worker writes its own batch file -- no shared mutable state.  A
         ``threading.Semaphore`` enforces the rate limit across threads.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2231,7 +2257,7 @@ class PubChemPipeline(BasePipeline):
         backoff respecting ``Retry-After``.  On all-retries-exhausted,
         dead-letters every InChIKey in the batch.
         """
-        if _tracer is not None:  # pragma: no cover — OTEL only
+        if _tracer is not None:  # pragma: no cover -- OTEL only
             with _tracer.start_as_current_span("pubchem_lookup_batch") as span:
                 span.set_attribute("batch.size", len(batch))
                 span.set_attribute("batch.idx", batch_idx)
@@ -2271,7 +2297,7 @@ class PubChemPipeline(BasePipeline):
                 and len(batch) > 1
             ):
                 logger.info(
-                    "[%s] Batch %d got permanent %d — splitting into %d "
+                    "[%s] Batch %d got permanent %d -- splitting into %d "
                     "individual lookups",
                     self.source_name,
                     batch_idx,
@@ -2360,7 +2386,7 @@ class PubChemPipeline(BasePipeline):
         # NCBI services accept both forms; the header form keeps the key
         # out of URLs / proxy logs. If PubChem ignores the header, the
         # only effect is reverting to the default rate limit (3 req/sec
-        # instead of 10 req/sec) — NOT a breaking change.
+        # instead of 10 req/sec) -- NOT a breaking change.
         params: dict[str, Any] = {}
         if self.api_key:
             headers["api-key"] = self.api_key
@@ -2372,7 +2398,7 @@ class PubChemPipeline(BasePipeline):
             # Circuit breaker check (ARCH-9, REL-3).
             if self._circuit_breaker.is_open():
                 logger.error(
-                    "[%s] Circuit breaker OPEN — failing fast on batch %d",
+                    "[%s] Circuit breaker OPEN -- failing fast on batch %d",
                     self.source_name,
                     batch_idx,
                 )
@@ -2419,7 +2445,7 @@ class PubChemPipeline(BasePipeline):
                 ):
                     logger.error(
                         "[%s] First %d batches all failed with connection "
-                        "errors — raising PubChemUnreachableError",
+                        "errors -- raising PubChemUnreachableError",
                         self.source_name,
                         self._consecutive_connection_failures,
                     )
@@ -2458,7 +2484,7 @@ class PubChemPipeline(BasePipeline):
                 time.sleep(backoff)
                 continue
 
-            # Success — reset connection failure counter.
+            # Success -- reset connection failure counter.
             self._consecutive_connection_failures = 0
             last_status = resp.status_code
             request_duration = time.monotonic() - request_start
@@ -2471,13 +2497,13 @@ class PubChemPipeline(BasePipeline):
                 len(resp.content),
             )
 
-            # 2xx success — parse JSON.
+            # 2xx success -- parse JSON.
             if 200 <= resp.status_code < 300:
                 # INT-15: guard against HTML response.
                 content_type = resp.headers.get("Content-Type", "")
                 if "application/json" not in content_type:
                     logger.warning(
-                        "[%s] Unexpected Content-Type %s on batch %d — "
+                        "[%s] Unexpected Content-Type %s on batch %d -- "
                         "dead-lettering",
                         self.source_name,
                         content_type,
@@ -2491,7 +2517,7 @@ class PubChemPipeline(BasePipeline):
                 if expected > 0 and actual < expected:
                     logger.warning(
                         "[%s] Truncated response on batch %d: expected %d "
-                        "bytes, got %d — retrying",
+                        "bytes, got %d -- retrying",
                         self.source_name,
                         batch_idx,
                         expected,
@@ -2534,7 +2560,7 @@ class PubChemPipeline(BasePipeline):
                     fault_code = fault.get("Code", "unknown")
                     fault_msg = fault.get("Message", "")
                     logger.warning(
-                        "[%s] PubChem Fault on batch %d: code=%s, msg=%s — "
+                        "[%s] PubChem Fault on batch %d: code=%s, msg=%s -- "
                         "treating as permanent failure",
                         self.source_name,
                         batch_idx,
@@ -2549,7 +2575,7 @@ class PubChemPipeline(BasePipeline):
                     or "Properties" not in data.get("PropertyTable", {})
                 ):
                     logger.error(
-                        "[%s] Unexpected response schema on batch %d — "
+                        "[%s] Unexpected response schema on batch %d -- "
                         "keys=%s, snippet=%s",
                         self.source_name,
                         batch_idx,
@@ -2565,37 +2591,37 @@ class PubChemPipeline(BasePipeline):
                 self._circuit_breaker.record_success()
                 return data, resp.status_code, None
 
-            # 4xx (except 429) — permanent failure (DESIGN-12, REL-1).
+            # 4xx (except 429) -- permanent failure (DESIGN-12, REL-1).
             if (
                 400 <= resp.status_code < 500
                 and resp.status_code != 429
             ):
                 logger.warning(
-                    "[%s] PubChem batch %d HTTP %d (non-retryable) — "
+                    "[%s] PubChem batch %d HTTP %d (non-retryable) -- "
                     "snippet=%s",
                     self.source_name,
                     batch_idx,
                     resp.status_code,
                     resp.text[:500],
                 )
-                # v52 ROOT FIX (P1-031 — inconsistent circuit breaker):
+                # v52 ROOT FIX (P1-031 -- inconsistent circuit breaker):
                 # The v48 PubChem client called record_failure() for 4xx
                 # errors, which meant 5 consecutive 404s (e.g. querying
                 # deleted PubChem CIDs) would OPEN the breaker and block
                 # ALL PubChem API calls for 60s. But the ChEMBL client
-                # (v43 fix) does NOT trip the breaker on 4xx — 4xx errors
+                # (v43 fix) does NOT trip the breaker on 4xx -- 4xx errors
                 # are PERMANENT client errors (the resource doesn't exist),
                 # not transient API failures. The circuit breaker is
                 # designed for TRANSIENT failures (429, 5xx, ConnectionError).
                 # ROOT FIX: do NOT call record_failure() for 4xx. Call
-                # record_success() instead — a 404 means the API responded
+                # record_success() instead -- a 404 means the API responded
                 # correctly with "not found", which is a successful
                 # round-trip. This aligns PubChem with ChEMBL's v43 policy
                 # and eliminates the inconsistency.
                 self._circuit_breaker.record_success()
                 return None, resp.status_code, f"http_{resp.status_code}_permanent"
 
-            # 429 or 5xx — retryable.
+            # 429 or 5xx -- retryable.
             retry_after = resp.headers.get("Retry-After", "")
             backoff = self._compute_backoff(attempt, retry_after)
             logger.warning(
@@ -2803,7 +2829,7 @@ class PubChemPipeline(BasePipeline):
 
         # SCI-11: build a set of requested InChIKeys for fast verification.
         requested_set = set(requested_inchikeys)
-        # Build a mapping from response InChIKey → record, deduping by
+        # Build a mapping from response InChIKey -> record, deduping by
         # lowest CID (DESIGN-19).
         by_inchikey: dict[str, dict] = {}
 
@@ -2836,7 +2862,7 @@ class PubChemPipeline(BasePipeline):
             if response_inchikey not in requested_set:
                 logger.warning(
                     "[%s] InChIKey mismatch on batch %d: response=%s not in "
-                    "requested set (CID=%s) — dead-lettering",
+                    "requested set (CID=%s) -- dead-lettering",
                     self.source_name,
                     batch_idx,
                     response_inchikey,
@@ -2884,7 +2910,7 @@ class PubChemPipeline(BasePipeline):
             #   - ``ConnectivitySMILES``   -> canonical SMILES (no stereo).
             # The original code looked up the input names ("CanonicalSMILES"
             # and "IsomericSMILES") in the response dict, which always
-            # returned None — silently losing 100% of SMILES data and
+            # returned None -- silently losing 100% of SMILES data and
             # cascading into NULL formal_charge and isotope_info (which are
             # computed from isomeric_smiles). This was a life-safety
             # critical bug: without SMILES, the Graph Transformer cannot
@@ -2908,7 +2934,7 @@ class PubChemPipeline(BasePipeline):
             # ``ConnectivitySMILES`` is always canonical (no stereo).
             isomeric_smiles = raw_smiles or legacy_isomeric
             # SW-3 ROOT FIX: Canonical SMILES must NEVER be derived from
-            # isomeric SMILES — the isomeric form carries stereo (@, /, \)
+            # isomeric SMILES -- the isomeric form carries stereo (@, /, \)
             # that must stay isolated so the Graph Transformer can build
             # separate 2D (canonical) and 3D (isomeric) fingerprints. The
             # previous code fell back to isomeric SMILES for canonical,
@@ -2922,12 +2948,12 @@ class PubChemPipeline(BasePipeline):
             )
             # v83 FORENSIC ROOT FIX (P2-6): if PubChem omits BOTH
             # ConnectivitySMILES and CanonicalSMILES, ``canonical_smiles``
-            # is None — the Graph Transformer cannot compute 2D fingerprints
+            # is None -- the Graph Transformer cannot compute 2D fingerprints
             # for this compound. ROOT FIX: when canonical is missing but
             # isomeric is available, use RDKit to compute the canonical
             # (no-stereo) form from the isomeric form.
             # ``Chem.MolToSmiles(mol, isomericSmiles=False)`` strips stereo
-            # by default, producing a TRUE canonical SMILES — not a copy of
+            # by default, producing a TRUE canonical SMILES -- not a copy of
             # the isomeric form. This is scientifically correct: the
             # canonical form is defined as the no-stereo SMILES, and RDKit's
             # canonicalization algorithm is the industry standard. If RDKit
@@ -2946,7 +2972,7 @@ class PubChemPipeline(BasePipeline):
                             "computed_canonical_smiles_from_isomeric_via_rdkit"
                         )
                 except (ImportError, ValueError, RuntimeError):  # v85 FORENSIC ROOT FIX (BUG #51)
-                    # RDKit not available or parse failed — leave None.
+                    # RDKit not available or parse failed -- leave None.
                     pass
 
             # SCI-18: sanitize every string field.
@@ -3060,7 +3086,7 @@ class PubChemPipeline(BasePipeline):
             if "heavy_atom_count" in range_violations:
                 heavy_atom = None
             if "pubchem_cid" in range_violations:
-                # CID out of range — dead-letter the whole record.
+                # CID out of range -- dead-letter the whole record.
                 continue
             transformations_applied.append("validated_ranges")
 
@@ -3085,11 +3111,11 @@ class PubChemPipeline(BasePipeline):
             )
             transformations_applied.append("computed_formal_charge")
 
-            # Optional CAS lookup (SCI-6) — only when explicitly enabled AND
+            # Optional CAS lookup (SCI-6) -- only when explicitly enabled AND
             # the caller has opted into HTTP during clean (ARCH-3).
             # FIX-P1-B-2: previously ``clean()`` issued live HTTP requests
             # to PubChem whenever ``fetch_cas=True``, violating the
-            # "pure transformation — NO HTTP calls" contract. Now CAS
+            # "pure transformation -- NO HTTP calls" contract. Now CAS
             # enrichment only runs when ``self._allow_clean_http=True``
             # (which is False by default inside ``clean()``). Operators
             # who want live CAS enrichment should call ``enrich_cas()``
@@ -3105,13 +3131,13 @@ class PubChemPipeline(BasePipeline):
             # Build the lineage columns (Domain 16).
             # v83 FORENSIC ROOT FIX (P1-4): the previous code used
             # ``datetime.now(timezone.utc)`` for ``download_date``, which
-            # is the CLEAN() time — NOT the actual download time. If the
+            # is the CLEAN() time -- NOT the actual download time. If the
             # operator re-runs clean() on cached responses (hours or days
             # after the actual download), the download_date was wrong,
             # breaking lineage / reproducibility audits. ROOT FIX: use
             # ``self._access_timestamp`` (set in ``_fetch_all_batches``
             # at download time) when available; fall back to now() only
-            # if the timestamp was never set (defensive — should not
+            # if the timestamp was never set (defensive -- should not
             # happen in normal flow).
             download_date = (
                 self._access_timestamp
@@ -3179,7 +3205,7 @@ class PubChemPipeline(BasePipeline):
                 new_cid = safe_cid
                 logger.info(
                     "[%s] Duplicate CID for inchikey=%s: existing=%d, "
-                    "new=%d — keeping lowest",
+                    "new=%d -- keeping lowest",
                     self.source_name,
                     response_inchikey,
                     existing_cid,
@@ -3241,7 +3267,7 @@ class PubChemPipeline(BasePipeline):
         if isinstance(value, bool):
             logger.warning(
                 "[pubchem] _safe_float: %s returned boolean %r for "
-                "inchikey=%s — rejecting",
+                "inchikey=%s -- rejecting",
                 field_name,
                 value,
                 inchikey,
@@ -3283,7 +3309,7 @@ class PubChemPipeline(BasePipeline):
         if isinstance(value, bool):
             logger.warning(
                 "[pubchem] _safe_int: %s returned boolean %r for "
-                "inchikey=%s — rejecting",
+                "inchikey=%s -- rejecting",
                 field_name,
                 value,
                 inchikey,
@@ -3296,7 +3322,7 @@ class PubChemPipeline(BasePipeline):
             if stripped in NULL_STRING_VALUES:
                 return None
         try:
-            # Use Decimal to handle "1.0" → 1 robustly.
+            # Use Decimal to handle "1.0" -> 1 robustly.
             return int(Decimal(str(value)))
         except (InvalidOperation, ValueError, TypeError) as exc:
             logger.warning(
@@ -3403,7 +3429,7 @@ class PubChemPipeline(BasePipeline):
             self._ensure_directories()
         assert self.raw_dir is not None  # noqa: S101
         dest = self.raw_dir / "pubchem_dead_letters.csv"
-        # Collect all keys across all dead-letter entries — different
+        # Collect all keys across all dead-letter entries -- different
         # failure paths produce different keys.
         all_keys: set[str] = set()
         for entry in self.dead_letter_queue:
@@ -3419,7 +3445,7 @@ class PubChemPipeline(BasePipeline):
             )
             writer.writeheader()
             for entry in self.dead_letter_queue:
-                # Stringify values — DictWriter with QUOTE_NONNUMERIC
+                # Stringify values -- DictWriter with QUOTE_NONNUMERIC
                 # requires all values to be str or numbers.
                 row = {
                     k: ("" if v is None else str(v))
@@ -3449,7 +3475,7 @@ class PubChemPipeline(BasePipeline):
     ) -> None:
         """Append a failing DataFrame to the dead-letter queue (CODE-23).
 
-        Used when ``load()`` catches an exception from a loader — the
+        Used when ``load()`` catches an exception from a loader -- the
         failing rows are preserved for inspection.
         """
         for _, row in df.iterrows():
@@ -3465,7 +3491,7 @@ class PubChemPipeline(BasePipeline):
 
 # ---------------------------------------------------------------------------
 # Backward-compat module-level aliases (DOC-4, COMP-8, prompt Section 3
-# rule: "No deletion of existing imports, constants, or helper functions —
+# rule: "No deletion of existing imports, constants, or helper functions --
 # extend them, rename them safely (with backward-compat aliases if exported),
 # but do not remove.").
 #
@@ -3473,7 +3499,7 @@ class PubChemPipeline(BasePipeline):
 # Other modules (and tests) import them via
 # ``pipelines/__init__.py:_SYMBOL_MAP``.  The institutional-grade rewrite
 # moves the configuration into ``config/settings.py`` and instance
-# attributes — but the module-level aliases are retained for backward
+# attributes -- but the module-level aliases are retained for backward
 # compatibility.  They read from the same settings so the values are
 # always in sync.
 # ---------------------------------------------------------------------------
@@ -3482,18 +3508,18 @@ class PubChemPipeline(BasePipeline):
 # ``settings.PUBCHEM_PIPELINE_PROPERTIES``.
 PUBCHEM_PROPERTIES: list[str] = list(PUBCHEM_PIPELINE_PROPERTIES)
 
-# Legacy batch size — now ``settings.PUBCHEM_PIPELINE_BATCH_SIZE``.
+# Legacy batch size -- now ``settings.PUBCHEM_PIPELINE_BATCH_SIZE``.
 BATCH_SIZE: int = PUBCHEM_PIPELINE_BATCH_SIZE
 
-# Legacy max retries — now ``settings.ENTITY_RESOLUTION_PUBCHEM_MAX_RETRIES``.
+# Legacy max retries -- now ``settings.ENTITY_RESOLUTION_PUBCHEM_MAX_RETRIES``.
 MAX_RETRIES: int = ENTITY_RESOLUTION_PUBCHEM_MAX_RETRIES
 
-# Legacy min backoff — now ``settings.PUBCHEM_PIPELINE_MIN_BACKOFF``.
+# Legacy min backoff -- now ``settings.PUBCHEM_PIPELINE_MIN_BACKOFF``.
 MIN_BACKOFF: float = PUBCHEM_PIPELINE_MIN_BACKOFF
 
-# Legacy max backoff — now ``settings.PUBCHEM_PIPELINE_MAX_BACKOFF``.
+# Legacy max backoff -- now ``settings.PUBCHEM_PIPELINE_MAX_BACKOFF``.
 MAX_BACKOFF: float = PUBCHEM_PIPELINE_MAX_BACKOFF
 
-# Legacy rate-limit interval — now
+# Legacy rate-limit interval -- now
 # ``settings.ENTITY_RESOLUTION_PUBCHEM_CALL_DELAY``.
 RATE_LIMIT_INTERVAL: float = ENTITY_RESOLUTION_PUBCHEM_CALL_DELAY

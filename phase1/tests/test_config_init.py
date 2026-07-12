@@ -1,5 +1,5 @@
 """
-Comprehensive test suite for config/__init__.py — Drug Repurposing Platform.
+Comprehensive test suite for config/__init__.py -- Drug Repurposing Platform.
 
 This test module verifies ALL 58 issues across 16 domains as specified in the
 Comprehensive Fix Prompt.  Each test is designed to verify actual functional
@@ -33,7 +33,7 @@ def _reset_config():
 
     The config package uses module-level globals (_settings_loaded, etc.)
     that persist across tests.  We must reset them to ensure test
-    isolation — each test starts with a freshly unloaded config.
+    isolation -- each test starts with a freshly unloaded config.
     """
     import config
     # Force reset internal state so each test starts clean.
@@ -62,14 +62,14 @@ def loaded_config():
 
 
 # ===================================================================
-# DOMAIN 1: ARCHITECTURE (Issues #1–#6)
+# DOMAIN 1: ARCHITECTURE (Issues #1-#6)
 # ===================================================================
 
 class TestDomain1Architecture:
     """Architecture: system structure, module organization, dependency flow."""
 
     def test_issue_01_not_dead_code_all_settings_accessible(self, loaded_config):
-        """Issue #1: config is no longer dead code — all settings are reachable
+        """Issue #1: config is no longer dead code -- all settings are reachable
         via ``from config import X``.
 
         Settings that are legitimately Optional[str] = None when their env
@@ -83,7 +83,7 @@ class TestDomain1Architecture:
             "ENTITY_RESOLUTION_PUBCHEM_CERT_PEM",
             "ENTITY_RESOLUTION_PUBCHEM_KEY_PEM",
             "ENTITY_RESOLUTION_SOURCE_WHITELIST",
-            # PubChem pipeline — institutional-grade additions (PUBCHEM_PIPELINE_MASTER_FIX_PROMPT.md).
+            # PubChem pipeline -- institutional-grade additions (PUBCHEM_PIPELINE_MASTER_FIX_PROMPT.md).
             "PUBCHEM_PIPELINE_MAX_RECORDS",  # None = unlimited
             "OPERATOR_ID",  # None when run unattended (Airflow)
         }
@@ -133,7 +133,11 @@ class TestDomain1Architecture:
         config._load_error = None
         config._resolved_settings = {}
 
-        with mock.patch("config.settings.load_dotenv") as mock_dotenv, \
+        # P1-019 ROOT FIX (Team-2): the module-level ``load_dotenv`` wrapper
+        # was removed. Tests now mock ``_load_dotenv_func`` (the module-level
+        # binding that is either the real ``dotenv.load_dotenv`` function or
+        # ``None`` if python-dotenv is not installed).
+        with mock.patch("config.settings._load_dotenv_func") as mock_dotenv, \
              mock.patch("logging.basicConfig") as mock_basicconfig:
             # Re-import should NOT trigger load_dotenv or basicConfig
             # because we haven't accessed any settings yet.
@@ -145,7 +149,7 @@ class TestDomain1Architecture:
             assert not config._settings_loaded or mock_dotenv.called
 
     def test_issue_05_lazy_loading_architecture(self):
-        """Issue #5: Settings are lazily loaded — not evaluated at import time."""
+        """Issue #5: Settings are lazily loaded -- not evaluated at import time."""
         import config
         # Before any access, settings should not be loaded.
         config._settings_loaded = False
@@ -163,17 +167,17 @@ class TestDomain1Architecture:
         assert hasattr(loaded_config, "DATABASE_URL")
         # Validation gateway
         assert callable(loaded_config.validate_config)
-        # Observability point — get_config_summary
+        # Observability point -- get_config_summary
         assert callable(loaded_config.get_config_summary)
-        # Package API — get_config
+        # Package API -- get_config
         assert callable(loaded_config.get_config)
-        # Metadata source — __version__, __all__
+        # Metadata source -- __version__, __all__
         assert hasattr(loaded_config, "__version__")
         assert hasattr(loaded_config, "__all__")
 
 
 # ===================================================================
-# DOMAIN 2: DESIGN (Issues #7–#11)
+# DOMAIN 2: DESIGN (Issues #7-#11)
 # ===================================================================
 
 class TestDomain2Design:
@@ -181,7 +185,7 @@ class TestDomain2Design:
 
     def test_issue_07_reexport_policy_documented(self, loaded_config):
         """Issue #7: Re-export list is designed using a clear, documented policy
-        — ALL non-deprecated settings are re-exported."""
+        -- ALL non-deprecated settings are re-exported."""
         doc = loaded_config.__doc__
         assert doc is not None
         assert "non-deprecated" in doc.lower() or "all" in doc.lower()
@@ -227,7 +231,7 @@ class TestDomain2Design:
 
 
 # ===================================================================
-# DOMAIN 3: SCIENTIFIC CORRECTNESS (Issues #12–#15)
+# DOMAIN 3: SCIENTIFIC CORRECTNESS (Issues #12-#15)
 # ===================================================================
 
 class TestDomain3ScientificCorrectness:
@@ -235,7 +239,7 @@ class TestDomain3ScientificCorrectness:
 
     def test_issue_12_data_version_settings_reexported(self, loaded_config):
         """Issue #12: CHEMBL_VERSION and STRING_VERSION are re-exported and
-        accessible — they determine which biomedical database versions the
+        accessible -- they determine which biomedical database versions the
         pipeline downloads."""
         assert hasattr(loaded_config, "CHEMBL_VERSION")
         assert hasattr(loaded_config, "STRING_VERSION")
@@ -277,7 +281,7 @@ class TestDomain3ScientificCorrectness:
 
     def test_issue_15_processing_limits_reexported(self, loaded_config):
         """Issue #15: CHEMBL_MAX_ROWS and CHEMBL_MAX_ACTIVITIES are re-exported.
-        They cap records downloaded — if set too low, the pipeline silently
+        They cap records downloaded -- if set too low, the pipeline silently
         produces an incomplete dataset."""
         assert hasattr(loaded_config, "CHEMBL_MAX_ROWS")
         assert hasattr(loaded_config, "CHEMBL_MAX_ACTIVITIES")
@@ -292,7 +296,7 @@ class TestDomain3ScientificCorrectness:
 
 
 # ===================================================================
-# DOMAIN 4: CODING (Issues #16–#20)
+# DOMAIN 4: CODING (Issues #16-#20)
 # ===================================================================
 
 class TestDomain4Coding:
@@ -339,7 +343,7 @@ class TestDomain4Coding:
         assert len(loaded_config.__all__) > 25
 
     def test_issue_19_comments_explain_why(self):
-        """Issue #19: Comments explain WHY, not just WHAT — audit references
+        """Issue #19: Comments explain WHY, not just WHAT -- audit references
         are self-documenting."""
         import config
         source = inspect_getsource(config)
@@ -359,7 +363,7 @@ class TestDomain4Coding:
 
 
 # ===================================================================
-# DOMAIN 5: DATA QUALITY & INTEGRITY (Issues #21–#24)
+# DOMAIN 5: DATA QUALITY & INTEGRITY (Issues #21-#24)
 # ===================================================================
 
 class TestDomain5DataQuality:
@@ -421,7 +425,7 @@ class TestDomain5DataQuality:
 
 
 # ===================================================================
-# DOMAIN 6: RELIABILITY & RESILIENCE (Issues #25–#28)
+# DOMAIN 6: RELIABILITY & RESILIENCE (Issues #25-#28)
 # ===================================================================
 
 class TestDomain6Reliability:
@@ -486,7 +490,7 @@ class TestDomain6Reliability:
 
 
 # ===================================================================
-# DOMAIN 7: IDEMPOTENCY & REPRODUCIBILITY (Issues #29–#30)
+# DOMAIN 7: IDEMPOTENCY & REPRODUCIBILITY (Issues #29-#30)
 # ===================================================================
 
 class TestDomain7Idempotency:
@@ -502,7 +506,7 @@ class TestDomain7Idempotency:
         original = _s.STRING_MIN_COMBINED_SCORE
         try:
             _s.STRING_MIN_COMBINED_SCORE = 999
-            # Reload to pick up the change — the reload clears the cache
+            # Reload to pick up the change -- the reload clears the cache
             # and re-reads from config.settings dynamically.
             loaded_config._settings_loaded = False
             loaded_config._resolved_settings = {}
@@ -516,7 +520,7 @@ class TestDomain7Idempotency:
 
     def test_issue_30_deterministic_fingerprint(self, loaded_config):
         """Issue #30: get_config_fingerprint() returns the same hash for the
-        same configuration — deterministic output for same input."""
+        same configuration -- deterministic output for same input."""
         fp1 = loaded_config.get_config_fingerprint()
         fp2 = loaded_config.get_config_fingerprint()
         assert fp1 == fp2, "Fingerprint should be deterministic"
@@ -525,7 +529,7 @@ class TestDomain7Idempotency:
 
 
 # ===================================================================
-# DOMAIN 8: PERFORMANCE & SCALABILITY (Issues #31–#32)
+# DOMAIN 8: PERFORMANCE & SCALABILITY (Issues #31-#32)
 # ===================================================================
 
 class TestDomain8Performance:
@@ -546,7 +550,7 @@ class TestDomain8Performance:
 
     def test_issue_32_caching_after_first_access(self, loaded_config):
         """Issue #32: After first access, values are cached in
-        _resolved_settings — subsequent accesses return the cached value
+        _resolved_settings -- subsequent accesses return the cached value
         without re-evaluation."""
         # First access populates the cache.
         _ = loaded_config.DATABASE_URL
@@ -557,7 +561,7 @@ class TestDomain8Performance:
 
 
 # ===================================================================
-# DOMAIN 9: SECURITY & PRIVACY (Issues #33–#36)
+# DOMAIN 9: SECURITY & PRIVACY (Issues #33-#36)
 # ===================================================================
 
 class TestDomain9Security:
@@ -573,7 +577,7 @@ class TestDomain9Security:
         assert "OMIM_API_KEY" in ss
 
     def test_issue_34_credential_masking_in_summary(self, loaded_config):
-        """Issue #34: get_config_summary() masks all sensitive values —
+        """Issue #34: get_config_summary() masks all sensitive values --
         passwords hidden, API keys truncated."""
         summary = loaded_config.get_config_summary()
         # DATABASE_URL should have masked password.
@@ -606,7 +610,7 @@ class TestDomain9Security:
 
 
 # ===================================================================
-# DOMAIN 10: TESTING & VALIDATION (Issues #37–#39)
+# DOMAIN 10: TESTING & VALIDATION (Issues #37-#39)
 # ===================================================================
 
 class TestDomain10Testing:
@@ -617,7 +621,7 @@ class TestDomain10Testing:
         assert Path(__file__).exists()
 
     def test_issue_38_regression_test_reexport_completeness(self, loaded_config):
-        """Issue #38: Regression test — every setting in config.settings (non-deprecated)
+        """Issue #38: Regression test -- every setting in config.settings (non-deprecated)
         is present in _SETTING_NAMES and __all__."""
         from config import settings as _s
         deprecated = {"CHEMBL_URL", "UNIPROT_SPROT_URL", "UNIPROT_TREMBL_URL",
@@ -637,7 +641,7 @@ class TestDomain10Testing:
                 # Non-deprecated should be in _SETTING_NAMES.
                 assert attr in loaded_config._SETTING_NAMES, (
                     f"Non-deprecated setting {attr} from config.settings "
-                    f"is missing from _SETTING_NAMES — regression!"
+                    f"is missing from _SETTING_NAMES -- regression!"
                 )
 
     def test_issue_39_side_effect_isolation_test(self):
@@ -655,7 +659,7 @@ class TestDomain10Testing:
 
 
 # ===================================================================
-# DOMAIN 11: LOGGING & OBSERVABILITY (Issues #40–#41)
+# DOMAIN 11: LOGGING & OBSERVABILITY (Issues #40-#41)
 # ===================================================================
 
 class TestDomain11Logging:
@@ -684,7 +688,7 @@ class TestDomain11Logging:
 
 
 # ===================================================================
-# DOMAIN 12: CONFIGURATION & ENVIRONMENT MANAGEMENT (Issues #42–#44)
+# DOMAIN 12: CONFIGURATION & ENVIRONMENT MANAGEMENT (Issues #42-#44)
 # ===================================================================
 
 class TestDomain12Configuration:
@@ -692,7 +696,7 @@ class TestDomain12Configuration:
 
     def test_issue_42_reexport_list_policy_driven(self, loaded_config):
         """Issue #42: The re-export list is defined by policy (all non-deprecated),
-        not hardcoded magic — documented in docstring."""
+        not hardcoded magic -- documented in docstring."""
         doc = loaded_config.__doc__
         assert doc is not None
         # Policy should be documented.
@@ -723,7 +727,7 @@ class TestDomain12Configuration:
 
 
 # ===================================================================
-# DOMAIN 13: DOCUMENTATION & READABILITY (Issues #45–#48)
+# DOMAIN 13: DOCUMENTATION & READABILITY (Issues #45-#48)
 # ===================================================================
 
 class TestDomain13Documentation:
@@ -776,7 +780,7 @@ class TestDomain13Documentation:
 
 
 # ===================================================================
-# DOMAIN 14: COMPLIANCE & STANDARDS ADHERENCE (Issues #49–#52)
+# DOMAIN 14: COMPLIANCE & STANDARDS ADHERENCE (Issues #49-#52)
 # ===================================================================
 
 class TestDomain14Compliance:
@@ -814,7 +818,7 @@ class TestDomain14Compliance:
 
 
 # ===================================================================
-# DOMAIN 15: INTEROPERABILITY & INTEGRATION (Issues #53–#55)
+# DOMAIN 15: INTEROPERABILITY & INTEGRATION (Issues #53-#55)
 # ===================================================================
 
 class TestDomain15Interoperability:
@@ -829,7 +833,7 @@ class TestDomain15Interoperability:
         assert stub_file.exists(), f"Stub file should exist at {stub_file}"
 
     def test_issue_54_convenience_api_complete(self, loaded_config):
-        """Issue #54: Downstream consumers can rely on the convenience API —
+        """Issue #54: Downstream consumers can rely on the convenience API --
         every non-deprecated setting is available via ``from config import X``."""
         # Import each setting via the convenience API.
         from config import (
@@ -849,7 +853,7 @@ class TestDomain15Interoperability:
 
     def test_issue_55_package_rename_safe(self):
         """Issue #55: Using relative imports (from .settings) means the
-        package is immune to renaming — no absolute 'config.settings'
+        package is immune to renaming -- no absolute 'config.settings'
         references at module level."""
         import config
         source = inspect_getsource(config)
@@ -867,7 +871,7 @@ class TestDomain15Interoperability:
 
 
 # ===================================================================
-# DOMAIN 16: DATA LINEAGE & TRACEABILITY (Issues #56–#58)
+# DOMAIN 16: DATA LINEAGE & TRACEABILITY (Issues #56-#58)
 # ===================================================================
 
 class TestDomain16Lineage:
@@ -899,7 +903,7 @@ class TestDomain16Lineage:
 
     def test_issue_58_impact_analysis_support(self, loaded_config):
         """Issue #58: get_config() and get_config_fingerprint() support
-        impact analysis — comparing configs between runs to detect changes."""
+        impact analysis -- comparing configs between runs to detect changes."""
         cfg = loaded_config.get_config()
         fp = loaded_config.get_config_fingerprint()
         assert isinstance(cfg, dict)
@@ -1011,7 +1015,7 @@ class TestRealFunctionalBehavior:
 
     def test_fingerprint_changes_on_config_change(self, loaded_config):
         """Verify that the fingerprint actually changes when a config value
-        changes — proving it's a real hash, not a constant."""
+        changes -- proving it's a real hash, not a constant."""
         fp1 = loaded_config.get_config_fingerprint()
         # Modify a setting.
         original = loaded_config._resolved_settings["STRING_MIN_COMBINED_SCORE"]
@@ -1074,7 +1078,7 @@ class TestRealFunctionalBehavior:
 
     def test_backward_compat_from_config_settings_import(self):
         """Verify that from config.settings import X still works for ALL
-        settings — backward compatibility guarantee."""
+        settings -- backward compatibility guarantee."""
         from config.settings import (
             DATABASE_URL, RAW_DATA_DIR, PROCESSED_DATA_DIR,
             CHEMBL_VERSION, STRING_VERSION, STRING_MIN_COMBINED_SCORE,

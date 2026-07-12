@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# © 2024-2026 Autonomous Drug Repurposing Platform — Team Cosmic / VentureLab
+# © 2024-2026 Autonomous Drug Repurposing Platform -- Team Cosmic / VentureLab
 """
 Shared utilities for entity resolution across the Drug Repurposing ETL platform.
 
@@ -7,53 +7,53 @@ This module provides the foundational primitives used by both
 :class:`~entity_resolution.drug_resolver.DrugResolver` and
 :class:`~entity_resolution.protein_resolver.ProteinResolver`:
 
-* :func:`normalize_name` — Aggressive name normalisation for fuzzy matching
+* :func:`normalize_name` -- Aggressive name normalisation for fuzzy matching
   (handles Unicode, Greek letters, parenthetical content, stereo indicators).
-* :func:`fuzzy_match_score` — :mod:`rapidfuzz`-backed fuzzy similarity with a
+* :func:`fuzzy_match_score` -- :mod:`rapidfuzz`-backed fuzzy similarity with a
   graceful exact-match fallback when rapidfuzz is unavailable.
-* :func:`fuzzy_match_best` — Batch fuzzy-match helper that uses
+* :func:`fuzzy_match_best` -- Batch fuzzy-match helper that uses
   :func:`rapidfuzz.process.extractOne` for O(1)-style lookup instead of O(n)
   linear sweeps.
-* :func:`extract_inchikey_first_block` — Connectivity-block extraction with
+* :func:`extract_inchikey_first_block` -- Connectivity-block extraction with
   full InChIKey validation, case normalisation, and synthetic-key rejection.
-* :func:`is_valid_inchikey` — Delegates to :func:`cleaning.normalizer.is_valid_inchikey`,
+* :func:`is_valid_inchikey` -- Delegates to :func:`cleaning.normalizer.is_valid_inchikey`,
   the SINGLE source of truth for InChIKey validation across the platform.
-* :func:`build_name_index`, :func:`build_inchikey_index` — Legacy multi-valued
-  index builders (DEPRECATED — kept for backward compatibility).
-* :func:`build_canonical_name_index`, :func:`build_canonical_inchikey_index` —
+* :func:`build_name_index`, :func:`build_inchikey_index` -- Legacy multi-valued
+  index builders (DEPRECATED -- kept for backward compatibility).
+* :func:`build_canonical_name_index`, :func:`build_canonical_inchikey_index` --
   Canonical single-valued index builders used by the resolvers.
-* :data:`METHOD_CONFIDENCE` — Public mapping from method name → confidence score,
+* :data:`METHOD_CONFIDENCE` -- Public mapping from method name -> confidence score,
   thread-safe and monitored.  Mirrored in the
   :class:`entity_resolution.base.MatchConfidence` enum; the two MUST be kept
   in sync (see :func:`sync_method_confidence`).
 * :func:`register_match_method`, :func:`unregister_match_method`,
   :func:`reset_method_confidence`, :func:`get_registered_methods`,
-  :func:`sync_method_confidence`, :func:`method_confidence_override` —
+  :func:`sync_method_confidence`, :func:`method_confidence_override` --
   Runtime management of confidence scores with full provenance.
-* :func:`compute_match_confidence` — Confidence-score lookup with optional
+* :func:`compute_match_confidence` -- Confidence-score lookup with optional
   enum / detailed / config-aware modes.
 * :func:`validate_drug_record`, :func:`validate_protein_record`,
-  :func:`validate_record` — Record validation with strict-mode format checks,
+  :func:`validate_record` -- Record validation with strict-mode format checks,
   cross-field referential integrity, and structured ``ValidationReport`` output.
-* :func:`find_duplicate_ids` — Within-batch duplicate detection with NaN/empty
+* :func:`find_duplicate_ids` -- Within-batch duplicate detection with NaN/empty
   handling, cross-batch ``seen`` parameter, and optional counts/indices.
 
 Design invariants
 -----------------
-1. **Single source of truth for InChIKey validation** — All InChIKey validation
+1. **Single source of truth for InChIKey validation** -- All InChIKey validation
    in this module delegates to :func:`cleaning.normalizer.is_valid_inchikey`,
    which handles standard (``-N``), non-standard (``-B`` etc.), mixture
    (comma-separated), and synthetic (``SYNTH`` prefix) InChIKeys per the InChI
    Trust specification.
-2. **UniProt accession regex** — Uses the OFFICIAL UniProt pattern
+2. **UniProt accession regex** -- Uses the OFFICIAL UniProt pattern
    ``^([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z0-9]{3}[0-9]){1,2})$``
    so clinically-critical proteins like TP53 (P04637), HBB (P68871),
    RAD51C (Q9NZQ7), STXBP2 (O00161) are correctly accepted.
-3. **Thread-safe confidence registry** — All mutations to :data:`METHOD_CONFIDENCE`
+3. **Thread-safe confidence registry** -- All mutations to :data:`METHOD_CONFIDENCE`
    go through a re-entrant lock to support concurrent resolver use.
-4. **Backward compatibility** — Every public function preserves its historical
+4. **Backward compatibility** -- Every public function preserves its historical
    signature with new parameters added as keyword-only with safe defaults.
-5. **Provenance / lineage** — Every confidence lookup, validation, and
+5. **Provenance / lineage** -- Every confidence lookup, validation, and
    normalisation can optionally return a structured dataclass
    (``MatchResult``, ``ValidationReport``, ``NormalizedName``,
    ``ConnectivityBlock``) recording what was done, when, and from where.
@@ -109,12 +109,12 @@ _RAPIDFUZZ_AVAILABLE: bool = RAPIDFUZZ_AVAILABLE
 
 logger = logging.getLogger(__name__)
 
-# v74 ROOT FIX (T-022 — silent RDKit degradation on ARM64):
+# v74 ROOT FIX (T-022 -- silent RDKit degradation on ARM64):
 # Module-level flag to gate the one-time RDKit-unavailable WARNING emitted
 # by validate_drug_record (see line ~2289). Without this flag, every record
 # validation would log the warning, causing log spam. The flag is set on the
 # first ImportError encountered and never reset, so the warning fires at
-# most once per process — operators see it once in the startup logs and can
+# most once per process -- operators see it once in the startup logs and can
 # decide whether to install rdkit or accept the degraded entity resolution.
 _RDKIT_UNAVAILABLE_WARNED: bool = False
 
@@ -134,14 +134,14 @@ _SYNTHETIC_PREFIX: str = "SYNTH"
 # Precompiled patterns (compiled once at import for performance)
 # =============================================================================
 
-# Parentheses removal — uses ``[^)]*`` (non-greedy on the closing paren).
+# Parentheses removal -- uses ``[^)]*`` (non-greedy on the closing paren).
 # Applied iteratively to handle nested parens (FIX #26 / BUG-CODE-02).
 _PARENTHESES_RE: re.Pattern[str] = re.compile(r"\([^)]*\)")
 
 # P2-7 ROOT FIX (v82): the ``_STEREO_PAREN_RE`` regex used to be compiled
 # INSIDE ``_normalize_name_cached`` (an ``@lru_cache(maxsize=8192)``
 # function). On every cache MISS (i.e. for every NEW name encountered),
-# the regex was recompiled — for 8192 unique names, that's 8192
+# the regex was recompiled -- for 8192 unique names, that's 8192
 # recompilations of a complex multi-alternative pattern. Moved to module
 # level so it's compiled EXACTLY ONCE at import. The ``re.IGNORECASE``
 # flag and all the audit-rationale comments are preserved verbatim.
@@ -150,13 +150,13 @@ _PARENTHESES_RE: re.Pattern[str] = re.compile(r"\([^)]*\)")
 # step removed ALL parenthetical content, collapsing (R)- and
 # (S)-enantiomers onto the same normalized key. (R)-thalidomide
 # (sedative) and (S)-thalidomide (teratogenic) became the same
-# entity — the patient-safety catastrophe the docstrings scream
+# entity -- the patient-safety catastrophe the docstrings scream
 # about. Preserve stereo tokens before stripping, then re-attach
 # them in a canonical prefix position.
 _STEREO_PAREN_RE: re.Pattern[str] = re.compile(
     r"\(\s*("
     r"[RS]"                          # (R) / (S) chirality
-    r"|[EZ]"                         # (E) / (Z) alkene geometry — v13 ROOT FIX:
+    r"|[EZ]"                         # (E) / (Z) alkene geometry -- v13 ROOT FIX:
                                      # v12 used "|EZ" which matches the literal
                                      # 2-char string "EZ", NOT (E) or (Z)
                                      # separately. (E)- and (Z)-alkene
@@ -166,9 +166,9 @@ _STEREO_PAREN_RE: re.Pattern[str] = re.compile(
     r"|[\+\−\-\u2212]"               # (+), (-), (−)
     # v29 ROOT FIX (audit C-7): Multi-stereo descriptors like
     # (2R,3S), (2S,3R), (3R,5S) were NOT matched by the original
-    # regex — they were stripped by the paren-removal loop,
+    # regex -- they were stripped by the paren-removal loop,
     # silently losing stereochemistry. Atorvastatin (2R,3S) and
-    # (2S,3R) would collapse to the same normalized key — a
+    # (2S,3R) would collapse to the same normalized key -- a
     # patient-safety issue. ROOT FIX: add a pattern that matches
     # comma-separated position+chirality descriptors.
     r"|\d{1,2}[RS](?:\s*,\s*\d{1,2}[RS])*"  # (2R,3S), (3R,5S), etc.
@@ -177,7 +177,7 @@ _STEREO_PAREN_RE: re.Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
-# Default character allowlist for :func:`normalize_name` — a-z, 0-9, hyphen, slash.
+# Default character allowlist for :func:`normalize_name` -- a-z, 0-9, hyphen, slash.
 # Precompiled for the hot path; ``allow_chars`` overrides recompile a new pattern.
 _NON_ALNUM_RE: re.Pattern[str] = re.compile(r"[^a-z0-9\-/]")
 
@@ -218,7 +218,7 @@ except ImportError:
     # AA sequence: 20 standard + ambiguity codes B J O U X Z + stop * +
     # alignment gap ``-``. Aligned EXACTLY with
     # ``cleaning._constants.CANONICAL_AA_SEQUENCE_REGEX`` (v35 root fix
-    # issue 40 — include or exclude ``-`` consistently across all layers).
+    # issue 40 -- include or exclude ``-`` consistently across all layers).
     _AA_VALID_RE: re.Pattern[str] = re.compile(
         r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ\*\-]+$"
     )
@@ -228,21 +228,59 @@ _CHEMBL_ID_RE: re.Pattern[str] = re.compile(r"^CHEMBL\d+$")
 # P1-ER-15 ROOT FIX: tightened from ^DB\d{5,7}$ to ^DB\d{5,6}$ to align
 # EXACTLY with Phase 2 kg_builder.ID_PATTERNS["Compound"] (which uses
 # DB\d{5,6}). The previous {5,7} upper bound accepted 7-digit IDs like
-# DB9999999 that DrugBank has never emitted and that Phase 2 rejects —
+# DB9999999 that DrugBank has never emitted and that Phase 2 rejects --
 # creating a "Phase 1 accepts, Phase 2 rejects" mismatch that silently
 # dropped drugs at the bridge. DrugBank 5.1.10's highest ID is DB16999
 # (5 digits); even with expansion headroom to DB999999 (6 digits), 7
 # digits is unjustified. Lower bound 5 preserves the rejection of
 # DB1 / DB123. SW-7 ROOT FIX retained.
+#
+# P1-017 ROOT FIX (Team-2 — accept synthesized IDs in entity resolution):
+#   The v50 open-data fallback (``_v50_downloaders.py::_synthesize_drugbank_id``)
+#   generates synthesized IDs with the ``SYNTH-DB-`` prefix (clearly
+#   non-DrugBank — see P1-017 root fix in drugbank_pipeline.py). Entity
+#   resolution MUST accept these IDs so synthesized drugs flow through
+#   to the KG. The previous regex ``^DB\d{5,6}$`` REJECTED all synthesized
+#   IDs — the v50 fallback was dead code at the entity resolution stage.
+#   ROOT FIX: add a SEPARATE ``_SYNTHESIZED_DRUG_ID_RE`` regex for the
+#   synthesized form. The validation logic (line ~2235) accepts EITHER
+#   a real DrugBank ID OR a synthesized ID via ``_is_valid_drugbank_id``.
+#   NOTE: this regex is kept in sync with ``drugbank_pipeline._DRUGBANK_ID_RE``
+#   and ``drugbank_pipeline._SYNTHESIZED_DRUG_ID_RE``. A future refactor
+#   should consolidate these into a single shared module to eliminate
+#   the duplication (documented as a follow-up — not in P1-017 scope).
 _DRUGBANK_ID_RE: re.Pattern[str] = re.compile(r"^DB\d{5,6}$")
+# P1-017 ROOT FIX (Team-2): separate regex for synthesized drug IDs.
+# MUST match the pattern in ``drugbank_pipeline._SYNTHESIZED_DRUG_ID_RE``.
+_SYNTHESIZED_DRUG_ID_RE: re.Pattern[str] = re.compile(
+    r"^SYNTH-DB-[0-9A-F]{8}$"  # synthesized from InChIKey hash: SYNTH-DB-A1B2C3D4
+    r"|^SYNTH-DB-M\d{6}$"      # synthesized for missing InChIKey: SYNTH-DB-M000001
+)
+
+
+def _is_valid_drugbank_id(drugbank_id: "str | None") -> bool:
+    """Validate a drugbank_id — accepts EITHER real OR synthesized IDs.
+
+    P1-017 ROOT FIX (Team-2): see drugbank_pipeline._is_valid_drugbank_id
+    for the full rationale. This is a copy kept in entity_resolution to
+    avoid a circular import (drugbank_pipeline imports from
+    entity_resolution at runtime). A future refactor should consolidate
+    both copies into a shared ``_constants`` module.
+    """
+    if not drugbank_id or not isinstance(drugbank_id, str):
+        return False
+    return bool(
+        _DRUGBANK_ID_RE.match(drugbank_id)
+        or _SYNTHESIZED_DRUG_ID_RE.match(drugbank_id)
+    )
 _INCHI_PREFIX_RE: re.Pattern[str] = re.compile(r"^InChI=1[SB]?/")
 # v9 ROOT FIX (audit F4.8): the comment claimed this matches STRING's
 # "taxonID.ENSEMBL_protein_id" format (e.g. 9606.ENSP00000269305), but
-# ENS[A-Z]+ matches ANY Ensembl ID type — ENSP (protein), ENSG (gene),
+# ENS[A-Z]+ matches ANY Ensembl ID type -- ENSP (protein), ENSG (gene),
 # ENST (transcript), ENSR (regulatory). STRING only emits ENSP records
 # (it is a protein-protein interaction database). The loose regex would
 # silently accept ENSG/ENST/ENSR IDs if a future code path ever fed
-# them in. Tighten to ENSP only — fail-closed for everything else.
+# them in. Tighten to ENSP only -- fail-closed for everything else.
 # Examples accepted: 9606.ENSP00000269305, 511145.ENSP00000269305
 # Examples rejected: 9606.ENSG00000143590, 9606.ENST00000357654
 _STRING_ID_RE: re.Pattern[str] = re.compile(r"^\d+\.ENSP\d+$")
@@ -252,7 +290,7 @@ _CHEMBL_TARGET_ID_RE: re.Pattern[str] = re.compile(r"^CHEMBL\d+$")
 # in the fallback branch). The duplicate local definition that was here
 # has been removed to ensure a single source of truth.
 
-# Method-name validation (FIX #65 / GAP-SEC-03) — lowercase identifier
+# Method-name validation (FIX #65 / GAP-SEC-03) -- lowercase identifier
 # starting with a letter, allowing lowercase alphanumerics and underscores.
 _VALID_METHOD_NAME_RE: re.Pattern[str] = re.compile(r"^[a-z][a-z0-9_]+$")
 
@@ -305,7 +343,7 @@ def _transliterate_greek(text: str) -> str:
 
 
 # =============================================================================
-# Helpers — sanitisation, caller info
+# Helpers -- sanitisation, caller info
 # =============================================================================
 
 def _sanitize_for_log(value: Any, max_len: int = 16) -> str:
@@ -313,13 +351,13 @@ def _sanitize_for_log(value: Any, max_len: int = 16) -> str:
 
     Drug names, InChIKeys, and protein identifiers can be proprietary or
     PII-adjacent in some contexts.  This helper ensures the log output never
-    contains the full value — only the first ``max_len`` characters followed
+    contains the full value -- only the first ``max_len`` characters followed
     by an ellipsis.
 
     Parameters
     ----------
     value:
-        Any value — converted to ``str`` via ``repr`` if not already a string.
+        Any value -- converted to ``str`` via ``repr`` if not already a string.
     max_len:
         Maximum number of characters to retain.  Default ``16``.
 
@@ -499,7 +537,7 @@ class _MonitoredDict(dict):
     """A ``dict`` subclass that logs every mutation at DEBUG level (FIX #54).
 
     All mutations to :data:`METHOD_CONFIDENCE` go through this class so we
-    can audit who changed what, when — even when external code does
+    can audit who changed what, when -- even when external code does
     ``METHOD_CONFIDENCE["foo"] = 0.5`` directly instead of going through
     :func:`register_match_method`.
 
@@ -513,7 +551,7 @@ class _MonitoredDict(dict):
         super().__setitem__(key, value)
         # Only log at DEBUG to avoid spamming INFO/WARNING in production.
         logger.debug(
-            "METHOD_CONFIDENCE mutation: %s = %s (was %s) — caller %s",
+            "METHOD_CONFIDENCE mutation: %s = %s (was %s) -- caller %s",
             key, value, old, _get_caller_info(skip=2),
         )
 
@@ -521,7 +559,7 @@ class _MonitoredDict(dict):
         old = self.get(key)
         super().__delitem__(key)
         logger.debug(
-            "METHOD_CONFIDENCE deletion: %s (was %s) — caller %s",
+            "METHOD_CONFIDENCE deletion: %s (was %s) -- caller %s",
             key, old, _get_caller_info(skip=2),
         )
 
@@ -529,7 +567,7 @@ class _MonitoredDict(dict):
         old = self.get(key)
         result = super().pop(key, *default)  # type: ignore[arg-type]
         logger.debug(
-            "METHOD_CONFIDENCE pop: %s (was %s) — caller %s",
+            "METHOD_CONFIDENCE pop: %s (was %s) -- caller %s",
             key, old, _get_caller_info(skip=2),
         )
         return result
@@ -537,7 +575,7 @@ class _MonitoredDict(dict):
     def update(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
         super().update(*args, **kwargs)
         logger.debug(
-            "METHOD_CONFIDENCE update: %d entries merged — caller %s",
+            "METHOD_CONFIDENCE update: %d entries merged -- caller %s",
             (len(args[0]) if args and hasattr(args[0], "__len__") else len(kwargs)),
             _get_caller_info(skip=2),
         )
@@ -545,12 +583,12 @@ class _MonitoredDict(dict):
     def clear(self) -> None:  # type: ignore[override]
         super().clear()
         logger.debug(
-            "METHOD_CONFIDENCE clear — caller %s",
+            "METHOD_CONFIDENCE clear -- caller %s",
             _get_caller_info(skip=2),
         )
 
 
-#: Public mapping from resolution-method name → confidence score.
+#: Public mapping from resolution-method name -> confidence score.
 #:
 #: This is the **public** counterpart of the legacy private
 #: ``_METHOD_CONFIDENCE`` table.  Audit D2-4 / D16-7 require it be
@@ -567,14 +605,14 @@ class _MonitoredDict(dict):
 #:
 #: SCI-02 fix: ``protein_name_fuzzy`` was raised from ``0.6`` to ``0.90``
 #: so that ``METHOD_CONFIDENCE["protein_name_fuzzy"] >= _PROTEIN_FUZZY_THRESHOLD``
-#: (0.90).  Audit SCI-02 — the same class of bug as D3-3 but for proteins.
+#: (0.90).  Audit SCI-02 -- the same class of bug as D3-3 but for proteins.
 #:
 #: NOTE: These values are mirrored in :class:`entity_resolution.base.MatchConfidence`.
-#: The two MUST be kept in sync — call :func:`sync_method_confidence` to verify.
-#: v29 ROOT FIX (audit C-1 / C-2 — Confidence Score Inversion):
+#: The two MUST be kept in sync -- call :func:`sync_method_confidence` to verify.
+#: v29 ROOT FIX (audit C-1 / C-2 -- Confidence Score Inversion):
 #: The values for "fuzzy" (was 0.85) and "protein_name_fuzzy" (was 0.90)
 #: were HIGHER than "name_normalized" (0.8). This is scientifically
-#: wrong — a fuzzy match is by definition LESS reliable than an exact
+#: wrong -- a fuzzy match is by definition LESS reliable than an exact
 #: normalized name match. The inversion caused the entity resolver to
 #: preferentially keep low-quality fuzzy matches over high-quality
 #: exact matches. Lowered to 0.65 / 0.60 respectively so the hierarchy
@@ -584,14 +622,14 @@ class _MonitoredDict(dict):
 METHOD_CONFIDENCE: Dict[str, float] = _MonitoredDict({
     "inchikey_exact": 1.0,
     "inchikey_connectivity": 0.9,
-    "inchikey_connectivity_no_collapse": 0.85,  # v67 P1-D4: connectivity match without stereoisomer collapse — lower than full connectivity merge
+    "inchikey_connectivity_no_collapse": 0.85,  # v67 P1-D4: connectivity match without stereoisomer collapse -- lower than full connectivity merge
     "name_normalized": 0.8,
     "pubchem_xref": 0.7,
-    "fuzzy": 0.65,                  # v29: was 0.85 — inversion fix
+    "fuzzy": 0.65,                  # v29: was 0.85 -- inversion fix
     "uniprot_exact": 1.0,
-    "gene_name_organism": 0.75,    # v29: was 0.85 — sit between
+    "gene_name_organism": 0.75,    # v29: was 0.85 -- sit between
                                     # name_normalized and fuzzy
-    "protein_name_fuzzy": 0.60,    # v29: was 0.90 — inversion fix
+    "protein_name_fuzzy": 0.60,    # v29: was 0.90 -- inversion fix
     # v89 ROOT FIX (BUG #32): smiles_canonical now in the canonical
     # METHOD_CONFIDENCE dict (was only registered at runtime by
     # drug_resolver.py:1979). Having it here means the dict-based
@@ -604,10 +642,10 @@ METHOD_CONFIDENCE: Dict[str, float] = _MonitoredDict({
 
 #: Snapshot of the original module-load values (FIX #10).
 #: Used by :func:`reset_method_confidence` to restore the defaults.
-#: NEVER mutate this dict — copy from it.
+#: NEVER mutate this dict -- copy from it.
 _ORIGINAL_METHOD_CONFIDENCE: Dict[str, float] = dict(METHOD_CONFIDENCE)
 
-#: Backward-compat alias — MUST point to the SAME object as
+#: Backward-compat alias -- MUST point to the SAME object as
 #: :data:`METHOD_CONFIDENCE` (legacy contract asserted by the test suite
 #: at ``tests/test_entity_resolution_init.py::test_method_confidence_exported``).
 _METHOD_CONFIDENCE: Dict[str, float] = METHOD_CONFIDENCE
@@ -646,7 +684,7 @@ def _normalize_name_cached(name: str, allow_chars: str = "-/") -> str:
     Separated from the public :func:`normalize_name` so that the cache only
     sees hashable ``str`` arguments (not ``None``, ``int``, etc.).
     """
-    # Step 1: Unicode NFC normalisation (GAP-SCI-08) — collapses composed
+    # Step 1: Unicode NFC normalisation (GAP-SCI-08) -- collapses composed
     # vs decomposed forms so ``café`` (NFC, U+00E9) and ``cafe\u0301`` (NFD)
     # produce the same output.
     name = unicodedata.normalize("NFC", name)
@@ -654,12 +692,12 @@ def _normalize_name_cached(name: str, allow_chars: str = "-/") -> str:
     # Step 2: Lower-case and strip leading/trailing whitespace.
     name = name.lower().strip()
 
-    # Step 3: Greek-letter transliteration (BUG-SCI-07) — must happen BEFORE
+    # Step 3: Greek-letter transliteration (BUG-SCI-07) -- must happen BEFORE
     # the ASCII filter, otherwise Greek letters are destroyed.
     name = _transliterate_greek(name)
 
-    # Step 4: NFKD decomposition + strip combining marks (accents) — converts
-    # ``é`` → ``e``, ``ü`` → ``u``, etc.  This preserves the meaning while
+    # Step 4: NFKD decomposition + strip combining marks (accents) -- converts
+    # ``é`` -> ``e``, ``ü`` -> ``u``, etc.  This preserves the meaning while
     # bringing everything into the ASCII range.
     name = unicodedata.normalize("NFKD", name)
     name = "".join(c for c in name if not unicodedata.combining(c))
@@ -676,21 +714,21 @@ def _normalize_name_cached(name: str, allow_chars: str = "-/") -> str:
     stereo_tokens = _STEREO_PAREN_RE.findall(name)
     stereo_tokens = [t.strip().lower() for t in stereo_tokens]
 
-    # V19 ROOT FIX (PS-4 residual — verification agent flagged this):
+    # V19 ROOT FIX (PS-4 residual -- verification agent flagged this):
     # Optical rotation indicators (+), (-), (±) were being extracted
     # as stereo tokens but then COLLAPSED onto the base name in Step 6
     # (the _NON_ALNUM_RE filter strips +, −, ± because they are not in
     # the default allow_chars="-/"). Result: (+)-ibuprofen, (-)-ibuprofen,
-    # (±)-ibuprofen ALL normalized to "ibuprofen" — the same patient-
+    # (±)-ibuprofen ALL normalized to "ibuprofen" -- the same patient-
     # safety collapse the audit's PS-4 flagged for (R)/(S).
     #
     # Root fix: convert +/−/±/racemic to ASCII letter prefixes BEFORE
     # re-attaching them so they survive the char filter:
-    #   '+' → 'p'      (plus — dextrorotatory)
-    #   '-' or '−' → 'm' (minus — levorotatory)
-    #   '±'   → 'pm'   (plus-minus — racemic by optical rotation)
-    #   'rac'/'racemate'/'racemic' → 'rac'
-    # Then (+)-ibuprofen → (p)-ibuprofen → p-ibuprofen (distinct from
+    #   '+' -> 'p'      (plus -- dextrorotatory)
+    #   '-' or '−' -> 'm' (minus -- levorotatory)
+    #   '±'   -> 'pm'   (plus-minus -- racemic by optical rotation)
+    #   'rac'/'racemate'/'racemic' -> 'rac'
+    # Then (+)-ibuprofen -> (p)-ibuprofen -> p-ibuprofen (distinct from
     # m-ibuprofen and pm-ibuprofen).
     _STEREO_TOKEN_NORMALIZE = {
         "+": "p",
@@ -711,7 +749,7 @@ def _normalize_name_cached(name: str, allow_chars: str = "-/") -> str:
     while "(" in name:
         new_name = _PARENTHESES_RE.sub("", name)
         if new_name == name:
-            break  # unbalanced parens — stop to avoid infinite loop
+            break  # unbalanced parens -- stop to avoid infinite loop
         name = new_name
 
     # Re-attach preserved stereo tokens in a deterministic prefix
@@ -725,7 +763,7 @@ def _normalize_name_cached(name: str, allow_chars: str = "-/") -> str:
     # Step 6: Keep only allowed characters (BUG-SCI-07, GAP-CONFIG-05).
     # The default allowlist is ``-/``; custom allowlists recompile the pattern.
     if allow_chars == "-/":
-        # Fast path — use the precompiled default pattern.
+        # Fast path -- use the precompiled default pattern.
         name = _NON_ALNUM_RE.sub("", name)
     else:
         escaped = re.escape(allow_chars)
@@ -735,7 +773,7 @@ def _normalize_name_cached(name: str, allow_chars: str = "-/") -> str:
     name = _MULTI_HYPHEN_RE.sub("-", name)
     name = _MULTI_SLASH_RE.sub("/", name)
 
-    # Step 8: Strip leading/trailing hyphens and slashes (BUG-SCI-06) —
+    # Step 8: Strip leading/trailing hyphens and slashes (BUG-SCI-06) --
     # ensures ``(R)-aspirin`` normalises to ``aspirin`` (not ``-aspirin``)
     # and ``aspirin-(S)`` normalises to ``aspirin`` (not ``aspirin-``).
     name = name.strip("-/")
@@ -756,36 +794,36 @@ def normalize_name(
     1. Return ``""`` immediately if *name* is ``None`` or non-string.
     2. Unicode NFC normalisation (collapses composed/decomposed forms).
     3. Lower-case and strip leading/trailing whitespace.
-    4. Greek-letter transliteration (``α`` → ``alpha``, ``γ`` → ``gamma``).
-    5. NFKD decomposition + strip combining marks (``é`` → ``e``).
+    4. Greek-letter transliteration (``α`` -> ``alpha``, ``γ`` -> ``gamma``).
+    5. NFKD decomposition + strip combining marks (``é`` -> ``e``).
     6. Iterative parenthetical-content removal (handles nested parens).
     7. Keep only ``a-z``, ``0-9``, and the characters in *allow_chars*.
     8. Collapse consecutive hyphens / slashes into single characters.
-    9. Strip leading/trailing hyphens and slashes (so ``(R)-aspirin`` →
+    9. Strip leading/trailing hyphens and slashes (so ``(R)-aspirin`` ->
        ``aspirin``, not ``-aspirin``).
 
     The function is cached via :func:`functools.lru_cache` with a max
-    size of 8192 entries — repeated calls with the same input are O(1).
+    size of 8192 entries -- repeated calls with the same input are O(1).
     Use :func:`normalize_name_cache_info` / :func:`normalize_name_cache_clear`
     for cache observability.
 
     Known Limitations
     -----------------
     - Nested parentheses are handled by iterative removal (innermost
-      first).  ``"Foo (a (b) c)"`` → ``"fooc"`` (the trailing ``c``
+      first).  ``"Foo (a (b) c)"`` -> ``"fooc"`` (the trailing ``c``
       survives because it was outside the inner parens).
     - PS-4 ROOT FIX (patient safety): stereochemistry indicators
       ``(R)``, ``(S)``, ``(E)``, ``(Z)`` are PRESERVED as lowercase
-      letters prefixed to the name — they are NOT stripped.  This is
+      letters prefixed to the name -- they are NOT stripped.  This is
       critical for patient safety: ``(R)-thalidomide`` is a sedative
       while ``(S)-thalidomide`` is a teratogen; merging them would
-      kill patients.  After normalization: ``(R)-warfarin`` →
-      ``"r-warfarin"``, ``(S)-warfarin`` → ``"s-warfarin"`` (distinct
+      kill patients.  After normalization: ``(R)-warfarin`` ->
+      ``"r-warfarin"``, ``(S)-warfarin`` -> ``"s-warfarin"`` (distinct
       match keys, no merge).
     - Unicode characters are handled via NFKD decomposition and Greek
       transliteration.  Accented characters are stripped to their base
-      form (``"é"`` → ``"e"``); Greek letters are transliterated to
-      ASCII (``"α"`` → ``"alpha"``).  This ensures that
+      form (``"é"`` -> ``"e"``); Greek letters are transliterated to
+      ASCII (``"α"`` -> ``"alpha"``).  This ensures that
       ``"α-tocopherol"`` and ``"γ-tocopherol"`` produce DIFFERENT
       normalised names and are NOT incorrectly merged.
     - Leading and trailing hyphens and slashes are stripped after all
@@ -795,12 +833,12 @@ def normalize_name(
     ---------------------------------------
     This function is designed for entity-resolution matching within the
     :mod:`entity_resolution` package.  It is NOT the same as
-    :func:`cleaning.normalizer.normalize_compound_name` — they serve
+    :func:`cleaning.normalizer.normalize_compound_name` -- they serve
     different purposes:
 
-    - :func:`normalize_name` — Aggressive normalisation for fuzzy matching
+    - :func:`normalize_name` -- Aggressive normalisation for fuzzy matching
       (removes parentheticals, strips accents, transliterates Greek).
-    - :func:`cleaning.normalizer.normalize_*` — Data-cleaning normalisation
+    - :func:`cleaning.normalizer.normalize_*` -- Data-cleaning normalisation
       for standardising field values before storage.
 
     Do NOT double-normalise.  If a record has already been through the
@@ -811,7 +849,7 @@ def normalize_name(
     ----------
     name:
         Raw name string from any source database.  Non-string inputs
-        are coerced to ``""`` (defensive — source DataFrames sometimes
+        are coerced to ``""`` (defensive -- source DataFrames sometimes
         contain ``NaN`` or ``None``).
     allow_chars:
         Characters to preserve in addition to ``a-z`` and ``0-9``.
@@ -858,7 +896,7 @@ def normalize_name(
     normalized = _normalize_name_cached(name, allow_chars)
 
     if detailed:
-        # Determine which transformation steps were applied — used for
+        # Determine which transformation steps were applied -- used for
         # data lineage / audit purposes.
         transformations: List[str] = []
         if name != name.lower().strip():
@@ -929,28 +967,28 @@ def fuzzy_match_score(name1: str, name2: str) -> float:
         Score in the range ``[0.0, 1.0]``.  Returns ``0.0`` if either
         argument is empty or non-string.
     """
-    # FIX #31 / GAP-CODE-07 — type-validate inputs.
+    # FIX #31 / GAP-CODE-07 -- type-validate inputs.
     if not isinstance(name1, str) or not isinstance(name2, str):
         return 0.0
     if not name1 or not name2:
         return 0.0
 
     if not RAPIDFUZZ_AVAILABLE:
-        # FIX #51 / GUARD-REL-05 — warn ONCE on first fallback use, not at
+        # FIX #51 / GUARD-REL-05 -- warn ONCE on first fallback use, not at
         # import time.  This keeps import side-effect-free (FIX #35, #55)
         # while still alerting operators to degraded functionality.
         global _rapidfuzz_fallback_warned
         if not _rapidfuzz_fallback_warned:
             _rapidfuzz_fallback_warned = True
             logger.warning(
-                "fuzzy_match_score: rapidfuzz not available — falling back "
+                "fuzzy_match_score: rapidfuzz not available -- falling back "
                 "to exact-match-only (0.0 or 1.0). Fuzzy matching is disabled. "
                 "Install rapidfuzz for full fuzzy matching support."
             )
         return 1.0 if name1 == name2 else 0.0
 
     score = _rapidfuzz_fuzz.token_sort_ratio(name1, name2) / 100.0
-    # FIX #37 / BUG-SEC-01 — truncate names in log output to prevent PII leak.
+    # FIX #37 / BUG-SEC-01 -- truncate names in log output to prevent PII leak.
     logger.debug(
         "fuzzy_match_score('%s', '%s') = %.3f",
         _sanitize_for_log(name1), _sanitize_for_log(name2), score,
@@ -974,7 +1012,7 @@ def fuzzy_match_best(
     query:
         Normalised query name.
     candidates:
-        Mapping of candidate names → canonical keys.  For example::
+        Mapping of candidate names -> canonical keys.  For example::
 
             {"aspirin": "BSYNRYMUTXBXSQ-UHFFFAOYSA-N",
              "ibuprofen": "WFXAZNNJSJXTJZ-UHFFFAOYSA-N"}
@@ -1015,7 +1053,7 @@ def fuzzy_match_best(
     )
     if result is None:
         return None
-    # rapidfuzz 3.x returns (match, score, index) — but extractOne may
+    # rapidfuzz 3.x returns (match, score, index) -- but extractOne may
     # return (match, score) in older versions.  Handle both.
     matched_name = result[0]
     score = result[1] / 100.0
@@ -1037,24 +1075,24 @@ def is_valid_inchikey(inchikey: Any) -> bool:
     - **Standard** InChIKeys: ``[A-Z]{14}-[A-Z]{10}-S`` (27 chars, ``-S`` suffix).
       Per the InChI Trust specification, the standard InChIKey ends in ``S``
       (not ``N``). The earlier docstring here had the standard / non-standard
-      suffixes reversed — corrected (audit finding 10).
+      suffixes reversed -- corrected (audit finding 10).
     - **Non-standard** InChIKeys: ``[A-Z]{14}-[A-Z]{10}-N`` (27 chars, ``-N``
       suffix). Non-standard InChIKeys end in ``N`` (not any letter) per the
       InChI Trust spec.
     - **Mixture** InChIKeys: multiple keys joined by hyphens (the regex at
       line 682-684 of this file uses hyphen separators, not commas as the
-      earlier docstring claimed — corrected, audit finding 10).
+      earlier docstring claimed -- corrected, audit finding 10).
     - **Synthetic** InChIKeys: ``SYNTH``-prefixed platform-generated surrogates
 
     Delegating rather than reimplementing eliminates the historical bug where
     three independent validators (in ``resolver_utils``, ``base``, and
-    ``cleaning.normalizer``) had divergent semantics — the same key could be
+    ``cleaning.normalizer``) had divergent semantics -- the same key could be
     accepted by one and rejected by another.
 
     Parameters
     ----------
     inchikey:
-        Anything — non-strings return ``False``.
+        Anything -- non-strings return ``False``.
 
     Returns
     -------
@@ -1072,7 +1110,7 @@ def is_valid_inchikey(inchikey: Any) -> bool:
     False
     """
     # Local import to avoid a circular import at module load time
-    # (cleaning.normalizer is heavy — pandas etc.).
+    # (cleaning.normalizer is heavy -- pandas etc.).
     try:
         from cleaning.normalizer import is_valid_inchikey as _normalizer_is_valid
     except ImportError:
@@ -1080,7 +1118,7 @@ def is_valid_inchikey(inchikey: Any) -> bool:
         # to the legacy strict pattern.  This should never happen in
         # production but keeps the resolver resilient.
         logger.debug(
-            "is_valid_inchikey: cleaning.normalizer unavailable — falling "
+            "is_valid_inchikey: cleaning.normalizer unavailable -- falling "
             "back to legacy strict pattern"
         )
         if not isinstance(inchikey, str):
@@ -1090,7 +1128,7 @@ def is_valid_inchikey(inchikey: Any) -> bool:
 
 
 def _is_synthetic_inchikey_local(inchikey: Any) -> bool:
-    """Local helper — delegates to :func:`cleaning.normalizer.is_synthetic_inchikey`
+    """Local helper -- delegates to :func:`cleaning.normalizer.is_synthetic_inchikey`
     when available, else uses the ``startswith("SYNTH")`` heuristic.
     """
     if not isinstance(inchikey, str) or not inchikey:
@@ -1157,10 +1195,10 @@ def extract_inchikey_first_block(
             return None
         return None
 
-    # FIX #17 / BUG-SCI-03 — normalise case before validation/extraction.
+    # FIX #17 / BUG-SCI-03 -- normalise case before validation/extraction.
     normalised = inchikey.strip().upper()
 
-    # FIX #18 / BUG-SCI-04 — validate before extracting.  Garbage strings
+    # FIX #18 / BUG-SCI-04 -- validate before extracting.  Garbage strings
     # pollute the connectivity index and cause false-positive drug merges.
     if not is_valid_inchikey(normalised):
         logger.debug(
@@ -1169,7 +1207,7 @@ def extract_inchikey_first_block(
         )
         return None
 
-    # FIX #19 / BUG-SCI-05 — synthetic InChIKeys (prefix SYNTH) have NO
+    # FIX #19 / BUG-SCI-05 -- synthetic InChIKeys (prefix SYNTH) have NO
     # chemical-connectivity meaning; their first 14 chars are SHA-256 hash
     # fragments.  Inserting them into the connectivity index would cause
     # false-positive drug merges.
@@ -1197,14 +1235,14 @@ def extract_inchikey_first_block(
 
 
 # =============================================================================
-# Index builders (legacy — DEPRECATED, kept for backward compat)
+# Index builders (legacy -- DEPRECATED, kept for backward compat)
 # =============================================================================
 
 def build_name_index(
     records: List[dict],
     name_field: str = "name",
 ) -> Dict[str, List[int]]:
-    """Build a lookup mapping from *normalised name* → list of record indices.
+    """Build a lookup mapping from *normalised name* -> list of record indices.
 
     .. deprecated::
         Use :func:`build_canonical_name_index` instead.  This legacy
@@ -1229,9 +1267,9 @@ def build_name_index(
         a list of indices into *records* that share that normalised
         name.
     """
-    # FIX #2 / BUG-ARCH-02 — emit DeprecationWarning on every call.
+    # FIX #2 / BUG-ARCH-02 -- emit DeprecationWarning on every call.
     warnings.warn(
-        "build_name_index is deprecated — use build_canonical_name_index "
+        "build_name_index is deprecated -- use build_canonical_name_index "
         "instead. Will be removed in a future version.",
         DeprecationWarning,
         stacklevel=2,
@@ -1254,7 +1292,7 @@ def build_name_index(
         else:
             dropped += 1
 
-    # FIX #41 / BUG-DQ-05 — log dropped records instead of silently skipping.
+    # FIX #41 / BUG-DQ-05 -- log dropped records instead of silently skipping.
     if dropped:
         logger.warning(
             "build_name_index: %d of %d records had empty normalised names "
@@ -1262,7 +1300,7 @@ def build_name_index(
             dropped, len(records),
         )
     logger.debug(
-        "build_name_index: %d records → %d unique normalised names, %d dropped",
+        "build_name_index: %d records -> %d unique normalised names, %d dropped",
         len(records), len(index), dropped,
     )
     return index
@@ -1272,7 +1310,7 @@ def build_inchikey_index(
     records: List[dict],
     inchikey_field: str = "inchikey",
 ) -> Dict[str, List[int]]:
-    """Build a lookup mapping from *InChIKey* → list of record indices.
+    """Build a lookup mapping from *InChIKey* -> list of record indices.
 
     .. deprecated::
         Use :func:`build_canonical_inchikey_index` instead.  This legacy
@@ -1281,7 +1319,7 @@ def build_inchikey_index(
 
     InChIKeys are normalised (strip + upper) before indexing (FIX #40 /
     BUG-DQ-03).  Unlike :func:`build_canonical_inchikey_index`, this
-    legacy function does NOT skip invalid InChIKeys — backward compat
+    legacy function does NOT skip invalid InChIKeys -- backward compat
     with the test suite requires that "AAA-BBB-C" still produces an
     index entry.  Use the canonical variant for new code.
 
@@ -1297,9 +1335,9 @@ def build_inchikey_index(
     dict[str, list[int]]
         Mapping from (normalised) InChIKey string to list of indices.
     """
-    # FIX #2 / BUG-ARCH-02 — emit DeprecationWarning on every call.
+    # FIX #2 / BUG-ARCH-02 -- emit DeprecationWarning on every call.
     warnings.warn(
-        "build_inchikey_index is deprecated — use "
+        "build_inchikey_index is deprecated -- use "
         "build_canonical_inchikey_index instead. Will be removed in a "
         "future version.",
         DeprecationWarning,
@@ -1318,7 +1356,7 @@ def build_inchikey_index(
                 f"{type(record).__name__}). Expected dict."
             ) from exc
         if ik and isinstance(ik, str):
-            # FIX #40 / BUG-DQ-03 — normalise case/whitespace before indexing.
+            # FIX #40 / BUG-DQ-03 -- normalise case/whitespace before indexing.
             ik = ik.strip().upper()
             index.setdefault(ik, []).append(i)
         else:
@@ -1331,7 +1369,7 @@ def build_inchikey_index(
             dropped, len(records),
         )
     logger.debug(
-        "build_inchikey_index: %d records → %d unique InChIKeys, %d dropped",
+        "build_inchikey_index: %d records -> %d unique InChIKeys, %d dropped",
         len(records), len(index), dropped,
     )
     return index
@@ -1359,9 +1397,9 @@ def _extract_key_and_record(
     index:
         Positional index of *item* in the source sequence (for error messages).
     record_type:
-        ``"auto"`` (default) — heuristic dispatch.
-        ``"dict"`` — require a plain dict.
-        ``"tuple"`` — require a ``(key, dict)`` 2-tuple.
+        ``"auto"`` (default) -- heuristic dispatch.
+        ``"dict"`` -- require a plain dict.
+        ``"tuple"`` -- require a ``(key, dict)`` 2-tuple.
 
     Returns
     -------
@@ -1392,7 +1430,7 @@ def _extract_key_and_record(
             key, record = item
         else:
             record = item
-            # FIX #32 / GAP-CODE-08 — validate record is a dict.
+            # FIX #32 / GAP-CODE-08 -- validate record is a dict.
             if not isinstance(record, dict):
                 raise TypeError(
                     f"Expected dict or (key, dict) tuple at index {index}, "
@@ -1400,7 +1438,7 @@ def _extract_key_and_record(
                 )
             key = str(record.get("canonical_key", index))
 
-    # FIX #32 — final type guard on the record half.
+    # FIX #32 -- final type guard on the record half.
     if not isinstance(record, dict):
         raise TypeError(
             f"Record must be dict, got {type(record).__name__} at index {index}"
@@ -1435,7 +1473,7 @@ def build_canonical_name_index(
     # contradicted the real default AND misled type-checkers into
     # thinking the tuple-returning overload fires by default. The
     # literal ellipsis ``= ...`` marks the parameter as REQUIRED for
-    # this overload — callers MUST pass ``return_duplicates=True``
+    # this overload -- callers MUST pass ``return_duplicates=True``
     # explicitly to opt into the tuple return shape.
     return_duplicates: bool = ...,
 ) -> Tuple[Dict[str, str], List[Tuple[str, str, int]]]: ...
@@ -1448,10 +1486,10 @@ def build_canonical_name_index(
     record_type: str = "auto",
     return_duplicates: bool = False,
 ) -> Union[Dict[str, str], Tuple[Dict[str, str], List[Tuple[str, str, int]]]]:
-    """Build a lookup from *normalised name* → first matching record key.
+    """Build a lookup from *normalised name* -> first matching record key.
 
     Unlike :func:`build_name_index` (which returns ``Dict[str, List[int]]``),
-    this helper returns ``Dict[str, str]`` — each normalised name maps
+    this helper returns ``Dict[str, str]`` -- each normalised name maps
     to the **first** record's canonical key.  This matches the shape
     actually consumed by :class:`DrugResolver._name_index` and
     :class:`ProteinResolver._name_index` (audit D5-1).
@@ -1463,14 +1501,14 @@ def build_canonical_name_index(
         record dicts.  When tuples are passed, the first element is
         used as the value; otherwise the record's ``"canonical_key"``
         field is used, falling back to a content-hash of the record
-        (FIX #8 / BUG-DESIGN-02 — content-hash is deterministic, unlike
+        (FIX #8 / BUG-DESIGN-02 -- content-hash is deterministic, unlike
         the legacy positional ``str(i)`` fallback).
     name_field:
         Key inside each record dict that holds the raw name.
     record_type:
-        ``"auto"`` (default) — heuristic dispatch.
-        ``"dict"`` — enforce plain-dict input.
-        ``"tuple"`` — enforce ``(key, dict)`` 2-tuple input.
+        ``"auto"`` (default) -- heuristic dispatch.
+        ``"dict"`` -- enforce plain-dict input.
+        ``"tuple"`` -- enforce ``(key, dict)`` 2-tuple input.
     return_duplicates:
         If ``True``, return a 2-tuple ``(index, duplicates)`` where
         ``duplicates`` is a list of ``(normalised_name, key, index)``
@@ -1481,7 +1519,7 @@ def build_canonical_name_index(
     Returns
     -------
     dict[str, str] or tuple[dict[str, str], list[tuple[str, str, int]]]
-        Mapping from normalised name → canonical key string.  When
+        Mapping from normalised name -> canonical key string.  When
         ``return_duplicates=True``, a second return value lists the
         dropped duplicates.
     """
@@ -1491,7 +1529,7 @@ def build_canonical_name_index(
     for i, item in enumerate(records):
         key, record = _extract_key_and_record(item, i, record_type)
 
-        # FIX #8 / BUG-DESIGN-02 — if no canonical_key is present, generate
+        # FIX #8 / BUG-DESIGN-02 -- if no canonical_key is present, generate
         # a deterministic content-hash key instead of falling back to the
         # positional index.  Positional indices are unstable across
         # reordering / filtering and cause silent corruption.
@@ -1501,7 +1539,7 @@ def build_canonical_name_index(
             try:
                 content_str = str(sorted(record.items()))
             except TypeError:
-                # Unhashable values — fall back to id().
+                # Unhashable values -- fall back to id().
                 content_str = str(id(record))
             generated_key = hashlib.sha256(content_str.encode()).hexdigest()[:16]
             warnings.warn(
@@ -1525,11 +1563,11 @@ def build_canonical_name_index(
             if norm not in index:
                 index[norm] = key
             else:
-                # FIX #9 / BUG-DESIGN-03 — track duplicates instead of
+                # FIX #9 / BUG-DESIGN-03 -- track duplicates instead of
                 # silently dropping them.
                 dropped.append((norm, key, i))
 
-    # FIX #9 — log dropped duplicates at WARNING level so operators notice.
+    # FIX #9 -- log dropped duplicates at WARNING level so operators notice.
     if dropped:
         logger.warning(
             "build_canonical_name_index: %d duplicate normalised names "
@@ -1537,7 +1575,7 @@ def build_canonical_name_index(
             len(dropped), [(n, k) for n, k, _ in dropped[:10]],
         )
     logger.debug(
-        "build_canonical_name_index: %d records → %d unique names, %d dropped",
+        "build_canonical_name_index: %d records -> %d unique names, %d dropped",
         len(records), len(index), len(dropped),
     )
 
@@ -1553,7 +1591,7 @@ def build_canonical_inchikey_index(
     record_type: str = "auto",
     return_duplicates: bool = False,
 ) -> Union[Dict[str, str], Tuple[Dict[str, str], List[Tuple[str, str, int]]]]:
-    """Build a lookup from *InChIKey* → first matching record key.
+    """Build a lookup from *InChIKey* -> first matching record key.
 
     Single-valued counterpart of :func:`build_inchikey_index`,
     matching the shape of :attr:`DrugResolver._inchikey_index`
@@ -1572,7 +1610,7 @@ def build_canonical_inchikey_index(
     inchikey_field:
         Key inside each record dict that holds the InChIKey.
     record_type:
-        ``"auto"``, ``"dict"``, or ``"tuple"`` — see
+        ``"auto"``, ``"dict"``, or ``"tuple"`` -- see
         :func:`build_canonical_name_index`.
     return_duplicates:
         If ``True``, return ``(index, duplicates)``.
@@ -1580,7 +1618,7 @@ def build_canonical_inchikey_index(
     Returns
     -------
     dict[str, str] or tuple
-        Mapping from normalised InChIKey → canonical key string.
+        Mapping from normalised InChIKey -> canonical key string.
     """
     index: Dict[str, str] = {}
     dropped: List[Tuple[str, str, int]] = []
@@ -1600,10 +1638,10 @@ def build_canonical_inchikey_index(
         if not ik or not isinstance(ik, str):
             continue
 
-        # FIX #39 / BUG-DQ-02 — normalise case/whitespace before indexing.
+        # FIX #39 / BUG-DQ-02 -- normalise case/whitespace before indexing.
         ik = ik.strip().upper()
 
-        # FIX #39 — skip invalid InChIKeys with a warning.  This prevents
+        # FIX #39 -- skip invalid InChIKeys with a warning.  This prevents
         # typos and garbage from polluting the index.  Note: synthetic
         # keys (SYNTH-prefixed) ARE accepted because they are a legitimate
         # platform-generated identifier.
@@ -1632,7 +1670,7 @@ def build_canonical_inchikey_index(
             len(dropped),
         )
     logger.debug(
-        "build_canonical_inchikey_index: %d records → %d unique InChIKeys, "
+        "build_canonical_inchikey_index: %d records -> %d unique InChIKeys, "
         "%d invalid, %d dropped",
         len(records), len(index), invalid, len(dropped),
     )
@@ -1734,12 +1772,12 @@ def register_match_method(method: str, confidence: float) -> None:
     ----------
     method:
         Resolution-method identifier (e.g. ``"inchikey_exact"``).  Must
-        match ``^[a-z][a-z0-9_]+$`` (FIX #65 / GAP-SEC-03) — lowercase
+        match ``^[a-z][a-z0-9_]+$`` (FIX #65 / GAP-SEC-03) -- lowercase
         identifier starting with a letter.  Whitespace-only or non-string
         values raise :class:`ValueError` (FIX #27 / BUG-CODE-03).
     confidence:
         Confidence score in ``[0.0, 1.0]``.  Booleans are rejected
-        (FIX #28 / BUG-CODE-04) — ``True`` would otherwise silently
+        (FIX #28 / BUG-CODE-04) -- ``True`` would otherwise silently
         register as confidence ``1.0`` because ``isinstance(True, int)``
         is ``True`` in Python.
 
@@ -1763,17 +1801,17 @@ def register_match_method(method: str, confidence: float) -> None:
     - Use :func:`unregister_match_method` to remove a custom method.
     - Use :func:`reset_method_confidence` to restore ALL original values.
     """
-    # FIX #27 / BUG-CODE-03 — reject whitespace-only method names.
+    # FIX #27 / BUG-CODE-03 -- reject whitespace-only method names.
     if not method or not isinstance(method, str) or not method.strip():
         raise ValueError(
             f"method must be a non-empty, non-whitespace string, got {method!r}"
         )
-    # FIX #65 / GAP-SEC-03 — enforce identifier pattern on method names.
+    # FIX #65 / GAP-SEC-03 -- enforce identifier pattern on method names.
     if not _VALID_METHOD_NAME_RE.match(method):
         raise ValueError(
             f"method name must match [a-z][a-z0-9_]+, got {method!r}"
         )
-    # FIX #28 / BUG-CODE-04 — reject bool as confidence.
+    # FIX #28 / BUG-CODE-04 -- reject bool as confidence.
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
         raise ValueError(
             f"confidence must be a numeric (int/float), not bool. "
@@ -1787,17 +1825,17 @@ def register_match_method(method: str, confidence: float) -> None:
     caller = _get_caller_info(skip=2)
 
     with _METHOD_CONFIDENCE_LOCK:
-        # FIX #49 / GAP-REL-03 — warn when overriding existing methods.
+        # FIX #49 / GAP-REL-03 -- warn when overriding existing methods.
         if method in METHOD_CONFIDENCE:
             old_value = METHOD_CONFIDENCE[method]
             logger.warning(
                 "register_match_method: overriding existing method '%s' "
-                "(%.3f → %.3f). Caller: %s",
+                "(%.3f -> %.3f). Caller: %s",
                 method, old_value, float(confidence), caller,
             )
         else:
             logger.info(
-                "register_match_method: registered '%s' → %.3f. Caller: %s",
+                "register_match_method: registered '%s' -> %.3f. Caller: %s",
                 method, float(confidence), caller,
             )
         METHOD_CONFIDENCE[method] = float(confidence)
@@ -1806,7 +1844,7 @@ def register_match_method(method: str, confidence: float) -> None:
         if method not in _ORIGINAL_METHOD_CONFIDENCE:
             _custom_methods[method] = float(confidence)
         else:
-            # Built-in method overridden — record in _custom_methods so
+            # Built-in method overridden -- record in _custom_methods so
             # from_method can see the new value.
             _custom_methods[method] = float(confidence)
 
@@ -1839,16 +1877,16 @@ def unregister_match_method(method: str) -> None:
             )
 
         if method in _ORIGINAL_METHOD_CONFIDENCE:
-            # Built-in method was overridden — restore the original value.
+            # Built-in method was overridden -- restore the original value.
             original = _ORIGINAL_METHOD_CONFIDENCE[method]
             METHOD_CONFIDENCE[method] = original
             _custom_methods.pop(method, None)
             logger.info(
-                "unregister_match_method: restored built-in '%s' → %.3f",
+                "unregister_match_method: restored built-in '%s' -> %.3f",
                 method, original,
             )
         else:
-            # Truly custom method — remove entirely.
+            # Truly custom method -- remove entirely.
             METHOD_CONFIDENCE.pop(method, None)
             _custom_methods.pop(method, None)
             # Reset the warning-suppression set so future registrations
@@ -1882,12 +1920,12 @@ def get_registered_methods() -> Dict[str, float]:
     """Return a snapshot copy of the current :data:`METHOD_CONFIDENCE`.
 
     Includes both built-in and custom-registered methods.  The returned
-    dict is a copy — mutations do not affect the global state.
+    dict is a copy -- mutations do not affect the global state.
 
     Returns
     -------
     dict[str, float]
-        Snapshot of all currently-registered method → confidence pairs.
+        Snapshot of all currently-registered method -> confidence pairs.
     """
     with _METHOD_CONFIDENCE_LOCK:
         return dict(METHOD_CONFIDENCE)
@@ -1910,7 +1948,7 @@ def sync_method_confidence() -> bool:
         from .base import MatchConfidence
     except ImportError:
         logger.error(
-            "sync_method_confidence: cannot import MatchConfidence — skipping check"
+            "sync_method_confidence: cannot import MatchConfidence -- skipping check"
         )
         return True
 
@@ -1918,7 +1956,7 @@ def sync_method_confidence() -> bool:
         all_match = True
         for method, confidence in METHOD_CONFIDENCE.items():
             if method in _ORIGINAL_METHOD_CONFIDENCE:
-                # Built-in — check enum.
+                # Built-in -- check enum.
                 enum_name = method.upper()
                 if not hasattr(MatchConfidence, enum_name):
                     logger.critical(
@@ -1930,7 +1968,7 @@ def sync_method_confidence() -> bool:
                 enum_value = float(getattr(MatchConfidence, enum_name))
                 if enum_value != confidence:
                     logger.critical(
-                        "sync_method_confidence: drift detected — "
+                        "sync_method_confidence: drift detected -- "
                         "MatchConfidence.%s = %.3f but METHOD_CONFIDENCE['%s'] = %.3f",
                         enum_name, enum_value, method, confidence,
                     )
@@ -1972,14 +2010,14 @@ def method_confidence_override(overrides: Dict[str, float]):
         with _METHOD_CONFIDENCE_LOCK:
             for method, original in saved.items():
                 if original is None:
-                    # Method didn't exist before — remove it entirely.
+                    # Method didn't exist before -- remove it entirely.
                     METHOD_CONFIDENCE.pop(method, None)
                     _custom_methods.pop(method, None)
                 else:
                     # Restore original value.
                     METHOD_CONFIDENCE[method] = original
                     if method in _ORIGINAL_METHOD_CONFIDENCE:
-                        # Built-in — clear from custom_methods.
+                        # Built-in -- clear from custom_methods.
                         _custom_methods.pop(method, None)
                     else:
                         _custom_methods[method] = original
@@ -2040,12 +2078,12 @@ def compute_match_confidence(
             f"method must be str, got {type(method).__name__}"
         )
 
-    # FIX #106 / GAP-INT-05 — schema-version compatibility check.
+    # FIX #106 / GAP-INT-05 -- schema-version compatibility check.
     if config is not None:
         try:
             cfg_version = getattr(config, "mapping_schema_version", None)
             if cfg_version and cfg_version != _RESOLVER_UTILS_SCHEMA_VERSION:
-                # Only warn — don't refuse to compute.  Operators can
+                # Only warn -- don't refuse to compute.  Operators can
                 # decide whether to upgrade.
                 logger.warning(
                     "compute_match_confidence: config schema version %s != "
@@ -2055,7 +2093,7 @@ def compute_match_confidence(
         except Exception:  # pragma: no cover - defensive
             pass
 
-    # FIX #29 / BUG-CODE-05 — trim whitespace before lookup.
+    # FIX #29 / BUG-CODE-05 -- trim whitespace before lookup.
     method = method.strip()
 
     with _METHOD_CONFIDENCE_LOCK:
@@ -2063,7 +2101,7 @@ def compute_match_confidence(
         confidence = METHOD_CONFIDENCE.get(method, 0.5)
 
     if not is_known:
-        # FIX #50 / GAP-REL-04 — rate-limit warnings to one per unknown method.
+        # FIX #50 / GAP-REL-04 -- rate-limit warnings to one per unknown method.
         if method not in _unknown_method_warned:
             _unknown_method_warned.add(method)
             logger.warning(
@@ -2074,7 +2112,7 @@ def compute_match_confidence(
                 method, 0.5, _get_caller_info(skip=2),
             )
 
-    # FIX #57 / GAP-IDEM-05 — round to 10 decimal places for cross-version
+    # FIX #57 / GAP-IDEM-05 -- round to 10 decimal places for cross-version
     # determinism.  IEEE 754 guarantees binary-level determinism, but the
     # string representation can differ; rounding makes string output stable.
     confidence = round(confidence, 10)
@@ -2095,7 +2133,7 @@ def compute_match_confidence(
         # Check custom methods first (FIX #6 / GUARD-ARCH-06).
         with _METHOD_CONFIDENCE_LOCK:
             if method in _custom_methods and method not in _ORIGINAL_METHOD_CONFIDENCE:
-                # Truly custom method — synthesize an UNKNOWN-like member
+                # Truly custom method -- synthesize an UNKNOWN-like member
                 # with the right value.  Enum members can't be added at
                 # runtime, so we return the float value cast through the
                 # MatchConfidence constructor if possible, else float.
@@ -2127,7 +2165,7 @@ _OPTIONAL_PROTEIN_FIELDS: Tuple[str, ...] = (
     "string_id", "chembl_target_id", "protein_name",
 )
 
-#: Default drug ID fields (DEPRECATED — pass id_fields explicitly).
+#: Default drug ID fields (DEPRECATED -- pass id_fields explicitly).
 _DRUG_ID_FIELDS: Tuple[str, ...] = ("chembl_id", "drugbank_id", "pubchem_cid")
 
 #: Default protein ID fields.
@@ -2136,7 +2174,7 @@ _PROTEIN_ID_FIELDS: Tuple[str, ...] = ("uniprot_id", "string_id", "chembl_target
 #: Protein fuzzy acceptance threshold (mirrors ``ProteinResolver._PROTEIN_FUZZY_THRESHOLD``).
 #: METHOD_CONFIDENCE["protein_name_fuzzy"] must be >= this value (FIX #16 / SCI-02).
 #:
-#: v29 ROOT FIX (audit C-2 — Confidence Score Inversion): was 0.90.
+#: v29 ROOT FIX (audit C-2 -- Confidence Score Inversion): was 0.90.
 #: Lowered to 0.55 to match the corrected MatchConfidence.PROTEIN_NAME_FUZZY=0.60.
 #: See base.py MatchConfidence docstring for the full rationale.
 _PROTEIN_FUZZY_THRESHOLD: float = 0.55
@@ -2169,7 +2207,7 @@ def validate_drug_record(
         - PubChem CID positivity / type (rejects bool).
         - InChI prefix check.
         - SMILES non-empty check.
-        - Molecular-weight range check (1–10 000 Da).
+        - Molecular-weight range check (1-10 000 Da).
         - Unknown-field detection (catches typos like ``inchikeyy``).
     detailed:
         If ``True``, return a :class:`ValidationReport` dataclass with
@@ -2222,7 +2260,7 @@ def validate_drug_record(
                 f"InChIKey format ([A-Z]{{14}}-[A-Z]{{10}}-[A-Z])"
             )
 
-        # FIX #23 / BUG-SCI-09 — ChEMBL ID format
+        # FIX #23 / BUG-SCI-09 -- ChEMBL ID format
         chembl_id = record.get("chembl_id")
         if chembl_id and isinstance(chembl_id, str) and not _CHEMBL_ID_RE.match(chembl_id):
             errors.append(
@@ -2230,15 +2268,20 @@ def validate_drug_record(
                 f"CHEMBL\\d+ format"
             )
 
-        # FIX #23 — DrugBank ID format
+        # FIX #23 -- DrugBank ID format
+        # P1-017 ROOT FIX (Team-2): accept EITHER a real DrugBank ID
+        # (``DB\d{5,6}``) OR a synthesized ID (``SYNTH-DB-...``). The
+        # previous check used ``_DRUGBANK_ID_RE.match()`` which rejected
+        # synthesized IDs -- breaking the v50 fallback at entity resolution.
         drugbank_id = record.get("drugbank_id")
-        if drugbank_id and isinstance(drugbank_id, str) and not _DRUGBANK_ID_RE.match(drugbank_id):
+        if drugbank_id and isinstance(drugbank_id, str) and not _is_valid_drugbank_id(drugbank_id):
             errors.append(
                 f"drugbank_id {_truncate_for_error(drugbank_id)} does not match "
-                f"DB\\d+ format"
+                f"DB\\d{{5,6}} (real DrugBank) OR SYNTH-DB-[0-9A-F]{{8}} / "
+                f"SYNTH-DB-M\\d{{6}} (synthesized) format"
             )
 
-        # FIX #23, #30 / BUG-CODE-06 — PubChem CID type + positivity
+        # FIX #23, #30 / BUG-CODE-06 -- PubChem CID type + positivity
         pcid = record.get("pubchem_cid")
         if pcid is not None:
             if isinstance(pcid, bool):
@@ -2255,7 +2298,7 @@ def validate_drug_record(
                     f"got {_truncate_for_error(pcid)}"
                 )
 
-        # FIX #23 — InChI prefix check
+        # FIX #23 -- InChI prefix check
         inchi = record.get("inchi")
         if inchi and isinstance(inchi, str) and not _INCHI_PREFIX_RE.match(inchi):
             errors.append(
@@ -2263,12 +2306,12 @@ def validate_drug_record(
                 f"InChI=1S/ or InChI=1/"
             )
 
-        # FIX #23 — SMILES non-empty check
+        # FIX #23 -- SMILES non-empty check
         smiles = record.get("smiles")
         if smiles is not None and isinstance(smiles, str) and not smiles.strip():
             errors.append("smiles is empty string")
 
-        # FIX #23, #46 — Molecular weight type + range check
+        # FIX #23, #46 -- Molecular weight type + range check
         mw = record.get("molecular_weight")
         if mw is not None:
             if isinstance(mw, bool):
@@ -2285,7 +2328,7 @@ def validate_drug_record(
                     f"(1-10000 Da)"
                 )
 
-        # FIX #23 — Type checks on known optional string fields.
+        # FIX #23 -- Type checks on known optional string fields.
         for f in ("chembl_id", "drugbank_id", "name"):
             v = record.get(f)
             if v is not None and not isinstance(v, str):
@@ -2293,16 +2336,16 @@ def validate_drug_record(
                     f"field {f!r} must be str or None, got {type(v).__name__}"
                 )
 
-        # FIX #45 / GAP-DQ-09 — Cross-field consistency (best-effort, RDKit optional)
+        # FIX #45 / GAP-DQ-09 -- Cross-field consistency (best-effort, RDKit optional)
         # Full InChIKey↔InChI cross-check requires RDKit; we attempt it but
         # silently skip if RDKit isn't available.
-        # v74 ROOT FIX (T-022 — silent RDKit degradation on ARM64):
-        #   The previous code did ``except ImportError: pass`` — RDKit
+        # v74 ROOT FIX (T-022 -- silent RDKit degradation on ARM64):
+        #   The previous code did ``except ImportError: pass`` -- RDKit
         #   unavailability was COMPLETELY silent. On ARM64 dev machines
         #   (Apple Silicon, AWS Graviton) where rdkit may not be installed,
         #   the cross-field InChIKey↔InChI consistency check was skipped
         #   with NO log entry. Entity resolution quality dropped with no
-        #   visible signal — the developer's local tests passed but
+        #   visible signal -- the developer's local tests passed but
         #   produced different (worse) results than the x86_64 Docker
         #   production environment.
         #   ROOT FIX: emit a one-time WARNING log when RDKit is unavailable
@@ -2319,13 +2362,13 @@ def validate_drug_record(
                         f"InChIKey derived from inchi (expected {computed_ik!r})"
                     )
             except ImportError:
-                # RDKit not available — skip cross-field check, but warn
+                # RDKit not available -- skip cross-field check, but warn
                 # once so the operator knows entity resolution is degraded.
                 global _RDKIT_UNAVAILABLE_WARNED
                 if not _RDKIT_UNAVAILABLE_WARNED:
                     _RDKIT_UNAVAILABLE_WARNED = True
                     logger.warning(
-                        "validate_drug_record: RDKit is not installed — "
+                        "validate_drug_record: RDKit is not installed -- "
                         "InChIKey↔InChI cross-field consistency check is "
                         "SKIPPED. Entity resolution quality is degraded "
                         "(name-only matching instead of fingerprint "
@@ -2338,7 +2381,7 @@ def validate_drug_record(
                     "validate_drug_record: RDKit cross-check failed: %s", exc,
                 )
 
-        # FIX #43 / BUG-DQ-06 — Unknown field detection (catch typos).
+        # FIX #43 / BUG-DQ-06 -- Unknown field detection (catch typos).
         all_known = set(required_fields) | set(optional_fields)
         unknown = set(record.keys()) - all_known
         if unknown:
@@ -2347,7 +2390,7 @@ def validate_drug_record(
             )
 
     ok = len(errors) == 0
-    # FIX #80 / GAP-LOG-02 — log validation failures.
+    # FIX #80 / GAP-LOG-02 -- log validation failures.
     if not ok:
         logger.warning(
             "validate_drug_record: %d errors for record with name=%s: %s",
@@ -2428,11 +2471,11 @@ def validate_protein_record(
             errors.append(f"missing or empty required field: {f!r}")
 
     if strict:
-        # FIX #15, #44 / BUG-SCI-01, BUG-DQ-07 — UniProt accession validation.
+        # FIX #15, #44 / BUG-SCI-01, BUG-DQ-07 -- UniProt accession validation.
         uid = record.get("uniprot_id")
         if uid and isinstance(uid, str):
             if uid.startswith("STRING:"):
-                # FIX #44 — validate the content after the prefix.
+                # FIX #44 -- validate the content after the prefix.
                 rest = uid[len("STRING:"):]
                 if not rest or not _STRING_ID_RE.match(rest):
                     errors.append(
@@ -2440,7 +2483,7 @@ def validate_protein_record(
                         f"{_truncate_for_error(uid)}"
                     )
             elif uid.startswith("CHEMBL_T:"):
-                # FIX #44 — validate the content after the prefix.
+                # FIX #44 -- validate the content after the prefix.
                 rest = uid[len("CHEMBL_T:"):]
                 if not rest or not _CHEMBL_TARGET_ID_RE.match(rest):
                     errors.append(
@@ -2448,20 +2491,20 @@ def validate_protein_record(
                         f"{_truncate_for_error(uid)}"
                     )
             elif not _UNIPROT_ACCESSION_RE.match(uid):
-                # FIX #15 — official UniProt accession pattern.
+                # FIX #15 -- official UniProt accession pattern.
                 errors.append(
                     f"uniprot_id {_truncate_for_error(uid)} does not match the "
                     f"official UniProt accession format"
                 )
 
-        # FIX #24 / BUG-SCI-10 — amino-acid sequence validation.
+        # FIX #24 / BUG-SCI-10 -- amino-acid sequence validation.
         seq = record.get("sequence")
         if seq and isinstance(seq, str) and not _AA_VALID_RE.match(seq):
             errors.append(
                 f"sequence contains invalid amino acid characters"
             )
 
-        # FIX #24 — string_id format
+        # FIX #24 -- string_id format
         sid = record.get("string_id")
         if sid and isinstance(sid, str) and not _STRING_ID_RE.match(sid):
             errors.append(
@@ -2469,7 +2512,7 @@ def validate_protein_record(
                 f"'species.ENSPxxxxx' format"
             )
 
-        # FIX #24 — chembl_target_id format
+        # FIX #24 -- chembl_target_id format
         ctid = record.get("chembl_target_id")
         if ctid and isinstance(ctid, str) and not _CHEMBL_TARGET_ID_RE.match(ctid):
             errors.append(
@@ -2485,7 +2528,7 @@ def validate_protein_record(
                     f"field {f!r} must be str or None, got {type(v).__name__}"
                 )
 
-        # FIX #43 — Unknown field detection.
+        # FIX #43 -- Unknown field detection.
         all_known = set(required_fields) | set(optional_fields)
         unknown = set(record.keys()) - all_known
         if unknown:
@@ -2573,7 +2616,7 @@ def find_duplicate_ids(
 ]:
     """Find source-specific IDs that appear in more than one record.
 
-    Audit D5-3 — silent duplicates across sources are a data-quality
+    Audit D5-3 -- silent duplicates across sources are a data-quality
     landmine because they produce ambiguous ``WHERE chembl_id = ...``
     lookups downstream.
 
@@ -2591,7 +2634,7 @@ def find_duplicate_ids(
         Sequence of record dicts.
     id_fields:
         Sequence of field names to check for duplicates.  Default
-        (DEPRECATED — FIX #12) is :data:`_DRUG_ID_FIELDS` (drug-specific).
+        (DEPRECATED -- FIX #12) is :data:`_DRUG_ID_FIELDS` (drug-specific).
         Callers should pass this explicitly.  When ``None``, a
         :class:`DeprecationWarning` is emitted.
     seen:
@@ -2625,7 +2668,7 @@ def find_duplicate_ids(
         all ``False``, returns a 2-tuple ``(result, seen)`` so the
         caller can keep using the same state dict across batches.
     """
-    # FIX #12 / GAP-DESIGN-06 — id_fields defaults to drug-specific values.
+    # FIX #12 / GAP-DESIGN-06 -- id_fields defaults to drug-specific values.
     # Emit a DeprecationWarning so callers know to pass id_fields explicitly.
     if id_fields is None:
         warnings.warn(
@@ -2637,7 +2680,7 @@ def find_duplicate_ids(
         id_fields = _DRUG_ID_FIELDS
     id_fields = tuple(id_fields)
 
-    # FIX #38 — sentinel-based detection of whether the caller explicitly
+    # FIX #38 -- sentinel-based detection of whether the caller explicitly
     # passed ``seen``.  ``seen=None`` (explicit) is different from
     # ``seen not passed at all``.  When explicitly passed (even as None),
     # we return the 2-tuple so the caller can chain calls.
@@ -2650,7 +2693,7 @@ def find_duplicate_ids(
             if f not in seen:
                 seen[f] = {}
 
-    # FIX #111 — track record indices when return_indices=True.
+    # FIX #111 -- track record indices when return_indices=True.
     indices_map: Dict[str, Dict[str, List[int]]] = {f: {} for f in id_fields}
 
     for i, record in enumerate(records):
@@ -2660,11 +2703,11 @@ def find_duplicate_ids(
             v = record.get(f)
             if v is None:
                 continue
-            # FIX #34 / GAP-CODE-10 — skip NaN.
+            # FIX #34 / GAP-CODE-10 -- skip NaN.
             if isinstance(v, float) and math.isnan(v):
                 continue
             v_str = str(v).strip()
-            # FIX #34 — skip empty and whitespace-only.
+            # FIX #34 -- skip empty and whitespace-only.
             if not v_str:
                 continue
             seen[f][v_str] = seen[f].get(v_str, 0) + 1
@@ -2685,21 +2728,21 @@ def find_duplicate_ids(
             if any(n > 1 for n in counts.values())
         }
     elif sanitize_output:
-        # FIX #67 — return only counts per field, no actual values.
+        # FIX #67 -- return only counts per field, no actual values.
         result = {
             f: sum(1 for n in counts.values() if n > 1)
             for f, counts in seen.items()
             if any(n > 1 for n in counts.values())
         }
     else:
-        # FIX #56 / GAP-IDEM-04 — sort by field name for deterministic order.
+        # FIX #56 / GAP-IDEM-04 -- sort by field name for deterministic order.
         result = {
             f: sorted(v for v, n in counts.items() if n > 1)
             for f, counts in sorted(seen.items())
             if any(n > 1 for n in counts.values())
         }
 
-    # FIX #82 / GAP-LOG-04 — log duplicate findings.
+    # FIX #82 / GAP-LOG-04 -- log duplicate findings.
     if result:
         if return_counts or return_indices:
             total_dupes = sum(
@@ -2734,7 +2777,7 @@ def find_duplicate_ids(
     else:
         logger.debug("find_duplicate_ids: no duplicates found")
 
-    # FIX #38 — when seen was provided AND return_counts is False,
+    # FIX #38 -- when seen was provided AND return_counts is False,
     # return a 2-tuple so the caller can keep using the same state dict.
     if seen_provided and not return_counts and not return_indices and not sanitize_output:
         return result, seen
@@ -2754,7 +2797,7 @@ def find_duplicate_ids_streaming(
     Parameters
     ----------
     records:
-        Iterable of record dicts.  Can be a generator — does not need
+        Iterable of record dicts.  Can be a generator -- does not need
         to fit in memory.
     id_fields:
         Sequence of field names to check.
@@ -2762,7 +2805,7 @@ def find_duplicate_ids_streaming(
     Yields
     ------
     tuple[str, str, int]
-        ``(field_name, duplicate_value, count_so_far)`` — emitted the
+        ``(field_name, duplicate_value, count_so_far)`` -- emitted the
         first time a value is seen for the second time, and again for
         each subsequent occurrence.
     """
@@ -2797,8 +2840,8 @@ __all__: List[str] = [
     "fuzzy_match_score",
     "extract_inchikey_first_block",
     "is_valid_inchikey",
-    "build_name_index",            # deprecated — kept for backward compat
-    "build_inchikey_index",        # deprecated — kept for backward compat
+    "build_name_index",            # deprecated -- kept for backward compat
+    "build_inchikey_index",        # deprecated -- kept for backward compat
     "build_canonical_name_index",
     "build_canonical_inchikey_index",
     "METHOD_CONFIDENCE",
@@ -2810,19 +2853,19 @@ __all__: List[str] = [
     # New public symbols added by the 113-issue fix
     "RAPIDFUZZ_AVAILABLE",         # was _RAPIDFUZZ_AVAILABLE
     "validate_record",             # polymorphic dispatcher
-    "unregister_match_method",     # new — for test isolation
-    "reset_method_confidence",     # new — restore original values
-    "get_registered_methods",      # new — snapshot of METHOD_CONFIDENCE
-    "method_confidence_override",  # new — context manager
-    "fuzzy_match_best",            # new — batch fuzzy match
-    "merge_into_name_index",       # new — incremental index update
-    "merge_into_inchikey_index",   # new — incremental index update
-    "find_duplicate_ids_streaming",  # new — streaming variant
-    "MatchResult",                 # new — dataclass for provenance
-    "ValidationReport",            # new — dataclass for validation
-    "NormalizedName",              # new — dataclass for normalisation
-    "ConnectivityBlock",           # new — dataclass for connectivity
-    "normalize_name_cache_info",   # new — cache observability
-    "normalize_name_cache_clear",  # new — cache management
-    "sync_method_confidence",      # new — verify enum/dict sync
+    "unregister_match_method",     # new -- for test isolation
+    "reset_method_confidence",     # new -- restore original values
+    "get_registered_methods",      # new -- snapshot of METHOD_CONFIDENCE
+    "method_confidence_override",  # new -- context manager
+    "fuzzy_match_best",            # new -- batch fuzzy match
+    "merge_into_name_index",       # new -- incremental index update
+    "merge_into_inchikey_index",   # new -- incremental index update
+    "find_duplicate_ids_streaming",  # new -- streaming variant
+    "MatchResult",                 # new -- dataclass for provenance
+    "ValidationReport",            # new -- dataclass for validation
+    "NormalizedName",              # new -- dataclass for normalisation
+    "ConnectivityBlock",           # new -- dataclass for connectivity
+    "normalize_name_cache_info",   # new -- cache observability
+    "normalize_name_cache_clear",  # new -- cache management
+    "sync_method_confidence",      # new -- verify enum/dict sync
 ]

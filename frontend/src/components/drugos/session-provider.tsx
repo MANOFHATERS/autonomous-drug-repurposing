@@ -84,14 +84,39 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const signOut = useCallback(async () => {
+    // FE-058 ROOT FIX: The previous signOut cleared React state but did NOT
+    // hard-navigate away from the current page. That left a brief window
+    // where the old auth cookie was still in the browser (until the
+    // /api/auth/logout Set-Cookie response landed) and any in-flight API
+    // call would succeed with stale credentials. It also left the user on
+    // whatever authenticated page they were on, with stale state showing
+    // until the next render.
+    //
+    // Root fix:
+    //   1. Call /api/auth/logout (best-effort — the server clears the
+    //      access + refresh cookies via Set-Cookie).
+    //   2. Clear React state immediately so no UI renders authenticated
+    //      content during the navigation window.
+    //   3. Dispatch `drugos:unauthorized` so any other open tab / window
+    //      also clears its session.
+    //   4. Hard-navigate to /login via `window.location.assign` — this
+    //      guarantees a full page reload, so the next render starts from
+    //      a clean state with no chance of stale cookies being sent.
     try {
       await api.logout()
     } catch {
-      // Best-effort
+      // Best-effort — even if the network call fails, we still clear
+      // local state and redirect. The cookie will expire on its own.
     }
     setUser(null)
     setOrganizations([])
     setActiveOrganizationId(null)
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('drugos:unauthorized'))
+      // Hard navigation — replaces the current history entry so the
+      // browser's Back button doesn't land on an authenticated page.
+      window.location.assign('/login')
+    }
   }, [])
 
   // Mount effect: flip `mounted` to true and kick off the first /me fetch.

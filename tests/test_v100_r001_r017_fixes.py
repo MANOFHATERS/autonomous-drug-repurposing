@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-v100 Forensic Root-Fix Verification — R-001 through R-017
+v100 Forensic Root-Fix Verification -- R-001 through R-017
 
 This test suite verifies each of the 17 bugs documented in the forensic
 audit was actually fixed at the CODE level (not just comments). Each test
 reads the real source files and asserts the fix is present. This is the
-"trust but verify" layer — it catches regressions if anyone re-introduces
+"trust but verify" layer -- it catches regressions if anyone re-introduces
 a bug.
 
 Run with:
@@ -55,7 +55,7 @@ def test_r001_subprocess_imported_at_module_level():
 
 def test_r001_no_alias_only_subprocess_import_in_tier1():
     """R-001: the Tier 1 block must not rely on `import subprocess as _sp`
-    alone — `subprocess` must be bound in scope."""
+    alone -- `subprocess` must be bound in scope."""
     src = _read("run_unified.py")
     # The except clause must reference subprocess.SubprocessError (not _sp)
     assert "subprocess.SubprocessError" in src, (
@@ -87,7 +87,7 @@ def test_r002_run_phase2_kg_builder_has_seed_param():
                 f"Args found: {arg_names}"
             )
     # If the function was deleted entirely (R-INT-002 alternative fix),
-    # that's also a valid fix — the NameError cannot occur if the
+    # that's also a valid fix -- the NameError cannot occur if the
     # function doesn't exist.
     if not has_func:
         # Verify the function is NOT called anywhere either.
@@ -119,12 +119,12 @@ def test_r003_no_swapped_bridge_recall():
                         and node.value.func.id == "run_bridge"):
                     pytest.fail(
                         "R-003 FAIL: found `staged, builder = run_bridge(...)` "
-                        "assignment in code — the swapped re-call is still present."
+                        "assignment in code -- the swapped re-call is still present."
                     )
 
 
 def test_r003_run_bridge_returns_builder_staged():
-    """R-003: run_bridge must return (builder, staged) — not (staged, builder)."""
+    """R-003: run_bridge must return (builder, staged) -- not (staged, builder)."""
     tree = _parse("run_4phase.py")
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "run_bridge":
@@ -145,7 +145,7 @@ def test_r004_run_schema_adapter_function_deleted():
     """R-004: the dead `run_schema_adapter` function must EITHER be deleted
     OR its output must be consumed (R-INT-005 alternative fix).
 
-    v100 design note: two valid fixes exist —
+    v100 design note: two valid fixes exist --
       (a) delete the function entirely (other agent's approach), OR
       (b) keep the function AND use its output (R-INT-005 approach).
     Both eliminate the dead-code bug.
@@ -182,7 +182,7 @@ def test_r004_no_dead_schema_adapter_call():
         if isinstance(n, ast.FunctionDef)
     ]
     if "run_schema_adapter" not in func_names:
-        return  # Function deleted — nothing to check.
+        return  # Function deleted -- nothing to check.
     # Function exists: any call must capture and use the result.
     src = _read("run_4phase.py")
     assert "graph_data = run_schema_adapter" in src, (
@@ -311,7 +311,7 @@ def test_r009_no_duplicate_bridge_call():
             )
             assert call_count == 1, (
                 f"R-009 FAIL: run_bridge calls run_phase1_to_phase2 "
-                f"{call_count} times — expected exactly 1. Duplicate "
+                f"{call_count} times -- expected exactly 1. Duplicate "
                 f"bridge call still present."
             )
             return
@@ -324,7 +324,7 @@ def test_r010_no_bare_except_in_run_full_platform():
     """R-010: run_full_platform.py's bridge and pipeline try blocks must
     not have bare `except Exception` that swallows programming bugs.
     The _ensure_phase1_data subprocess fallback is exempt (catching
-    Exception there is correct — any subprocess failure should fall back)."""
+    Exception there is correct -- any subprocess failure should fall back)."""
     tree = _parse("run_full_platform.py")
     # Find all except handlers that catch Exception in the main() function
     # (not in _ensure_phase1_data which is a subprocess fallback)
@@ -347,11 +347,11 @@ def test_r010_no_bare_except_in_run_full_platform():
 
 def test_r011_no_bare_except_in_run_pipeline():
     """R-011: run_4phase.py must not have bare `except Exception` in
-    the main() try block — EXCEPT for the top-level catch-all that
+    the main() try block -- EXCEPT for the top-level catch-all that
     logs and returns an exit code (which is reasonable for a CLI tool).
 
     v100 design note: a single top-level `except Exception as e:` that
-    logs the error and returns a non-zero exit code is acceptable —
+    logs the error and returns a non-zero exit code is acceptable --
     it's not silently swallowing bugs, it's making the CLI exit cleanly.
     """
     src = _read("run_4phase.py")
@@ -374,15 +374,15 @@ def test_r011_no_bare_except_in_run_pipeline():
 
 def test_r012_no_silent_import_error_pass():
     """R-012: the `except ImportError: pass` must be replaced with a
-    logger.warning — OR the rapidfuzz code must be removed entirely
+    logger.warning -- OR the rapidfuzz code must be removed entirely
     (v100 alternative fix: if the KP fuzzy-matching logic is removed,
     there's no ImportError to silence).
     """
     src = _read("run_4phase.py")
     if "rapidfuzz" not in src:
-        return  # rapidfuzz code removed entirely — no bug possible.
+        return  # rapidfuzz code removed entirely -- no bug possible.
     assert "except ImportError:\n                pass" not in src, (
-        "R-012 FAIL: `except ImportError: pass` still present — rapidfuzz "
+        "R-012 FAIL: `except ImportError: pass` still present -- rapidfuzz "
         "missing is silently ignored, causing KP Recovery = 0%."
     )
     assert "rapidfuzz not installed" in src or "KP fuzzy matching disabled" in src, (
@@ -397,7 +397,7 @@ def test_r013_no_direct_dict_access_rl_latency():
     src = _read("run_real_pipeline.py")
     assert "results['rl_inference_latency_ms']" not in src, (
         "R-013 FAIL: direct dict access results['rl_inference_latency_ms'] "
-        "still present — KeyError if key is missing."
+        "still present -- KeyError if key is missing."
     )
     assert "results.get('rl_inference_latency_ms'" in src, (
         "R-013 FAIL: .get() not used for rl_inference_latency_ms"
@@ -428,7 +428,7 @@ def test_r014_no_string_format_as_float():
                                     and call.args[1].value == "N/A"):
                                 pytest.fail(
                                     "R-014 FAIL: found .get('...', 'N/A') "
-                                    "formatted with float spec — ValueError "
+                                    "formatted with float spec -- ValueError "
                                     "when key is missing."
                                 )
     # Also check the specific known pattern is gone from code (not comments)
@@ -456,7 +456,7 @@ def test_r015_all_runners_pass_real_data():
         )
         assert has_real, (
             f"R-015 FAIL: {runner} does not pass phase1_staged_data or "
-            f"graph_data — config drift / synthetic fallback."
+            f"graph_data -- config drift / synthetic fallback."
         )
 
 
@@ -490,7 +490,7 @@ def test_r017_makefile_installs_only_top_level_requirements():
     )
     assert "phase1/requirements.txt" not in install_section, (
         "R-017 FAIL: Makefile install still installs phase1/requirements.txt "
-        "— causes version conflicts with top-level requirements."
+        "-- causes version conflicts with top-level requirements."
     )
     assert "phase2/drugos_graph/requirements.txt" not in install_section, (
         "R-017 FAIL: Makefile install still installs phase2/drugos_graph/requirements.txt"

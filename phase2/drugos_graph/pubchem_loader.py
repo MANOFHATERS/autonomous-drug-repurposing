@@ -1,4 +1,4 @@
-"""PubChem loader — bridges to Phase 1's cleaned PubChem enrichment CSV.
+"""PubChem loader -- bridges to Phase 1's cleaned PubChem enrichment CSV.
 
 This loader consumes ``phase1/processed_data/pubchem_enrichment.csv``
 (produced by ``phase1.pipelines.pubchem_pipeline.PubChemPipeline``) and
@@ -11,9 +11,9 @@ Design decision (v5 audit fix):
     Phase 1's already-cleaned PubChem output into Phase 2's graph builder.
 
 Public API (matches the contract expected by ``run_pipeline.py:1821-1825``):
-    - ``download_pubchem()`` → triggers Phase 1's pipeline if needed
-    - ``parse_pubchem()`` → returns a pandas DataFrame of enrichment rows
-    - ``pubchem_to_node_records(df)`` → List[Dict] of Compound nodes
+    - ``download_pubchem()`` -> triggers Phase 1's pipeline if needed
+    - ``parse_pubchem()`` -> returns a pandas DataFrame of enrichment rows
+    - ``pubchem_to_node_records(df)`` -> List[Dict] of Compound nodes
 """
 
 from __future__ import annotations
@@ -24,6 +24,23 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
+
+# v102 ROOT FIX (P2-036): route InChIKey normalization through the
+# centralized helper so this loader produces the SAME canonical form
+# as phase1_bridge.py and chembl_loader.py.
+try:
+    from .utils import normalize_inchikey as _normalize_inchikey
+except Exception:  # pragma: no cover — fallback for direct-script execution
+    def _normalize_inchikey(inchikey):  # type: ignore[no-redef]
+        if inchikey is None:
+            return ""
+        try:
+            ik = str(inchikey).strip()
+        except Exception:
+            return ""
+        if not ik or ik.lower() in ("nan", "none", "null", "na"):
+            return ""
+        return ik.upper()
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +53,7 @@ DEFAULT_PUBCHEM_CSV: Path = _DEFAULT_PHASE1_PROCESSED_DIR / "pubchem_enrichment.
 # PubChem SD records emit ">1000", "<0.01", ">=50", "~1.5E3", etc. as
 # CENSORED values (the real value is beyond the measurement range).
 # The previous ``_safe_float`` treated these as non-numeric placeholders
-# and returned None — discarding the censoring information AND the
+# and returned None -- discarding the censoring information AND the
 # lower/upper-bound value (1000). Downstream consumers that filter by
 # molecular_weight had no way to know whether the value was truly
 # missing vs censored-high. Compounds with censored molecular weights
@@ -45,9 +62,9 @@ DEFAULT_PUBCHEM_CSV: Path = _DEFAULT_PHASE1_PROCESSED_DIR / "pubchem_enrichment.
 #
 # ROOT FIX: detect censored values via regex and emit a structured
 # ``CensoredValue`` dict instead of None. The dict carries:
-#   - ``value``: float — the bound (1000.0 for ">1000")
-#   - ``censored``: True — flag so consumers can filter
-#   - ``direction``: ">" | "<" | ">=" | "<=" | "~" — censoring direction
+#   - ``value``: float -- the bound (1000.0 for ">1000")
+#   - ``censored``: True -- flag so consumers can filter
+#   - ``direction``: ">" | "<" | ">=" | "<=" | "~" -- censoring direction
 # Consumers that just want a float can call ``_safe_float`` which returns
 # the bound for censored values (preserving the legacy contract for
 # callers that expect a float-or-None return).
@@ -72,7 +89,7 @@ def _parse_censored_value(raw: str) -> Optional[Dict[str, Any]]:
         bound = float(bound_str)
     except (TypeError, ValueError):
         return None
-    # Normalize "~" to "~" (approximately) — keep as-is for semantic clarity.
+    # Normalize "~" to "~" (approximately) -- keep as-is for semantic clarity.
     return {
         "value": bound,
         "censored": True,
@@ -86,7 +103,7 @@ def _safe_float(value: Any) -> Optional[float]:
 
     PubChem SD records emit ``"N/A"``, ``">1000"``, ``"?"``, ``"1.5E"``
     and similar non-numeric placeholders for unknown/approximate masses.
-    The previous code did ``float(row_dict["molecular_weight"])`` directly —
+    The previous code did ``float(row_dict["molecular_weight"])`` directly --
     a single non-numeric placeholder raised ``ValueError`` and aborted
     the entire PubChem batch (the caller in ``run_pipeline.py`` swallows
     the exception, so all subsequent Compound rows were silently lost).
@@ -101,9 +118,9 @@ def _safe_float(value: Any) -> Optional[float]:
     while the censoring metadata is preserved separately via
     ``_safe_float_with_censoring``. This means molecular-weight filters
     (e.g. "< 500 Da") will now INCLUDE censored-high compounds (bound
-    1000.0 > 500 → correctly excluded by the filter) instead of silently
+    1000.0 > 500 -> correctly excluded by the filter) instead of silently
     dropping them (None cannot be compared, so the filter skipped them
-    before — which could either include or exclude depending on the
+    before -- which could either include or exclude depending on the
     filter's NaN handling, often inconsistently).
     """
     if value is None:
@@ -162,7 +179,7 @@ def download_pubchem(target_path: Optional[Path] = None) -> Path:
     around ``PubChemPipeline().run()`` and logged at WARNING. This hid
     patient-safety-critical PubChem enrichment failures as warnings, and
     the downstream guard ``if not out_path.exists()`` only fired if NO
-    CSV existed — a stale/partial CSV from a previous failed run would
+    CSV existed -- a stale/partial CSV from a previous failed run would
     be silently used. Now: narrow the exception to expected failure
     modes (ImportError, OSError, plus the PubChem pipeline's own
     PipelineError), log at ERROR, AND verify the CSV's freshness
@@ -186,7 +203,7 @@ def download_pubchem(target_path: Optional[Path] = None) -> Path:
         # v16 SF-6: narrow except + ERROR level + metric.
         logger.error(
             "pubchem_loader: Phase 1 PubChemPipeline failed (%s: %s). "
-            "Falling back to whatever CSV is present at %s — if the CSV "
+            "Falling back to whatever CSV is present at %s -- if the CSV "
             "is stale, downstream enrichment will be missing the latest "
             "PubChem compound properties.",
             type(exc).__name__, exc, out_path,
@@ -202,7 +219,7 @@ def download_pubchem(target_path: Optional[Path] = None) -> Path:
         age_sec = _time.time() - out_path.stat().st_mtime
         if age_sec > 30 * 86400:
             logger.warning(
-                "pubchem_loader: CSV at %s is %.1f days old — consider "
+                "pubchem_loader: CSV at %s is %.1f days old -- consider "
                 "re-running Phase 1 PubChemPipeline to refresh.",
                 out_path, age_sec / 86400,
             )
@@ -268,11 +285,11 @@ def pubchem_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     """Emit Compound node records from PubChem enrichment rows.
 
     v27 ROOT FIX (P2-L-2): Phase 1's ``pubchem_enrichment.csv`` is keyed
-    by ``inchikey`` (NOT ``pubchem_cid`` — PubChem enrichment at Phase 1
+    by ``inchikey`` (NOT ``pubchem_cid`` -- PubChem enrichment at Phase 1
     is the post-cleaning output where compounds have already been
     resolved to their canonical InChIKey). The previous implementation
-    REQUIRED a ``pubchem_cid`` / ``cid`` / ``CID`` column — none of which
-    exist in Phase 1's CSV — so it silently dropped 100% of rows
+    REQUIRED a ``pubchem_cid`` / ``cid`` / ``CID`` column -- none of which
+    exist in Phase 1's CSV -- so it silently dropped 100% of rows
     (confirmed empirically: ``pubchem_nodes: 0``).
 
     Phase 1's actual columns are:
@@ -293,12 +310,12 @@ def pubchem_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     """
     nodes: List[Dict[str, Any]] = []
     seen: set[str] = set()
-    # v29 ROOT FIX (audit L-8): CID matching was case-sensitive — failed
+    # v29 ROOT FIX (audit L-8): CID matching was case-sensitive -- failed
     # on case differences. Normalize to lowercase before comparison.
     # The previous code only checked three specific column-name spellings
     # ("pubchem_cid", "cid", "CID"). Real-world Phase 1 outputs and raw
     # PubChem SD-record extracts emit the CID column under many case
-    # variants ("PubChem_CID", "PUBCHEM_CID", "Cid", "Pubchem_cid", …).
+    # variants ("PubChem_CID", "PUBCHEM_CID", "Cid", "Pubchem_cid", ...).
     # Any case variant other than the three hard-coded ones was silently
     # treated as "no CID column present", dropping the CID from the
     # emitted node record (and, when no InChIKey was present either,
@@ -324,10 +341,17 @@ def pubchem_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
             except (TypeError, ValueError):
                 cid_int = None
 
-        # InChIKey — Phase 1's canonical key. Uppercase to satisfy
+        # InChIKey -- Phase 1's canonical key. Uppercase to satisfy
         # kg_builder.ID_PATTERNS["Compound"] regex (must be uppercase).
-        inchikey = str(row_dict.get("inchikey") or "").strip()
-        inchikey = "" if inchikey.lower() == "nan" else inchikey.upper()
+        #
+        # v102 P2-036: route through centralized ``normalize_inchikey`` so
+        # this loader produces the SAME canonical form as phase1_bridge
+        # and chembl_loader (strip + upper + placeholder-collapse).
+        # Previously this loader used ``inchikey.upper()`` WITHOUT strip,
+        # so a " RZBJ...AN " input from a malformed PubChem extract
+        # would dead-letter while chembl_loader's ``.strip().upper()``
+        # would succeed — the SAME compound got two canonical IDs.
+        inchikey = _normalize_inchikey(row_dict.get("inchikey"))
 
         # Choose canonical ID: InChIKey preferred, else CID<pid> if we
         # somehow have a CID without an InChIKey (raw-SD-record path).
@@ -336,14 +360,14 @@ def pubchem_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
         elif cid_int is not None:
             canonical_id = f"CID{cid_int}"
         else:
-            # Neither InChIKey nor CID — cannot canonically identify
+            # Neither InChIKey nor CID -- cannot canonically identify
             # the compound. Skip rather than emit a dead-letter node.
             continue
         if canonical_id in seen:
             continue
         seen.add(canonical_id)
 
-        # SMILES — Phase 1 emits ``canonical_smiles`` and ``isomeric_smiles``;
+        # SMILES -- Phase 1 emits ``canonical_smiles`` and ``isomeric_smiles``;
         # raw-SD-record path emits ``smiles``. Map all three.
         canonical_smiles = str(row_dict.get("canonical_smiles") or "").strip()
         if canonical_smiles.lower() == "nan":
@@ -392,7 +416,7 @@ def pubchem_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
             ) else None,
             "_source": "pubchem",
         }
-        # Emit ``pubchem_cid`` ONLY when a CID was actually present —
+        # Emit ``pubchem_cid`` ONLY when a CID was actually present --
         # Phase 1's enrichment CSV has no CID column, so omit it.
         if cid_int is not None:
             node["pubchem_cid"] = cid_int

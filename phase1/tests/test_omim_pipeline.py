@@ -1,9 +1,9 @@
 """
-tests/test_omim_pipeline.py — REAL institutional-grade tests for the OMIM pipeline.
+tests/test_omim_pipeline.py -- REAL institutional-grade tests for the OMIM pipeline.
 
 This is test #1 of 3 required by the master prompt:
-  1. tests/test_omim_pipeline.py (THIS FILE) — real tests for the OMIM file.
-  2. tests/test_all_26_files_integration_v10.py — all 26 files combined integration.
+  1. tests/test_omim_pipeline.py (THIS FILE) -- real tests for the OMIM file.
+  2. tests/test_all_26_files_integration_v10.py -- all 26 files combined integration.
   3. All existing tests must still pass.
 
 Test classes mirror the DisGeNET test structure (test_disgenet_pipeline_institutional_v389.py)
@@ -233,12 +233,12 @@ def morbidmap_fixture(tmp_path):
 
 
 # ===========================================================================
-# Domain 3 — SCIENTIFIC CORRECTNESS (LIFE-SAFETY CRITICAL)
+# Domain 3 -- SCIENTIFIC CORRECTNESS (LIFE-SAFETY CRITICAL)
 # ===========================================================================
 class TestDomain3ScientificCorrectness:
     """Tests verifying the OMIM pipeline is scientifically correct.
 
-    These tests are the most important — wrong science = patient harm.
+    These tests are the most important -- wrong science = patient harm.
     """
 
     def test_bug_3_1_first_row_not_dropped(self, omim_pipeline, tmp_path):
@@ -253,7 +253,7 @@ class TestDomain3ScientificCorrectness:
         fixture.write_text(content, encoding="utf-8")
         df = omim_pipeline.clean(fixture)
         # BOTH data rows must be present (not just 1).
-        assert len(df) == 2, f"Expected 2 rows, got {len(df)} — first row dropped (BUG-3.1)"
+        assert len(df) == 2, f"Expected 2 rows, got {len(df)} -- first row dropped (BUG-3.1)"
         assert set(df["gene_symbol"]) == {"FGFR3", "FBN1"}
 
     def test_bug_3_2_score_is_not_flat(self, omim_pipeline, morbidmap_fixture):
@@ -262,7 +262,7 @@ class TestDomain3ScientificCorrectness:
         # The fixture has mk=3 (0.9) and mk=4 (0.8) records.
         scores = df["score"].unique()
         assert len(scores) > 1, f"Score is flat (BUG-3.2): {scores}"
-        # Specifically, mk=3 → 0.9, mk=4 → 0.8.
+        # Specifically, mk=3 -> 0.9, mk=4 -> 0.8.
         mk3 = df[df["mapping_key"] == 3]
         mk4 = df[df["mapping_key"] == 4]
         if not mk3.empty:
@@ -271,7 +271,7 @@ class TestDomain3ScientificCorrectness:
             assert mk4["score"].iloc[0] == pytest.approx(0.8, abs=0.001)
 
     def test_bug_3_3_confidence_tier_not_high(self, omim_pipeline, morbidmap_fixture):
-        """BUG-3.3: confidence_tier must be weak/moderate/strong — NEVER 'high'."""
+        """BUG-3.3: confidence_tier must be weak/moderate/strong -- NEVER 'high'."""
         df = omim_pipeline.clean(morbidmap_fixture)
         tiers = set(df["confidence_tier"].dropna().unique())
         assert tiers.issubset({"weak", "moderate", "strong"}), \
@@ -292,7 +292,7 @@ class TestDomain3ScientificCorrectness:
                 "Susceptibility marker {} not found in susceptibility CSV"
         # Check the main CSV for the other markers.
         # Note: SOMEGENE is filtered out (mk=2 not in default [3,4]).
-        # FANCE, MYGENE, ALTGENE, MENDGENE have mk=3 — should be in main CSV.
+        # FANCE, MYGENE, ALTGENE, MENDGENE have mk=3 -- should be in main CSV.
         main_markers = set(df["association_modifier"].dropna().unique())
         expected_main_markers = {"[]", "*", "+", "%"}
         assert expected_main_markers.issubset(main_markers), \
@@ -320,7 +320,7 @@ class TestDomain3ScientificCorrectness:
         df = omim_pipeline.clean(morbidmap_fixture)
         # The fixture has "Testicular germ cell tumor, 273300 (4) KIT".
         kit_rows = df[df["gene_symbol"] == "KIT"]
-        assert not kit_rows.empty, "KIT (mk=4) was filtered out — BUG-3.5 regression"
+        assert not kit_rows.empty, "KIT (mk=4) was filtered out -- BUG-3.5 regression"
         assert (kit_rows["mapping_key"] == 4).all()
 
     def test_bug_3_7_mim_range_validated(self, omim_pipeline, tmp_path):
@@ -382,7 +382,7 @@ class TestDomain3ScientificCorrectness:
         # Main CSV must NOT have susceptibility records.
         sus_in_main = df[df["association_modifier"] == "{}"]
         assert sus_in_main.empty, \
-            "Susceptibility record leaked into main CSV (BUG-3.13 — patient-harm risk)"
+            "Susceptibility record leaked into main CSV (BUG-3.13 -- patient-harm risk)"
         # Susceptibility CSV must have them.
         sus_path = op.OMIM_SUSCEPTIBILITY_OUTPUT_PATH
         assert sus_path.exists(), "Susceptibility CSV not written (BUG-3.13)"
@@ -394,8 +394,8 @@ class TestDomain3ScientificCorrectness:
         """BUG-3.14: phenotype_mim=0 must be rejected (records with no valid MIM
         are dropped via the no_disease_id path).
         """
-        # "Bad record, 0 (3)" — "0" is 1 digit, doesn't match \d{5,7}, so
-        # phenotype_mim=None → disease_id=None → dropped at no_disease_id step.
+        # "Bad record, 0 (3)" -- "0" is 1 digit, doesn't match \d{5,7}, so
+        # phenotype_mim=None -> disease_id=None -> dropped at no_disease_id step.
         content = (
             "# Generated: 2024-06-15\n"
             "Achondroplasia, 100800 (3)\tFGFR3\t134934\t4p16.3\n"
@@ -413,16 +413,16 @@ class TestDomain3ScientificCorrectness:
     def test_bug_3_15_association_type_derived(self, omim_pipeline, morbidmap_fixture):
         """BUG-3.15: association_type must be derived from the marker."""
         df = omim_pipeline.clean(morbidmap_fixture)
-        # For unmarked mk=3 records → "causal".
+        # For unmarked mk=3 records -> "causal".
         causal_rows = df[df["association_modifier"].isna()]
         if not causal_rows.empty:
             assert (causal_rows["association_type"] == "causal").all(), \
                 "Unmarked records should have association_type='causal'"
-        # For [] records → "non_disease".
+        # For [] records -> "non_disease".
         non_disease_rows = df[df["association_modifier"] == "[]"]
         if not non_disease_rows.empty:
             assert (non_disease_rows["association_type"] == "non_disease").all()
-        # For * records → "gene_locus".
+        # For * records -> "gene_locus".
         gene_locus_rows = df[df["association_modifier"] == "*"]
         if not gene_locus_rows.empty:
             assert (gene_locus_rows["association_type"] == "gene_locus").all()
@@ -430,7 +430,7 @@ class TestDomain3ScientificCorrectness:
     def test_bug_3_18_inheritance_pattern_extracted(self, omim_pipeline, morbidmap_fixture):
         """BUG-3.18: Inheritance pattern must be extracted from phenotype_name."""
         df = omim_pipeline.clean(morbidmap_fixture)
-        # Cystic fibrosis record has ", Autosomal recessive" — should be extracted.
+        # Cystic fibrosis record has ", Autosomal recessive" -- should be extracted.
         cftr_rows = df[df["gene_symbol"] == "CFTR"]
         if not cftr_rows.empty:
             inh = cftr_rows["inheritance_pattern"].iloc[0]
@@ -485,7 +485,7 @@ class TestDomain3ScientificCorrectness:
 
 
 # ===========================================================================
-# Domain 5 — DATA QUALITY & INTEGRITY
+# Domain 5 -- DATA QUALITY & INTEGRITY
 # ===========================================================================
 class TestDomain5DataQuality:
     """Tests for data completeness, uniqueness, validity, consistency."""
@@ -494,7 +494,7 @@ class TestDomain5DataQuality:
         """BUG-5.1: Below OMIM_MIN_EXPECTED_RECORDS, a warning is logged."""
         with caplog.at_level(logging.WARNING, logger="pipelines.omim_pipeline"):
             omim_pipeline.clean(morbidmap_fixture)
-        # The fixture has <5000 records — should log a warning.
+        # The fixture has <5000 records -- should log a warning.
         # (In production with a real morbidmap, this would not fire.)
         assert any("below OMIM_MIN_EXPECTED_RECORDS" in r.message for r in caplog.records) or \
                len([r for r in caplog.records if "OMIM_MIN_EXPECTED" in r.message]) >= 0
@@ -539,7 +539,7 @@ class TestDomain5DataQuality:
 
 
 # ===========================================================================
-# Domain 7 — IDEMPOTENCY & REPRODUCIBILITY
+# Domain 7 -- IDEMPOTENCY & REPRODUCIBILITY
 # ===========================================================================
 class TestDomain7Idempotency:
     """Tests verifying the pipeline is deterministic and idempotent."""
@@ -592,7 +592,7 @@ class TestDomain7Idempotency:
 
 
 # ===========================================================================
-# Domain 1 — ARCHITECTURE
+# Domain 1 -- ARCHITECTURE
 # ===========================================================================
 class TestDomain1Architecture:
     """Tests for system structure, module organization, dependency flow."""
@@ -658,7 +658,7 @@ class TestDomain1Architecture:
 
     def test_bug_1_5_compute_score_is_staticmethod(self):
         """BUG-1.5: _compute_omim_score must be a pure @staticmethod."""
-        # Call without an instance — verifies it's a staticmethod.
+        # Call without an instance -- verifies it's a staticmethod.
         score, method = OMIMPipeline._compute_omim_score(3, 0, 0.0)
         assert score == 0.9
         assert method.startswith("omim_v1_mk3_pmid0")
@@ -684,7 +684,7 @@ class TestDomain1Architecture:
 
 
 # ===========================================================================
-# Domain 2 — DESIGN
+# Domain 2 -- DESIGN
 # ===========================================================================
 class TestDomain2Design:
     """Tests for design patterns, API design, interface contracts."""
@@ -712,11 +712,11 @@ class TestDomain2Design:
 
     def test_bug_2_3_score_branches_reachable(self):
         """BUG-2.3: All 4 mapping_key score branches must be reachable."""
-        # mk=1 → 0.5, mk=2 → 0.6, mk=3 → 0.9, mk=4 → 0.8
+        # mk=1 -> 0.5, mk=2 -> 0.6, mk=3 -> 0.9, mk=4 -> 0.8
         for mk, expected in [(1, 0.5), (2, 0.6), (3, 0.9), (4, 0.8)]:
             score, _ = OMIMPipeline._compute_omim_score(mk, 0, 0.0)
             assert score == pytest.approx(expected, abs=0.001), \
-                f"mk={mk} → score {score}, expected {expected}"
+                f"mk={mk} -> score {score}, expected {expected}"
 
     def test_bug_2_4_confidence_tier_from_score(self, omim_pipeline, morbidmap_fixture):
         """BUG-2.4: confidence_tier must be derived from score via classify_confidence."""
@@ -807,7 +807,7 @@ class TestDomain2Design:
 
 
 # ===========================================================================
-# Domain 4 — CODING
+# Domain 4 -- CODING
 # ===========================================================================
 class TestDomain4Coding:
     """Tests for syntax, logic, naming, structure."""
@@ -857,7 +857,7 @@ class TestDomain4Coding:
         df = pd.DataFrame({"gene_symbols_raw": [None, "A,B", ""]})
         # Should not raise.
         df["gene_symbol"] = df["gene_symbols_raw"].fillna("").str.split(r"\s*,\s*")
-        # NaN → fillna("") → split → [''] (one empty string).
+        # NaN -> fillna("") -> split -> [''] (one empty string).
         # The explode step in clean() then drops the empty entries via the
         # gene_symbol != "" filter.
         assert df["gene_symbol"].iloc[1] == ["A", "B"]
@@ -865,7 +865,7 @@ class TestDomain4Coding:
 
     def test_bug_4_5_vectorized_scoring(self, omim_pipeline, morbidmap_fixture):
         """BUG-4.5: Scoring must be vectorized (no df.apply)."""
-        # Spy on df.apply — should not be called for scoring.
+        # Spy on df.apply -- should not be called for scoring.
         # This is hard to test directly; we verify the score column is
         # computed correctly for a multi-row df.
         df = omim_pipeline.clean(morbidmap_fixture)
@@ -909,7 +909,7 @@ class TestDomain4Coding:
         """BUG-4.23: RuntimeError messages must not leak the API key."""
         # Patch _api_get to fail fast (no real retries).
         with patch.object(omim_pipeline._session, "get", side_effect=requests.exceptions.ConnectionError("refused")):
-            with patch("time.sleep"):  # no-op sleep — avoids 65s of backoff
+            with patch("time.sleep"):  # no-op sleep -- avoids 65s of backoff
                 with pytest.raises(RuntimeError) as exc_info:
                     omim_pipeline._api_get(
                         "https://api.omim.org/api/geneMap",
@@ -926,19 +926,19 @@ class TestDomain4Coding:
 
 
 # ===========================================================================
-# Domain 6 — RELIABILITY & RESILIENCE
+# Domain 6 -- RELIABILITY & RESILIENCE
 # ===========================================================================
 class TestDomain6Reliability:
     """Tests for error handling, fault tolerance, graceful degradation."""
 
     def test_bug_6_1_retry_after_respected(self, omim_pipeline):
-        """BUG-6.1: v83 P2-1/P2-2 ROOT FIX — dead API path removed.
+        """BUG-6.1: v83 P2-1/P2-2 ROOT FIX -- dead API path removed.
 
         The previous test validated that ``_api_get`` respected the
         ``Retry-After`` header on 429. ``_api_get`` was DEAD CODE (removed
         in v83 P2-1) and ``self._session`` was removed in P2-2. The
         production ``download()`` uses ``_download_morbidmap()`` which
-        uses the base class's ``_download_file`` — the base class handles
+        uses the base class's ``_download_file`` -- the base class handles
         retries via ``RETRYABLE_EXCEPTIONS`` / ``RETRYABLE_STATUS_CODES``.
 
         This test now validates the FIX: the dead ``_api_get`` method and
@@ -947,20 +947,20 @@ class TestDomain6Reliability:
         own test suite.
         """
         assert not hasattr(omim_pipeline, "_api_get"), (
-            "v83 P2-1: _api_get should be REMOVED — dead code."
+            "v83 P2-1: _api_get should be REMOVED -- dead code."
         )
         assert not hasattr(omim_pipeline, "_session"), (
-            "v83 P2-2: self._session should be REMOVED — dead code."
+            "v83 P2-2: self._session should be REMOVED -- dead code."
         )
 
     def test_bug_6_5_pagination_bounded(self, omim_pipeline, tmp_path, monkeypatch):
-        """BUG-6.5: v83 P2-1 ROOT FIX — dead API path removed.
+        """BUG-6.5: v83 P2-1 ROOT FIX -- dead API path removed.
 
         The previous test validated that ``_download_via_api()`` paginated
         correctly. ``_download_via_api``, ``_fetch_gene_map_page``, and
         ``_write_gene_map_json`` were ALL dead code (removed in v22 and
         again confirmed dead in v83 P2-1). The production ``download()``
-        only calls ``_download_morbidmap()`` — the morbidmap text file is
+        only calls ``_download_morbidmap()`` -- the morbidmap text file is
         the production data source.
 
         This test now validates the FIX: the dead API-path methods must
@@ -971,13 +971,13 @@ class TestDomain6Reliability:
         """
         # Dead methods must not exist.
         assert not hasattr(omim_pipeline, "_download_via_api"), (
-            "v22/v83 P2-1: _download_via_api should be REMOVED — dead code."
+            "v22/v83 P2-1: _download_via_api should be REMOVED -- dead code."
         )
         assert not hasattr(omim_pipeline, "_fetch_gene_map_page"), (
-            "v22/v83 P2-1: _fetch_gene_map_page should be REMOVED — dead code."
+            "v22/v83 P2-1: _fetch_gene_map_page should be REMOVED -- dead code."
         )
         assert not hasattr(omim_pipeline, "_write_gene_map_json"), (
-            "v22/v83 P2-1: _write_gene_map_json should be REMOVED — dead code."
+            "v22/v83 P2-1: _write_gene_map_json should be REMOVED -- dead code."
         )
         # The pagination bound config must still be a positive integer.
         from config.settings import OMIM_MAX_PAGINATION_PAGES
@@ -990,7 +990,7 @@ class TestDomain6Reliability:
         content = b"# Generated: 2024-06-15\nAchondroplasia, 100800 (3)\tFGFR3\t134934\t4p16.3\n\xff\xfe\n"
         fixture = tmp_path / "morbidmap_latin1.txt"
         fixture.write_bytes(content)
-        # Should not raise — latin-1 fallback kicks in.
+        # Should not raise -- latin-1 fallback kicks in.
         df = omim_pipeline.clean(fixture)
         assert not df.empty
 
@@ -1024,7 +1024,7 @@ class TestDomain6Reliability:
 
 
 # ===========================================================================
-# Domain 8 — PERFORMANCE & SCALABILITY
+# Domain 8 -- PERFORMANCE & SCALABILITY
 # ===========================================================================
 class TestDomain8Performance:
     """Tests for time complexity, memory usage, batch processing."""
@@ -1035,10 +1035,10 @@ class TestDomain8Performance:
         assert OMIM_API_PAGE_LIMIT == 1000
 
     def test_bug_8_11_session_reused(self, omim_pipeline):
-        """BUG-8.11: v83 P2-2 ROOT FIX — the unused ``self._session`` has been REMOVED.
+        """BUG-8.11: v83 P2-2 ROOT FIX -- the unused ``self._session`` has been REMOVED.
 
         The previous code created ``self._session = requests.Session()`` but
-        NEVER used it — the only consumer was the dead ``_api_get`` method
+        NEVER used it -- the only consumer was the dead ``_api_get`` method
         (P2-1), which was itself never called by ``download()``. The unclosed
         session leaked socket file descriptors across pipeline runs.
 
@@ -1049,14 +1049,14 @@ class TestDomain8Performance:
         NOT exist (so there's no socket leak).
         """
         assert not hasattr(omim_pipeline, "_session"), (
-            "v83 P2-2: self._session should be REMOVED — it was dead code "
+            "v83 P2-2: self._session should be REMOVED -- it was dead code "
             "that leaked socket file descriptors. The base class's "
             "_download_file manages HTTP connections."
         )
 
 
 # ===========================================================================
-# Domain 9 — SECURITY & PRIVACY
+# Domain 9 -- SECURITY & PRIVACY
 # ===========================================================================
 class TestDomain9Security:
     """Tests for PII handling, secrets management, sanitization."""
@@ -1114,7 +1114,7 @@ class TestDomain9Security:
 
 
 # ===========================================================================
-# Domain 10 — TESTING & VALIDATION
+# Domain 10 -- TESTING & VALIDATION
 # ===========================================================================
 class TestDomain10Testing:
     """Meta-tests verifying test coverage and assertion quality."""
@@ -1142,7 +1142,7 @@ class TestDomain10Testing:
 
 
 # ===========================================================================
-# Domain 11 — LOGGING & OBSERVABILITY
+# Domain 11 -- LOGGING & OBSERVABILITY
 # ===========================================================================
 class TestDomain11Logging:
     """Tests for logging coverage, log levels, metrics."""
@@ -1165,7 +1165,7 @@ class TestDomain11Logging:
 
 
 # ===========================================================================
-# Domain 12 — CONFIGURATION & ENVIRONMENT
+# Domain 12 -- CONFIGURATION & ENVIRONMENT
 # ===========================================================================
 class TestDomain12Configuration:
     """Tests for config management, magic numbers, env vars."""
@@ -1212,7 +1212,7 @@ class TestDomain12Configuration:
 
 
 # ===========================================================================
-# Domain 13 — DOCUMENTATION & READABILITY
+# Domain 13 -- DOCUMENTATION & READABILITY
 # ===========================================================================
 class TestDomain13Documentation:
     """Tests for docstrings, naming, comments."""
@@ -1239,7 +1239,7 @@ class TestDomain13Documentation:
 
 
 # ===========================================================================
-# Domain 14 — COMPLIANCE & STANDARDS ADHERENCE
+# Domain 14 -- COMPLIANCE & STANDARDS ADHERENCE
 # ===========================================================================
 class TestDomain14Compliance:
     """Tests for standards adherence, schema contracts."""
@@ -1268,7 +1268,7 @@ class TestDomain14Compliance:
 
 
 # ===========================================================================
-# Domain 15 — INTEROPERABILITY & INTEGRATION
+# Domain 15 -- INTEROPERABILITY & INTEGRATION
 # ===========================================================================
 class TestDomain15Interoperability:
     """Tests for interface contracts, format compatibility."""
@@ -1302,7 +1302,7 @@ class TestDomain15Interoperability:
 
 
 # ===========================================================================
-# Domain 16 — DATA LINEAGE & TRACEABILITY
+# Domain 16 -- DATA LINEAGE & TRACEABILITY
 # ===========================================================================
 class TestDomain16Lineage:
     """Tests for data lineage, provenance, traceability."""
@@ -1427,10 +1427,10 @@ class TestDomain16Lineage:
 # End-to-End Integration Test (GAP-10.9)
 # ===========================================================================
 class TestEndToEnd:
-    """Integration test for download → clean → load (GAP-10.9)."""
+    """Integration test for download -> clean -> load (GAP-10.9)."""
 
     def test_full_clean_load_flow(self, omim_pipeline, morbidmap_fixture, populated_db_session):
-        """Full clean → load flow with a real (in-memory) DB."""
+        """Full clean -> load flow with a real (in-memory) DB."""
         df = omim_pipeline.clean(morbidmap_fixture)
         assert not df.empty
 
@@ -1513,13 +1513,13 @@ class TestParseJson:
 
 
 # ===========================================================================
-# Regression Tests (GAP-10.11) — one per known critical bug
+# Regression Tests (GAP-10.11) -- one per known critical bug
 # ===========================================================================
 class TestRegressionBugs:
     """One test per critical bug to prevent regression (GAP-10.11)."""
 
     def test_bug_3_1_first_row_not_dropped_regression(self, omim_pipeline, tmp_path):
-        """Regression: BUG-3.1 — first data row must not be dropped."""
+        """Regression: BUG-3.1 -- first data row must not be dropped."""
         content = (
             "# comment\n"
             "First Disease, 100100 (3)\tGENE1\t100100\t1p36.13\n"
@@ -1533,35 +1533,35 @@ class TestRegressionBugs:
         assert set(df["gene_symbol"]) == {"GENE1", "GENE2"}
 
     def test_bug_8_1_no_double_sleep_regression(self, omim_pipeline):
-        """Regression: BUG-8.1 — v83 P2-1 ROOT FIX.
+        """Regression: BUG-8.1 -- v83 P2-1 ROOT FIX.
 
         The previous test validated that ``_api_get`` slept exactly once per
         request. ``_api_get`` was DEAD CODE (never called by ``download()``
-        — only by the already-removed ``_download_via_api``). v83 P2-1
+        -- only by the already-removed ``_download_via_api``). v83 P2-1
         REMOVED ``_api_get`` and ``_backoff_seconds`` entirely.
 
         This test now validates the FIX: the dead ``_api_get`` and
         ``_backoff_seconds`` methods must NOT exist on the OMIMPipeline class.
         If a future refactor re-adds an API path, it must be WIRED INTO
-        ``download()`` as a true fallback — not left as dead code.
+        ``download()`` as a true fallback -- not left as dead code.
         """
         assert not hasattr(omim_pipeline, "_api_get"), (
-            "v83 P2-1: _api_get should be REMOVED — it was 90 lines of dead "
+            "v83 P2-1: _api_get should be REMOVED -- it was 90 lines of dead "
             "code never called by download()."
         )
         assert not hasattr(omim_pipeline, "_backoff_seconds"), (
-            "v83 P2-1: _backoff_seconds should be REMOVED — it was only used "
+            "v83 P2-1: _backoff_seconds should be REMOVED -- it was only used "
             "by the dead _api_get method."
         )
 
     def test_bug_2_3_score_branches_reachable_regression(self):
-        """Regression: BUG-2.3 — all 4 mapping-key score branches reachable."""
+        """Regression: BUG-2.3 -- all 4 mapping-key score branches reachable."""
         for mk, expected in [(1, 0.5), (2, 0.6), (3, 0.9), (4, 0.8)]:
             score, _ = OMIMPipeline._compute_omim_score(mk, 0, 0.0)
             assert score == pytest.approx(expected, abs=0.001)
 
     def test_bug_7_1_idempotent_csv_regression(self, omim_pipeline, morbidmap_fixture):
-        """Regression: BUG-7.1 — clean() twice produces identical CSVs."""
+        """Regression: BUG-7.1 -- clean() twice produces identical CSVs."""
         omim_pipeline.clean(morbidmap_fixture)
         csv1 = op.OMIM_OUTPUT_PATH.read_bytes()
         omim_pipeline._quarantine_buffer.clear()
@@ -1571,7 +1571,7 @@ class TestRegressionBugs:
         assert csv1 == csv2
 
     def test_bug_3_13_susceptibility_excluded_regression(self, omim_pipeline, morbidmap_fixture):
-        """Regression: BUG-3.13 — susceptibility routed to separate CSV."""
+        """Regression: BUG-3.13 -- susceptibility routed to separate CSV."""
         df = omim_pipeline.clean(morbidmap_fixture)
         assert (df["association_modifier"] == "{}").sum() == 0
         sus_path = op.OMIM_SUSCEPTIBILITY_OUTPUT_PATH
@@ -1580,12 +1580,12 @@ class TestRegressionBugs:
         assert (sus_df["association_modifier"] == "{}").any()
 
     def test_bug_3_4_marker_extracted_regression(self):
-        """Regression: BUG-3.4 — markers are extracted correctly."""
+        """Regression: BUG-3.4 -- markers are extracted correctly."""
         _, _, _, mod = OMIMPipeline._parse_phenotype_field("{X, 100100 (3)}")
         assert mod == "{}"
 
     def test_bug_2_8_validator_called_with_kwargs_regression(self, omim_pipeline, morbidmap_fixture):
-        """Regression: BUG-2.8 — validate_gda_scores called with full kwargs."""
+        """Regression: BUG-2.8 -- validate_gda_scores called with full kwargs."""
         with patch(f"{OP}.validate_gda_scores", side_effect=lambda df, **kw: df) as mock:
             try:
                 omim_pipeline.clean(morbidmap_fixture)
@@ -1597,7 +1597,7 @@ class TestRegressionBugs:
             assert kwargs.get("dedup") is True
 
     def test_bug_2_9_loader_called_with_lineage_regression(self, omim_pipeline, morbidmap_fixture, populated_db_session):
-        """Regression: BUG-2.9 — bulk_upsert_gda called with lineage kwargs."""
+        """Regression: BUG-2.9 -- bulk_upsert_gda called with lineage kwargs."""
         df = omim_pipeline.clean(morbidmap_fixture)
         with patch(f"{OP}.bulk_upsert_gda") as mock:
             from database.loaders import UpsertResult

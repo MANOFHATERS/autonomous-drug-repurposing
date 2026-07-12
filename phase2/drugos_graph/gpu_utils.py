@@ -1,4 +1,4 @@
-"""DrugOS Graph Module — GPU Utilities
+"""DrugOS Graph Module -- GPU Utilities
 ========================================
 GPU memory validation and batch size testing for PyG data loading.
 """
@@ -12,12 +12,37 @@ logger = logging.getLogger(__name__)
 
 
 def check_gpu_available() -> Dict[str, Any]:
-    """Check GPU availability and memory."""
+    """Check GPU availability and memory.
+
+    P2-004 FORENSIC ROOT FIX (Team 4 -- multi-GPU device_index missing):
+    The previous version did NOT report ``device_index``.
+    ``transe_model._get_device`` reads ``info.get("device_index")`` to
+    respect the operator's chosen GPU on multi-GPU hosts (the v35 L-31
+    root fix). But this function never set ``device_index`` -- so
+    ``info.get("device_index")`` always returned None, and the L-31 fix
+    silently fell through to ``return torch.device("cuda")`` which is
+    always ``cuda:0``. On multi-GPU hosts (e.g. an 8x A100 box), the
+    operator's ``CUDA_VISIBLE_DEVICES=2`` was silently ignored --
+    training always ran on GPU 0.
+
+    ROOT FIX: report ``device_index = torch.cuda.current_device()``.
+    ``torch.cuda.current_device()`` honors ``CUDA_VISIBLE_DEVICES`` --
+    when the operator sets ``CUDA_VISIBLE_DEVICES=2``, PyTorch remaps
+    device 2 to ``cuda:0`` (the only visible device), and
+    ``current_device()`` returns 0 (the local index). This is the
+    correct semantic: ``device_index`` is the LOCAL index within the
+    visible devices, which is what ``torch.device("cuda", idx)`` expects.
+    """
     info = {"cuda_available": torch.cuda.is_available()}
 
     if torch.cuda.is_available():
         info["device_name"] = torch.cuda.get_device_name(0)
         info["device_count"] = torch.cuda.device_count()
+        # P2-004 ROOT FIX: report device_index so transe_model._get_device
+        # can respect the operator's CUDA_VISIBLE_DEVICES choice on
+        # multi-GPU hosts. torch.cuda.current_device() returns the LOCAL
+        # index within the visible devices (honors CUDA_VISIBLE_DEVICES).
+        info["device_index"] = torch.cuda.current_device()
         info["total_memory_gb"] = torch.cuda.get_device_properties(0).total_mem / 1e9
         info["allocated_memory_gb"] = torch.cuda.memory_allocated(0) / 1e9
         info["free_memory_gb"] = info["total_memory_gb"] - info["allocated_memory_gb"]
@@ -31,6 +56,21 @@ def test_batch_memory(
     num_edges: int = 6000000,
     feat_dim: int = 256,
     batch_size: int = 512,
+    # P2-051 ROOT FIX: the previous signature hard-coded
+    # ``device="cuda"`` inside the function body, which on a multi-GPU
+    # host always allocates the test batch on cuda:0. If cuda:0 was
+    # occupied (e.g. by another process) the function reported
+    # "FAIL — OOM" even when cuda:2 had 70 GB free — a FALSE failure
+    # that misled operators into thinking the GPU was unusable. Root
+    # fix: accept an explicit ``device`` parameter (string or
+    # ``torch.device``) so the caller can target a specific GPU.
+    # Default to "cuda" (== cuda:0) for backward compat, but operators
+    # on multi-GPU hosts can now pass device="cuda:2" to validate the
+    # specific GPU they intend to train on. We also surface the chosen
+    # device in the result dict so the audit log records WHICH GPU was
+    # tested — without this, the result was ambiguous on multi-GPU
+    # hosts.
+    device: str = "cuda",
 ) -> Dict[str, Any]:
     """Test if GPU memory can fit a mini-batch.
 
@@ -39,6 +79,10 @@ def test_batch_memory(
         num_edges: Approximate total edge count.
         feat_dim: Node feature dimension.
         batch_size: Mini-batch size to test.
+        device: Target CUDA device specifier ("cuda", "cuda:0",
+            "cuda:2", ...). Defaults to "cuda" (cuda:0). On multi-GPU
+            hosts, pass the specific device you intend to train on so
+            the test measures the correct GPU's free memory (P2-051).
 
     Returns:
         Dict with memory estimates and pass/fail.
@@ -55,25 +99,58 @@ def test_batch_memory(
         "node_feat_gb": round(node_feat_bytes / 1e9, 2),
         "edge_index_gb": round(edge_index_bytes / 1e9, 2),
         "batch_size": batch_size,
+        # P2-051: record the device under test so the audit log is
+        # unambiguous on multi-GPU hosts.
+        "device_requested": str(device),
     }
 
     if torch.cuda.is_available():
-        free_gb = (torch.cuda.get_device_properties(0).total_mem -
-                   torch.cuda.memory_allocated(0)) / 1e9
+        # P2-051 ROOT FIX: resolve the requested device explicitly so
+        # we measure the FREE memory of the GPU the caller intends to
+        # use, not always cuda:0. ``torch.device(device).index`` is
+        # None for "cuda" (defaults to 0) — coerce to int so the
+        # ``torch.cuda`` APIs accept it.
+        _dev = torch.device(device)
+        _dev_idx = _dev.index if _dev.index is not None else 0
+        # Validate the index is in range — a typo like "cuda:9" on a
+        # 4-GPU host should produce a clear error, not a cryptic
+        # CUDA error inside ``torch.randn``.
+        if _dev_idx >= torch.cuda.device_count():
+            result["fits_gpu"] = False
+            result["batch_test"] = (
+                f"FAIL — invalid device {device!r} "
+                f"(host has {torch.cuda.device_count()} GPU(s))"
+            )
+            logger.error(
+                "test_batch_memory: requested device %s but host has "
+                "only %d GPU(s). (P2-051)",
+                device, torch.cuda.device_count(),
+            )
+            return result
+        free_gb = (
+            torch.cuda.get_device_properties(_dev_idx).total_mem
+            - torch.cuda.memory_allocated(_dev_idx)
+        ) / 1e9
         result["gpu_free_gb"] = round(free_gb, 2)
+        result["device_tested"] = f"cuda:{_dev_idx}"
         result["fits_gpu"] = total_estimated_gb < free_gb
 
-        # Test actual mini-batch allocation
+        # Test actual mini-batch allocation ON THE REQUESTED DEVICE.
+        # P2-051: previously this used ``device="cuda"`` which is
+        # always cuda:0; multi-GPU operators testing cuda:2 got a false
+        # OOM from cuda:0. Now we allocate on the resolved device.
         try:
-            test_batch = torch.randn(batch_size, feat_dim, device="cuda")
+            test_batch = torch.randn(batch_size, feat_dim, device=_dev)
             result["batch_test"] = "PASS"
             del test_batch
+            # P2-051: empty the cache on the tested device, not the
+            # default device.
             torch.cuda.empty_cache()
         except torch.cuda.OutOfMemoryError:
-            result["batch_test"] = "FAIL — OOM"
+            result["batch_test"] = f"FAIL — OOM on cuda:{_dev_idx}"
     else:
         result["fits_gpu"] = False
-        result["batch_test"] = "SKIP — no GPU"
+        result["batch_test"] = "SKIP -- no GPU"
 
     logger.info(f"GPU memory test: {result}")
     return result
@@ -87,7 +164,7 @@ def recommend_batch_size(
     # "for backward compat with callers that don't pass it." But
     # TransEConfig.num_negatives defaults to 10. Callers that didn't
     # pass `num_negatives` got a batch size recommendation 11× too large
-    # → OOM on GPUs the function claimed were safe. The fix: default to
+    # -> OOM on GPUs the function claimed were safe. The fix: default to
     # 10 (matching TransEConfig) so callers get the CORRECT memory
     # estimate out of the box. Callers that want the old behavior can
     # explicitly pass `num_negatives=1`.
@@ -99,10 +176,10 @@ def recommend_batch_size(
     ``bytes_per_sample = feat_dim * 4 * 2`` assumed exactly 2 nodes
     per sample (src + dst of a positive edge). But the TransE trainer
     (and any link-prediction trainer using negative sampling) actually
-    loads ``1 + num_negatives`` nodes per sample — the positive's src
+    loads ``1 + num_negatives`` nodes per sample -- the positive's src
     and dst, PLUS one tail embedding per negative sample. With the
     default ``num_negatives=10``, the true memory cost per positive
-    sample is ``feat_dim * 4 * 2 * (1 + 10) = 22 * feat_dim`` bytes —
+    sample is ``feat_dim * 4 * 2 * (1 + 10) = 22 * feat_dim`` bytes --
     11× what the old formula assumed. The recommended batch size was
     therefore 11× too large, causing OOM crashes on GPUs that the
     function claimed were safe.
@@ -135,7 +212,7 @@ def recommend_batch_size(
     # fix changed the default from 1 to 10 to match TransEConfig, but the
     # function signature still accepts any int. A caller that explicitly
     # passes num_negatives=1 (backward compat) gets a batch size
-    # recommendation 11× too large → OOM on GPUs the function claims are
+    # recommendation 11× too large -> OOM on GPUs the function claims are
     # safe. The fix logs a WARNING so the operator can see the
     # discrepancy. Callers that genuinely want num_negatives=1 (e.g. a
     # custom trainer with 1:1 neg ratio) can silence the warning by
@@ -147,7 +224,7 @@ def recommend_batch_size(
         ) == "1"
         if not _allow_n1:
             logger.warning(
-                "recommend_batch_size called with num_negatives=1 — the "
+                "recommend_batch_size called with num_negatives=1 -- the "
                 "recommended batch size will be 11× too large for a "
                 "trainer using the default 1:10 pos:neg ratio "
                 "(TransEConfig.num_negatives=10). This causes OOM on "
@@ -169,12 +246,12 @@ def recommend_batch_size(
     # * 2  : src + dst of the positive triple.
     # * (1 + num_negatives): the positive itself + one tail embedding
     #   per negative sample.
-    # * 5  : v41 fix — forward + gradients + Adam state.
+    # * 5  : v41 fix -- forward + gradients + Adam state.
     bytes_per_sample = feat_dim * 4 * 2 * (1 + num_negatives) * 5  # v41: added *5
     max_batch = int(available_bytes / bytes_per_sample)
 
     # Cap at reasonable values
-    # v43 ROOT FIX (P2 — recommend_batch_size cap arbitrary): the
+    # v43 ROOT FIX (P2 -- recommend_batch_size cap arbitrary): the
     # previous cap was 8192 with no documented basis. The cap should be
     # configurable via env var DRUGOS_MAX_BATCH_SIZE (default 8192 for
     # backward compat). This lets operators with large GPUs (A100 80GB)

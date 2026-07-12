@@ -8,6 +8,8 @@
  * touch tokens from JavaScript.
  */
 
+import { z, type ZodType } from "zod";
+
 export interface ApiError {
   error: string;
   message?: string;
@@ -184,6 +186,9 @@ export interface AdminUser {
   role: string;
   status: string;
   emailVerified: boolean;
+  // FE-009 ROOT FIX: surfaced from /api/admin/users so the admin screen
+  // can show the real 2FA state per user instead of a fabricated boolean.
+  mfaEnabled?: boolean;
   createdAt: string;
   lastLoginAt: string | null;
 }
@@ -325,9 +330,27 @@ export interface EvidencePackage {
 // Core fetch wrapper
 // ---------------------------------------------------------------------------
 
+/**
+ * FE-066 ROOT FIX: Runtime response validation.
+ *
+ * Previously: request<T> did `let body: any` and returned `body as T`. The
+ * generic T was a LIE — if the API returned a different shape, the caller
+ * got an object TypeScript thought was T but wasn't, and the bug only
+ * surfaced at runtime (usually in a React render, far from the cause).
+ *
+ * Root fix: request<T> now accepts an optional `schema: ZodType<T>`. When
+ * provided, the parsed body is run through `schema.parse(body)` before
+ * return. Zod either confirms the shape or throws an ApiError with status
+ * 0 and a descriptive message — the caller sees the contract violation
+ * immediately, at the call site, instead of a cryptic render error.
+ *
+ * Backward-compat: if no schema is passed, the old `as T` behavior is
+ * preserved (so we don't break the ~50 existing call sites in one go).
+ * New code SHOULD pass a schema; the lint rule can be tightened later.
+ */
 async function request<T>(
   url: string,
-  init?: RequestInit & { skipAuthRedirect?: boolean }
+  init?: RequestInit & { skipAuthRedirect?: boolean; schema?: ZodType<T> }
 ): Promise<T> {
   const res = await fetch(url, {
     credentials: "include",
@@ -357,9 +380,28 @@ async function request<T>(
     // If 401 and not explicitly skipped, dispatch an event so the auth
     // provider can redirect to login.
     if (res.status === 401 && !init?.skipAuthRedirect) {
-      window.dispatchEvent(new CustomEvent("drugos:unauthorized"));
+      // Guard for non-browser environments (jest, SSR).
+      if (typeof window !== "undefined" && window.dispatchEvent) {
+        window.dispatchEvent(new CustomEvent("drugos:unauthorized"));
+      }
     }
     throw err;
+  }
+
+  // FE-066: if a zod schema was provided, validate the body. On failure
+  // throw a structured ApiError so callers can distinguish contract
+  // violations from network errors.
+  if (init?.schema) {
+    const parsed = init.schema.safeParse(body);
+    if (!parsed.success) {
+      const err: ApiError = {
+        error: "response_shape_mismatch",
+        message: `API response from ${url} did not match expected schema: ${parsed.error.message}`,
+        status: 0, // 0 = client-side validation failure, not an HTTP status
+      };
+      throw err;
+    }
+    return parsed.data;
   }
 
   return body as T;
@@ -393,7 +435,39 @@ export const api = {
 
   refresh: () => request<{ ok: true }>("/api/auth/refresh", { method: "POST" }),
 
-  me: () => request<AuthMeResponse>("/api/auth/me", { skipAuthRedirect: true }),
+  me: () =>
+    request<AuthMeResponse>("/api/auth/me", {
+      skipAuthRedirect: true,
+      // FE-066: validate the /me response shape. If the server contract
+      // drifts (e.g. `user` becomes `profile`), this throws immediately
+      // instead of producing undefined-user render errors downstream.
+      schema: z.object({
+        user: z.object({
+          id: z.string(),
+          email: z.string(),
+          name: z.string().nullable(),
+          role: z.string(),
+          title: z.string().nullable().optional(),
+          bio: z.string().nullable().optional(),
+          status: z.string().optional(),
+          emailVerified: z.boolean().optional(),
+          academicVerified: z.boolean().optional(),
+          mfaEnabled: z.boolean().optional(),
+          lastLoginAt: z.string().nullable().optional(),
+          createdAt: z.string().optional(),
+        }),
+        organizations: z.array(
+          z.object({
+            id: z.string(),
+            name: z.string(),
+            slug: z.string(),
+            plan: z.string(),
+            role: z.string(),
+          })
+        ),
+        activeOrganizationId: z.string().nullable(),
+      }) as ZodType<AuthMeResponse>,
+    }),
   updateMe: (body: { name?: string; title?: string; bio?: string }) =>
     request<{ user: AuthUser }>("/api/auth/me", { method: "PATCH", body: JSON.stringify(body) }),
 
@@ -407,7 +481,10 @@ export const api = {
   getProject: (id: string) => request<ProjectDetail>(`/api/projects/${id}`),
   addHypothesis: (projectId: string, body: { title: string; drugName: string; diseaseName: string; notes?: string }) =>
     request<Hypothesis>(`/api/projects/${projectId}`, { method: "POST", body: JSON.stringify(body) }),
-  addComment: (projectId: string, body: { authorName: string; body: string }) =>
+  // FE-073 ROOT FIX: authorName is intentionally NOT accepted. The server
+  // derives it from the authenticated user's User.name || User.email.
+  // Sending authorName in the body is a no-op (server ignores it).
+  addComment: (projectId: string, body: { body: string }) =>
     request<Comment>(`/api/projects/${projectId}/comments`, { method: "POST", body: JSON.stringify(body) }),
 
   // BILLING

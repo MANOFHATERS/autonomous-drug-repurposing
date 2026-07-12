@@ -212,7 +212,7 @@ class TestStringDetailedMergeProteinReorder:
                 df.loc[swap_mask, ["protein2", "protein1"]].values
             )
 
-        # Row 0 (uniprot_a=P23219, protein_a=P04637): uniprot_a != protein_a → swapped
+        # Row 0 (uniprot_a=P23219, protein_a=P04637): uniprot_a != protein_a -> swapped
         assert df.iloc[0]["protein1"] == "9606.ENSP000001"
         assert df.iloc[0]["protein2"] == "9606.ENSP000003"
         # Row 1 (uniprot_a=P04637, protein_a=P04637): no swap
@@ -305,7 +305,7 @@ class TestProteinCascadeDeletePPI:
 
         ppi_id = ppi.id
 
-        # Delete protein p1 — should cascade-delete the PPI
+        # Delete protein p1 -- should cascade-delete the PPI
         session.delete(p1)
         session.commit()
 
@@ -542,10 +542,10 @@ class TestDrugBankFileHandleLeak:
         found_none_handle = False
         for i, line in enumerate(lines):
             if '_file_handle = None' in line:
-                # Check context — is it in the else (non-gz) branch?
+                # Check context -- is it in the else (non-gz) branch?
                 # If so, that's the old broken pattern
                 found_none_handle = True
-        assert not found_none_handle, "Found '_file_handle = None' — non-gz file handle not tracked"
+        assert not found_none_handle, "Found '_file_handle = None' -- non-gz file handle not tracked"
 
 
 # ============================================================================
@@ -778,7 +778,7 @@ class TestPubChemNaN_CIDDetailed:
         session.add(drug)
         session.commit()
 
-        # Create DataFrame with NaN CID — the load method drops these
+        # Create DataFrame with NaN CID -- the load method drops these
         # before they reach bulk_update_drugs_from_pubchem
         # Test the Int64 handling directly
         df = pd.DataFrame({
@@ -912,7 +912,7 @@ class TestGdaUpsertIdempotency:
         # K1 fix: bulk_upsert_gda returns UpsertResult; compare via int()
         assert int(count1) == 1
 
-        # Second upsert with same data — should not duplicate
+        # Second upsert with same data -- should not duplicate
         count2 = bulk_upsert_gda(db_session, df)
         assert int(count2) == 1
 
@@ -1124,7 +1124,7 @@ class TestPPIBulkUpsert:
         ppi_count = session.query(ProteinProteinInteraction).count()
         assert ppi_count == 1
 
-        # Delete protein p1 — should cascade-delete the PPI
+        # Delete protein p1 -- should cascade-delete the PPI
         session.delete(p1)
         session.commit()
 

@@ -1,7 +1,7 @@
 """
-DrugOS — Graph Module
+DrugOS -- Graph Module
 =====================
-Autonomous Drug Repurposing Platform — Knowledge Graph Construction
+Autonomous Drug Repurposing Platform -- Knowledge Graph Construction
 & GNN Data Pipeline (Team Cosmic / VentureLab).
 
 This package provides all components for building, loading, querying,
@@ -14,7 +14,7 @@ Pathway) and 13 DRKG-derived types.
 
 Parameters
 ----------
-(none — this is a package)
+(none -- this is a package)
 
 Modules
 -------
@@ -23,7 +23,7 @@ config : module
     CORE_NODE_TYPES, CORE_EDGE_TYPES, CANONICAL_IDS, Neo4jConfig,
     PyGConfig, TransEConfig, ensure_dirs(), and all path constants
     (PROJECT_ROOT, DATA_DIR, RAW_DIR, PROCESSED_DIR, KG_DIR,
-    EMBEDDINGS_DIR, LOGS_DIR, MODEL_DIR). Pure stdlib — safe to
+    EMBEDDINGS_DIR, LOGS_DIR, MODEL_DIR). Pure stdlib -- safe to
     import eagerly.
 id_crosswalk : module
     **CRITICAL** for scientific correctness. Translates external
@@ -35,7 +35,7 @@ id_crosswalk : module
     :Protein nodes and ``Drug -> Protein -> Gene -> Disease`` queries
     would silently return empty results). Loaded by every
     cross-database loader (string, stitch, chembl, opentargets).
-    Pure stdlib — safe to import eagerly.
+    Pure stdlib -- safe to import eagerly.
 entity_resolver : module
     Cross-database entity resolution and ID mapping for Compound,
     Disease, and Gene nodes. Uses pandas (lightweight).
@@ -45,17 +45,17 @@ drugbank_parser : module
     Parse DrugBank XML into structured drug records.
 kg_builder : module
     Build and manage the Neo4j knowledge graph. Uses neo4j
-    (guarded — ImportError is deferred until first access).
+    (guarded -- ImportError is deferred until first access).
 pyg_builder : module
     Convert KG to PyTorch Geometric HeteroData for GNN training.
-    Uses torch + torch_geometric (heavy — lazy-loaded).
+    Uses torch + torch_geometric (heavy -- lazy-loaded).
 graph_queries : module
     Cypher query utilities for graph traversal and search.
 graph_stats : module
     KG statistics, validation, and sanity checks.
 utils : module
     Shared utilities (identifier sanitization, type mapping). Pure
-    Python — safe to import eagerly.
+    Python -- safe to import eagerly.
 run_pipeline : module
     Main runner script to execute the full pipeline.
 stitch_loader : module
@@ -75,29 +75,29 @@ clinicaltrials_loader : module
 geo_loader : module
     GEO Gene Expression Omnibus loader (Institutional-Grade v1.0.0).
     Downloads, parses, validates, and converts GEO SOFT files into
-    Protein→expressed_in→Anatomy edges for the knowledge graph. GEO
+    Protein->expressed_in->Anatomy edges for the knowledge graph. GEO
     is the SOLE source of tissue-specificity data in the KG. The
     loader implements the ``Loader`` Protocol via the ``GeoLoader``
     adapter class and addresses all 192 audit findings across 16
     quality domains (GEO_LOADER_MASTER_REPAIR_PROMPT.md).
 transe_model : module
     TransE knowledge graph embedding baseline model. Uses torch
-    (heavy — lazy-loaded).
+    (heavy -- lazy-loaded).
 evaluation : module
     Link prediction evaluation metrics (AUC, P@K, MRR).
 negative_sampling : module
     Negative sampling strategies for training data. Uses torch
-    (heavy — lazy-loaded).
+    (heavy -- lazy-loaded).
 training_data : module
     Training data construction and temporal splitting.
 chemberta_encoder : module
     ChemBERTa SMILES molecular embedding generation. Uses torch +
-    transformers (heavy — lazy-loaded).
+    transformers (heavy -- lazy-loaded).
 mlflow_tracker : module
     MLflow experiment tracking integration. Lazy import inside
     __init__.
 gpu_utils : module
-    GPU memory validation and batch testing. Uses torch (heavy —
+    GPU memory validation and batch testing. Uses torch (heavy --
     lazy-loaded).
 
 Notes
@@ -112,16 +112,16 @@ submodule or public API object.
 
 Three version constants are exposed for reproducibility:
 
-- ``__version__`` — package version (from ``importlib.metadata``).
-- ``__schema_version__`` — bumps when ``CORE_NODE_TYPES``,
+- ``__version__`` -- package version (from ``importlib.metadata``).
+- ``__schema_version__`` -- bumps when ``CORE_NODE_TYPES``,
   ``CORE_EDGE_TYPES``, or ``CANONICAL_IDS`` change in ``config.py``.
   Two runs with the same ``__version__`` but different
   ``__schema_version__`` may produce non-equivalent graphs.
-- ``__pipeline_version__`` — bumps when ``run_pipeline.py``'s step
+- ``__pipeline_version__`` -- bumps when ``run_pipeline.py``'s step
   ordering or any transformation step changes. MLflow logs both
   ``__version__`` and ``__pipeline_version__`` so experiment runs are
   fully reproducible.
-- ``__data_sources_version__`` — a dict mirroring the
+- ``__data_sources_version__`` -- a dict mirroring the
   ``version_note`` strings in ``config.DATA_SOURCES`` in a
   programmatically accessible form. Downstream consumers (e.g. MLflow
   tracker) can log this to record exactly which dataset versions
@@ -157,7 +157,7 @@ Cross-database ID resolution (CRITICAL for scientific correctness)::
 
 For STRING/STITCH Ensembl-protein or OpenTargets ENSG resolution, run the
 appropriate loader first (``load_string_aliases`` /
-``load_opentargets_targets``) — see ``drugos_graph/id_crosswalk.py``.
+``load_opentargets_targets``) -- see ``drugos_graph/id_crosswalk.py``.
 
 Lazy import tier (skip ML stack in CI / data-only jobs)::
 
@@ -188,25 +188,25 @@ from typing import Any, Callable
 # the `version` field in `pyproject.toml`.
 try:
     __version__: str = _pkg_version("drugos-graph")
-except PackageNotFoundError:  # pragma: no cover — dev mode only
+except PackageNotFoundError:  # pragma: no cover -- dev mode only
     __version__: str = "2.0.0"
 
 __author__: str = "DrugOS Team"
 __email__: str = "team-cosmic@drugos.local"
 __license__: str = "MIT"
 
-# Schema version — bump when CORE_NODE_TYPES, CORE_EDGE_TYPES, or
+# Schema version -- bump when CORE_NODE_TYPES, CORE_EDGE_TYPES, or
 # CANONICAL_IDS change in config.py. Two runs with the same
 # __version__ but different __schema_version__ may produce
 # non-equivalent graphs.
 __schema_version__: str = "2.0.0"
 
-# Pipeline version — bump when run_pipeline.py's step ordering or any
+# Pipeline version -- bump when run_pipeline.py's step ordering or any
 # transformation step changes. MLflow logs both __version__ and
 # __pipeline_version__ so experiment runs are fully reproducible.
 __pipeline_version__: str = "2.0.0-week2"
 
-# Data-source version manifest — programmatically accessible counterpart
+# Data-source version manifest -- programmatically accessible counterpart
 # to the `version_note` strings in config.DATA_SOURCES. Keys MUST match
 # the keys of DATA_SOURCES; the validator below enforces this.
 __data_sources_version__: dict[str, str] = {
@@ -229,11 +229,11 @@ __data_sources_version__: dict[str, str] = {
 # semver string (e.g. editable installs with VCS suffixes).
 if not re.match(r"^\d+\.\d+\.\d+", __version__ or ""):
     logging.getLogger(__name__).warning(
-        "drugos_graph.__version__ is %r — does not look like semver",
+        "drugos_graph.__version__ is %r -- does not look like semver",
         __version__,
     )
 
-# ─── 3. Logger setup (idempotent — GUARD-REL-3) ───────────────────────────
+# ─── 3. Logger setup (idempotent -- GUARD-REL-3) ───────────────────────────
 # A NullHandler is attached exactly once, even under importlib.reload().
 # This prevents the "No handlers could be found" warning in library
 # consumers that have not configured logging, while not interfering
@@ -249,8 +249,8 @@ if not any(isinstance(h, logging.NullHandler) for h in _logger.handlers):
 _CORE_MODULES: frozenset[str] = frozenset({
     "config", "utils", "id_crosswalk",
     # New core support modules added by the uniprot_loader v2.0 audit fix:
-    "exceptions",   # D6-006 — domain-specific exception hierarchy
-    "schemas",      # D1-003 — UniProtRecord / ProteinNode TypedDicts
+    "exceptions",   # D6-006 -- domain-specific exception hierarchy
+    "schemas",      # D1-003 -- UniProtRecord / ProteinNode TypedDicts
     # NOTE: _loader_protocol is intentionally NOT here (private, leading _).
     # v72 ROOT FIX (P2C-021): entity_resolver REMOVED from _CORE_MODULES.
     # _CORE_MODULES is documented as "lightweight, stdlib-only" modules
@@ -265,7 +265,7 @@ _DATA_MODULES: frozenset[str] = frozenset({
     "graph_stats", "stitch_loader", "sider_loader", "string_loader",
     "chembl_loader", "opentargets_loader", "uniprot_loader",
     "clinicaltrials_loader", "geo_loader", "run_pipeline",
-    # Phase 1 → Phase 2 bridge (single authoritative contract connecting
+    # Phase 1 -> Phase 2 bridge (single authoritative contract connecting
     # the two halves of the platform). See phase1_bridge.py docstring.
     "phase1_bridge",
     # v72 ROOT FIX (P2C-021): entity_resolver moved here from
@@ -291,17 +291,17 @@ __all__: list[str] = [
     "__schema_version__", "__pipeline_version__", "__data_sources_version__",
     # ── Submodule facades (lazy) ──
     "config", "drkg_loader", "drugbank_parser", "kg_builder",
-    "entity_resolver", "id_crosswalk",          # was missing — BUG-ARCH-1
+    "entity_resolver", "id_crosswalk",          # was missing -- BUG-ARCH-1
     "exceptions", "schemas",                    # uniprot_loader v2.0 audit fix
     "pyg_builder", "graph_queries", "graph_stats",
     "utils", "run_pipeline", "stitch_loader", "sider_loader",
     "string_loader", "chembl_loader", "opentargets_loader",
     "uniprot_loader", "clinicaltrials_loader",
-    "geo_loader",                                # was missing — BUG-ARCH-2
+    "geo_loader",                                # was missing -- BUG-ARCH-2
     "transe_model", "evaluation", "negative_sampling",
     "training_data", "chemberta_encoder",
     "mlflow_tracker", "gpu_utils",
-    "phase1_bridge",                            # Phase 1 → Phase 2 connector
+    "phase1_bridge",                            # Phase 1 -> Phase 2 connector
     # ── Public API objects (re-exported from submodules) ──
     "Neo4jConfig", "PyGConfig", "TransEConfig",
     "DATA_SOURCES", "CORE_NODE_TYPES", "CORE_EDGE_TYPES",
@@ -324,11 +324,11 @@ __all__: list[str] = [
 # updates this dict so `module_load_status()` can report it.
 _LOADED_MODULES: dict[str, str] = {}
 
-# Lightweight re-exports — eagerly resolved at import time because the
+# Lightweight re-exports -- eagerly resolved at import time because the
 # underlying modules are stdlib-lightweight AND because they are the
 # most commonly accessed names. Heavy re-exports (DrugOSGraphBuilder,
 # PyGBuilder, TransEModel, NegativeSampler, MLflowTracker) are NOT in
-# this dict — they are resolved lazily through __getattr__.
+# this dict -- they are resolved lazily through __getattr__.
 _LIGHT_REEXPORTS: dict[str, tuple[str, str]] = {
     "Neo4jConfig":                    (".config",       "Neo4jConfig"),
     "PyGConfig":                      (".config",       "PyGConfig"),
@@ -344,7 +344,7 @@ _LIGHT_REEXPORTS: dict[str, tuple[str, str]] = {
     "DRKG_NODE_TYPE_TO_NEO4J_LABEL":  (".utils",        "DRKG_NODE_TYPE_TO_NEO4J_LABEL"),
 }
 
-# Heavy re-exports — resolved lazily. Maps public name -> (module attr
+# Heavy re-exports -- resolved lazily. Maps public name -> (module attr
 # path relative to drugos_graph, attribute name). Importing any of
 # these triggers the heavy dependency chain of the source module.
 _HEAVY_REEXPORTS: dict[str, tuple[str, str]] = {
@@ -354,7 +354,7 @@ _HEAVY_REEXPORTS: dict[str, tuple[str, str]] = {
     "EntityResolver":              (".entity_resolver",   "EntityResolver"),
     "NegativeSampler":             (".negative_sampling", "NegativeSampler"),
     "MLflowTracker":               (".mlflow_tracker",    "MLflowTracker"),
-    # Fixes audit issue 1.2 — export graph_queries classes from package
+    # Fixes audit issue 1.2 -- export graph_queries classes from package
     "DrugOSGraphQueries":          (".graph_queries",     "DrugOSGraphQueries"),
     "DrugRepurposingCandidate":    (".graph_queries",     "DrugRepurposingCandidate"),
     # R-031: RecordingGraphBuilder re-exported at package level so
@@ -375,18 +375,18 @@ def __getattr__(name: str) -> Any:
     """PEP 562 module-level lazy attribute resolver.
 
     Resolution order:
-      1. Names in ``_LIGHT_REEXPORTS`` — eagerly imported in
+      1. Names in ``_LIGHT_REEXPORTS`` -- eagerly imported in
          ``_populate_light_reexports()`` and cached in ``__dict__``;
          this branch only fires if population failed or was skipped.
-      2. Names in ``_HEAVY_REEXPORTS`` — imported on first access.
-      3. Names in ``_LAZY_MODULE_NAMES`` (submodule facades) —
+      2. Names in ``_HEAVY_REEXPORTS`` -- imported on first access.
+      3. Names in ``_LAZY_MODULE_NAMES`` (submodule facades) --
          ``importlib.import_module`` fires the heavy dependency chain
          of the target module.
-      4. Deprecated names — emit ``DeprecationWarning`` then resolve.
-      5. Anything else — raise ``AttributeError`` (NOT ``ImportError``,
+      4. Deprecated names -- emit ``DeprecationWarning`` then resolve.
+      5. Anything else -- raise ``AttributeError`` (NOT ``ImportError``,
          so ``hasattr()`` behaves correctly).
     """
-    # Python internals sometimes probe for these — must raise AttributeError.
+    # Python internals sometimes probe for these -- must raise AttributeError.
     if name in ("__path__", "__warningregistry__", "__deprecated_aliases__"):
         raise AttributeError(name)
 
@@ -398,7 +398,7 @@ def __getattr__(name: str) -> Any:
         globals()[name] = obj  # cache for next access
         return obj
 
-    # 2. Heavy reexport — triggers neo4j/torch/transformers import.
+    # 2. Heavy reexport -- triggers neo4j/torch/transformers import.
     if name in _HEAVY_REEXPORTS:
         mod_rel, attr_name = _HEAVY_REEXPORTS[name]
         try:
@@ -432,14 +432,14 @@ def __getattr__(name: str) -> Any:
         globals()[name] = mod  # cache so __getattr__ isn't called again
         return mod
 
-    # 4. Deprecation shim — emit warning then fall through to AttributeError.
+    # 4. Deprecation shim -- emit warning then fall through to AttributeError.
     if name in __deprecated__:
         _emit_deprecation(name)
         new_name = __deprecated__[name]
         if new_name in globals() or new_name in _LAZY_OBJECT_NAMES:
             return getattr(__import__(__name__), new_name)
 
-    # 5. Unknown attribute — MUST be AttributeError for hasattr() correctness.
+    # 5. Unknown attribute -- MUST be AttributeError for hasattr() correctness.
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -448,16 +448,16 @@ def __dir__() -> list[str]:
     return sorted(set(list(globals().keys()) + list(__all__)))
 
 
-# ─── 7. Public API re-exports (lightweight only — eager) ──────────────────
+# ─── 7. Public API re-exports (lightweight only -- eager) ──────────────────
 # Eagerly populate the lightweight reexports so `from drugos_graph import
 # Neo4jConfig` does not pay the __getattr__ cost. Each import is wrapped
 # in try/except so a missing lightweight dep (e.g. pandas for
-# id_crosswalk's optional loaders) does not break package import — the
+# id_crosswalk's optional loaders) does not break package import -- the
 # heavy fallback path through __getattr__ still works.
 def _populate_light_reexports() -> None:
     """Populate ``__dict__`` with lightweight re-exported objects.
 
-    Failures are non-fatal — a name that can't be resolved here will
+    Failures are non-fatal -- a name that can't be resolved here will
     be retried through ``__getattr__`` on first access.
     """
     for public_name, (mod_rel, attr_name) in _LIGHT_REEXPORTS.items():
@@ -505,7 +505,7 @@ _VALIDATORS: list[Callable[[], list[str]]] = []
 
 # Critical (lightweight) deps that, if missing, indicate a broken
 # install. Heavy deps (torch, transformers, mlflow) are intentionally
-# NOT checked here — they're optional from the package's perspective.
+# NOT checked here -- they're optional from the package's perspective.
 _CRITICAL_LIGHT_DEPS: tuple[str, ...] = (
     "pandas", "numpy", "networkx",
 )
@@ -515,7 +515,7 @@ def _validate_critical_dependencies() -> list[str]:
     """Check that lightweight critical deps are importable.
 
     Heavy deps (torch, transformers, mlflow) are intentionally NOT
-    checked here — they're validated lazily on first access of the
+    checked here -- they're validated lazily on first access of the
     corresponding submodule. Returns a list of issue strings; an
     empty list means all critical deps are present.
     """
@@ -559,11 +559,11 @@ def _check_all_complete() -> list[str]:
     against the actual submodules discovered by ``pkgutil``. Function
     and object names in ``__all__`` (e.g. ``configure``,
     ``ensure_dirs``, ``Neo4jConfig``) are intentionally NOT compared
-    against disk because they are not files — they are attributes
+    against disk because they are not files -- they are attributes
     re-exported from submodules.
     """
     actual = _discover_actual_submodules()
-    # Only compare module facade names — i.e. names that are in BOTH
+    # Only compare module facade names -- i.e. names that are in BOTH
     # __all__ AND _LAZY_MODULE_NAMES. Function/object reexports like
     # `configure`, `ensure_dirs`, `Neo4jConfig` are not files and must
     # not be flagged here.
@@ -594,7 +594,7 @@ def _validate_all() -> list[str]:
     pkg = sys.modules[__name__]
     for name in __all__:
         if name.startswith("__") and name.endswith("__"):
-            # Metadata dunder — verify it's a string/dict.
+            # Metadata dunder -- verify it's a string/dict.
             try:
                 val = getattr(pkg, name)
                 if not isinstance(val, (str, dict)):
@@ -609,7 +609,7 @@ def _validate_all() -> list[str]:
         except AttributeError as exc:
             failures.append(f"{name}: AttributeError: {exc}")
         except ImportError as exc:
-            # Heavy optional dep missing — non-fatal but report.
+            # Heavy optional dep missing -- non-fatal but report.
             failures.append(f"{name}: ImportError (optional dep missing): {exc}")
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{name}: {type(exc).__name__}: {exc}")
@@ -656,16 +656,16 @@ def _validate_scientific_schema() -> list[str]:
                 f"CANONICAL_IDS key {ent_type!r} is not a known node type"
             )
 
-    # v57 ROOT FIX (P2C-002 + P2C-007): REVERSE check — every entry in
+    # v57 ROOT FIX (P2C-002 + P2C-007): REVERSE check -- every entry in
     # CORE_NODE_TYPES (and DRKG_NODE_TYPES) MUST have a corresponding
     # entry in CANONICAL_IDS. The forward check above (CANONICAL_IDS
     # keys must be node types) was already present; the reverse check
     # was missing, which let ClinicalOutcome/MedDRA_Term/Anatomy ship
-    # without canonical IDs — entity_resolver.resolve_canonical_id
+    # without canonical IDs -- entity_resolver.resolve_canonical_id
     # returned None silently for those types. The actual reverse-check
     # logic lives in ``schemas._validate_canonical_ids_reverse`` so it
     # can be reused by callers who want strict validation (raises
-    # ``SchemaValidationError``) — see
+    # ``SchemaValidationError``) -- see
     # ``schemas._validate_canonical_ids_reverse_strict``.
     try:
         from .schemas import _validate_canonical_ids_reverse
@@ -678,14 +678,14 @@ def _validate_scientific_schema() -> list[str]:
 
     if ("Compound", "treats", "Disease") not in CORE_EDGE_TYPES:
         issues.append(
-            "Core edge ('Compound', 'treats', 'Disease') is missing — "
+            "Core edge ('Compound', 'treats', 'Disease') is missing -- "
             "this is the Phase 2 spec contract for the link-prediction "
             "target edge type."
         )
 
     if ("Gene", "encodes", "Protein") not in CORE_EDGE_TYPES:
         issues.append(
-            "Bridge edge ('Gene', 'encodes', 'Protein') is missing — "
+            "Bridge edge ('Gene', 'encodes', 'Protein') is missing -- "
             "without it the graph splits into disconnected Gene and "
             "Protein subgraphs."
         )
@@ -935,7 +935,7 @@ def configure_logging(
     Parameters
     ----------
     level : str or int, default "INFO"
-        Logging level — 'DEBUG', 'INFO', 'WARNING', 'ERROR', or
+        Logging level -- 'DEBUG', 'INFO', 'WARNING', 'ERROR', or
         the numeric equivalent.
     format_str : str, optional
         Format string. Defaults to ``config.LOG_FORMAT``.
@@ -1061,9 +1061,9 @@ def module_load_status() -> dict[str, str]:
     """Return a copy of the module-load registry (for diagnostics).
 
     The registry maps module name -> status string. Status values:
-      - ``"ok"`` — module imported successfully.
-      - ``"FAILED: <reason>"`` — import raised ``ImportError``.
-      - ``"SKIPPED: <reason>"`` — import was skipped by ``import_tier``
+      - ``"ok"`` -- module imported successfully.
+      - ``"FAILED: <reason>"`` -- import raised ``ImportError``.
+      - ``"SKIPPED: <reason>"`` -- import was skipped by ``import_tier``
         because a dependency was missing.
 
     This call also synchronizes the registry with ``sys.modules`` so
@@ -1145,11 +1145,11 @@ def safe_config() -> dict[str, object]:
 # ─── Self-test hook (DRUGOS_SELF_TEST env var) ────────────────────────────
 # Runs the full validation suite at import time when the env var is
 # set. Useful for CI smoke tests and post-install verification.
-# DRUGOS_SELF_TEST=1 — run all validators.
-# DRUGOS_SELF_TEST=2 — also run the slow secret-logging scan.
+# DRUGOS_SELF_TEST=1 -- run all validators.
+# DRUGOS_SELF_TEST=2 -- also run the slow secret-logging scan.
 if os.environ.get("DRUGOS_SELF_TEST"):
     _logger.info(
-        "DRUGOS_SELF_TEST=%s — running full self-validation",
+        "DRUGOS_SELF_TEST=%s -- running full self-validation",
         os.environ["DRUGOS_SELF_TEST"],
     )
     _self_test_report: dict[str, list[str]] = validate(strict=False)

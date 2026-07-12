@@ -6,16 +6,16 @@ Before v16, two modules defined ``_ACTIVITY_VALUE_MAX`` with DIFFERENT
 values:
 
 - ``cleaning/normalizer.py`` defined ``_ACTIVITY_VALUE_MAX = 1e6``
-  (1 mM) — beyond this, a value was marked ``censored=True`` ("we know
+  (1 mM) -- beyond this, a value was marked ``censored=True`` ("we know
   it's > X") because 1 mM is the upper limit of pharmacological
   relevance.
 - ``cleaning/deduplicator.py`` defined ``_ACTIVITY_VALUE_MAX = 1e9``
-  (1 M) — beyond this, a value was filtered out as "non-physical"
+  (1 M) -- beyond this, a value was filtered out as "non-physical"
   (concentrations above 1 M are chemically impossible in aqueous
   biological assays).
 
 A value of e.g. ``5e7 nM`` (50 mM) was therefore ``censored=True``
-in normalizer but ``valid`` in deduplicator — a 3-order-of-magnitude
+in normalizer but ``valid`` in deduplicator -- a 3-order-of-magnitude
 inconsistency that meant the same activity record had different
 "valid" status depending on which module inspected it. Downstream
 TransE training saw a biased sample.
@@ -23,16 +23,16 @@ TransE training saw a biased sample.
 v16 fix: this module exposes TWO clearly-named constants so the
 distinction is explicit and both modules import from here:
 
-- ``ACTIVITY_VALUE_CENSORED_THRESHOLD = 1e6``  (1 mM — above this,
+- ``ACTIVITY_VALUE_CENSORED_THRESHOLD = 1e6``  (1 mM -- above this,
   a value is flagged as "censored: > X" because it exceeds the
   pharmacologically relevant range)
-- ``ACTIVITY_VALUE_NON_PHYSICAL_THRESHOLD = 1e9``  (1 M — above this,
+- ``ACTIVITY_VALUE_NON_PHYSICAL_THRESHOLD = 1e9``  (1 M -- above this,
   a value is rejected as non-physical / corrupt)
 
 Both modules now reference these shared constants; no module defines
 its own ``_ACTIVITY_VALUE_MAX``.
 
-v29 ROOT FIX (Compound Chain 3 — InChIKey Validation Divergence):
+v29 ROOT FIX (Compound Chain 3 -- InChIKey Validation Divergence):
 The forensic audit found that normalizer.py accepted 28+ char
 suffixed InChIKeys (`(?:-[A-Za-z0-9]+)?` block), while
 deduplicator.py required strict 27-char (`^[A-Z]{14}-[A-Z]{10}-[A-Z]$`).
@@ -44,10 +44,10 @@ The DB CHECK was even more permissive (LENGTH=27 OR SYNTH%). This
 ROOT FIX: define ONE canonical regex here. All modules import from
 this single source of truth. The regex is the IUPAC standard
 InChIKey format: 14 uppercase letters, hyphen, 10 uppercase letters,
-hyphen, 1 uppercase letter (the version char — usually S or N, but
+hyphen, 1 uppercase letter (the version char -- usually S or N, but
 the spec allows any uppercase letter for forward compatibility).
 Protonation / tautomeric suffixes (`-a`, `-b`) are NOT part of the
-canonical InChIKey — they're an IUPAC extension and should be
+canonical InChIKey -- they're an IUPAC extension and should be
 stripped BEFORE validation, not accepted by the regex. This is the
 audited, scientifically-correct behavior.
 """
@@ -58,19 +58,19 @@ import math
 import re
 from typing import Any, Optional
 
-# 1 mM (1e6 nM) — upper bound of pharmacologically relevant range.
+# 1 mM (1e6 nM) -- upper bound of pharmacologically relevant range.
 # Values above this are flagged as "censored: > X" in normalizer.
 ACTIVITY_VALUE_CENSORED_THRESHOLD: float = 1e6
 
-# 1 M (1e9 nM) — non-physical upper bound for aqueous biological assays.
+# 1 M (1e9 nM) -- non-physical upper bound for aqueous biological assays.
 # Values above this are rejected as corrupt in deduplicator.
 ACTIVITY_VALUE_NON_PHYSICAL_THRESHOLD: float = 1e9
 
-# v65 ROOT FIX (P1C-014 — misleading alias name):
+# v65 ROOT FIX (P1C-014 -- misleading alias name):
 #   The previous alias was named ``_ACTIVITY_VALUE_MAX`` and pointed at
 #   the CENSORED threshold (1e6 = 1 mM). The name ``_ACTIVITY_VALUE_MAX``
 #   suggested it was the ABSOLUTE maximum valid value, but the actual
-#   non-physical rejection threshold is 1e9 (1 M) — 3 orders of magnitude
+#   non-physical rejection threshold is 1e9 (1 M) -- 3 orders of magnitude
 #   higher. A legacy caller importing ``_ACTIVITY_VALUE_MAX`` from this
 #   module expecting the deduplicator's rejection threshold (1e9) got 1e6
 #   instead, silently dropping valid activity measurements in
@@ -79,22 +79,22 @@ ACTIVITY_VALUE_NON_PHYSICAL_THRESHOLD: float = 1e9
 #   = 1e9 (non-physical), so the SAME name meant two different things in
 #   two modules.
 #   ROOT FIX:
-#     1. Rename the alias to ``_ACTIVITY_VALUE_CENSORED_MAX_LEGACY`` —
+#     1. Rename the alias to ``_ACTIVITY_VALUE_CENSORED_MAX_LEGACY`` --
 #        the name now states exactly what it is (the CENSORED threshold,
 #        kept for legacy backward compatibility).
 #     2. Keep ``_ACTIVITY_VALUE_MAX`` as a backward-compat alias pointing
 #        at the renamed constant, with a prominent deprecation comment
 #        so future callers see the clearer name. The value is UNCHANGED
-#        (1e6) — only the canonical name is new.
+#        (1e6) -- only the canonical name is new.
 #     3. ``deduplicator.py`` no longer defines its own
 #        ``_ACTIVITY_VALUE_MAX`` (the 1e9 shadow was removed in the same
 #        v65 fix). The only modules that still define
 #        ``_ACTIVITY_VALUE_MAX`` are this module (1e6, censored) and
-#        ``normalizer.py`` (1e6, censored) — both agree. No module
+#        ``normalizer.py`` (1e6, censored) -- both agree. No module
 #        defines ``_ACTIVITY_VALUE_MAX`` as 1e9 anymore.
 _ACTIVITY_VALUE_CENSORED_MAX_LEGACY: float = ACTIVITY_VALUE_CENSORED_THRESHOLD
 
-# Backward-compat alias — DEPRECATED. Use
+# Backward-compat alias -- DEPRECATED. Use
 # ``_ACTIVITY_VALUE_CENSORED_MAX_LEGACY`` (clear name) or, better, the
 # fully-explicit ``ACTIVITY_VALUE_CENSORED_THRESHOLD`` /
 # ``ACTIVITY_VALUE_NON_PHYSICAL_THRESHOLD`` constants directly. This alias
@@ -127,12 +127,12 @@ CANONICAL_INCHIKEY_REGEX: re.Pattern[str] = re.compile(
     r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$"
 )
 
-# Strict standard variant — version char must be 'S' (per IUPAC).
+# Strict standard variant -- version char must be 'S' (per IUPAC).
 CANONICAL_STANDARD_INCHIKEY_REGEX: re.Pattern[str] = re.compile(
     r"^[A-Z]{14}-[A-Z]{10}-S$"
 )
 
-# Non-standard variant — version char must be 'N'.
+# Non-standard variant -- version char must be 'N'.
 CANONICAL_NONSTANDARD_INCHIKEY_REGEX: re.Pattern[str] = re.compile(
     r"^[A-Z]{14}-[A-Z]{10}-N$"
 )
@@ -144,20 +144,20 @@ CANONICAL_SYNTHETIC_INCHIKEY_REGEX: re.Pattern[str] = re.compile(
     r"^SYNTH.+$", re.IGNORECASE
 )
 
-# Strict SYNTH pattern — SYNTH + 9 hex + hyphen + 10 hex + hyphen + 1 hex.
+# Strict SYNTH pattern -- SYNTH + 9 hex + hyphen + 10 hex + hyphen + 1 hex.
 CANONICAL_SYNTHETIC_INCHIKEY_STRICT_REGEX: re.Pattern[str] = re.compile(
     r"^SYNTH[0-9A-F]{9}-[0-9A-F]{10}-[0-9A-F]$", re.IGNORECASE
 )
 
-# Mixture InChIKey — multiple standard keys joined by hyphens.
-# v43 ROOT FIX (P1 — _MIXTURE_INCHIKEY_PATTERN uses * not +): the
+# Mixture InChIKey -- multiple standard keys joined by hyphens.
+# v43 ROOT FIX (P1 -- _MIXTURE_INCHIKEY_PATTERN uses * not +): the
 # previous regex used (?:...)* for the second component, which matches
-# ZERO repetitions — so a single 27-char key also matched. The guard
+# ZERO repetitions -- so a single 27-char key also matched. The guard
 # `"-" in key[27:]` in _is_mixture_inchikey caught this, but if the
 # guard were ever removed in a refactor, every standard InChIKey would
-# be classified as a mixture → dedup_groups treats them as mixture-keyed
-# → NaN-InChIKey sentinels NOT collapsed → duplicate drug rows survive
-# dedup → KG has duplicate Compound nodes. Changing * to + requires at
+# be classified as a mixture -> dedup_groups treats them as mixture-keyed
+# -> NaN-InChIKey sentinels NOT collapsed -> duplicate drug rows survive
+# dedup -> KG has duplicate Compound nodes. Changing * to + requires at
 # least 2 components, making the regex self-sufficient without the guard.
 CANONICAL_MIXTURE_INCHIKEY_REGEX: re.Pattern[str] = re.compile(
     r"^(?:[A-Z]{14}-[A-Z]{10}-[A-Z])(?:-[A-Z]{14}-[A-Z]{10}-[A-Z])+$"
@@ -172,7 +172,7 @@ CANONICAL_MIXTURE_INCHIKEY_REGEX: re.Pattern[str] = re.compile(
 # chars (the longest approved HGNC symbol as of 2024 is well under 50, but
 # 50 matches the DB column length and gives headroom for future symbols).
 # This is the STRICT human form. Non-human species use Title-Case symbols
-# (e.g. ``Tp53`` for mouse) — see ``CANONICAL_NON_HUMAN_GENE_SYMBOL_REGEX``.
+# (e.g. ``Tp53`` for mouse) -- see ``CANONICAL_NON_HUMAN_GENE_SYMBOL_REGEX``.
 #
 # Pipelines that ingest HUMAN gene data (UniProt human, DisGeNET, OMIM,
 # STRING 9606) MUST import this regex and use it at the OUTPUT boundary.
@@ -186,7 +186,7 @@ CANONICAL_HGNC_GENE_SYMBOL_REGEX: re.Pattern[str] = re.compile(
     r"^[A-Z][A-Z0-9\-]{0,49}$"
 )
 
-# Non-human gene symbols — Title-Case first letter, rest upper/lower/digits/
+# Non-human gene symbols -- Title-Case first letter, rest upper/lower/digits/
 # hyphens. Matches e.g. ``Tp53`` (mouse), ``Tp53`` (rat). Max 50 chars to
 # stay consistent with the human form and the DB column.
 CANONICAL_NON_HUMAN_GENE_SYMBOL_REGEX: re.Pattern[str] = re.compile(
@@ -221,9 +221,9 @@ CANONICAL_OMIM_DISEASE_ID_REGEX: re.Pattern[str] = re.compile(
 # ambiguity codes (B=Asx, J=Xle, O=Pyl, U=Sec, X=any, Z=Glx) + the stop
 # char ``*`` + the alignment gap char ``-`` (for aligned/padded sequences).
 # The gap char is included for consistency between the DB CHECK, the
-# pipeline validator, and the entity_resolution validator — without it, an
+# pipeline validator, and the entity_resolution validator -- without it, an
 # aligned sequence with gaps would pass the DB CHECK but fail the cleaning
-# validator (silent data loss at the cleaning → DB boundary).
+# validator (silent data loss at the cleaning -> DB boundary).
 CANONICAL_AA_SEQUENCE_REGEX: re.Pattern[str] = re.compile(
     r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ\*\-]+$"
 )
@@ -238,7 +238,7 @@ CANONICAL_AA_SEQUENCE_REGEX: re.Pattern[str] = re.compile(
 # support regex CHECKs natively. The STRICT canonical regex is enforced at
 # the Python layer instead, by ``database.models._validate_uniprot_id``
 # (which delegates to ``entity_resolution.resolver_utils._UNIPROT_ACCESSION_RE``
-# — same pattern).
+# -- same pattern).
 #
 # Why a separate canonical regex here:
 #   * Audit D-4 found that the DB CHECK only enforces ``LENGTH 4-10`` and
@@ -246,22 +246,22 @@ CANONICAL_AA_SEQUENCE_REGEX: re.Pattern[str] = re.compile(
 #     identifier or a stray ``MOUSE1`` token) sneak into the human protein
 #     set. The Python validator already rejects these via the strict regex,
 #     but the regex was previously only defined in
-#     ``entity_resolution.resolver_utils`` — invisible to anyone reading the
+#     ``entity_resolution.resolver_utils`` -- invisible to anyone reading the
 #     DB layer. Declaring it here (single source of truth, mirroring the
 #     InChIKey pattern above) makes the canonical contract explicit and
 #     importable from any module.
 #
 # Two variants are exposed:
-#   * ``CANONICAL_UNIPROT_ACCESSION_REGEX`` — the audit-D-4 spec verbatim:
+#   * ``CANONICAL_UNIPROT_ACCESSION_REGEX`` -- the audit-D-4 spec verbatim:
 #     ``^[OPQ][0-9][A-Z0-9]{3}[0-9]([A-Z0-9]{3}[0-9]){1,5}$``. This is the
 #     STRICT form. Note: it requires the optional 4-char block at least
-#     once, so it matches 10–26-char accessions only. It is intended for
+#     once, so it matches 10-26-char accessions only. It is intended for
 #     caller code that explicitly wants to accept ONLY the long form.
-#   * ``CANONICAL_UNIPROT_ACCESSION_REGEX_FULL`` — the operational form
+#   * ``CANONICAL_UNIPROT_ACCESSION_REGEX_FULL`` -- the operational form
 #     that ALSO accepts canonical 6-char accessions (e.g. P69999, Q9Y6K9).
 #     This is what ``models._validate_uniprot_id`` and
 #     ``resolver_utils._UNIPROT_ACCESSION_RE`` actually apply. Both must
-#     stay byte-for-byte in sync — divergence = silent data loss (audit
+#     stay byte-for-byte in sync -- divergence = silent data loss (audit
 #     D-4 / Chain 3).
 #
 # Reference: https://www.uniprot.org/help/accession_numbers
@@ -269,7 +269,7 @@ CANONICAL_UNIPROT_ACCESSION_REGEX: re.Pattern[str] = re.compile(
     r"^[OPQ][0-9][A-Z0-9]{3}[0-9]([A-Z0-9]{3}[0-9]){1,5}$"
 )
 
-# Operational form — accepts canonical 6-char accessions as well as the
+# Operational form -- accepts canonical 6-char accessions as well as the
 # 10-char newer format. Mirrors
 # ``entity_resolution.resolver_utils._UNIPROT_ACCESSION_RE`` EXACTLY.
 CANONICAL_UNIPROT_ACCESSION_REGEX_FULL: re.Pattern[str] = re.compile(
@@ -289,7 +289,7 @@ def strip_inchikey_extension(inchikey: str) -> str:
     v84 FORENSIC ROOT FIX (BUG #52): also strip trailing newlines /
     whitespace. Some sources emit 28-char keys with a trailing ``\\n``
     that ``str.strip()`` handles but the previous version's length
-    check (``len(s) > 27``) did not — a 28-char key with a trailing
+    check (``len(s) > 27``) did not -- a 28-char key with a trailing
     newline would NOT be stripped because ``len("...N\\n") == 28``
     and the prefix ``s[:27]`` would be ``"...N"``\\n truncated to
     ``"...N"`` without the newline... actually the newline IS at
@@ -301,7 +301,7 @@ def strip_inchikey_extension(inchikey: str) -> str:
     Examples
     --------
     >>> strip_inchikey_extension("BSYNRYMUTXBXSQ-UHFFFAOYSA-N")
-    'BSYNRYMUTXBXSQ-UHFFFAOYSA-N'  # already 27-char canonical — unchanged
+    'BSYNRYMUTXBXSQ-UHFFFAOYSA-N'  # already 27-char canonical -- unchanged
     >>> strip_inchikey_extension("BSYNRYMUTXBXSQ-UHFFFAOYSA-N-a")
     'BSYNRYMUTXBXSQ-UHFFFAOYSA-N'  # extension stripped
     >>> strip_inchikey_extension("BSYNRYMUTXBXSQ-UHFFFAOYSA-N\\n")
@@ -363,7 +363,7 @@ def is_canonical_inchikey(inchikey: str) -> bool:
 # return) so every CSV shipped downstream has the SAME canonical form,
 # regardless of which source produced it.
 #
-# These functions are deliberately MINIMAL — they enforce case + whitespace
+# These functions are deliberately MINIMAL -- they enforce case + whitespace
 # only. Format validation (regex, length, checksum) remains the job of the
 # pipeline-specific validators (which import the CANONICAL_*_REGEX constants
 # above). Splitting "shape" from "case" keeps the normalizers idempotent
@@ -372,7 +372,7 @@ def is_canonical_inchikey(inchikey: str) -> bool:
 # Calling normalize_*() on already-normalized data is a no-op.
 #
 # The ``normalize_pubchem_cid`` function returns ``Optional[int]`` (not str)
-# because PubChem CIDs are integers — storing them as strings would re-introduce
+# because PubChem CIDs are integers -- storing them as strings would re-introduce
 # the leading-zero / case divergence this fix eliminates. ``None`` is returned
 # for any value that cannot be coerced to a positive integer.
 
@@ -387,7 +387,7 @@ def normalize_inchikey(s: str) -> str:
     Returns ``None`` for ``None`` input so callers can decide how to handle
     missing values (the canonical regex will reject ``None`` as invalid).
     This is aligned with ``normalizer.py``'s ``normalize_inchikey`` which
-    also returns ``None`` for ``None`` input (v35 root fix — the previous
+    also returns ``None`` for ``None`` input (v35 root fix -- the previous
     ``""`` sentinel created a divergence between the two normalizers that
     caused ``None`` values to be silently written as empty strings into
     the cleaned CSV).
@@ -575,7 +575,7 @@ def normalize_pubchem_cid(s: Any) -> Optional[int]:
     """
     if s is None:
         return None
-    # Booleans are a subclass of int — exclude them explicitly because a
+    # Booleans are a subclass of int -- exclude them explicitly because a
     # CID is never a boolean (and ``int(True) == 1`` would otherwise sneak
     # a fake CID into the output).
     if isinstance(s, bool):
@@ -602,7 +602,7 @@ def normalize_pubchem_cid(s: Any) -> Optional[int]:
         return int(s)
     # Fall through for numpy / pandas nullable numeric types. ``float(s)``
     # raises TypeError for pandas.NA (its __float__ is not defined), which
-    # we want — that returns None below.
+    # we want -- that returns None below.
     try:
         f = float(s)
     except (TypeError, ValueError):

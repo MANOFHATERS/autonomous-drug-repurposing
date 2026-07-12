@@ -11,7 +11,7 @@ Covers:
   * C-32: ``paired: bool = False`` kwarg added to
     ``evaluation._compute_bootstrap_ci``.
 
-C-24 (``temporal_split_pairs``) is intentionally NOT removed — another
+C-24 (``temporal_split_pairs``) is intentionally NOT removed -- another
 agent (FIX-D) is wiring it INTO step 11. We do NOT assert its absence;
 we only assert its presence so that an accidental removal is caught.
 """
@@ -39,7 +39,7 @@ def test_margin_ranking_loss_class_removed():
 
     # Class is gone from the module namespace.
     assert not hasattr(transe_model, "MarginRankingLoss"), (
-        "transe_model.MarginRankingLoss still exists — C-22 dead code "
+        "transe_model.MarginRankingLoss still exists -- C-22 dead code "
         "not removed."
     )
     # Class is gone from __all__.
@@ -64,7 +64,7 @@ def test_sweep_margin_removed():
 
     # Function is gone from the module namespace.
     assert not hasattr(transe_model, "sweep_margin"), (
-        "transe_model.sweep_margin still exists — C-23 dead code "
+        "transe_model.sweep_margin still exists -- C-23 dead code "
         "not removed."
     )
     # Function is gone from __all__.
@@ -83,13 +83,13 @@ def test_sweep_margin_removed():
 # ─── C-24: temporal_split_pairs still present (NOT removed) ─────────────
 
 def test_temporal_split_pairs_still_present():
-    """C-24: ``temporal_split_pairs`` is intentionally LEFT IN PLACE —
+    """C-24: ``temporal_split_pairs`` is intentionally LEFT IN PLACE --
     another agent (FIX-D) is wiring it INTO step 11. We verify it is
     still importable and exported."""
     from drugos_graph import training_data
 
     assert hasattr(training_data, "temporal_split_pairs"), (
-        "training_data.temporal_split_pairs is MISSING — it should be "
+        "training_data.temporal_split_pairs is MISSING -- it should be "
         "left in place (FIX-D is wiring it into step 11)."
     )
     assert "temporal_split_pairs" in getattr(
@@ -104,12 +104,12 @@ def test_temporal_split_pairs_still_present():
 
 def test_drkg_parse_cache_removed():
     """C-25: the ``_drkg_parse_cache`` module-level dict has been
-    removed from ``run_pipeline.py`` — it was written but never read."""
+    removed from ``run_pipeline.py`` -- it was written but never read."""
     from drugos_graph import run_pipeline
 
     # The attribute must not exist on the imported module.
     assert not hasattr(run_pipeline, "_drkg_parse_cache"), (
-        "run_pipeline._drkg_parse_cache still exists — C-25 dead code "
+        "run_pipeline._drkg_parse_cache still exists -- C-25 dead code "
         "not removed."
     )
 

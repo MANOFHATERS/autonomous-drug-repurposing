@@ -224,7 +224,7 @@ class TestEndToEndPipelineFlow:
         sqlite_bulk_upsert_entity_mapping(db_session, em_df)
         count1 = db_session.query(EntityMapping).count()
 
-        # Re-insert same mapping — should not duplicate
+        # Re-insert same mapping -- should not duplicate
         em_df2 = em_df.copy()
         em_df2["match_confidence"] = 0.9
         sqlite_bulk_upsert_entity_mapping(db_session, em_df2)
@@ -350,7 +350,7 @@ class TestNullishHandling:
         df = pd.DataFrame({"col": ["null", "none", "N/A", "unknown", "hello"]})
         mask = _is_nullish(df["col"])
         assert mask.iloc[0] == True   # "null"
-        assert mask.iloc[1] == False  # "none" is NOT nullish — legitimate biomedical value
+        assert mask.iloc[1] == False  # "none" is NOT nullish -- legitimate biomedical value
         assert mask.iloc[2] == True   # "N/A"
         assert mask.iloc[3] == False  # "unknown" is NOT nullish
         assert mask.iloc[4] == False  # "hello" is real data
@@ -417,7 +417,7 @@ class TestMigrationScript:
 
 
 class TestNeo4jExportStub:
-    """Verify Neo4j export is now implemented via the Phase 1 → Phase 2 bridge.
+    """Verify Neo4j export is now implemented via the Phase 1 -> Phase 2 bridge.
 
     Previously (Phase 1 standalone): export_to_neo4j raised NotImplementedError.
     Now (unified package): export_to_neo4j delegates to
@@ -432,7 +432,7 @@ class TestNeo4jExportStub:
         )
 
     def test_neo4j_exporter_no_longer_raises(self):
-        """export_to_neo4j must NOT raise NotImplementedError — it now works.
+        """export_to_neo4j must NOT raise NotImplementedError -- it now works.
 
         Called with no builder and no Neo4j credentials, it falls back to
         the in-memory RecordingGraphBuilder (dry-run mode) and returns a

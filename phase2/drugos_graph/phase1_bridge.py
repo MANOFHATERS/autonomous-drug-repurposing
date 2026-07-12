@@ -54,20 +54,50 @@ SCHEMA MAPPING (Phase 1 CSV column → Phase 2 node/edge property)
 ----------------------------------------------------------------
 
 Compound nodes (from drugbank_drugs.csv)
-    drugbank_id        → id            (canonical Neo4j ID)
-    name               → name
-    inchikey           → inchikey
-    smiles             → smiles
-    molecular_weight   → molecular_weight
-    is_fda_approved    → fda_approved
-    is_withdrawn       → withdrawn       (RL safety signal — patient harm)
-    clinical_status    → clinical_status
-    groups             → groups
-    mechanism_of_action→ mechanism_of_action
-    cas_number         → cas_number
-    chembl_id          → chembl_id
-    pubchem_cid        → pubchem_cid
-    completeness_score → completeness_score
+    P2-009 ROOT FIX (docstring drift): the previous docstring claimed
+    ``drugbank_id → id (canonical Neo4j ID)``. That was the v3.11
+    behaviour. As of v3.12 (see config.py:5508-5509,
+    ``CANONICAL_IDS["Compound"] = "inchikey"`` with the comment
+    "Changed from drugbank_id (issue 3.12)"), the canonical Neo4j ID
+    for Compound nodes is ``inchikey`` (uppercase IUPAC form, e.g.
+    ``RZVAJINKQORUOD-UHFFFAOYSA-N`` for aspirin). The actual bridge
+    code at lines ~3547-3551 uses ``inchikey_canonical`` when present
+    and non-synthetic, falling back to ``drugbank_id`` ONLY for
+    biologics that lack an InChIKey (e.g. ``DB00071`` for insulin
+    glargine). A new developer reading the old docstring wrote
+    queries / unit tests / merge logic keyed on ``drugbank_id`` —
+    which worked for biologics but silently FAILED for every
+    small-molecule drug (which uses ``inchikey``). The misleading
+    documentation caused silent test-passes-while-prod-fails bugs
+    (tests used biologics, prod used small molecules).
+
+    Canonical ID resolution (in priority order — see also
+    ``entity_resolver.resolve_canonical_id``):
+        inchikey (uppercase)         → id    (canonical Neo4j ID when
+                                              present and non-synthetic;
+                                              universal across ChEMBL,
+                                              PubChem, DrugBank per
+                                              IUPAC standard)
+        drugbank_id (e.g. DB00071)   → id    (fallback for biologics
+                                              and any compound lacking
+                                              an InChIKey — typically
+                                              large molecules /
+                                              peptides / mixtures)
+
+    Other Compound properties (unchanged):
+        name                          → name
+        inchikey                      → inchikey
+        smiles                        → smiles
+        molecular_weight              → molecular_weight
+        is_fda_approved               → fda_approved
+        is_withdrawn                  → withdrawn       (RL safety signal — patient harm)
+        clinical_status               → clinical_status
+        groups                        → groups
+        mechanism_of_action           → mechanism_of_action
+        cas_number                    → cas_number
+        chembl_id                     → chembl_id
+        pubchem_cid                   → pubchem_cid
+        completeness_score            → completeness_score
 
 Protein nodes (from drugbank_interactions.csv.gz, dedup on uniprot_id)
     uniprot_id         → id
@@ -148,21 +178,120 @@ import json
 import logging
 import os
 import re  # v24: needed for CHEMBL_TGT_ ID normalization (Audit Chain 9 fix)
+import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Protocol, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Protocol, Tuple
 
 import pandas as pd
 
 # v27 ROOT FIX (P2-B-5): import DrugOSDataError so the new
 # ``_validate_phase1_columns`` helper can raise on schema mismatch.
+# P2-052 ROOT FIX: the previous ``except Exception`` was too broad — it
+# silently swallowed SyntaxError, NameError, AttributeError, and any
+# other bug inside ``exceptions.py``. If a maintainer introduced a
+# typo in exceptions.py (e.g. ``class DrugOSDataError(Exception:`` with
+# a colon instead of paren), this module would silently fall back to
+# the local stub class — which LACKS the rich ``context`` attribute the
+# real DrugOSDataError provides. Operators would see schema-mismatch
+# errors lose their structured context and never know the exceptions
+# module was broken. Root fix: catch ONLY ``ImportError`` (the expected
+# case for direct-script execution where the package isn't on sys.path).
+# Any other exception (SyntaxError, NameError, etc.) now propagates so
+# the operator sees the real bug immediately.
 try:
     from .exceptions import DrugOSDataError
-except Exception:  # pragma: no cover — fallback for direct-script execution
+except ImportError:  # pragma: no cover — fallback for direct-script execution
     class DrugOSDataError(Exception):
         """Local fallback when the package cannot be imported."""
 
+# v102 ROOT FIX (P2-036): centralize InChIKey normalization so every
+# loader produces the SAME canonical form. Falls back to a local
+# implementation if utils cannot be imported (direct-script execution).
+try:
+    from .utils import normalize_inchikey as _normalize_inchikey
+except Exception:  # pragma: no cover — fallback for direct-script execution
+    def _normalize_inchikey(inchikey):  # type: ignore[no-redef]
+        if inchikey is None:
+            return ""
+        try:
+            ik = str(inchikey).strip()
+        except Exception:
+            return ""
+        if not ik or ik.lower() in ("nan", "none", "null", "na"):
+            return ""
+        return ik.upper()
+
 logger = logging.getLogger(__name__)
+
+
+# P2-025 ROOT FIX: cross-platform exclusive file lock for the audit log.
+#
+# The previous ``_log_bridge_fallback`` opened ``bridge_fallbacks.jsonl``
+# in append mode WITHOUT any file lock. If two pipeline runs executed
+# concurrently (CI matrix, dev + prod on the same machine), their
+# writes interleaved — producing malformed JSONL (one line containing
+# partial JSON from each run). The audit log became unparseable, which
+# violates the FDA 21 CFR Part 11 tamper-evident audit-trail
+# requirement.
+#
+# ROOT FIX: acquire an exclusive lock (``fcntl.flock`` on Unix,
+# ``msvcrt.locking`` on Windows) on a sidecar ``.lock`` file BEFORE
+# appending to the audit log. The lock is released in the ``finally``
+# block. The pattern mirrors ``chemberta_encoder._acquire_cache_lock``
+# (lines 1106-1145) so the two audit subsystems share the same
+# concurrency contract.
+@contextmanager
+def _acquire_audit_lock(audit_path: Path) -> Iterator[Any]:
+    """Acquire an exclusive lock for the bridge-fallbacks audit log.
+
+    Uses a sidecar ``<audit_path>.lock`` file so the lock does not
+    interfere with readers of the audit log itself. The lock is
+    best-effort: if ``fcntl``/``msvcrt`` is unavailable (exotic
+    platform), the lock is skipped and the write proceeds without
+    protection — but this is logged at DEBUG so operators can detect
+    the degraded mode.
+    """
+    lock_path = Path(str(audit_path) + ".lock")
+    lock_fd = None
+    try:
+        lock_fd = open(lock_path, "w")
+        if sys.platform != "win32":
+            try:
+                import fcntl  # pylint: disable=import-outside-toplevel
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            except (ImportError, OSError) as lock_exc:
+                logger.debug(
+                    "fcntl.flock unavailable for audit log lock "
+                    "(%s) — proceeding WITHOUT file lock. Concurrent "
+                    "pipeline runs may interleave audit writes.",
+                    lock_exc,
+                )
+        else:
+            try:
+                import msvcrt  # pylint: disable=import-outside-toplevel
+                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_LOCK, 1)
+            except (ImportError, OSError) as lock_exc:
+                logger.debug(
+                    "msvcrt.locking unavailable for audit log lock "
+                    "(%s) — proceeding WITHOUT file lock. Concurrent "
+                    "pipeline runs may interleave audit writes.",
+                    lock_exc,
+                )
+        yield lock_fd
+    finally:
+        if lock_fd is not None:
+            try:
+                if sys.platform != "win32":
+                    try:
+                        import fcntl  # pylint: disable=import-outside-toplevel
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    except (ImportError, OSError):
+                        pass
+                lock_fd.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # v58 ROOT FIX (P2C-001 + P2C-008 deep): structured audit log for every
@@ -188,6 +317,11 @@ def _log_bridge_fallback(
     caller re-raised after emitting this audit record, so downstream
     readers can distinguish a true CSV fallback from a misleading
     "falling back" log that was actually followed by a raise.
+
+    P2-025 ROOT FIX: the audit write is now guarded by an exclusive
+    file lock (``_acquire_audit_lock``) so concurrent pipeline runs
+    cannot interleave their JSONL writes. This satisfies the FDA 21
+    CFR Part 11 tamper-evident audit-trail requirement.
     """
     try:
         from datetime import datetime, timezone
@@ -209,8 +343,11 @@ def _log_bridge_fallback(
             "extra": extra or {},
         }
         log_path = _audit_dir / "bridge_fallbacks.jsonl"
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        # P2-025 ROOT FIX: hold the exclusive lock for the duration of
+        # the append so concurrent runs cannot interleave writes.
+        with _acquire_audit_lock(log_path):
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
     except Exception as exc:  # noqa: BLE001
         logger.debug("Failed to write bridge fallback audit log: %s", exc)
 
@@ -1134,15 +1271,42 @@ def _is_production_env() -> bool:
 
     Logic:
       * ``DRUGOS_ENVIRONMENT=prod`` → True (explicit prod override).
-      * ``DRUGOS_ENVIRONMENT=dev`` → False (explicit dev override, even
-        if DATABASE_URL is set — lets developers use CSV fallback).
-      * Otherwise: True iff ``DATABASE_URL`` is set and non-empty.
+      * ``DRUGOS_ENVIRONMENT=dev`` (or UNSET) → False (dev is the safe
+        default — production deployments MUST set DRUGOS_ENVIRONMENT=prod
+        explicitly so an accidental DATABASE_URL leak from a global env
+        file doesn't trigger production-mode hard failures on a dev
+        machine).
+      * Otherwise (any other value): True iff ``DATABASE_URL`` is set
+        and non-empty (backward compat for operators who set
+        DRUGOS_ENVIRONMENT to a non-standard value like "staging").
+
+    P2-062 ROOT FIX: the previous logic defaulted UNSET
+    ``DRUGOS_ENVIRONMENT`` to "" (empty string), which fell through to
+    the ``DATABASE_URL`` check. An operator who set ``DATABASE_URL``
+    for a dev run (e.g. to test the postgres path) WITHOUT setting
+    ``DRUGOS_ENVIRONMENT=dev`` got PRODUCTION-mode behavior — DB
+    failures were FATAL, crashing the dev run instead of falling back
+    to CSV. This was confusing because the operator expected dev-mode
+    CSV fallback. Root fix: default UNSET to "dev" (the safe choice).
+    Production deployments MUST set ``DRUGOS_ENVIRONMENT=prod``
+    explicitly — this is the fail-safe direction (an unset variable
+    produces dev-mode behavior, not prod-mode hard failures). The
+    DOCX V1 launch checklist should require
+    ``DRUGOS_ENVIRONMENT=prod`` as an explicit deployment step.
     """
-    env = os.environ.get("DRUGOS_ENVIRONMENT", "").lower().strip()
+    # P2-062: default to "dev" when UNSET. Previously defaulted to ""
+    # which fell through to the DATABASE_URL check and caused dev runs
+    # with an accidental DATABASE_URL to get prod-mode hard failures.
+    env = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower().strip()
     if env == "prod":
         return True
     if env == "dev":
         return False
+    # P2-062: backward compat — if the operator set a non-standard
+    # value (e.g. "staging", "qa"), fall back to the DATABASE_URL
+    # heuristic. This preserves the old behavior for operators who
+    # explicitly set a non-standard env, while making "dev" the safe
+    # default for the common case of an UNSET variable.
     # Default: production iff the operator has configured a database.
     return bool(os.environ.get("DATABASE_URL", "").strip())
 
@@ -3544,7 +3708,18 @@ def stage_phase1_to_phase2(
             # but if any source emits a lowercase InChIKey it would be
             # dead-lettered. Uppercase explicitly here so the canonical
             # ID always matches the ID_PATTERNS regex.
-            inchikey_canonical = inchikey.upper() if inchikey else ""
+            #
+            # v102 ROOT FIX (P2-036): route through the centralized
+            # ``normalize_inchikey`` helper so this loader produces the
+            # SAME canonical form as chembl_loader and pubchem_loader
+            # (uppercase + strip + placeholder-collapsed). Previously
+            # ``inchikey.upper() if inchikey else ""`` did NOT strip
+            # whitespace, so a " RZBJ...AN " input would dead-letter
+            # while chembl_loader's ``.strip().upper()`` would succeed —
+            # the SAME compound landed as TWO canonical IDs depending
+            # on which loader ran. Centralizing eliminates this class
+            # of bug.
+            inchikey_canonical = _normalize_inchikey(inchikey)
             if inchikey_canonical and not inchikey_canonical.startswith("SYNTH"):
                 canonical_id = inchikey_canonical
             else:
@@ -4150,7 +4325,47 @@ def stage_phase1_to_phase2(
                 ).strip("_")
                 if not _slug:
                     continue
-                did = f"SYNDROME:{_slug}"
+                # v102 ROOT FIX (P2-046): before slugifying to a
+                # synthetic SYNDROME: ID, try to upgrade the disease
+                # name to a real biomedical ontology ID (DOID/MeSH) via
+                # the existing _DISEASE_KEYWORD_MAP. The previous code
+                # ALWAYS slugified — emitting "SYNDROME:Pain",
+                # "SYNDROME:Hepatitis-B", etc. — which do NOT match any
+                # biomedical ontology (DOID, OMIM, MeSH, EFO). ~half of
+                # Compound-treats-Disease edges pointed at SYNDROME:
+                # nodes that were disconnected from the rest of the
+                # Disease subgraph. Multi-hop queries like
+                # "Compound → treats → Disease → associated_with → Gene"
+                # returned empty for these diseases (they had no Gene
+                # edges). The KG was fragmented.
+                #
+                # ROOT FIX: scan the disease_name (lowercased) against
+                # _DISEASE_KEYWORD_MAP. If a keyword matches, upgrade
+                # the did to the corresponding DOID ID and mark the
+                # node with ontology_status="mapped". If NO keyword
+                # matches, keep the SYNDROME: slugified ID but mark
+                # the node with ontology_status="unmapped" so operators
+                # can audit (e.g. run a richer NLP disease-name matcher
+                # like NCBImeta API or a local MeSH lookup to upgrade
+                # later). This preserves the clinical signal (Aspirin
+                # treats Pain → now points at DOID:0050133 instead of
+                # SYNDROME:Pain) while keeping the audit trail.
+                _dname_lower = dname.strip().lower()
+                _matched_doid = None
+                for _kw, (_doid_id, _doid_name) in _DISEASE_KEYWORD_MAP.items():
+                    if _kw in _dname_lower:
+                        _matched_doid = _doid_id
+                        break
+                if _matched_doid is not None:
+                    # Upgrade to a real DOID ID — connects to the
+                    # broader Disease subgraph (DisGeNET, OMIM, etc.).
+                    did = _matched_doid
+                    _ontology_status = "mapped"
+                else:
+                    # No keyword match — keep the slugified SYNDROME: ID
+                    # but mark it unmapped so operators can audit.
+                    did = f"SYNDROME:{_slug}"
+                    _ontology_status = "unmapped"
                 # Emit a Disease node if not already staged.
                 if did not in disease_id_set and did not in _slug_seen:
                     _slug_seen.add(did)
@@ -4165,6 +4380,13 @@ def stage_phase1_to_phase2(
                         "_loaded_at": loaded_at,
                         "_schema_version": schema_version,
                         "_synthetic_disease": True,  # audit flag
+                        # v102 P2-046: track whether this Disease ID was
+                        # mapped to a real ontology (DOID/MeSH) or is a
+                        # synthetic SYNDROME: slug awaiting NLP upgrade.
+                        # Operators can query
+                        # ``MATCH (d:Disease {ontology_status: 'unmapped'})``
+                        # to audit the unmapped population.
+                        "ontology_status": _ontology_status,
                     }
                     staged.disease_nodes.append(dnode)
                     disease_id_set.add(did)
@@ -4213,6 +4435,42 @@ def stage_phase1_to_phase2(
             key = (drug_canonical, did)
             if key in seen_treats:
                 continue  # upstream dedup (bug #B2)
+            # P2-058 ROOT FIX: explicit referential-integrity guard
+            # BEFORE creating the treats edge. The audit (P2-058) noted
+            # that if a future refactor moves the treats_edges.append
+            # OUTSIDE the if/else block at lines 4181-4212, an invalid
+            # did (one that doesn't match any biomedical ontology
+            # pattern AND wasn't already in disease_id_set) could
+            # produce an orphan edge — the treats edge would point at
+            # a Disease node that kg_builder would dead-letter (no
+            # MATCH for the dst), but the bridge's ``staged.edges``
+            # count would include it, inflating the operator's
+            # expectation of loaded edge count. The current code path
+            # uses ``continue`` at line 4212 to skip invalid dids, so
+            # this guard is technically redundant TODAY — but it makes
+            # the invariant EXPLICIT and protects against future
+            # refactors. If ``did`` is not in ``disease_id_set`` (i.e.
+            # no Disease node was staged for it, by ANY source), we
+            # skip the edge creation and log a WARNING so the operator
+            # sees the silent drop. This is the "belt and suspenders"
+            # approach: the upstream ``continue`` at line 4212 should
+            # already prevent reaching here with an invalid did, but
+            # if a future maintainer changes that control flow, this
+            # guard catches the orphan edge before it's created.
+            if did not in disease_id_set:
+                logger.warning(
+                    "Phase1 bridge: skipping treats edge for drug=%s "
+                    "disease_id=%s — did is NOT in disease_id_set "
+                    "(no Disease node staged by any source). This "
+                    "would produce an orphan edge (treats → "
+                    "non-existent Disease). The upstream validation "
+                    "should have already skipped this did, so "
+                    "reaching this warning indicates a control-flow "
+                    "regression in the if/else block above. "
+                    "(P2-058 root fix)",
+                    drug_canonical, did,
+                )
+                continue
             seen_treats.add(key)
             _treat_itype = _safe_str(row.get("indication_type", "")) or "structured"
             treats_edges.append({
@@ -5863,18 +6121,107 @@ def bridge_to_pyg_maps(
     ValueError
         If the builder is empty or any edge references an unknown node.
     """
-    # Build entity_maps: {label: {id: idx}} with contiguous per-label indices.
+    # P2-027 ROOT FIX: consolidate Compound aliases before building
+    # entity_maps.
+    #
+    # The previous code deduped nodes ONLY by ``n["id"]``. But biotech
+    # drugs (insulin, mAbs, vaccines — ~30% of modern FDA approvals)
+    # have no InChIKey, so their canonical id is the DrugBank id (e.g.
+    # "DB00071"). ChEMBL and PubChem emit the SAME compound with
+    # canonical id = InChIKey (e.g. "RZ..."). The two never dedupe —
+    # producing DUPLICATE Compound nodes in the PyG HeteroData, broken
+    # multi-hop reasoning, and wasted GNN capacity.
+    #
+    # ROOT FIX: for Compound nodes, consult the ``compound_id_aliases``
+    # list (a whitelisted node property — see kg_builder.NODE_PROPERTY_
+    # WHITELIST). If ANY alias of the current node already maps to an
+    # existing index, treat the current node's id as an ALIAS of that
+    # existing index (do NOT allocate a new index). This mirrors the
+    # MERGE-by-alias pattern in kg_builder._load_nodes (line ~1645).
+    #
+    # We build a separate ``alias_to_idx`` map for Compound so edge
+    # lookups (which may reference the Compound by ANY of its ids)
+    # resolve to the canonical index.
+    #
+    # NOTE: Team 4's P2-005 fix addressed the same issue (P2-027 and
+    # P2-005 are the same bug). This implementation supersedes Team 4's
+    # version because it ALSO handles edge lookup via the alias map
+    # (Team 4's version only consolidated nodes, leaving edges that
+    # reference a Compound by its alias id unresolved).
     entity_maps: Dict[str, Dict[str, int]] = {}
+    # P2-027: parallel alias→canonical-index map for Compound nodes.
+    # Keyed by ANY id (canonical or alias) → canonical PyG index.
+    compound_alias_to_idx: Dict[str, int] = {}
+    n_compound_alias_merges = 0
+
     for load in builder.node_loads:
         label = load["label"]
         if label not in entity_maps:
             entity_maps[label] = {}
         for i, n in enumerate(load["nodes"]):
             nid = n["id"]
-            if nid not in entity_maps[label]:
-                entity_maps[label][nid] = len(entity_maps[label])
+            if label == "Compound":
+                # P2-027: check if this Compound's id OR any of its
+                # aliases already maps to an existing index.
+                if nid in compound_alias_to_idx:
+                    # Already known (either as a canonical id from a
+                    # previous load, or as an alias of an earlier node).
+                    # DO NOT add to entity_maps — entity_maps must
+                    # contain only canonical ids so len(entity_maps
+                    # [label]) reflects the true node count. The alias
+                    # is already in compound_alias_to_idx for edge
+                    # lookup.
+                    continue
+                aliases = n.get("compound_id_aliases") or []
+                if isinstance(aliases, str):
+                    # Defensive: some loaders may emit a pipe-joined str.
+                    aliases = [a.strip() for a in aliases.split("|") if a.strip()]
+                existing_idx = None
+                for alias in aliases:
+                    if isinstance(alias, str) and alias in compound_alias_to_idx:
+                        existing_idx = compound_alias_to_idx[alias]
+                        break
+                if existing_idx is not None:
+                    # Alias merge — DO NOT add this nid to entity_maps
+                    # (it would inflate the key count and confuse any
+                    # downstream code that uses len(entity_maps[label])
+                    # as the node count). Instead, register nid + all
+                    # its aliases ONLY in compound_alias_to_idx so edge
+                    # lookups can resolve them to the canonical index.
+                    compound_alias_to_idx[nid] = existing_idx
+                    for alias in aliases:
+                        if isinstance(alias, str):
+                            compound_alias_to_idx[alias] = existing_idx
+                    n_compound_alias_merges += 1
+                    continue
+                # New canonical Compound node — allocate a new index.
+                new_idx = len(entity_maps[label])
+                entity_maps[label][nid] = new_idx
+                compound_alias_to_idx[nid] = new_idx
+                for alias in aliases:
+                    if isinstance(alias, str):
+                        compound_alias_to_idx[alias] = new_idx
+            else:
+                # Non-Compound labels: original simple dedup by id.
+                if nid not in entity_maps[label]:
+                    entity_maps[label][nid] = len(entity_maps[label])
+
+    if n_compound_alias_merges > 0:
+        logger.info(
+            "bridge_to_pyg_maps: P2-027 alias consolidation merged %d "
+            "Compound nodes into existing canonical nodes (avoids "
+            "duplicate biologic Compound nodes in PyG HeteroData).",
+            n_compound_alias_merges,
+            extra={
+                "stage": "bridge_to_pyg_maps",
+                "compound_alias_merges": n_compound_alias_merges,
+            },
+        )
 
     # Build edge_maps: {(src, rel, dst): (src_idx_list, dst_idx_list)}.
+    # P2-027: for Compound endpoints, resolve via compound_alias_to_idx
+    # so edges referencing a Compound by an alias id (e.g. InChIKey)
+    # resolve to the canonical PyG index.
     edge_maps: Dict[Tuple[str, str, str], Tuple[List[int], List[int]]] = {}
     for load in builder.edge_loads:
         key = (load["src_label"], load["rel_type"], load["dst_label"])
@@ -5885,18 +6232,27 @@ def bridge_to_pyg_maps(
         for e in load["edges"]:
             sid = e["src_id"]
             did = e["dst_id"]
-            if sid not in src_map:
+            # P2-027: resolve Compound endpoints through the alias map.
+            if key[0] == "Compound" and sid in compound_alias_to_idx:
+                src_idx = compound_alias_to_idx[sid]
+            elif sid in src_map:
+                src_idx = src_map[sid]
+            else:
                 raise ValueError(
                     f"bridge_to_pyg_maps: edge {key} references unknown "
                     f"src node {sid!r} in label {key[0]!r}"
                 )
-            if did not in dst_map:
+            if key[2] == "Compound" and did in compound_alias_to_idx:
+                dst_idx = compound_alias_to_idx[did]
+            elif did in dst_map:
+                dst_idx = dst_map[did]
+            else:
                 raise ValueError(
                     f"bridge_to_pyg_maps: edge {key} references unknown "
                     f"dst node {did!r} in label {key[2]!r}"
                 )
-            src_list.append(src_map[sid])
-            dst_list.append(dst_map[did])
+            src_list.append(src_idx)
+            dst_list.append(dst_idx)
         if key in edge_maps:
             # Merge with existing lists (preserves order).
             old_s, old_d = edge_maps[key]

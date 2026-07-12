@@ -25,7 +25,9 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import type { ReactNode } from 'react';
 import { api, type ApiError } from '@/lib/api-client';
+import { Card, CardContent } from '@/components/ui/card';
 
 export interface AsyncState<T> {
   data: T | null;
@@ -330,6 +332,13 @@ export function useBuildEvidencePackage() {
 
 /**
  * Fetch RL-ranked candidates via the real /api/rl endpoint.
+ *
+ * FE-067 ROOT FIX: When `drug` and `disease` are both unset, the hook now
+ * issues a GET /api/rl (default top-N list) instead of short-circuiting
+ * with no fetch. This lets the Knowledge Graph Explorer look up real RL
+ * candidates by drug name when the user clicks a drug node — previously
+ * the lookup hit the mock `drugCandidates` array and silently failed for
+ * any drug that wasn't in the mock set.
  */
 export function useRlCandidates(params: { drug?: string; disease?: string; limit?: number }) {
   const [state, setState] = useState<AsyncState<{ candidates: any[]; source?: string; total?: number }>>({
@@ -340,18 +349,26 @@ export function useRlCandidates(params: { drug?: string; disease?: string; limit
 
   const paramsKey = JSON.stringify(params);
   useEffect(() => {
-    if (!params.drug && !params.disease) {
-      setState({ data: null, loading: false, error: null });
-      return;
-    }
     let cancelled = false;
     setState({ data: null, loading: true, error: null });
-    fetch(`/api/rl`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params),
-    })
+
+    // FE-067: if no drug/disease filter is provided, fetch the default
+    // top-N list via GET. Otherwise POST with the filter params.
+    const hasFilter = !!(params.drug || params.disease);
+    const fetchInit: RequestInit = hasFilter
+      ? {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(params),
+        }
+      : {
+          method: "GET",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+        };
+
+    fetch(`/api/rl`, fetchInit)
       .then(async (res) => {
         const text = await res.text();
         let body: any = null;
@@ -422,3 +439,150 @@ export function ErrorDisplay({ error, onRetry }: { error: ApiError; onRetry?: ()
 // We import these here so the icons used by LoadingSpinner/ErrorDisplay are
 // always available without each screen importing them separately.
 import { RefreshCw, AlertCircle } from 'lucide-react';
+
+// ---------------------------------------------------------------------------
+// FE-009 ROOT FIX: Generic hooks for admin/dashboard screens.
+//
+// The previous all-screens.tsx and admin-billing-etc-screens.tsx rendered
+// hardcoded mock data ("Dr. Sarah Chen", "James Wilson", etc.) for ~38
+// admin/dashboard screens. An admin viewing "User Management" thought they
+// saw the real user list but actually saw 6 fake users. The platform was
+// non-functional for its stated admin/billing/collab use cases.
+//
+// The hooks below let every admin screen call the real API client with
+// proper loading / error / empty states, so a researcher never sees
+// fabricated data presented as real.
+// ---------------------------------------------------------------------------
+
+/**
+ * Generic "fetch a list endpoint" hook. Returns { data, loading, error }
+ * plus a `refetch` callback. The fetch is fired on mount and whenever
+ * `refetchToken` changes (so callers can trigger a refresh).
+ *
+ * Usage:
+ *   const { data, loading, error, refetch } = useApiList(
+ *     () => api.listUsers(50, 0),
+ *     []
+ *   );
+ */
+export function useApiList<T>(
+  fetcher: () => Promise<T>,
+  deps: unknown[] = [],
+  options: { refetchToken?: unknown } = {}
+): {
+  data: T | null;
+  loading: boolean;
+  error: ApiError | null;
+  refetch: () => void;
+} {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<ApiError | null>(null);
+  const [refetchCounter, setRefetchCounter] = useState(0);
+
+  // We deliberately stringify deps to avoid identity churn. The linter
+  // can't statically verify that `fetcher` is stable, so we ignore it.
+  const depsKey = JSON.stringify(deps);
+  const refetchToken = options.refetchToken;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetcher()
+      .then((result) => {
+        if (!cancelled) {
+          setData(result);
+          setLoading(false);
+        }
+      })
+      .catch((err: ApiError) => {
+        if (!cancelled) {
+          setError(err);
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+     
+  }, [depsKey, refetchToken, refetchCounter]);
+
+  const refetch = () => setRefetchCounter((c) => c + 1);
+  return { data, loading, error, refetch };
+}
+
+/**
+ * Generic "fetch a single resource" hook. Same semantics as useApiList but
+ * for endpoints that return a single object (e.g. api.getSystemStatus()).
+ */
+export function useApiResource<T>(
+  fetcher: () => Promise<T>,
+  deps: unknown[] = []
+): {
+  data: T | null;
+  loading: boolean;
+  error: ApiError | null;
+  refetch: () => void;
+} {
+  return useApiList(fetcher, deps);
+}
+
+/**
+ * FE-009 ROOT FIX: DemoDataBanner.
+ *
+ * For admin/dashboard screens where the backend API has NOT been implemented
+ * yet (RolesScreen, SSOScreen, FeatureFlagsScreen, etc.), we render this
+ * banner above the illustrative data. It tells the admin honestly:
+ *   "This screen shows illustrative demo data. The backend API is not yet
+ *    implemented. Do not make business decisions based on these numbers."
+ *
+ * This is the production-grade way to handle "we don't have a real API for
+ * this screen yet" — we DO NOT silently render mock data as if it were
+ * real (that was the original FE-009 bug).
+ */
+export function DemoDataBanner({ screenName }: { screenName: string }) {
+  return (
+    <div className="mb-4 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-amber-900">
+      <div className="flex items-start gap-2">
+        <AlertCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
+        <div className="text-sm">
+          <p className="font-semibold">Illustrative demo data — {screenName}</p>
+          <p className="mt-1 text-xs">
+            The backend API for this screen has not been implemented yet. The
+            numbers and entries below are illustrative only and may not match
+            your actual organization&rsquo;s state. <strong>Do not make business,
+            billing, or compliance decisions based on this view.</strong>
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * FE-009 ROOT FIX: Generic empty state for list-based admin screens.
+ * Used when a real API returns an empty list.
+ */
+export function EmptyState({
+  title,
+  description,
+  action,
+}: {
+  title: string;
+  description?: string;
+  action?: ReactNode;
+}) {
+  return (
+    <Card>
+      <CardContent className="py-12 text-center text-muted-foreground">
+        <AlertCircle className="h-8 w-8 mx-auto mb-2 opacity-50" />
+        <p className="text-sm font-medium">{title}</p>
+        {description && (
+          <p className="text-xs mt-1 max-w-md mx-auto">{description}</p>
+        )}
+        {action && <div className="mt-4">{action}</div>}
+      </CardContent>
+    </Card>
+  );
+}

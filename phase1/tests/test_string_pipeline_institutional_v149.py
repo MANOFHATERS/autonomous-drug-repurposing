@@ -5,27 +5,27 @@ the upgraded STRING pipeline correctly addresses every one of the 149
 catalogued defects documented in ``STRING_PIPELINE_FIX_PROMPT.docx``,
 covering all 16 quality domains:
 
-* Domain 1 (Architecture)          — GAP-1.1 through GAP-1.6
-* Domain 2 (Design)                — GUARD-2.1, GUARD-2.2, GAP-2.3 through GAP-2.7
-* Domain 3 (Scientific Correctness) — BUG-3.1 through BUG-3.7, GAP-3.5 through GAP-3.11  ← LIFE-SAFETY CRITICAL
-* Domain 4 (Coding)                — BUG-4.1 through BUG-4.3, GAP-4.4 through GAP-4.16
-* Domain 5 (Data Quality)          — BUG-5.1 through BUG-5.3, GAP-5.4 through GAP-5.8
-* Domain 6 (Reliability)           — GAP-6.2 through GAP-6.8
-* Domain 7 (Idempotency)           — BUG-7.1, BUG-7.2, GAP-7.3 through GAP-7.7
-* Domain 8 (Performance)           — BUG-8.1 through BUG-8.3, GAP-8.4 through GAP-8.9
-* Domain 9 (Security)              — GAP-9.1 through GAP-9.5
-* Domain 10 (Testing)              — BUG-10.1 through BUG-10.4, GAP-10.5 through GAP-10.9  (this test file)
-* Domain 11 (Logging)              — BUG-11.1, BUG-11.2, GAP-11.3 through GAP-11.11
-* Domain 12 (Configuration)        — GAP-12.1 through GAP-12.9
-* Domain 13 (Documentation)        — GAP-13.1 through GAP-13.10
-* Domain 14 (Compliance)           — BUG-14.1, GAP-14.2 through GAP-14.8
-* Domain 15 (Interoperability)     — BUG-15.1, BUG-15.2, GAP-15.3 through GAP-15.10
-* Domain 16 (Lineage)              — BUG-16.1, BUG-16.2, GAP-16.3 through GAP-16.12
+* Domain 1 (Architecture)          -- GAP-1.1 through GAP-1.6
+* Domain 2 (Design)                -- GUARD-2.1, GUARD-2.2, GAP-2.3 through GAP-2.7
+* Domain 3 (Scientific Correctness) -- BUG-3.1 through BUG-3.7, GAP-3.5 through GAP-3.11  ← LIFE-SAFETY CRITICAL
+* Domain 4 (Coding)                -- BUG-4.1 through BUG-4.3, GAP-4.4 through GAP-4.16
+* Domain 5 (Data Quality)          -- BUG-5.1 through BUG-5.3, GAP-5.4 through GAP-5.8
+* Domain 6 (Reliability)           -- GAP-6.2 through GAP-6.8
+* Domain 7 (Idempotency)           -- BUG-7.1, BUG-7.2, GAP-7.3 through GAP-7.7
+* Domain 8 (Performance)           -- BUG-8.1 through BUG-8.3, GAP-8.4 through GAP-8.9
+* Domain 9 (Security)              -- GAP-9.1 through GAP-9.5
+* Domain 10 (Testing)              -- BUG-10.1 through BUG-10.4, GAP-10.5 through GAP-10.9  (this test file)
+* Domain 11 (Logging)              -- BUG-11.1, BUG-11.2, GAP-11.3 through GAP-11.11
+* Domain 12 (Configuration)        -- GAP-12.1 through GAP-12.9
+* Domain 13 (Documentation)        -- GAP-13.1 through GAP-13.10
+* Domain 14 (Compliance)           -- BUG-14.1, GAP-14.2 through GAP-14.8
+* Domain 15 (Interoperability)     -- BUG-15.1, BUG-15.2, GAP-15.3 through GAP-15.10
+* Domain 16 (Lineage)              -- BUG-16.1, BUG-16.2, GAP-16.3 through GAP-16.12
 
 Plus TIER 0 (pipeline-breaking) bugs: BUG-P0-1, BUG-P0-2, BUG-P0-3.
 
-Every test here verifies REAL behaviour with REAL assertions — no ``pass``
-statements, no ``assertTrue(True)``.  All tests are mock-based — no network
+Every test here verifies REAL behaviour with REAL assertions -- no ``pass``
+statements, no ``assertTrue(True)``.  All tests are mock-based -- no network
 access is required.
 
 Run::
@@ -210,7 +210,7 @@ def fixtures_copied(string_pipeline):
 
 
 # ============================================================================
-# Section 1 — TIER 0: Pipeline-breaking bugs (BUG-P0-1, BUG-P0-2, BUG-P0-3)
+# Section 1 -- TIER 0: Pipeline-breaking bugs (BUG-P0-1, BUG-P0-2, BUG-P0-3)
 # ============================================================================
 
 
@@ -304,16 +304,16 @@ class TestTier0PipelineBreakers:
         # Should produce valid output with NaN sub-scores (no crash).
         assert len(df) > 0
         assert "neighborhood" in df.columns
-        assert df["neighborhood"].isna().all()  # No detailed file → all NaN
+        assert df["neighborhood"].isna().all()  # No detailed file -> all NaN
 
 
 # ============================================================================
-# Section 2 — Domain 3: Scientific Correctness (LIFE-SAFETY CRITICAL)
+# Section 2 -- Domain 3: Scientific Correctness (LIFE-SAFETY CRITICAL)
 # ============================================================================
 
 
 class TestScientificCorrectness:
-    """Domain 3 — every transformation must be defensible against a citation."""
+    """Domain 3 -- every transformation must be defensible against a citation."""
 
     def test_bug_3_1_homodimers_logged_and_deadlettered(
         self, fixtures_copied, tmp_processed_dir, caplog
@@ -440,7 +440,7 @@ class TestScientificCorrectness:
         """BUG-3.7: Lowercase UniProt accessions are uppercased."""
         p = fixtures_copied
         mapping = p._build_string_uniprot_map(p._aliases_path)
-        # The fixture has lowercase "p01116" — should be uppercased to P01116.
+        # The fixture has lowercase "p01116" -- should be uppercased to P01116.
         # (Wait, the fixture only had it for ENSP00000001800 which isn't in the
         # links file. So we check that the mapping for that ID is uppercase.)
         if "9606.ENSP00000001800" in mapping:
@@ -459,7 +459,7 @@ class TestScientificCorrectness:
         p = fixtures_copied
         mapping = p._build_string_uniprot_map(p._aliases_path)
         # The fixture has P04637-2 (isoform of TP53) for ENSP00000001900.
-        # Canonical accessions have no hyphen — isoforms should be excluded.
+        # Canonical accessions have no hyphen -- isoforms should be excluded.
         for v in mapping.values():
             assert "-" not in v, f"Isoform {v!r} must be separated from canonical"
         # Dead-letter file should exist for isoforms.
@@ -529,7 +529,7 @@ class TestScientificCorrectness:
         """GAP-3.11: max_score dedup keeps the highest score for collapsed pairs."""
         p = string_pipeline
         # Two ENSP pairs that collapse to the same UniProt pair.
-        # Row A: score 700, Row B: score 900 — should keep 900.
+        # Row A: score 700, Row B: score 900 -- should keep 900.
         rows = [
             "protein1 protein2 combined_score",
             "9606.ENSP00000000233 9606.ENSP00000000412 700",
@@ -559,16 +559,16 @@ class TestScientificCorrectness:
 
 
 # ============================================================================
-# Section 3 — Domain 5: Data Quality & Integrity
+# Section 3 -- Domain 5: Data Quality & Integrity
 # ============================================================================
 
 
 class TestDataQuality:
-    """Domain 5 — every value must be valid, complete, unique, consistent."""
+    """Domain 5 -- every value must be valid, complete, unique, consistent."""
 
     def test_bug_5_1_null_combined_score_not_zeroed(self, string_pipeline, tmp_processed_dir):
         """BUG-5.1: NULL combined_score is quarantined, not masked as 0.
-        Same as BUG-3.2 — verifies the fix simultaneously resolves BUG-5.1."""
+        Same as BUG-3.2 -- verifies the fix simultaneously resolves BUG-5.1."""
         p = string_pipeline
         rows = [
             "protein1 protein2 combined_score",
@@ -603,7 +603,7 @@ class TestDataQuality:
 
     def test_bug_5_2_nan_score_rows_deadlettered(self, string_pipeline, tmp_processed_dir):
         """BUG-5.2: NaN-scored rows are dead-lettered before the score filter."""
-        # Same setup as test_bug_5_1 — already covered.
+        # Same setup as test_bug_5_1 -- already covered.
         p = string_pipeline
         rows = [
             "protein1 protein2 combined_score",
@@ -715,12 +715,12 @@ class TestDataQuality:
 
 
 # ============================================================================
-# Section 4 — Domain 7: Idempotency & Reproducibility
+# Section 4 -- Domain 7: Idempotency & Reproducibility
 # ============================================================================
 
 
 class TestIdempotency:
-    """Domain 7 — same input → same output, every time."""
+    """Domain 7 -- same input -> same output, every time."""
 
     def test_bug_7_1_dedup_deterministic(self, string_pipeline, tmp_processed_dir):
         """BUG-7.1: dedup is deterministic across runs (max_score strategy)."""
@@ -822,12 +822,12 @@ class TestIdempotency:
 
 
 # ============================================================================
-# Section 5 — Domain 1: Architecture
+# Section 5 -- Domain 1: Architecture
 # ============================================================================
 
 
 class TestArchitecture:
-    """Domain 1 — system structure, module organization."""
+    """Domain 1 -- system structure, module organization."""
 
     def test_gap_1_1_load_uses_passed_session(self, fixtures_copied, populated_db_session):
         """GAP-1.1: load() uses the passed session, not a new one."""
@@ -912,12 +912,12 @@ class TestArchitecture:
 
 
 # ============================================================================
-# Section 6 — Domain 9: Security & Privacy
+# Section 6 -- Domain 9: Security & Privacy
 # ============================================================================
 
 
 class TestSecurity:
-    """Domain 9 — integrity of input data is a security property."""
+    """Domain 9 -- integrity of input data is a security property."""
 
     def test_gap_9_1_detailed_file_integrity_verified(self, string_pipeline):
         """GAP-9.1: _verify_file_integrity catches corrupted files."""
@@ -938,7 +938,7 @@ class TestSecurity:
         p = fixtures_copied
         df = p.clean(p._links_path)
         # The DataFrame should not contain formula-injection characters in
-        # identifier columns (defensive — UniProt IDs are safe by pattern).
+        # identifier columns (defensive -- UniProt IDs are safe by pattern).
         for col in ("uniprot_id_a", "uniprot_id_b", "string_id_a", "string_id_b"):
             if col in df.columns and not df.empty:
                 # No cell should start with =, +, -, @ (CSV formula injection).
@@ -988,12 +988,12 @@ class TestSecurity:
 
 
 # ============================================================================
-# Section 7 — Domain 2: Design
+# Section 7 -- Domain 2: Design
 # ============================================================================
 
 
 class TestDesign:
-    """Domain 2 — schema contracts, naming consistency."""
+    """Domain 2 -- schema contracts, naming consistency."""
 
     def test_guard_2_1_output_matches_schema(self, fixtures_copied):
         """GUARD-2.1: output columns match schema/v1.json."""
@@ -1059,12 +1059,12 @@ class TestDesign:
 
 
 # ============================================================================
-# Section 8 — Domain 14: Compliance
+# Section 8 -- Domain 14: Compliance
 # ============================================================================
 
 
 class TestCompliance:
-    """Domain 14 — would this pass an external audit?"""
+    """Domain 14 -- would this pass an external audit?"""
 
     def test_bug_14_1_schema_conformance(self, fixtures_copied):
         """BUG-14.1: output passes schema validation."""
@@ -1118,12 +1118,12 @@ class TestCompliance:
 
 
 # ============================================================================
-# Section 9 — Domain 6: Reliability & Resilience
+# Section 9 -- Domain 6: Reliability & Resilience
 # ============================================================================
 
 
 class TestReliability:
-    """Domain 6 — what happens when things go wrong?"""
+    """Domain 6 -- what happens when things go wrong?"""
 
     def test_gap_6_3_missing_aliases_raises_filenotfound(self, string_pipeline):
         """GAP-6.3: missing aliases file raises FileNotFoundError (not silent)."""
@@ -1181,18 +1181,18 @@ class TestReliability:
         p._links_path = p.raw_dir / "9606.protein.links.v12.0.txt.gz"
         p._aliases_path = p.raw_dir / "9606.protein.aliases.v12.0.txt.gz"
         p._detailed_path = p.raw_dir / "9606.protein.links.detailed.v12.0.txt.gz"
-        # Should NOT crash — should skip detailed and continue.
+        # Should NOT crash -- should skip detailed and continue.
         df = p.clean(p._links_path)
         assert isinstance(df, pd.DataFrame)
 
 
 # ============================================================================
-# Section 10 — Domain 10: Testing & Validation
+# Section 10 -- Domain 10: Testing & Validation
 # ============================================================================
 
 
 class TestTesting:
-    """Domain 10 — verifies that the tests themselves are real and meaningful."""
+    """Domain 10 -- verifies that the tests themselves are real and meaningful."""
 
     def test_gap_10_5_edge_case_tests_exist(self):
         """GAP-10.5: edge-case test methods exist on this test class."""
@@ -1247,12 +1247,12 @@ class TestTesting:
 
 
 # ============================================================================
-# Section 11 — Domain 4: Coding
+# Section 11 -- Domain 4: Coding
 # ============================================================================
 
 
 class TestCoding:
-    """Domain 4 — syntax, logic, naming, structure."""
+    """Domain 4 -- syntax, logic, naming, structure."""
 
     def test_bug_4_1_sep_is_regex_not_space(self):
         """BUG-4.1: read_csv uses sep=r'\\s+', not sep=' '."""
@@ -1319,7 +1319,7 @@ class TestCoding:
                     if pd.isna(val):
                         continue  # np.nan or NaN is acceptable
                     assert val is not None, (
-                        f"Numeric column {col!r} contains None — use np.nan"
+                        f"Numeric column {col!r} contains None -- use np.nan"
                     )
 
     def test_gap_4_8_log_messages_accurate(self, fixtures_copied, caplog):
@@ -1330,17 +1330,17 @@ class TestCoding:
         info_text = " ".join(rec.message for rec in caplog.records)
         # The "Parsed N raw PPI records" log should match the actual count.
         # The fixture has 10 rows - 1 header - 2 mouse (filtered at load_links)
-        # = 7 rows. (The NaN row stays in — it's dropped at filter stage.)
+        # = 7 rows. (The NaN row stays in -- it's dropped at filter stage.)
         assert "Parsed" in info_text
 
 
 # ============================================================================
-# Section 12 — Domain 8: Performance & Scalability
+# Section 12 -- Domain 8: Performance & Scalability
 # ============================================================================
 
 
 class TestPerformance:
-    """Domain 8 — will this work at 100x scale?"""
+    """Domain 8 -- will this work at 100x scale?"""
 
     def test_gap_8_1_low_memory_configurable(self):
         """GAP-8.1: STRING_LOW_MEMORY config knob is importable."""
@@ -1391,12 +1391,12 @@ class TestPerformance:
 
 
 # ============================================================================
-# Section 13 — Domain 11: Logging & Observability
+# Section 13 -- Domain 11: Logging & Observability
 # ============================================================================
 
 
 class TestLogging:
-    """Domain 11 — can I find WHERE it went wrong?"""
+    """Domain 11 -- can I find WHERE it went wrong?"""
 
     def test_bug_11_1_session_carries_lineage(self, fixtures_copied, populated_db_session):
         """BUG-11.1: the passed session carries lineage context."""
@@ -1429,7 +1429,7 @@ class TestLogging:
         p = fixtures_copied
         metrics = []
         p._emit_metric = lambda name, value, tags=None: metrics.append((name, value))
-        # The fixture has aliases that don't cover all proteins — some unmapped.
+        # The fixture has aliases that don't cover all proteins -- some unmapped.
         p.clean(p._links_path)
         # Even if no unmapped, the metric infrastructure is in place.
         # Verify the metric infrastructure works.
@@ -1444,7 +1444,7 @@ class TestLogging:
         p.load(df, session=populated_db_session)
         names = [m[0] for m in metrics]
         # The fixture has 1 homodimer (P69905-P69905 via ENSP00000000233 self-interaction,
-        # plus another from ENSP00000000999-ENSP00000001000 → P23219-P23219).
+        # plus another from ENSP00000000999-ENSP00000001000 -> P23219-P23219).
         assert "string.homodimers_dropped" in names
 
     def test_gap_11_5_dedup_metric_emitted(self, fixtures_copied):
@@ -1458,16 +1458,16 @@ class TestLogging:
 
 
 # ============================================================================
-# Section 14 — Domain 12: Configuration & Environment
+# Section 14 -- Domain 12: Configuration & Environment
 # ============================================================================
 
 
 class TestConfiguration:
-    """Domain 12 — can I deploy by changing just config?"""
+    """Domain 12 -- can I deploy by changing just config?"""
 
     def test_gap_12_1_source_not_hardcoded(self, fixtures_copied):
         """GAP-12.1: source uses self.source_name, not hardcoded 'string'."""
-        # Same as test_gap_2_7 — verifying from a different angle.
+        # Same as test_gap_2_7 -- verifying from a different angle.
         p = fixtures_copied
         df = p.clean(p._links_path)
         assert (df["source"] == p.source_name).all()
@@ -1514,12 +1514,12 @@ class TestConfiguration:
 
 
 # ============================================================================
-# Section 15 — Domain 15: Interoperability & Integration
+# Section 15 -- Domain 15: Interoperability & Integration
 # ============================================================================
 
 
 class TestInteroperability:
-    """Domain 15 — will my consumers break?"""
+    """Domain 15 -- will my consumers break?"""
 
     def test_bug_15_1_schema_matches_downstream_consumers(self, fixtures_copied):
         """BUG-15.1: output schema matches what downstream consumers expect."""
@@ -1581,7 +1581,7 @@ class TestInteroperability:
         """GAP-15.8: empty UniProt mapping raises RuntimeError."""
         p = fixtures_copied
         df = p.clean(p._links_path)
-        # db_session is empty (no proteins) — load should raise.
+        # db_session is empty (no proteins) -- load should raise.
         with pytest.raises(RuntimeError, match="UniProt"):
             p.load(df, session=db_session)
 
@@ -1599,12 +1599,12 @@ class TestInteroperability:
 
 
 # ============================================================================
-# Section 16 — Domain 16: Data Lineage & Traceability
+# Section 16 -- Domain 16: Data Lineage & Traceability
 # ============================================================================
 
 
 class TestLineage:
-    """Domain 16 — can I trace HOW a value was derived?"""
+    """Domain 16 -- can I trace HOW a value was derived?"""
 
     def test_bug_16_1_source_version_in_audit(self, string_pipeline):
         """BUG-16.1: source_version is set after download()."""
@@ -1690,12 +1690,12 @@ class TestLineage:
 
 
 # ============================================================================
-# Section 17 — Domain 13: Documentation & Readability
+# Section 17 -- Domain 13: Documentation & Readability
 # ============================================================================
 
 
 class TestDocumentation:
-    """Domain 13 — can I understand this 6 months from now?"""
+    """Domain 13 -- can I understand this 6 months from now?"""
 
     def test_gap_13_1_clean_docstring_lists_stages(self):
         """GAP-13.1: clean() docstring lists the decomposition stages."""
@@ -1735,15 +1735,15 @@ class TestDocumentation:
 
 
 # ============================================================================
-# Section 18 — End-to-end integration
+# Section 18 -- End-to-end integration
 # ============================================================================
 
 
 class TestEndToEnd:
-    """End-to-end: download (mocked) → clean → load into SQLite."""
+    """End-to-end: download (mocked) -> clean -> load into SQLite."""
 
     def test_full_lifecycle_mock(self, fixtures_copied, populated_db_session, tmp_processed_dir):
-        """Full lifecycle: clean() → load() → DB has PPIs with lineage."""
+        """Full lifecycle: clean() -> load() -> DB has PPIs with lineage."""
         p = fixtures_copied
         df = p.clean(p._links_path)
         assert len(df) > 0
@@ -1772,13 +1772,13 @@ class TestEndToEnd:
         populated_db_session.commit()
         ppis1 = populated_db_session.query(ProteinProteinInteraction).count()
 
-        # Load again — should be an upsert, not insert.
+        # Load again -- should be an upsert, not insert.
         loaded2 = p.load(df, session=populated_db_session)
         populated_db_session.commit()
         ppis2 = populated_db_session.query(ProteinProteinInteraction).count()
 
         assert ppis1 == ppis2, (
-            f"Idempotency violated: {ppis1} → {ppis2} after second load"
+            f"Idempotency violated: {ppis1} -> {ppis2} after second load"
         )
 
     def test_clean_output_schema_valid(self, fixtures_copied):
@@ -1862,7 +1862,7 @@ class TestEndToEnd:
 
 
 # ============================================================================
-# Section 19 — Helper: build a session pre-populated with proteins
+# Section 19 -- Helper: build a session pre-populated with proteins
 # ============================================================================
 
 

@@ -22,10 +22,10 @@ Loading Strategy
 Environment variables are NOT read at import time. Instead, the first
 access to any setting triggers ``_ensure_dotenv_loaded()`` which loads
 the ``.env`` file exactly once. This makes importing this module
-side-effect-free — safe for DAG parsing, test frameworks, and IDE
+side-effect-free -- safe for DAG parsing, test frameworks, and IDE
 autocompletion.
 
-Exceptions (P1-022 ROOT FIX — documented eager reads):
+Exceptions (P1-022 ROOT FIX -- documented eager reads):
   ``ENVIRONMENT`` (and its alias ``DRUGOS_ENVIRONMENT``) IS read at
   import time. This is intentional because ENVIRONMENT is consumed by
   many module-level constants (``_PROFILE_DEFAULTS`` lookups,
@@ -82,11 +82,11 @@ Deprecated Settings
 The following settings are deprecated and will be removed in v2.0.0
 (scheduled: 2025-Q4). Accessing them triggers a ``DeprecationWarning``:
 
-- ``CHEMBL_URL`` — use ``CHEMBL_API_URL`` or the ChEMBL pipeline directly
-- ``UNIPROT_SPROT_URL`` — use the UniProt REST API
-- ``UNIPROT_TREMBL_URL`` — use the UniProt REST API
-- ``STRING_PROTEIN_INFO_URL`` — not used by any pipeline
-- ``DISGENET_STATIC_URL`` — use ``DISGENET_API_URL`` (static URL
+- ``CHEMBL_URL`` -- use ``CHEMBL_API_URL`` or the ChEMBL pipeline directly
+- ``UNIPROT_SPROT_URL`` -- use the UniProt REST API
+- ``UNIPROT_TREMBL_URL`` -- use the UniProt REST API
+- ``STRING_PROTEIN_INFO_URL`` -- not used by any pipeline
+- ``DISGENET_STATIC_URL`` -- use ``DISGENET_API_URL`` (static URL
   deprecated since 2024)
 """
 
@@ -105,7 +105,7 @@ from pathlib import Path
 from typing import Optional
 
 # ---------------------------------------------------------------------------
-# Lazy dotenv loading — ARCH-1, ARCH-5, RELI-3
+# Lazy dotenv loading -- ARCH-1, ARCH-5, RELI-3
 # ---------------------------------------------------------------------------
 # python-dotenv is an OPTIONAL dependency. If it is not installed, the
 # platform falls back to plain os.getenv() (environment variables must be
@@ -113,32 +113,35 @@ from typing import Optional
 
 _dotenv_loaded: bool = False
 
-# Module-level load_dotenv binding so tests can mock `config.settings.load_dotenv`
-# and downstream code can call it without re-importing. python-dotenv is an
-# OPTIONAL dependency — if it's not installed, `load_dotenv` is a no-op
-# function that returns False (and logs once).
+# P1-019 ROOT FIX (Team-2 -- inline the load_dotenv import, remove the
+#   module-level wrapper):
+#   The previous code defined a module-level ``load_dotenv`` wrapper that
+#   tried to import ``python-dotenv`` and fell back to a no-op function
+#   on ImportError. The wrapper existed ONLY so tests could mock
+#   ``config.settings.load_dotenv`` directly. But the wrapper was dead
+#   code: ``_ensure_dotenv_loaded`` (the only caller) was already guarded
+#   by ``_dotenv_loaded`` (a process-wide flag), so the no-op fallback
+#   was called at most once per process. The wrapper also logged the
+#   SAME INFO message on every call (misleading -- it implied the no-op
+#   could be called multiple times).
+#   ROOT FIX: inline the import in ``_ensure_dotenv_loaded``. Tests that
+#   need to mock the dotenv loader can mock
+#   ``config.settings._load_dotenv_func`` (the module-level binding) OR
+#   use ``monkeypatch.setattr`` on the import. No wrapper needed.
+#   If python-dotenv is not installed, ``_load_dotenv_func`` is None and
+#   ``_ensure_dotenv_loaded`` logs a SINGLE info message and falls back
+#   to pure ``os.getenv()``.
 try:
     from dotenv import load_dotenv as _load_dotenv_func  # type: ignore[import-untyped]
-
-    def load_dotenv(*args, **kwargs):  # type: ignore[no-redef]
-        """Module-level wrapper around python-dotenv's load_dotenv."""
-        return _load_dotenv_func(*args, **kwargs)
-
-except ImportError:  # pragma: no cover — exercised when dotenv is missing
-    def load_dotenv(*args, **kwargs):  # type: ignore[no-redef]
-        """No-op fallback when python-dotenv is not installed."""
-        logging.getLogger(__name__).info(
-            "python-dotenv is not installed. Environment variables must "
-            "be set externally. Install with: pip install python-dotenv"
-        )
-        return False
+except ImportError:  # pragma: no cover -- exercised when dotenv is missing
+    _load_dotenv_func = None  # type: ignore[assignment]
 
 
 def _ensure_dotenv_loaded() -> None:
     """Load the .env file exactly once, if it exists.
 
     This function is called on the first access to any setting via
-    ``_getenv()``.  It is idempotent — subsequent calls are no-ops.
+    ``_getenv()``.  It is idempotent -- subsequent calls are no-ops.
     If python-dotenv is not installed, a single info-level message is
     logged and the function falls back to pure ``os.getenv()``.
     """
@@ -147,9 +150,17 @@ def _ensure_dotenv_loaded() -> None:
         return
     _dotenv_loaded = True
 
+    # P1-019: if python-dotenv is not installed, log ONCE and fall back.
+    if _load_dotenv_func is None:
+        logging.getLogger(__name__).info(
+            "python-dotenv is not installed. Environment variables must "
+            "be set externally. Install with: pip install python-dotenv"
+        )
+        return
+
     try:
         env_path = Path(__file__).parent.parent / ".env"
-        loaded = load_dotenv(env_path, override=False)
+        loaded = _load_dotenv_func(env_path, override=False)
         if not loaded and not env_path.exists():
             logging.getLogger(__name__).info(
                 "No .env file found at %s. All settings will use "
@@ -160,7 +171,7 @@ def _ensure_dotenv_loaded() -> None:
             logging.getLogger(__name__).debug(
                 "Loaded .env file from %s", env_path
             )
-    except Exception as exc:  # noqa: BLE001 — defensive: never crash on env load
+    except Exception as exc:  # noqa: BLE001 -- defensive: never crash on env load
         logging.getLogger(__name__).warning(
             "Failed to load .env file: %s. Falling back to os.getenv().", exc
         )
@@ -178,7 +189,7 @@ def _getenv(key: str, default: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Safe parsing utilities — CODE-1, CODE-2, CODE-4, RELI-1
+# Safe parsing utilities -- CODE-1, CODE-2, CODE-4, RELI-1
 # ---------------------------------------------------------------------------
 
 
@@ -299,7 +310,7 @@ def _parse_csv_ints(key: str, default: list[int]) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
-# Deprecated setting descriptor — DESIGN-1, DOC-4
+# Deprecated setting descriptor -- DESIGN-1, DOC-4
 # ---------------------------------------------------------------------------
 
 
@@ -329,13 +340,13 @@ class _DeprecatedSetting:
         # accepted mutations to deprecated settings. A future operator
         # (or stale code path) could write to the deprecated name, the
         # value would persist, and downstream code reading the
-        # REPLACEMENT name would never see the mutation — a silent
+        # REPLACEMENT name would never see the mutation -- a silent
         # configuration drift bug. The fix emits a DeprecationWarning
         # on EVERY mutation so the operator sees the deprecated write
         # in logs (the warning machinery forwards to logging if
         # ``warnings.catch_warnings`` is not installed) AND surfaces
         # the canonical replacement name in the message. The mutation
-        # is still permitted for backward compatibility — but it is no
+        # is still permitted for backward compatibility -- but it is no
         # longer silent.
         warnings.warn(
             f"Setting `{self._name}` is DEPRECATED. Mutating it via "
@@ -351,14 +362,14 @@ class _DeprecatedSetting:
 
 
 # ---------------------------------------------------------------------------
-# Environment & project root — DESIGN-3, ARCH-6
+# Environment & project root -- DESIGN-3, ARCH-6
 # ---------------------------------------------------------------------------
 
 # FIX TOP-2: Standardize on DRUGOS_ENVIRONMENT across both phases.
 # Phase 1 previously read ``ENVIRONMENT`` (vocabulary: dev/staging/prod).
 # Phase 2 reads ``DRUGOS_ENVIRONMENT`` (vocabulary: development/staging/
 # production). The mismatch meant operators could set DRUGOS_ENVIRONMENT=
-# production and Phase 1 would still run in dev mode — silently defeating
+# production and Phase 1 would still run in dev mode -- silently defeating
 # the production-mode guards. We now:
 #   * Read DRUGOS_ENVIRONMENT as the canonical name.
 #   * Fall back to the legacy ENVIRONMENT var for backward compat.
@@ -367,30 +378,30 @@ class _DeprecatedSetting:
 #       dev  -> development
 #       prod -> production
 #       staging -> staging (unchanged)
-# Synchronized with phase2/drugos_graph/config.py — DO NOT diverge
+# Synchronized with phase2/drugos_graph/config.py -- DO NOT diverge
 # (audit TOP-2).
 #
-# P1-022 ROOT FIX (v100 forensic — docstring was lying about lazy loading):
+# P1-022 ROOT FIX (v100 forensic -- docstring was lying about lazy loading):
 # The module docstring at lines 20-26 claims "Environment variables are
 # NOT read at import time." That claim was TRUE for most settings
 # (which use _getenv() inside _ensure_dotenv_loaded()) but FALSE for
-# ENVIRONMENT — _raw_environment is read EAGERLY at import time here.
+# ENVIRONMENT -- _raw_environment is read EAGERLY at import time here.
 # This made the module's import-time behavior inconsistent with its
 # documented contract. If a test set DRUGOS_ENVIRONMENT=development
 # AFTER importing config.settings, the change was NOT picked up.
 # ROOT FIX: we keep the eager read (because ENVIRONMENT is consumed
 # by _PROFILE_DEFAULTS lookups and many other module-level constants
-# that need a stable value at import time — making it lazy would
+# that need a stable value at import time -- making it lazy would
 # require a sweeping refactor of every consumer), but we now:
 #   1. Document the eager-read exception explicitly in the module
 #      docstring (see the "Exceptions" subsection added to the
 #      Loading Strategy block above).
 #   2. Treat empty-string ENVIRONMENT as "production" (the previous
 #      ``or`` short-circuit already did this implicitly because '' is
-#      falsy — but now it's EXPLICIT and documented, so an operator
+#      falsy -- but now it's EXPLICIT and documented, so an operator
 #      who sets ENVIRONMENT= (empty) in their .env knows they get
 #      production mode).
-#   3. Warn LOUDLY (logger.warning, not info — see P1-023) when
+#   3. Warn LOUDLY (logger.warning, not info -- see P1-023) when
 #      falling back to the production default.
 _raw_environment: str = (
     os.getenv("DRUGOS_ENVIRONMENT")
@@ -425,17 +436,17 @@ ENVIRONMENT: str = _ENV_NORMALIZATION.get(_raw_environment, _raw_environment)
 # workflows/*.yml files already do this where needed).
 if not os.getenv("DRUGOS_ENVIRONMENT") and not os.getenv("ENVIRONMENT"):
     logger_production_default = __import__("logging").getLogger(__name__)
-    # P1-023 ROOT FIX (v100 forensic — log level was INFO, not WARNING):
+    # P1-023 ROOT FIX (v100 forensic -- log level was INFO, not WARNING):
     # The previous code emitted this at INFO level, which is filtered
     # out by default in production (root logger = WARNING per the
     # ``_PROFILE_DEFAULTS["production"]["LOG_LEVEL"] = "WARNING"``
     # setting). An operator running in production without explicit log
-    # configuration would NEVER see this message — defeating the
+    # configuration would NEVER see this message -- defeating the
     # "LOUD log.warning" promised by the comment at line ~472. ROOT
     # FIX: emit at WARNING level so the message lands in every log
     # sink (file + stderr) regardless of the operator's log filter.
     logger_production_default.warning(
-        "v89 P0 ROOT FIX: DRUGOS_ENVIRONMENT not set — defaulting to "
+        "v89 P0 ROOT FIX: DRUGOS_ENVIRONMENT not set -- defaulting to "
         "'production' (was 'development'). All DRUGOS_ALLOW_* escape "
         "hatches are now REFUSED by default. To enable dev mode, "
         "explicitly set DRUGOS_ENVIRONMENT=development."
@@ -452,7 +463,7 @@ if not (BASE_DIR / "config").exists():
     )
 
 # ---------------------------------------------------------------------------
-# Environment-specific profile defaults — DESIGN-3
+# Environment-specific profile defaults -- DESIGN-3
 # ---------------------------------------------------------------------------
 
 _PROFILE_DEFAULTS: dict[str, dict[str, str]] = {
@@ -488,20 +499,20 @@ def _get_profile_default(key: str, fallback: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Database — DATA-2, SEC-1, CONF-2
+# Database -- DATA-2, SEC-1, CONF-2
 # ---------------------------------------------------------------------------
 
 # Default uses placeholder credentials, NOT hardcoded real ones.
 # In development, docker-compose defaults are auto-applied with a warning.
 #
-# v93 ROOT FIX (P1-039 — empty DATABASE_URL bypasses placeholder check):
+# v93 ROOT FIX (P1-039 -- empty DATABASE_URL bypasses placeholder check):
 #   The previous code used ``_getenv("DATABASE_URL", "<default>")`` which
 #   returns the default ONLY if the env var is UNSET. If the operator
 #   explicitly sets ``DATABASE_URL=""`` (empty string) in their .env
 #   (e.g. by accident, or by copying a template without filling it in),
 #   ``_getenv`` returns "" (empty string), NOT the default. The
 #   placeholder check at line 476 (``if "REPLACE_USER" in DATABASE_URL``)
-#   does NOT fire for empty string — so the operator gets an empty
+#   does NOT fire for empty string -- so the operator gets an empty
 #   DATABASE_URL that fails at connection time with a cryptic error
 #   (e.g. "could not connect to server" with no host). Root fix: treat
 #   empty/whitespace-only DATABASE_URL as equivalent to UNSET, and fall
@@ -512,7 +523,7 @@ _DATABASE_URL_RAW: str = _getenv(
     "postgresql://REPLACE_USER:REPLACE_PASSWORD@localhost:5432/drug_repurposing",
 )
 if not _DATABASE_URL_RAW or not _DATABASE_URL_RAW.strip():
-    # Empty or whitespace-only — treat as unset. The placeholder default
+    # Empty or whitespace-only -- treat as unset. The placeholder default
     # below will trigger the existing dev-mode warning at line 476.
     _log_warn = logging.getLogger("drugos.config.settings")
     _log_warn.warning(
@@ -530,19 +541,19 @@ else:
 # Auto-apply docker-compose defaults in development when placeholder is present
 # v28 ROOT FIX (audit TOP-11): previously this block silently swapped the
 # placeholder DATABASE_URL to ``cosmic:cosmic`` in dev mode with only a
-# Python ``warnings.warn`` — which is filtered by default in pytest,
+# Python ``warnings.warn`` -- which is filtered by default in pytest,
 # swallowed by logging, and invisible to operators who run the pipeline
 # via ``python3 run_unified.py`` (no -W flag). That meant a developer
 # could run the entire Phase 1 ETL against a default-credential DB and
 # never see a single console message telling them so. Real-world risk:
 # someone copy-pastes dev settings into a staging box and the
 # cosmic:cosmic default silently takes over because the env var was
-# missing — exactly the failure mode that produced the v28 audit.
+# missing -- exactly the failure mode that produced the v28 audit.
 #
 # The fix is two-layered:
 #   1. The silent swap is gated behind an EXPLICIT opt-in env var
 #      ``DRUGOS_DEV_ALLOW_DEFAULT_DB=1``. Without it, the dev environment
-#      will RAISE — forcing the operator to either set DATABASE_URL or
+#      will RAISE -- forcing the operator to either set DATABASE_URL or
 #      acknowledge the insecure default.
 #   2. When the opt-in is set, we emit a LOUD log.warning (visible in
 #      every log sink, not just Python's warning machinery) AND a
@@ -575,12 +586,12 @@ if "REPLACE_USER" in DATABASE_URL or "REPLACE_PASSWORD" in DATABASE_URL:
                 "insecure default and use cosmic:cosmic@localhost, set "
                 "DRUGOS_DEV_ALLOW_DEFAULT_DB=1. (v34 root fix CRITICAL #4)"
             )
-            # Do NOT modify DATABASE_URL — leave the placeholder so the
+            # Do NOT modify DATABASE_URL -- leave the placeholder so the
             # connection fails loudly with a clear error message.
         else:
             # Opt-in acknowledged. Single consolidated warning.
             _log.warning(
-                "DRUGOS DEV MODE: DRUGOS_DEV_ALLOW_DEFAULT_DB=1 is set — "
+                "DRUGOS DEV MODE: DRUGOS_DEV_ALLOW_DEFAULT_DB=1 is set -- "
                 "applying docker-compose default credentials "
                 "(cosmic:cosmic by default; override with "
                 "DRUGOS_DEV_DB_USER / DRUGOS_DEV_DB_PASSWORD / "
@@ -591,9 +602,9 @@ if "REPLACE_USER" in DATABASE_URL or "REPLACE_PASSWORD" in DATABASE_URL:
             )
             warnings.warn(
                 "DATABASE_URL contains placeholder credentials. "
-                "DRUGOS_DEV_ALLOW_DEFAULT_DB=1 is set — using docker-"
+                "DRUGOS_DEV_ALLOW_DEFAULT_DB=1 is set -- using docker-"
                 "compose defaults (cosmic:cosmic by default; override "
-                "via DRUGOS_DEV_DB_* env vars). This is INSECURE — set "
+                "via DRUGOS_DEV_DB_* env vars). This is INSECURE -- set "
                 "DATABASE_URL explicitly for any non-local environment.",
                 UserWarning,
             )
@@ -615,26 +626,26 @@ if "REPLACE_USER" in DATABASE_URL or "REPLACE_PASSWORD" in DATABASE_URL:
             f"for the {ENVIRONMENT} environment."
         )
 
-# v65 ROOT FIX (P1C-010 — detect cosmic:cosmic default credentials):
+# v65 ROOT FIX (P1C-010 -- detect cosmic:cosmic default credentials):
 #   The check above ONLY fires when DATABASE_URL contains the literal
 #   strings "REPLACE_USER" or "REPLACE_PASSWORD" (the placeholder
 #   credentials). But the .env.example file ships
 #   ``DATABASE_URL=postgresql://cosmic:cosmic@localhost:5432/...`` (the
 #   docker-compose dev default). An operator who copies .env.example to
-#   .env (the standard setup flow) gets cosmic:cosmic directly — the
+#   .env (the standard setup flow) gets cosmic:cosmic directly -- the
 #   REPLACE_USER check NEVER fires. So the dev default credentials are
 #   silently accepted in staging/production, bypassing the v34 ROOT FIX
 #   (CRITICAL #4) that was supposed to prevent this. The runtime
 #   validator in config/__init__.py:1056 checks for
 #   ``_DEFAULT_DB_URL_PREFIX`` ("postgresql://cosmic:cosmic@") but ONLY
-#   in the validate_config() path — NOT at import time. So the import-
+#   in the validate_config() path -- NOT at import time. So the import-
 #   time check (settings.py) and the runtime validation (config/__init__)
 #   use DIFFERENT detection logic, and the gap between them lets
 #   cosmic:cosmic through silently at import time.
 #   ROOT FIX: add a second import-time check that detects
 #   ``cosmic:cosmic@`` in DATABASE_URL. In staging/production, RAISE
 #   (matching the REPLACE_USER behavior). In development, require the
-#   same ``DRUGOS_DEV_ALLOW_DEFAULT_DB=1`` opt-in — if NOT set, log an
+#   same ``DRUGOS_DEV_ALLOW_DEFAULT_DB=1`` opt-in -- if NOT set, log an
 #   ERROR and leave DATABASE_URL as-is (the connection will fail with a
 #   clear authentication error rather than silently using cosmic:cosmic).
 _DEFAULT_DB_CREDENTIAL_MARKER = "cosmic:cosmic@"
@@ -654,7 +665,7 @@ if _DEFAULT_DB_CREDENTIAL_MARKER in DATABASE_URL:
                 "DATABASE_URL contains docker-compose default credentials "
                 "('cosmic:cosmic') but DRUGOS_DEV_ALLOW_DEFAULT_DB=1 is NOT "
                 "set. The .env.example file ships cosmic:cosmic as the dev "
-                "default — copying it to .env bypassed the REPLACE_USER "
+                "default -- copying it to .env bypassed the REPLACE_USER "
                 "check above. REFUSING to silently accept default credentials. "
                 "Either (a) set DATABASE_URL to a real connection string, or "
                 "(b) set DRUGOS_DEV_ALLOW_DEFAULT_DB=1 to acknowledge the "
@@ -663,22 +674,22 @@ if _DEFAULT_DB_CREDENTIAL_MARKER in DATABASE_URL:
                 "credentials as written. (v65 root fix P1C-010)"
             )
         # If the opt-in IS set, the cosmic:cosmic URL is accepted with
-        # only the existing log messages — no additional action needed
+        # only the existing log messages -- no additional action needed
         # (the v34 fix's warning at line 483-500 covers the dev-default
         # case).
         #
         # P1-A14 ROOT FIX (v82): the previous code, when the opt-in was
         # NOT set, only logged an ERROR but LEFT DATABASE_URL pointing at
-        # cosmic:cosmic — so the connection SUCCEEDED with insecure creds
+        # cosmic:cosmic -- so the connection SUCCEEDED with insecure creds
         # in dev. This is INCONSISTENT with the REPLACE_USER path (which
         # leaves a placeholder that fails the connection). An operator
-        # who copied .env.example → .env got cosmic:cosmic, saw no error
+        # who copied .env.example -> .env got cosmic:cosmic, saw no error
         # at import time (just a log line), and the DB connection worked
-        # — silently using insecure creds. ROOT FIX: when the opt-in is
+        # -- silently using insecure creds. ROOT FIX: when the opt-in is
         # NOT set, REPLACE DATABASE_URL with a refusal placeholder so the
-        # connection FAILS loudly — matching the REPLACE_USER behavior.
+        # connection FAILS loudly -- matching the REPLACE_USER behavior.
         # This makes both dev-default-credential paths CONSISTENT:
-        # without opt-in → connection fails; with opt-in → connection
+        # without opt-in -> connection fails; with opt-in -> connection
         # succeeds with insecure creds + loud warning.
         if not _allow_default_db:
             DATABASE_URL = (
@@ -703,26 +714,26 @@ if Path("/.dockerenv").exists() and "localhost" in DATABASE_URL:
 
 RAW_DATA_DIR: Path = BASE_DIR / "raw_data"
 # FIX TOP-12: ``PROCESSED_DATA_DIR`` (phase1/processed_data/) is the
-# OUTPUT directory for Phase 1 pipelines — DrugBank/OMIM/STRING/ChEMBL
+# OUTPUT directory for Phase 1 pipelines -- DrugBank/OMIM/STRING/ChEMBL
 # CSVs land here. It is a READ-ONLY upstream artifact for Phase 2 (Phase 2
 # reads these CSVs via the phase1_bridge; never writes to them). Phase 2's
-# own outputs go to phase2/data/processed/ — keep the two paths distinct.
+# own outputs go to phase2/data/processed/ -- keep the two paths distinct.
 # Synchronized with phase2/drugos_graph/config.py
-# (``PHASE1_PROCESSED_DIR`` constant) — DO NOT diverge (audit TOP-12).
+# (``PHASE1_PROCESSED_DIR`` constant) -- DO NOT diverge (audit TOP-12).
 PROCESSED_DATA_DIR: Path = BASE_DIR / "processed_data"
 
 # ---------------------------------------------------------------------------
-# ChEMBL — SCI-2, SCI-4, IDMP-2, INTEROP-2
+# ChEMBL -- SCI-2, SCI-4, IDMP-2, INTEROP-2
 # ---------------------------------------------------------------------------
 
-DEFAULT_CHEMBL_VERSION: str = "35"  # CONF-1 — minimum supported version
+DEFAULT_CHEMBL_VERSION: str = "35"  # CONF-1 -- minimum supported version
 
 # Valid ChEMBL database release versions.
 # ChEMBL is a continuously-updated biomedical database. New releases are
 # published 2-3 times per year by EBI. As of 2025, ChEMBL has reached
 # v39 ROOT FIX (P1 #60): removed speculative versions 36, 37, 38.
 # As of 2025, ChEMBL's latest release is v35. Versions 36+ do not
-# exist yet. The previous code listed them as "known valid" — a
+# exist yet. The previous code listed them as "known valid" -- a
 # future v36 would be accepted without warning, which could mask
 # a schema-breaking change. The fix: only list versions that ACTUALLY
 # exist (30-35). When ChEMBL releases v36, append it here after
@@ -760,7 +771,7 @@ CHEMBL_VERSION: str = _validate_chembl_version(
     _getenv("CHEMBL_VERSION", DEFAULT_CHEMBL_VERSION)
 )
 
-# ChEMBL API URL — moved from chembl_pipeline.py (INTEROP-2)
+# ChEMBL API URL -- moved from chembl_pipeline.py (INTEROP-2)
 CHEMBL_API_URL: str = _getenv(
     "CHEMBL_API_URL", "https://www.ebi.ac.uk/chembl/api/data"
 )
@@ -780,7 +791,7 @@ CHEMBL_MAX_ACTIVITIES: Optional[int] = _parse_optional_int(
 #
 # ChEMBL clinical phases (max_phase column):
 #   0 = preclinical, 1 = Phase I, 2 = Phase II, 3 = Phase III, 4 = Phase 4 (approved).
-# Phase 4 means the drug has reached the market — i.e., globally approved
+# Phase 4 means the drug has reached the market -- i.e., globally approved
 # (any regulator, NOT FDA-specific). We filter molecules to max_phase=4 to
 # get the set of approved drugs. The count ranges below are the expected
 # number of molecules returned by /molecule.json?max_phase=4 for each
@@ -788,13 +799,13 @@ CHEMBL_MAX_ACTIVITIES: Optional[int] = _parse_optional_int(
 CHEMBL_VERSION_COUNT_RANGES: dict[str, tuple[int, int, str]] = {
     # version: (min, max, rationale)
     # v9 ROOT FIX (audit F3.9): the DOCX target is "10,000 FDA-approved
-    # drugs" — but ChEMBL contains ~2.3M compounds total. The
+    # drugs" -- but ChEMBL contains ~2.3M compounds total. The
     # max_phase=4 subset for v33/v34/v35 is ~3-15K depending on the
     # release, which is consistent with the DOCX target.
     # v39 ROOT FIX (P1 #59): corrected the rationale strings. The
     # previous rationale said "FDA-approved" but ChEMBL's max_phase=4
     # means "Phase 4 clinical trial" which is GLOBALLY approved (any
-    # regulator — FDA, EMA, PMDA, etc.), NOT FDA-specific. The audit
+    # regulator -- FDA, EMA, PMDA, etc.), NOT FDA-specific. The audit
     # flagged this as scientifically misleading. The count ranges
     # themselves are correct; only the rationale text was wrong.
     "32": (8000, 15000, "ChEMBL v32 max_phase=4 (globally approved, any regulator) ~12K molecules"),
@@ -837,7 +848,7 @@ if CHEMBL_MAX_ROWS is None and ENVIRONMENT != "development":
     )
 
 # ---------------------------------------------------------------------------
-# ChEMBL pipeline operational settings — added for institutional-grade
+# ChEMBL pipeline operational settings -- added for institutional-grade
 # chembl_pipeline.py rewrite (CFG-1 to CFG-15). All values are env-var
 # overridable for dev / staging / prod parity (Domain 12).
 # ---------------------------------------------------------------------------
@@ -877,7 +888,7 @@ CHEMBL_HTTP_TIMEOUT: tuple[float, float] = (
 )
 
 # Maximum acceptable HTTP response body size in bytes (SEC-5). Default 50 MB
-# — a single ChEMBL page is ~1-3 MB so this is generous but bounded.
+# -- a single ChEMBL page is ~1-3 MB so this is generous but bounded.
 CHEMBL_MAX_RESPONSE_BYTES: int = _getenv_int("CHEMBL_MAX_RESPONSE_BYTES", 50 * 1024 * 1024)
 if CHEMBL_MAX_RESPONSE_BYTES < 1024:
     raise ValueError(
@@ -896,7 +907,7 @@ CHEMBL_CIRCUIT_BREAKER_RESET_SECONDS: float = _getenv_float(
 )
 
 # Scientific filters (S10-S12, S15). These define what we keep when
-# downloading / cleaning activities. Defaults are conservative — only
+# downloading / cleaning activities. Defaults are conservative -- only
 # well-measured human-protein binding/functional assays with exact ('=')
 # activity relations.
 CHEMBL_TARGET_ORGANISM: str = _getenv("CHEMBL_TARGET_ORGANISM", "Homo sapiens")
@@ -952,7 +963,7 @@ CHEMBL_ASSAY_TYPES: frozenset[str] = frozenset(
     if s.strip()
 )
 # target_type: SINGLE PROTEIN, PROTEIN COMPLEX, ORGANISM, CELL-LINE, etc.
-# We keep SINGLE PROTEIN and PROTEIN COMPLEX — both have meaningful
+# We keep SINGLE PROTEIN and PROTEIN COMPLEX -- both have meaningful
 # target_components UniProt accessions (S11).
 CHEMBL_TARGET_TYPES: frozenset[str] = frozenset(
     s.strip()
@@ -1044,11 +1055,11 @@ PIPELINE_CONTACT_EMAIL: str = _getenv(
 )
 PIPELINE_RESUME: bool = _getenv_bool("PIPELINE_RESUME", False)
 
-# DEPRECATED: ChEMBL FTP URL — values stored in _DEPRECATED_SETTINGS (DESIGN-1)
+# DEPRECATED: ChEMBL FTP URL -- values stored in _DEPRECATED_SETTINGS (DESIGN-1)
 # Accessing these triggers DeprecationWarning via module __getattr__
 
 # ---------------------------------------------------------------------------
-# UniProt — SCI-5, IDMP-1
+# UniProt -- SCI-5, IDMP-1
 # ---------------------------------------------------------------------------
 
 # UniProt release for reproducibility. Defaults to 'current_release'
@@ -1067,7 +1078,7 @@ if UNIPROT_RELEASE == "current_release" and ENVIRONMENT == "production":
 # Accessing these triggers DeprecationWarning via module __getattr__
 
 # ---------------------------------------------------------------------------
-# STRING — SCI-1, DESIGN-2
+# STRING -- SCI-1, DESIGN-2
 # ---------------------------------------------------------------------------
 
 DEFAULT_STRING_VERSION: str = "12.0"  # CONF-1
@@ -1081,19 +1092,19 @@ STRING_VERSION: str = _getenv("STRING_VERSION", DEFAULT_STRING_VERSION)
 
 # Version-aware score thresholds (SCI-1)
 # FIX TOP-1: STRING combined_score >= 700 is the canonical high-confidence
-# cutoff (Szklarczyk et al. 2023, Nucleic Acids Research — >= 700 achieves
+# cutoff (Szklarczyk et al. 2023, Nucleic Acids Research -- >= 700 achieves
 # >80% precision on KEGG pathway benchmarks; >= 400 achieves only ~50%).
-# The previous v12.0 entry used 400 — this dropped ~75% of the high-
+# The previous v12.0 entry used 400 -- this dropped ~75% of the high-
 # confidence PPIs that Phase 1 retained, causing Phase 2 to silently lose
 # most of its protein-protein interaction graph. All STRING versions now
 # use 700 as the default threshold. Operators can still override via the
 # STRING_MIN_COMBINED_SCORE env var. Synchronized with
-# phase2/drugos_graph/config.py — DO NOT diverge (audit TOP-1).
+# phase2/drugos_graph/config.py -- DO NOT diverge (audit TOP-1).
 STRING_VERSION_SCORE_THRESHOLDS: dict[str, tuple[int, str]] = {
     # version: (default_threshold, scientific_rationale)
-    "11.0b": (700, "v11.0b — 700 is the canonical high-confidence cutoff (Szklarczyk 2023)"),
-    "11.5": (700, "v11.5 — 700 is the canonical high-confidence cutoff (Szklarczyk 2023)"),
-    "12.0": (700, "v12.0 — 700 is the canonical high-confidence cutoff (Szklarczyk 2023); "
+    "11.0b": (700, "v11.0b -- 700 is the canonical high-confidence cutoff (Szklarczyk 2023)"),
+    "11.5": (700, "v11.5 -- 700 is the canonical high-confidence cutoff (Szklarczyk 2023)"),
+    "12.0": (700, "v12.0 -- 700 is the canonical high-confidence cutoff (Szklarczyk 2023); "
                   "previously 400 which retained only ~50% precision PPIs"),
 }
 
@@ -1175,11 +1186,11 @@ STRING_PROTEIN_LINKS_DETAILED_URL: str = _string_urls["protein_links_detailed_ur
 # STRING production-override + reliability/reproducibility knobs (BUG-3.4,
 # GAP-12.5, GAP-12.6, GAP-12.7, GAP-12.9, GAP-8.1, GAP-8.2).
 #
-# These are ADDITIVE — no existing setting is removed.  They are consumed by
+# These are ADDITIVE -- no existing setting is removed.  They are consumed by
 # the institutional-grade pipelines/string_pipeline.py (v2.0.0).
 # ---------------------------------------------------------------------------
 
-# Sci: Szklarczyk et al. 2023 (Nucleic Acids Research) — combined_score
+# Sci: Szklarczyk et al. 2023 (Nucleic Acids Research) -- combined_score
 # >= 700 achieves >80% precision on KEGG pathway benchmarks; >= 400 (the
 # dev default) achieves only ~50%.  For a clinical-decision-support system,
 # 700 is the minimum defensible threshold.
@@ -1203,22 +1214,22 @@ STRING_DETAILED_MODE: str = _getenv("STRING_DETAILED_MODE", "optional").lower()
 if STRING_DETAILED_MODE not in {"optional", "required", "skip"}:
     warnings.warn(
         f"STRING_DETAILED_MODE={STRING_DETAILED_MODE!r} is not one of "
-        f"optional/required/skip — falling back to 'optional'.",
+        f"optional/required/skip -- falling back to 'optional'.",
         UserWarning,
     )
     STRING_DETAILED_MODE = "optional"
 """How the STRING pipeline handles the detailed-links file.
 
-- ``optional`` (default) — attempt download; on failure, log a WARNING
+- ``optional`` (default) -- attempt download; on failure, log a WARNING
   and continue without sub-scores.  Reproducible only if the download
   consistently succeeds.
-- ``required`` — download without try/except.  Failure raises.  Use this
+- ``required`` -- download without try/except.  Failure raises.  Use this
   for production runs where sub-score coverage MUST be reproducible.
-- ``skip`` — do not attempt download at all.  Sub-scores will be NULL.
+- ``skip`` -- do not attempt download at all.  Sub-scores will be NULL.
 """
 
 # GAP-12.6: Self-interaction (homodimer) handling.
-# Sci: Homodimers are biologically real and clinically critical —
+# Sci: Homodimers are biologically real and clinically critical --
 # receptor dimerization (EGFR, HER2, VEGFR) is the primary mechanism of
 # action for trastuzumab, lapatinib, cetuximab, pertuzumab. p53
 # tetramerization is fundamental to tumor-suppressor function.  The DB
@@ -1228,7 +1239,7 @@ if STRING_DETAILED_MODE not in {"optional", "required", "skip"}:
 # v90 ROOT FIX (BUG #9): default changed from True to False.
 # Dropping self-interactions (homodimers) removes biologically
 # critical protein interactions (EGFR, HER2, p53 tetramerization,
-# STAT3 homodimer). These are NOT artifacts — they are real PPIs
+# STAT3 homodimer). These are NOT artifacts -- they are real PPIs
 # with high combined scores. The previous default True dropped ALL
 # homodimers to satisfy a DB constraint (chk_ppi_ordered), but the
 # correct fix is to relax the constraint or mark homodimers with
@@ -1243,7 +1254,7 @@ STRING_DROP_SELF_INTERACTIONS: bool = _getenv_bool(
 # GAP-3.11 / GAP-12.7: Dedup strategy for collapsing multiple STRING
 # ENSP pairs that map to the same UniProt pair.
 #   - "max_score"  (default, recommended): keep the row with the highest
-#                   combined_score (strongest evidence — Szklarczyk et al. 2023)
+#                   combined_score (strongest evidence -- Szklarczyk et al. 2023)
 #   - "mean_score": aggregate by mean (dilutes strong evidence with weak)
 #   - "first":      legacy non-deterministic (sorted first for determinism)
 STRING_DEDUP_STRATEGY: str = _getenv(
@@ -1252,18 +1263,18 @@ STRING_DEDUP_STRATEGY: str = _getenv(
 if STRING_DEDUP_STRATEGY not in {"max_score", "mean_score", "first"}:
     warnings.warn(
         f"STRING_DEDUP_STRATEGY={STRING_DEDUP_STRATEGY!r} is not one of "
-        f"max_score/mean_score/first — falling back to 'max_score'.",
+        f"max_score/mean_score/first -- falling back to 'max_score'.",
         UserWarning,
     )
     STRING_DEDUP_STRATEGY = "max_score"
 """Dedup strategy for collapsing multiple STRING ENSP pairs that map to
 the same UniProt pair (e.g. isoforms of the same protein).
 
-- ``max_score`` (default, recommended) — keep the row with the highest
+- ``max_score`` (default, recommended) -- keep the row with the highest
   combined_score.  Deterministic and reflects the strongest evidence
   (Szklarczyk et al. 2023).
-- ``mean_score`` — aggregate by mean.  Dilutes strong evidence with weak.
-- ``first`` — legacy; deterministic because we sort first, but loses
+- ``mean_score`` -- aggregate by mean.  Dilutes strong evidence with weak.
+- ``first`` -- legacy; deterministic because we sort first, but loses
   information.
 """
 
@@ -1299,7 +1310,7 @@ try:
         OMIM = "omim"
         PUBCHEM = "pubchem"
 
-except ImportError:  # pragma: no cover — enum is stdlib, this never fires.
+except ImportError:  # pragma: no cover -- enum is stdlib, this never fires.
     DataSourceName = None  # type: ignore[assignment]
 
 # DEPRECATED: STRING protein info URL (DESIGN-1)
@@ -1308,7 +1319,7 @@ except ImportError:  # pragma: no cover — enum is stdlib, this never fires.
 # Accessing this triggers DeprecationWarning via module __getattr__
 
 # ---------------------------------------------------------------------------
-# DisGeNET — SCI-3, SEC-2, DESIGN-4, CONF-4
+# DisGeNET -- SCI-3, SEC-2, DESIGN-4, CONF-4
 # ---------------------------------------------------------------------------
 
 # SCI-3: DisGeNET migrated to api.disgenet.com in 2024.
@@ -1339,7 +1350,7 @@ if not DISGENET_USE_API:
 # ===========================================================================
 # DisGeNET institutional-grade configuration knobs (389-fix audit).
 #
-# These are ADDITIVE — no existing setting is removed.  They are consumed by
+# These are ADDITIVE -- no existing setting is removed.  They are consumed by
 # the institutional-grade ``pipelines/disgenet_pipeline.py`` (v2.0.0).
 #
 # All scientific thresholds cite Piñero et al., 2020, *DisGeNET: a
@@ -1350,7 +1361,7 @@ if not DISGENET_USE_API:
 
 # SCI-1 / DES-1 / CONF-1: Minimum score threshold.
 # Per Piñero et al. 2020, DisGeNET scores in [0.06, 0.1) constitute "weak
-# evidence" — biologically meaningful, especially for rare diseases.  The
+# evidence" -- biologically meaningful, especially for rare diseases.  The
 # previous default of 0.1 silently destroyed this evidence.  The new default
 # is 0.06, the published weak-evidence floor.  Set DISGENET_ALLOW_WEAK_EVIDENCE
 # to False to hard-filter at this threshold; otherwise weak-evidence rows are
@@ -1358,7 +1369,7 @@ if not DISGENET_USE_API:
 DISGENET_MIN_SCORE: float = _getenv_float("DISGENET_MIN_SCORE", default=0.06)
 """Minimum DisGeNET score for inclusion.
 
-Defaults to 0.06 — the floor of DisGeNET's 'weak evidence' band per
+Defaults to 0.06 -- the floor of DisGeNET's 'weak evidence' band per
 Piñero et al., 2020 (Nucleic Acids Research).  Set to 0.0 to disable
 filtering entirely (preserve all evidence, including sub-weak).  Pair
 with DISGENET_ALLOW_WEAK_EVIDENCE=false to hard-filter at this threshold;
@@ -1375,13 +1386,13 @@ DISGENET_ALLOW_WEAK_EVIDENCE: bool = _getenv_bool(
 them with confidence_tier="weak".
 If False, hard-filter at DISGENET_MIN_SCORE (drops weak-evidence rows)."""
 
-# v82 FORENSIC ROOT FIX (P1-3 — weak-evidence threshold hardcoded 0.1):
+# v82 FORENSIC ROOT FIX (P1-3 -- weak-evidence threshold hardcoded 0.1):
 # The previous code hardcoded ``0.1`` as the weak-evidence threshold in
 # ``disgenet_pipeline._apply_score_filter`` while ``DISGENET_MIN_SCORE``
-# was configurable. The two thresholds were DECOUPLED — operators tuning
+# was configurable. The two thresholds were DECOUPLED -- operators tuning
 # ``DISGENET_MIN_SCORE`` did not get the expected behavior:
 #   * If MIN_SCORE=0.2 (drop weak evidence): weak-evidence path still
-#     fired for [0.06, 0.1) but those rows were already dropped → dead
+#     fired for [0.06, 0.1) but those rows were already dropped -> dead
 #     code.
 #   * If MIN_SCORE=0.05: weak-evidence threshold (0.1) didn't move, so
 #     rows in [0.05, 0.06) were dropped before the weak-evidence tagger
@@ -1389,7 +1400,7 @@ If False, hard-filter at DISGENET_MIN_SCORE (drops weak-evidence rows)."""
 # ROOT FIX: make the weak-evidence threshold configurable as
 # ``DISGENET_WEAK_EVIDENCE_THRESHOLD`` (default 0.1, preserving prior
 # behavior). The weak-evidence band is now
-# ``[DISGENET_MIN_SCORE, DISGENET_WEAK_EVIDENCE_THRESHOLD)`` — the two
+# ``[DISGENET_MIN_SCORE, DISGENET_WEAK_EVIDENCE_THRESHOLD)`` -- the two
 # thresholds move together when operators tune either one.
 DISGENET_WEAK_EVIDENCE_THRESHOLD: float = _getenv_float(
     "DISGENET_WEAK_EVIDENCE_THRESHOLD", default=0.1
@@ -1402,16 +1413,16 @@ weak-evidence floor). Must be > ``DISGENET_MIN_SCORE`` to be meaningful."""
 
 # SCI-11 / DES-2 / CONF-2: Confidence tier thresholds.
 # Per Piñero et al. 2020 §2.3, the DSGP score bands are:
-#   [0.0, 0.06)   — sub-weak (below published floor)
-#   [0.06, 0.3)   — weak evidence
-#   [0.3, 1.0]    — strong evidence
+#   [0.0, 0.06)   -- sub-weak (below published floor)
+#   [0.06, 0.3)   -- weak evidence
+#   [0.3, 1.0]    -- strong evidence
 # These thresholds are configurable via DISGENET_CONFIDENCE_TIERS (JSON-encoded
-# list of [threshold, label] pairs).  The previous 0.7 → "very_high" tier is
+# list of [threshold, label] pairs).  The previous 0.7 -> "very_high" tier is
 # removed (no publication supports it).
 DISGENET_CONFIDENCE_TIERS_JSON: str = _getenv(
     "DISGENET_CONFIDENCE_TIERS",
     # P1-004 ROOT FIX (v100 forensic): labels aligned with Piñero 2020 §2.3
-    # — sub_weak / weak / strong. The previous default was
+    # -- sub_weak / weak / strong. The previous default was
     # [[0.0,"weak"],[0.06,"moderate"],[0.3,"strong"]] which mislabeled the
     # [0.0, 0.06) sub-floor band as "weak" and the [0.06, 0.3) weak band
     # as "moderate" (Piñero does not define a "moderate" band). The DB
@@ -1437,7 +1448,7 @@ DISGENET_PMID_CAP: int = _getenv_int("DISGENET_PMID_CAP", default=200)
 """Maximum number of PMIDs retained per record after capping.  Default 200
 (utilises the full String(2000) capacity of the pmid_list column).  If the
 resulting max string length exceeds PMID_LIST_LENGTH, the pipeline raises
-ValueError at init — see DISGENET_PMID_SORT_ORDER for sort semantics."""
+ValueError at init -- see DISGENET_PMID_SORT_ORDER for sort semantics."""
 
 DISGENET_PMID_SORT_ORDER: str = _getenv(
     "DISGENET_PMID_SORT_ORDER", "recent_first"
@@ -1445,16 +1456,16 @@ DISGENET_PMID_SORT_ORDER: str = _getenv(
 if DISGENET_PMID_SORT_ORDER not in {"recent_first", "chronological", "as_returned"}:
     warnings.warn(
         f"DISGENET_PMID_SORT_ORDER={DISGENET_PMID_SORT_ORDER!r} is not one of "
-        f"recent_first/chronological/as_returned — falling back to 'recent_first'.",
+        f"recent_first/chronological/as_returned -- falling back to 'recent_first'.",
         UserWarning,
     )
     DISGENET_PMID_SORT_ORDER = "recent_first"
 """Sort order for PMIDs before capping (SCI-16).
-- ``recent_first`` (default) — descending PMID (NCBI assigns PMIDs
+- ``recent_first`` (default) -- descending PMID (NCBI assigns PMIDs
   monotonically; higher = more recent).  Retains the most evidentially
   important PMIDs.
-- ``chronological`` — ascending PMID.
-- ``as_returned`` — no sort (legacy behaviour, not recommended)."""
+- ``chronological`` -- ascending PMID.
+- ``as_returned`` -- no sort (legacy behaviour, not recommended)."""
 
 # PERF-15 / CONF-4: API page size.
 DISGENET_API_PAGE_SIZE: int = _getenv_int("DISGENET_API_PAGE_SIZE", default=5000)
@@ -1473,7 +1484,7 @@ termination)."""
 
 # CONF-6 / PERF-16 / REL-13: API timeout.
 DISGENET_API_TIMEOUT: int = _getenv_int("DISGENET_API_TIMEOUT", default=30)
-"""HTTP timeout (seconds) for a single API request.  Default 30 — DisGeNET
+"""HTTP timeout (seconds) for a single API request.  Default 30 -- DisGeNET
 pages typically respond in <5s, 30 is generous.  Lowered from the previous
 hardcoded 120s."""
 
@@ -1577,14 +1588,14 @@ DISGENET_ALLOW_PARTIAL_DATA: bool = _getenv_bool(
     "DISGENET_ALLOW_PARTIAL_DATA", default=False
 )
 """If True (dev/debug only), do NOT raise on pagination completeness
-mismatch — log ERROR and write a partial-data manifest instead.  Default
+mismatch -- log ERROR and write a partial-data manifest instead.  Default
 False (production: raise)."""
 
 # IDEM-7: UniProt map cache.
 DISGENET_UNIPROT_MAP_TTL_HOURS: int = _getenv_int(
     "DISGENET_UNIPROT_MAP_TTL_HOURS", default=24
 )
-"""TTL (hours) for the cached gene_symbol→uniprot_id map.  Default 24h."""
+"""TTL (hours) for the cached gene_symbol->uniprot_id map.  Default 24h."""
 
 # IDEM-8: DisGeNET version pinning.
 DISGENET_TARGET_VERSION: str = _getenv("DISGENET_TARGET_VERSION", default="")
@@ -1622,7 +1633,7 @@ DISGENET_MAX_DATA_AGE_DAYS: int = _getenv_int(
 )
 """Maximum acceptable age (days) of the DisGeNET release.  If the release
 date is older than this, the manifest's stale_data flag is set to True
-(WARNING, not failure — DisGeNET may have legitimate slow release cycles).
+(WARNING, not failure -- DisGeNET may have legitimate slow release cycles).
 Default 180 (6 months)."""
 
 # CONF-10 / CONF-11: Output / raw filenames.
@@ -1631,7 +1642,7 @@ DISGENET_OUTPUT_FILENAME: str = _getenv(
 )
 """Output CSV filename in PROCESSED_DATA_DIR.  Default
 'gene_disease_associations.csv'.  Changing this breaks downstream
-consumers (Neo4j exporter, Graph Transformer) — change only for testing."""
+consumers (Neo4j exporter, Graph Transformer) -- change only for testing."""
 
 DISGENET_RAW_FILENAME: str = _getenv(
     "DISGENET_RAW_FILENAME", default=""
@@ -1648,7 +1659,7 @@ to bound peak memory."""
 DISGENET_API_PARALLEL_PAGES: int = _getenv_int(
     "DISGENET_API_PARALLEL_PAGES", default=1
 )
-"""Number of concurrent API page requests.  Default 1 (sequential —
+"""Number of concurrent API page requests.  Default 1 (sequential --
 DisGeNET's rate limit is 2 req/sec, parallelism just hits 429s).  Reserved
 for future optimisation."""
 
@@ -1752,7 +1763,7 @@ def _parse_disgenet_source_weights(raw: str) -> dict[str, float]:
 # SCI-38: Source quality weights for normalized_score computation.
 # These weights reflect the curation level of each DisGeNET sub-source
 # (Piñero et al. 2020 §2.3).  They are heuristic, not derived from a
-# closed-form formula — they encode the relative credibility of each source.
+# closed-form formula -- they encode the relative credibility of each source.
 DISGENET_SOURCE_WEIGHTS_JSON: str = _getenv(
     "DISGENET_SOURCE_WEIGHTS",
     default=json.dumps({
@@ -1906,7 +1917,7 @@ def _validate_disgenet_config() -> None:
 try:
     _validate_disgenet_config()
 except ValueError as _disgenet_cfg_err:
-    # Defer to runtime — log a warning, allow import (the pipeline will
+    # Defer to runtime -- log a warning, allow import (the pipeline will
     # re-validate and raise on init).
     warnings.warn(
         f"DisGeNET config validation warning: {_disgenet_cfg_err}",
@@ -1916,7 +1927,7 @@ except ValueError as _disgenet_cfg_err:
 
 
 # ---------------------------------------------------------------------------
-# PubChem — INTEROP-2, DESIGN-5
+# PubChem -- INTEROP-2, DESIGN-5
 # ---------------------------------------------------------------------------
 
 PUBCHEM_REST_BASE: str = _getenv(
@@ -1930,7 +1941,7 @@ PUBCHEM_FTP_BASE: str = _getenv(
 PUBCHEM_API_URL: str = PUBCHEM_REST_BASE
 
 # ---------------------------------------------------------------------------
-# Entity Resolution — audit D12-2 (integrate entity_resolution config
+# Entity Resolution -- audit D12-2 (integrate entity_resolution config
 # with config/settings.py).  Every field mirrors ResolverConfig in
 # entity_resolution/base.py and is env-overridable with the prefix
 # ENTITY_RESOLUTION_.  These settings are consumed by
@@ -1948,7 +1959,7 @@ ENTITY_RESOLUTION_PUBCHEM_ENABLED: bool = _getenv_bool(
 # If False (default, safe), two InChIKeys sharing the same 14-char
 # connectivity block are NOT merged unless their full 27-char forms
 # are identical.  This preserves stereoisomer distinctness (audit D3-4
-# — thalidomide-enantiomer safety).  Opt in via =1 for legacy
+# -- thalidomide-enantiomer safety).  Opt in via =1 for legacy
 # behaviour.
 ENTITY_RESOLUTION_COLLAPSE_STEREOISOMERS: bool = _getenv_bool(
     "ENTITY_RESOLUTION_COLLAPSE_STEREOISOMERS", False
@@ -1956,12 +1967,12 @@ ENTITY_RESOLUTION_COLLAPSE_STEREOISOMERS: bool = _getenv_bool(
 
 # Minimum rapidfuzz.fuzz.token_sort_ratio score (on [0,1]) at which a
 # fuzzy name match is accepted.  Default 0.60.
-# v43 ROOT FIX (P1 — fuzzy threshold divergence): the previous default
+# v43 ROOT FIX (P1 -- fuzzy threshold divergence): the previous default
 # was 0.85, but the actual runtime gate in drug_resolver._FUZZY_THRESHOLD
 # and ResolverConfig.from_env() default is 0.60. An operator reading
 # config.settings.ENTITY_RESOLUTION_FUZZY_THRESHOLD would log "fuzzy
 # threshold = 0.85" while the resolver actually accepts matches scoring
-# >= 0.60 — causing confusion and false-positive bug reports. The fix
+# >= 0.60 -- causing confusion and false-positive bug reports. The fix
 # aligns the config default to 0.60 to match the runtime gate.
 # Audit D3-3.
 ENTITY_RESOLUTION_FUZZY_THRESHOLD: float = _getenv_float(
@@ -1969,12 +1980,12 @@ ENTITY_RESOLUTION_FUZZY_THRESHOLD: float = _getenv_float(
 )
 
 # Ceiling on the number of indexed names scanned per fuzzy sweep
-# (audit D8-2 — bounds worst-case O(n^2)).  Default 10000.
+# (audit D8-2 -- bounds worst-case O(n^2)).  Default 10000.
 ENTITY_RESOLUTION_FUZZY_MAX_CANDIDATES: int = _getenv_int(
     "ENTITY_RESOLUTION_FUZZY_MAX_CANDIDATES", 10_000
 )
 
-# PubChem REST base URL — configurable so air-gapped deployments can
+# PubChem REST base URL -- configurable so air-gapped deployments can
 # point at an internal mirror.  Audit D9-3.
 ENTITY_RESOLUTION_PUBCHEM_REST_BASE: str = _getenv(
     "ENTITY_RESOLUTION_PUBCHEM_REST_BASE", PUBCHEM_REST_BASE
@@ -2074,11 +2085,11 @@ def get_entity_resolution_config() -> Dict[str, Any]:
 
 
 # ===========================================================================
-# PubChem Pipeline — institutional-grade settings (CONF-1 … CONF-12, ARCH-7)
+# PubChem Pipeline -- institutional-grade settings (CONF-1 ... CONF-12, ARCH-7)
 #
 # These settings are consumed by ``pipelines/pubchem_pipeline.py``.  They
 # complement (do NOT duplicate) the ``ENTITY_RESOLUTION_PUBCHEM_*`` block
-# above — REST base / call delay / timeout / max retries / API key /
+# above -- REST base / call delay / timeout / max retries / API key /
 # CA bundle / client cert / strict salt form are reused from there.
 #
 # Every value is env-var-overridable.  Defaults are documented inline.
@@ -2101,7 +2112,7 @@ PUBCHEM_PIPELINE_MIN_BACKOFF: float = _getenv_float(
     "PUBCHEM_PIPELINE_MIN_BACKOFF", 2.0
 )
 
-# [CONF-3] Maximum backoff (seconds) — caps the exponential growth so a
+# [CONF-3] Maximum backoff (seconds) -- caps the exponential growth so a
 # badly-degraded PubChem does not stall the pipeline for hours.
 PUBCHEM_PIPELINE_MAX_BACKOFF: float = _getenv_float(
     "PUBCHEM_PIPELINE_MAX_BACKOFF", 32.0
@@ -2115,7 +2126,7 @@ PUBCHEM_PIPELINE_READ_TIMEOUT: float = _getenv_float(
 )
 
 # [CONF-1, DQ-14, IDEM-1] Cache TTL (seconds) for ``inchikeys_to_lookup.txt``.
-# Files older than this trigger a re-query.  Default 1 hour — balances
+# Files older than this trigger a re-query.  Default 1 hour -- balances
 # freshness against PubChem API load.  Set to 0 to disable caching.
 PUBCHEM_PIPELINE_CACHE_TTL_SECONDS: int = _getenv_int(
     "PUBCHEM_PIPELINE_CACHE_TTL_SECONDS", 3600
@@ -2128,7 +2139,7 @@ PUBCHEM_PIPELINE_CONCURRENCY: int = _getenv_int(
     "PUBCHEM_PIPELINE_CONCURRENCY", 1
 )
 
-# [SCI-7] Optionally fetch PubChem synonyms (voluminous — default False).
+# [SCI-7] Optionally fetch PubChem synonyms (voluminous -- default False).
 # When True, ``pubchem_compound_properties.synonyms`` is populated as a
 # JSON array string.  Single source of truth for entity_resolution.
 PUBCHEM_PIPELINE_FETCH_SYNONYMS: bool = _getenv_bool(
@@ -2136,7 +2147,7 @@ PUBCHEM_PIPELINE_FETCH_SYNONYMS: bool = _getenv_bool(
 )
 
 # [SCI-6] Optionally fetch CAS Registry Number via the synonyms endpoint.
-# Default False — adds 1 extra HTTP call per resolved CID.  When True,
+# Default False -- adds 1 extra HTTP call per resolved CID.  When True,
 # ``pubchem_compound_properties.cas_number`` is populated and cross-
 # validated against ``drugs.cas_number`` (from DrugBank).
 PUBCHEM_PIPELINE_FETCH_CAS: bool = _getenv_bool(
@@ -2146,7 +2157,7 @@ PUBCHEM_PIPELINE_FETCH_CAS: bool = _getenv_bool(
 # [REL-5] Maximum batch size for split-retry on permanent 4xx failures.
 # When a batch returns 400/404 etc., the batch is split into individual
 # InChIKey lookups.  This cap prevents 100 individual requests for a
-# fully-bad batch — if exceeded, all 100 are dead-lettered without splitting.
+# fully-bad batch -- if exceeded, all 100 are dead-lettered without splitting.
 PUBCHEM_PIPELINE_SPLIT_RETRY_MAX: int = _getenv_int(
     "PUBCHEM_PIPELINE_SPLIT_RETRY_MAX", 20
 )
@@ -2180,7 +2191,7 @@ PUBCHEM_CIRCUIT_BREAKER_RESET_SECONDS: float = _getenv_float(
 )
 
 # [CONF-6] Comma-separated list of PubChem properties to fetch per CID.
-# Rarely changed — but exposed for forward-compat with new PubChem fields.
+# Rarely changed -- but exposed for forward-compat with new PubChem fields.
 PUBCHEM_PIPELINE_PROPERTIES: list[str] = [
     p.strip()
     for p in _getenv(
@@ -2208,7 +2219,7 @@ PUBCHEM_PIPELINE_PROPERTIES: list[str] = [
     if p.strip()
 ]
 
-# [LOG-3] Optional Prometheus metrics emission.  Default False — don't
+# [LOG-3] Optional Prometheus metrics emission.  Default False -- don't
 # add the prometheus_client import overhead in dev.  When True, the
 # pipeline emits ``pubchem_batches_total``, ``pubchem_retries_total``,
 # ``pubchem_records_loaded``, ``pubchem_api_latency_seconds``.
@@ -2230,14 +2241,14 @@ OPERATOR_ID: Optional[str] = (
 # object (authoritative).  When False, formal charge is parsed from the
 # SMILES string (heuristic) and SMILES are not validated.
 try:
-    import rdkit  # noqa: F401  — presence check only
+    import rdkit  # noqa: F401  -- presence check only
     RDKIT_AVAILABLE: bool = True
 except ImportError:
     RDKIT_AVAILABLE: bool = False
 
 
 # ---------------------------------------------------------------------------
-# DrugBank — CODE-7, INTEROP-1
+# DrugBank -- CODE-7, INTEROP-1
 # ---------------------------------------------------------------------------
 
 # DrugBank distributes the full database as a .xml.gz file.
@@ -2253,7 +2264,7 @@ DRUGBANK_XML_PATH: Path = Path(
     )
     # If the env var is set but empty, fall back to the default.
     # Without this guard, Path("") == Path(".") which is the current
-    # directory — causes a confusing IsADirectoryError downstream.
+    # directory -- causes a confusing IsADirectoryError downstream.
     or str(RAW_DATA_DIR / "drugbank" / "drugbank_all_full_database.xml.gz")
 )
 
@@ -2274,7 +2285,7 @@ DEFAULT_DRUGBANK_VERSION: str = "5.1"
 # publicly. DrugBank's latest public release as of 2024 is 5.1.x
 # (5.1.12 was the most recent). The fictional "5.2" entry would have
 # accepted ``DRUGBANK_VERSION=5.2`` as a known-good version, silencing
-# the "not in the known valid set" warning — operators could then
+# the "not in the known valid set" warning -- operators could then
 # configure the pipeline against a non-existent release and never see
 # a hint that the version was wrong. Removed here.
 VALID_DRUGBANK_VERSIONS: frozenset[str] = frozenset(
@@ -2332,7 +2343,7 @@ DRUGBANK_GENERATE_SYNTH_KEYS: bool = _getenv_bool(
     "DRUGBANK_GENERATE_SYNTH_KEYS", True
 )
 
-# S7: hard drop of records with no InChIKey (default False — keep biologics).
+# S7: hard drop of records with no InChIKey (default False -- keep biologics).
 DRUGBANK_DROP_NO_INCHIKEY: bool = _getenv_bool("DRUGBANK_DROP_NO_INCHIKEY", False)
 
 # ID4: conservative_defaults flag for fill_missing_drug_fields.
@@ -2385,7 +2396,7 @@ DRUGBANK_VALIDATE_READABILITY: bool = _getenv_bool(
 DRUGBANK_DPI_BATCH_SIZE: int = _parse_required_int("DRUGBANK_DPI_BATCH_SIZE", "500")
 
 # ---------------------------------------------------------------------------
-# OMIM — SEC-2 + 16-domain institutional-grade config (master prompt §7.12)
+# OMIM -- SEC-2 + 16-domain institutional-grade config (master prompt §7.12)
 # ---------------------------------------------------------------------------
 # BUG-9.15 / BUG-12.8: OMIM_API_KEY stripped of whitespace (handles trailing
 # newlines that some secret managers inject).
@@ -2393,11 +2404,11 @@ OMIM_API_KEY: str = (os.getenv("OMIM_API_KEY") or "").strip()
 OMIM_API_BASE: str = os.getenv("OMIM_API_BASE") or "https://api.omim.org/api"
 
 # BUG-2.6 / BUG-12.1: rate-limit interval between OMIM API requests.
-# OMIM's published rate limit is 4 req/sec → 0.25s between requests.
+# OMIM's published rate limit is 4 req/sec -> 0.25s between requests.
 OMIM_REQUEST_INTERVAL: float = _getenv_float("OMIM_REQUEST_INTERVAL", 0.25)
 
 # BUG-2.5 / BUG-3.5 / BUG-3.6 / BUG-12.3: which phenotype mapping keys to
-# include in the cleaned GDA output. Default [3, 4] — molecular basis known
+# include in the cleaned GDA output. Default [3, 4] -- molecular basis known
 # (mk=3) plus contiguous gene deletion/duplication syndromes (mk=4, e.g.
 # DiGeorge, Williams). Both are clinically real and well-characterized.
 # Advanced users can set OMIM_MAPPING_KEYS_INCLUDE=1,2,3,4 for comprehensive
@@ -2432,7 +2443,7 @@ OMIM_MIN_EXPECTED_RECORDS: int = _getenv_int("OMIM_MIN_EXPECTED_RECORDS", 5000)
 # BUG-6.5 / BUG-12.16: upper bound on pagination pages.
 OMIM_MAX_PAGINATION_PAGES: int = _getenv_int("OMIM_MAX_PAGINATION_PAGES", 1000)
 
-# BUG-12.17: legacy dedup-keep-policy — kept for backward-compat; the new
+# BUG-12.17: legacy dedup-keep-policy -- kept for backward-compat; the new
 # atomic-write path (BUG-1.9) doesn't append, so this is informational only.
 OMIM_DEDUP_KEEP_POLICY: str = _getenv("OMIM_DEDUP_KEEP_POLICY", "last")
 
@@ -2441,7 +2452,7 @@ OMIM_DEDUP_KEEP_POLICY: str = _getenv("OMIM_DEDUP_KEEP_POLICY", "last")
 #   base + min(0.05 * log1p(num_pmids), 0.08) + min(evidence_strength * 0.05, 0.05)
 # clamped to [0, 1].
 #   - mk=3 (0.9): molecular basis known (mutation found in gene). Strongest
-#     single signal — chosen to match DisGeNET's strong-evidence threshold.
+#     single signal -- chosen to match DisGeNET's strong-evidence threshold.
 #   - mk=4 (0.8): contiguous gene deletion/duplication syndrome. Clinically
 #     validated, but the gene-disease causal chain is less direct than mk=3.
 #   - mk=2 (0.6): the disease phenotype itself was mapped (no gene identified).
@@ -2458,7 +2469,7 @@ OMIM_USER_AGENT: str = _getenv(
 )
 
 # BUG-12.6: regex validating the OMIM_API_KEY format. OMIM API keys are UUIDs.
-# v43 ROOT FIX (P1 — OMIM_API_KEY_FORMAT_RE not compiled): the previous
+# v43 ROOT FIX (P1 -- OMIM_API_KEY_FORMAT_RE not compiled): the previous
 # code declared this as a str and used re.match(OMIM_API_KEY_FORMAT_RE,
 # ...) which re-compiles the regex on every call. Compiling once at
 # import time is faster and makes the type stubs correct (re.Pattern
@@ -2482,7 +2493,7 @@ OMIM_MAX_AGE_DAYS: int = _getenv_int("OMIM_MAX_AGE_DAYS", 30)
 # BUG-8.20: DB batch size for bulk_upsert_gda.
 OMIM_DB_BATCH_SIZE: int = _getenv_int("OMIM_DB_BATCH_SIZE", 1000)
 
-# BUG-3.13: when True (default — the safe choice for drug repurposing),
+# BUG-3.13: when True (default -- the safe choice for drug repurposing),
 # susceptibility ({}) records are routed to a separate CSV and excluded from
 # the main GDA load. Downstream ML MUST filter WHERE is_susceptibility = False
 # for repurposing candidates. Treating {} as causal is the patient-harm
@@ -2497,7 +2508,7 @@ OMIM_JSON_PRETTY: bool = _getenv_bool("OMIM_JSON_PRETTY", False)
 # load for reproducibility.
 OMIM_RANDOM_SEED: int = _getenv_int("OMIM_RANDOM_SEED", 42)
 
-# BUG-9.15: helper — does the OMIM_API_KEY look like a valid UUID?
+# BUG-9.15: helper -- does the OMIM_API_KEY look like a valid UUID?
 def _omim_api_key_is_valid_format() -> bool:
     """Return True iff OMIM_API_KEY is empty OR matches the UUID format."""
     if not OMIM_API_KEY:
@@ -2507,7 +2518,7 @@ def _omim_api_key_is_valid_format() -> bool:
     return bool(OMIM_API_KEY_FORMAT_RE.match(OMIM_API_KEY))
 
 
-# BUG-12.11: eager validation of OMIM config — mirrors DisGeNET's
+# BUG-12.11: eager validation of OMIM config -- mirrors DisGeNET's
 # `_validate_disgenet_config` pattern. Raises ValueError on invalid values;
 # logs UserWarning if a non-critical key is misconfigured.
 def _validate_omim_config() -> None:
@@ -2555,10 +2566,10 @@ def _validate_omim_config() -> None:
     except Exception as exc:
         errors.append(f"OMIM_API_BASE is not a valid URL: {exc}")
 
-    # BUG-12.6: API key format check (warning only — empty is allowed)
+    # BUG-12.6: API key format check (warning only -- empty is allowed)
     if not _omim_api_key_is_valid_format():
         warnings.warn(
-            f"OMIM_API_KEY does not match expected UUID format — may be mistyped",
+            f"OMIM_API_KEY does not match expected UUID format -- may be mistyped",
             UserWarning,
             stacklevel=2,
         )
@@ -2569,7 +2580,7 @@ def _validate_omim_config() -> None:
         )
 
 
-# Run eager validation — but be tolerant if a downstream test wants to
+# Run eager validation -- but be tolerant if a downstream test wants to
 # re-configure env vars and reload. Following DisGeNET's pattern: log warning
 # and continue on validation failure (the pipeline will raise a clearer error
 # at __init__ time).
@@ -2583,7 +2594,7 @@ except ValueError as _omim_cfg_exc:
     # Catching ``UserWarning`` was dead code. Worse, if a future change
     # made ``_validate_omim_config`` actually raise ``UserWarning``, the
     # ``warnings.warn`` call inside this except block would emit ANOTHER
-    # UserWarning — creating an infinite-loop risk if warnings were
+    # UserWarning -- creating an infinite-loop risk if warnings were
     # configured as errors. The fix narrows the except to ``ValueError``
     # only, which is the only exception ``_validate_omim_config`` raises.
     warnings.warn(
@@ -2598,7 +2609,7 @@ except ValueError as _omim_cfg_exc:
 # ---------------------------------------------------------------------------
 # Previously the 20+ OMIM_* settings existed ONLY as flat module-level
 # constants. That worked, but it meant every consumer had to import each
-# constant by name (see pipelines/omim_pipeline.py — it imports ~15 of
+# constant by name (see pipelines/omim_pipeline.py -- it imports ~15 of
 # them individually). This consolidated dict is the canonical structured
 # view of all OMIM settings in one place, suitable for:
 #   * programmatic introspection (e.g. /health endpoints)
@@ -2606,13 +2617,13 @@ except ValueError as _omim_cfg_exc:
 #   * new code that prefers dict access over many-name imports
 #
 # The individual OMIM_* module-level constants above are KEPT for
-# backwards compatibility — they are the same values, just accessible as
+# backwards compatibility -- they are the same values, just accessible as
 # flat names. The OMIMPipeline continues to import them by name; new
 # consumers should prefer ``OMIM_CONFIG``.
 #
 # NOTE: ``OMIM_API_KEY`` is masked in ``OMIM_CONFIG["api_key_masked"]``
 # but the raw value is still in ``OMIM_API_KEY`` (module-level) so the
-# pipeline can authenticate. Do not log ``OMIM_CONFIG["api_key"]`` —
+# pipeline can authenticate. Do not log ``OMIM_CONFIG["api_key"]`` --
 # use ``OMIM_CONFIG["api_key_masked"]`` for any human-facing output.
 OMIM_CONFIG: dict[str, object] = {
     # --- Connection -----------------------------------------------------
@@ -2668,7 +2679,7 @@ def get_omim_config() -> dict[str, object]:
 AIRFLOW_HOME: Path = BASE_DIR / "airflow"
 
 # ---------------------------------------------------------------------------
-# Logging — ARCH-2, IDMP-3, SEC-5, LOG-1, LOG-2, LOG-3
+# Logging -- ARCH-2, IDMP-3, SEC-5, LOG-1, LOG-2, LOG-3
 # ---------------------------------------------------------------------------
 
 LOG_LEVEL: str = _getenv("LOG_LEVEL", "INFO")
@@ -2773,7 +2784,7 @@ def setup_logging(level: Optional[str] = None) -> None:
     )
     # Configure the root logger via logging.basicConfig so that
     # third-party modules' log records also get formatted output.
-    # We pass our handler and format to basicConfig (idempotent — if
+    # We pass our handler and format to basicConfig (idempotent -- if
     # the root logger already has handlers, basicConfig is a no-op).
     logging.basicConfig(
         level=log_level,
@@ -2836,7 +2847,7 @@ def log_config_summary() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Data provenance & versioning — DATA-3, IDMP-4, LINEAGE-1, LINEAGE-2
+# Data provenance & versioning -- DATA-3, IDMP-4, LINEAGE-1, LINEAGE-2
 # ---------------------------------------------------------------------------
 
 DATA_SNAPSHOT_ID: str = _getenv(
@@ -2886,7 +2897,7 @@ def get_provenance_metadata() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# URL validation — DATA-1, INTEROP-3
+# URL validation -- DATA-1, INTEROP-3
 # ---------------------------------------------------------------------------
 
 
@@ -2894,7 +2905,7 @@ def validate_all_urls() -> dict[str, bool]:
     """Validate all URL settings with HEAD requests.
 
     Returns a dict of setting_name -> is_valid. Logs warnings for
-    failing URLs. Does NOT raise — the pipeline should start even if a
+    failing URLs. Does NOT raise -- the pipeline should start even if a
     URL is temporarily down.
     """
     results: dict[str, bool] = {}
@@ -2960,7 +2971,7 @@ def check_api_endpoints() -> dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# API key validation — SEC-2
+# API key validation -- SEC-2
 # ---------------------------------------------------------------------------
 
 
@@ -2985,7 +2996,7 @@ def validate_api_keys() -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# .env file checks — SEC-3, COMP-2
+# .env file checks -- SEC-3, COMP-2
 # ---------------------------------------------------------------------------
 
 
@@ -3038,7 +3049,7 @@ def validate_env_file(path: Optional[Path] = None) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Secret management — SEC-4
+# Secret management -- SEC-4
 # ---------------------------------------------------------------------------
 
 
@@ -3055,7 +3066,7 @@ def get_secret(key: str, default: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Environment schema validation — CONF-3
+# Environment schema validation -- CONF-3
 # ---------------------------------------------------------------------------
 
 ENV_VAR_SCHEMA: dict[str, dict] = {
@@ -3116,13 +3127,13 @@ def validate_env_schema() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Configuration registry (data dictionary) — DOC-3
+# Configuration registry (data dictionary) -- DOC-3
 # ---------------------------------------------------------------------------
 # v29 ROOT FIX (audit C-13): CONFIG_REGISTRY is STALE.
 #
 # This registry was originally intended as a self-documenting data
 # dictionary of every setting in the module. In practice it has not been
-# maintained alongside the actual settings — many settings added by the
+# maintained alongside the actual settings -- many settings added by the
 # institutional-grade rewrites of the ChEMBL / STRING / DisGeNET / OMIM /
 # PubChem / DrugBank pipelines are NOT registered here, and several
 # entries (e.g. ``OMIM_DEDUP_KEEP_POLICY``) describe settings whose
@@ -3198,7 +3209,7 @@ CONFIG_REGISTRY: dict[str, dict] = {
         # The CONFIG_REGISTRY default was NOT updated when the code
         # default was changed to 700, so any tooling that read the
         # registry default (e.g. config validators, documentation
-        # generators, .env scaffolding) still saw 400 — silently
+        # generators, .env scaffolding) still saw 400 -- silently
         # contradicting the scientifically-validated threshold.
         "default": "700",
         "description": "Minimum STRING PPI score for inclusion (700 = high confidence, >80% precision per Szklarczyk 2023)",
@@ -3302,7 +3313,7 @@ CONFIG_REGISTRY: dict[str, dict] = {
         "type": "str",
         "required": False,
         "default": "last",
-        "description": "Legacy dedup-keep-policy (no longer used — atomic writes don't append).",
+        "description": "Legacy dedup-keep-policy (no longer used -- atomic writes don't append).",
         "used_by": ["pipelines.omim"],
     },
     "OMIM_CONFIRMED_SCORE": {
@@ -3414,8 +3425,8 @@ CONFIG_REGISTRY: dict[str, dict] = {
         "type": "str",
         "required": False,
         "default": "development",
-        "description": "Deployment environment profile (aliases are accepted and normalized — see _ENV_NORMALIZATION map at line ~363)",
-        # v66 ROOT FIX (P1C-026 — valid_values omitted accepted aliases):
+        "description": "Deployment environment profile (aliases are accepted and normalized -- see _ENV_NORMALIZATION map at line ~363)",
+        # v66 ROOT FIX (P1C-026 -- valid_values omitted accepted aliases):
         #   The previous list only included the canonical forms
         #   (development, staging, production). But the normalization map
         #   (_ENV_NORMALIZATION at line ~363) ALSO accepts "dev",
@@ -3435,7 +3446,7 @@ CONFIG_REGISTRY: dict[str, dict] = {
 }
 
 # ---------------------------------------------------------------------------
-# Structured config groups (dataclasses) — ARCH-3
+# Structured config groups (dataclasses) -- ARCH-3
 # ---------------------------------------------------------------------------
 
 
@@ -3534,7 +3545,7 @@ def get_disgenet_config() -> DisGeNETConfig:
 
 
 # ---------------------------------------------------------------------------
-# Configuration reload — ARCH-4, CONF-5
+# Configuration reload -- ARCH-4, CONF-5
 # ---------------------------------------------------------------------------
 
 
@@ -3545,7 +3556,7 @@ def reload_settings() -> dict[str, tuple[str, str]]:
     allowing new environment variable values to take effect without
     a full ``importlib.reload()`` (which can break held references).
 
-    v79 FORENSIC ROOT FIX (P0-A5 — reload_settings() returned an EMPTY
+    v79 FORENSIC ROOT FIX (P0-A5 -- reload_settings() returned an EMPTY
     diff because module-level constants were never re-read):
       The v78 code only reset the lazy caches (``_db_config``,
       ``_chembl_config``, etc.) but NEVER re-read the module-level
@@ -3553,8 +3564,8 @@ def reload_settings() -> dict[str, tuple[str, str]]:
       ``UNIPROT_RELEASE``, ``DISGENET_USE_API``, ``STRING_MIN_COMBINED_SCORE``,
       etc.). These constants are bound at import time via ``_getenv()``
       calls and stored in ``globals()``. ``get_data_version_info()``
-      reads THESE SAME constants — so calling it before and after
-      ``reload_settings()`` returned identical values → empty diff.
+      reads THESE SAME constants -- so calling it before and after
+      ``reload_settings()`` returned identical values -> empty diff.
       Operators were silently misled that hot-reload worked; only a
       process restart picked up new env vars.
 
@@ -3563,7 +3574,7 @@ def reload_settings() -> dict[str, tuple[str, str]]:
       ``reload_settings()``, iterate the registry, call each reloader
       (which re-reads the env var and parses it), compare old vs new,
       update ``globals()``, and record the diff. The diff is now REAL
-      — operators can trust it to reflect env-var changes.
+      -- operators can trust it to reflect env-var changes.
 
     Returns a dict of setting_name -> (old_value, new_value) for
     settings whose values changed after the reload.
@@ -3601,7 +3612,7 @@ def reload_settings() -> dict[str, tuple[str, str]]:
             new_value = reloader()
         except Exception as exc:
             logger.warning(
-                "reload_settings: failed to re-read %s (%s) — keeping "
+                "reload_settings: failed to re-read %s (%s) -- keeping "
                 "old value %r",
                 global_name, exc, old_value,
             )
@@ -3631,7 +3642,7 @@ def reload_settings() -> dict[str, tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# v79 FORENSIC ROOT FIX (P0-A5) — Reloadable settings registry
+# v79 FORENSIC ROOT FIX (P0-A5) -- Reloadable settings registry
 # ---------------------------------------------------------------------------
 # Each entry: (global_name, reloader_callable)
 # The reloader re-reads the env var and parses it using the SAME helper
@@ -3753,7 +3764,7 @@ _register_reloadable("DATA_SNAPSHOT_ID", _reload_data_snapshot_id)
 
 
 # ---------------------------------------------------------------------------
-# __all__ — CODE-8
+# __all__ -- CODE-8
 # ---------------------------------------------------------------------------
 
 __all__ = [
@@ -3773,7 +3784,7 @@ __all__ = [
     "CHEMBL_EXPECTED_DRUG_COUNT_MIN",
     "CHEMBL_EXPECTED_DRUG_COUNT_MAX",
     "CHEMBL_URL",  # deprecated
-    # ChEMBL — institutional-grade operational settings (chembl_pipeline.py rewrite)
+    # ChEMBL -- institutional-grade operational settings (chembl_pipeline.py rewrite)
     "CHEMBL_PAGE_SIZE",
     "CHEMBL_MAX_RETRIES",
     "CHEMBL_RETRY_BACKOFF_BASE",
@@ -3826,7 +3837,7 @@ __all__ = [
     "DISGENET_API_KEY",
     "DISGENET_USE_API",
     "DISGENET_STATIC_URL",  # deprecated
-    # DisGeNET — institutional-grade operational settings (389-fix audit)
+    # DisGeNET -- institutional-grade operational settings (389-fix audit)
     "DISGENET_MIN_SCORE",
     "DISGENET_ALLOW_WEAK_EVIDENCE",
     "DISGENET_WEAK_EVIDENCE_THRESHOLD",
@@ -3891,7 +3902,7 @@ __all__ = [
     "ENTITY_RESOLUTION_DEFAULT_ORGANISM",
     "ENTITY_RESOLUTION_MAPPING_SCHEMA_VERSION",
     "get_entity_resolution_config",
-    # PubChem pipeline (institutional-grade — fixes PUBCHEM_PIPELINE_MASTER_FIX_PROMPT.md)
+    # PubChem pipeline (institutional-grade -- fixes PUBCHEM_PIPELINE_MASTER_FIX_PROMPT.md)
     "PUBCHEM_PIPELINE_BATCH_SIZE",
     "PUBCHEM_PIPELINE_MIN_BACKOFF",
     "PUBCHEM_PIPELINE_MAX_BACKOFF",
@@ -3967,7 +3978,7 @@ __all__ = [
     # Logging
     "LOG_LEVEL",
     "setup_logging",
-    # Loaders (previously missing from __all__ — institutional-grade fix)
+    # Loaders (previously missing from __all__ -- institutional-grade fix)
     "LOADERS_DEAD_LETTER_ENABLED",
     "LOADERS_STRICT_VALIDATION",
     "LOADERS_MAX_RETRY_ATTEMPTS",
@@ -4008,7 +4019,7 @@ __all__ = [
     "DEFAULT_STRING_VERSION",
     "CHEMBL_VERSION_COUNT_RANGES",
     "STRING_VERSION_SCORE_THRESHOLDS",
-    "CONFIG_REGISTRY",  # DEPRECATED (v29 audit C-13) — kept for back-compat
+    "CONFIG_REGISTRY",  # DEPRECATED (v29 audit C-13) -- kept for back-compat
     "OMIM_CONFIG",  # v29 ROOT FIX (audit C-13): consolidated OMIM settings
     "get_omim_config",  # v29 ROOT FIX (audit C-13): accessor for OMIM_CONFIG
     "ENV_VAR_SCHEMA",
@@ -4024,7 +4035,7 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
-# Deprecated settings registry — DESIGN-1, DOC-4
+# Deprecated settings registry -- DESIGN-1, DOC-4
 # ---------------------------------------------------------------------------
 # These settings are accessed via module-level __getattr__ so that
 # DeprecationWarning is raised on every access.  The descriptor-based

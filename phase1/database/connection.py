@@ -52,6 +52,16 @@ v2.0.0 — Complete institutional-grade rewrite addressing 109 issues across
     session context, health-check dataclass, retry logic, circuit breaker,
     credential masking, SQLite PRAGMA tuning, structured logging, lineage
     tracking, schema verification, and comprehensive testability hooks.
+
+P1-029 PROCESS-WIDE SIDE EFFECT (documented):
+    This module registers a process-wide ``sqlite3.register_adapter`` that
+    converts ``decimal.Decimal`` → ``float`` on EVERY ``sqlite3.connect()``
+    in the process (not just SQLAlchemy-managed connections). This is a
+    deliberate, documented trade-off — see the inline comment at the
+    ``import sqlite3`` block below for the full rationale. Operators
+    running this platform in a SHARED Python process with other libraries
+    that depend on ``sqlite3`` raising on ``Decimal`` MUST spin the
+    platform up in its own process (see ``docker-compose.yml``).
 """
 
 from __future__ import annotations
@@ -120,36 +130,67 @@ logger = logging.getLogger(__name__)
 #   ``pytest.approx`` or ``math.isclose`` with a tolerance (e.g.
 #   ``rel=1e-9``) so they pass on BOTH backends. This is now documented
 #   in every bulk loader's coercion comment.
+#
+# P1-029 ROOT FIX (process-wide Decimal adapter side effect — documented):
+#   ``sqlite3.register_adapter`` is PROCESS-WIDE. Once this module is
+#   imported, EVERY ``sqlite3.connect()`` in the process (Airflow metadata
+#   DB, third-party libraries, raw sqlite3 test fixtures) will silently
+#   convert ``Decimal`` → ``float`` instead of raising ``ProgrammingError``.
+#   This is a deliberate, documented trade-off: the alternative (a
+#   SQLAlchemy ``TypeDecorator`` scoped to ORM-managed connections only)
+#   would require touching every ``Numeric``/``Decimal`` column in
+#   ``models.py`` (100+ columns) AND every migration, AND would leave raw
+#   ``sqlite3`` connections in the same process still broken — net-zero
+#   benefit for high risk. Instead we ACCEPT the process-wide side effect
+#   and document it loudly here, in the module docstring above, and in
+#   the operator runbook (``docs/operations/sqlite-decimal-adapter.md``).
+#
+#   Operators running this platform in a SHARED Python process with other
+#   libraries that depend on ``sqlite3`` raising on ``Decimal`` MUST spin
+#   the platform up in its own process (the documented production
+#   deployment model — see ``docker-compose.yml``). The dev/test path
+#   (``pytest``) is unaffected because no test asserts the stdlib default.
 # ---------------------------------------------------------------------------
 import sqlite3 as _sqlite3_module
 from decimal import Decimal as _Decimal_type
 
-# v93 ROOT FIX (P1-040 — mutating stdlib _sqlite3_module private attr):
-#   The previous code set ``_sqlite3_module._drugos_decimal_adapter_registered
-#   = True`` — a PRIVATE attribute on the stdlib ``sqlite3`` module. This is
-#   a GLOBAL SIDE EFFECT that persists across module reloads and affects ALL
-#   sqlite3 connections in the process, not just this module's connections.
-#   It also pollutes the stdlib module's namespace with a non-standard
-#   attribute that other libraries (or future Python versions) may not
-#   expect. Root fix: use ONLY the module-level ``_DECIMAL_ADAPTER_REGISTERED``
-#   flag (defined below) to track registration state. Do NOT mutate the
-#   stdlib module. The flag is reset on module reload (Python re-executes
-#   the module), so re-registration is safe.
-_DECIMAL_ADAPTER_REGISTERED: bool = False
+# P1-035 ROOT FIX (remove the _DECIMAL_ADAPTER_REGISTERED flag anti-pattern):
+#   The previous code guarded ``register_adapter`` with a module-level
+#   ``_DECIMAL_ADAPTER_REGISTERED: bool = False`` flag. On
+#   ``importlib.reload(database.connection)`` the flag reset to ``False``
+#   and ``register_adapter`` was called again. On Python < 3.12 this
+#   raises ``TypeError`` (re-registering the same type+callable is
+#   forbidden); the previous code swallowed this in a broad ``except
+#   Exception`` and logged a MISLEADING warning ("Failed to register
+#   SQLite Decimal adapter") when the adapter was actually already
+#   registered. On Python 3.12+ ``register_adapter`` IS idempotent so the
+#   flag is pure dead-weight.
+#
+#   ROOT FIX: call ``register_adapter`` UNCONDITIONALLY (Python 3.12+
+#   semantics). For Python < 3.12 compatibility, narrow the except to
+#   ``TypeError`` ONLY (the actual re-registration error) and treat it as
+#   a DEBUG no-op (the adapter is already registered — exactly what we
+#   want). Other exceptions (e.g. ``sqlite3.NotSupportedError``) still
+#   log a WARNING so real driver failures surface. The
+#   ``_DECIMAL_ADAPTER_REGISTERED`` flag is GONE — no module state, no
+#   reload footgun, no misleading warning.
 try:
-    # register_adapter is idempotent-safe only if the SAME adapter function
-    # is passed; we guard with a module-level flag to avoid re-registration
-    # on hot-reload. The flag is process-local (not on the stdlib module).
-    if not _DECIMAL_ADAPTER_REGISTERED:
-        _sqlite3_module.register_adapter(_Decimal_type, float)
-        _DECIMAL_ADAPTER_REGISTERED = True
-        logger.debug(
-            "SQLite Decimal→float adapter registered process-wide "
-            "(P1C-021 root fix, v93 P1-040 — no stdlib mutation). "
-            "Numeric columns on SQLite store float64; PostgreSQL "
-            "preserves Decimal precision. Tests MUST use pytest.approx "
-            "for numeric assertions."
-        )
+    _sqlite3_module.register_adapter(_Decimal_type, float)
+    logger.debug(
+        "SQLite Decimal→float adapter registered process-wide "
+        "(P1-029 documented side effect, P1-035 unconditional register). "
+        "Numeric columns on SQLite store float64; PostgreSQL preserves "
+        "Decimal precision. Tests MUST use pytest.approx for numeric "
+        "assertions. See module docstring for the full rationale."
+    )
+except TypeError:
+    # Python < 3.12: register_adapter raises TypeError if the same
+    # type+callable is already registered (e.g. after importlib.reload).
+    # The adapter is already installed — exactly the state we want.
+    logger.debug(
+        "SQLite Decimal→float adapter already registered "
+        "(Python < 3.12 idempotency) — no action needed."
+    )
 except Exception as _adapter_exc:  # noqa: BLE001 — never fatal
     logger.warning(
         "Failed to register SQLite Decimal adapter (P1C-021): %s. "
@@ -723,6 +764,72 @@ def _configure_engine_events(engine: Engine) -> None:
                 logger.debug("SQLite PRAGMAs applied: foreign_keys=ON, WAL, NORMAL, busy_timeout=30000")
             finally:
                 cursor.close()
+
+        # P1-015 ROOT FIX (Team-2 — register SQLite REGEXP function so
+        # CHECK constraints can use real regex matching instead of the
+        # weak LENGTH+SUBSTR backstop):
+        #   The migration 001 + 009 SQL uses PostgreSQL's POSIX regex
+        #   operator ``~`` for InChIKey / disease_id / pmid_list format
+        #   validation. SQLite does NOT support ``~`` natively. The
+        #   previous fix (v76 T-038) translated the InChIKey regex to
+        #   ``LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND
+        #   SUBSTR(inchikey, 26, 1) = '-'`` — a weak check that accepts
+        #   any 27-char string with hyphens at positions 15 and 26
+        #   (e.g. ``11111111111111-2222222222-3``, ``aaaa...``, ``!!!!...``).
+        #   Dev DBs (SQLite) accepted gibberish InChIKeys that prod
+        #   PostgreSQL rejected — a dev/prod asymmetry footgun.
+        #   ROOT FIX: register a SQLite REGEXP function via
+        #   ``create_function``. SQLite's SQL parser recognizes the
+        #   ``REGEXP`` operator (e.g. ``inchikey REGEXP '^[A-Z]{14}-...'``)
+        #   and routes it to the registered Python function. This gives
+        #   SQLite the SAME regex matching power as PostgreSQL's ``~``,
+        #   so the migration runner can translate ``~`` to ``REGEXP``
+        #   (instead of the weak LENGTH backstop) and dev/prod behavior
+        #   is identical. The function uses Python's ``re`` module with
+        #   ``re.search`` (SQLite REGEXP convention: returns 1 if the
+        #   pattern matches ANYWHERE in the string, 0 otherwise — so
+        #   patterns must use ``^...$`` anchors for full-string match,
+        #   which all our regexes already do).
+        import re as _re_for_sqlite_regexp
+
+        def _sqlite_regexp(pattern: str, value: Any) -> int:
+            """SQLite REGEXP function — returns 1 if pattern matches, 0 else.
+
+            SQLite calls this with (pattern, value) when a SQL statement
+            uses the ``REGEXP`` operator: ``value REGEXP pattern``.
+            ``value`` may be NULL (returns 0 — NULL does not match any
+            pattern). ``pattern`` is a Python regex string. Uses
+            ``re.search`` so patterns MUST anchor with ``^...$`` for
+            full-string match (all our CHECK-constraint regexes do).
+            """
+            if value is None:
+                return 0
+            if not isinstance(pattern, str):
+                return 0
+            try:
+                return 1 if _re_for_sqlite_regexp.search(pattern, str(value)) else 0
+            except _re_for_sqlite_regexp.error:
+                # Invalid regex pattern — do not match (safer than raising
+                # inside a CHECK constraint, which would reject every row).
+                return 0
+
+        @event.listens_for(engine, "connect")
+        def _register_sqlite_regexp_function(
+            dbapi_connection: Any, connection_record: Any
+        ) -> None:
+            # create_function signature: (name, num_args, func, deterministic?)
+            # ``deterministic=True`` (SQLite 3.8.3+) lets the query planner
+            # cache results — important for CHECK constraints evaluated
+            # on every INSERT. Older SQLite versions ignore the 4th arg.
+            try:
+                dbapi_connection.create_function(
+                    "REGEXP", 2, _sqlite_regexp, deterministic=True
+                )
+            except TypeError:
+                # Older SQLite / pysqlite versions don't accept
+                # ``deterministic`` — fall back to the 3-arg form.
+                dbapi_connection.create_function("REGEXP", 2, _sqlite_regexp)
+            logger.debug("SQLite REGEXP function registered (P1-015)")
 
     # --- Connection lifecycle logging ---
     if _DEBUG_EVENTS or not is_sqlite:

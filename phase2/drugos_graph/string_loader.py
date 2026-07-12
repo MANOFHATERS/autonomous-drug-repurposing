@@ -1,5 +1,5 @@
 """
-DrugOS Graph Module — STRING Loader (Institutional-Grade v1.0)
+DrugOS Graph Module -- STRING Loader (Institutional-Grade v1.0)
 ==============================================================
 Downloads, parses, validates, and converts STRING protein-protein
 interaction (PPI) data into knowledge-graph edge records for the
@@ -16,20 +16,20 @@ Project Context
 The Autonomous Drug Repurposing Platform mines 10,000 FDA-approved drugs
 against every known disease using a chained pipeline:
 
-1. **Knowledge Graph (Neo4j)** — built by this loader + 6 sibling loaders
+1. **Knowledge Graph (Neo4j)** -- built by this loader + 6 sibling loaders
    (ChEMBL, DrugBank, UniProt, DisGeNET, OMIM, PubChem).
-2. **Graph Transformer (PyTorch + PyG)** — predicts a 0-1 therapeutic-
+2. **Graph Transformer (PyTorch + PyG)** -- predicts a 0-1 therapeutic-
    likelihood score for every untested drug-disease pair by message-passing
    over the graph this loader helps build.
-3. **RL Hypothesis Ranker (Stable-Baselines3, PPO)** — ranks the top
+3. **RL Hypothesis Ranker (Stable-Baselines3, PPO)** -- ranks the top
    predictions by plausibility x safety x market opportunity.
-4. **Clinical decision layer** — pharma partners and clinicians consume
+4. **Clinical decision layer** -- pharma partners and clinicians consume
    the ranking.
 
 STRING PPIs are **edges** in that graph. They tell the model "these two
 human proteins work together in the same pathway." A drug targeting
 Protein A therefore has implied effects on every protein B that A
-interacts with — and on every disease those B-proteins are associated
+interacts with -- and on every disease those B-proteins are associated
 with. **The STRING loader is upstream of every drug-disease prediction
 the platform ever makes.** A silently corrupted STRING graph trains the
 Graph Transformer on garbage; the RL ranker then ranks the wrong drugs;
@@ -68,7 +68,7 @@ Regulatory Compliance
   provide the system-of-record audit trail required for clinical decision
   support. Each entry is timestamped (ISO-8601 UTC), includes the
   ``load_id`` correlation ID, and is append-only.
-- **HIPAA:** N/A (no PHI — see PII Declaration above).
+- **HIPAA:** N/A (no PHI -- see PII Declaration above).
 - **GDPR:** N/A (no EU data subjects).
 - **CC BY 4.0 (STRING license):** Every edge record carries
   ``_license="CC BY 4.0"`` and ``_attribution="Data source: STRING
@@ -91,26 +91,26 @@ References
 
 Design Patterns
 ---------------
-- **Adapter** — ``StringLoader`` adapts the module-level functions to the
+- **Adapter** -- ``StringLoader`` adapts the module-level functions to the
   ``Loader`` Protocol (PEP 544) so ``run_pipeline.py`` can treat all
   loaders polymorphically (A1-01).
-- **Facade** — ``load_string()`` orchestrates the full pipeline:
+- **Facade** -- ``load_string()`` orchestrates the full pipeline:
   download -> parse -> validate -> resolve -> edge_records -> (optional)
   Neo4j load (A1-06).
-- **Strategy** — ``unresolved_policy`` kwarg on ``string_to_edge_records``
+- **Strategy** -- ``unresolved_policy`` kwarg on ``string_to_edge_records``
   selects between ``drop`` / ``keep_ensembl`` / ``raise`` (D2-07).
-- **Iterator** — ``iter_string_ppi`` and ``iter_string_edges`` provide
+- **Iterator** -- ``iter_string_ppi`` and ``iter_string_edges`` provide
   streaming APIs for memory-bounded processing of the 11M-row file (A1-08).
-- **Dead-Letter Queue** — malformed rows are written to
+- **Dead-Letter Queue** -- malformed rows are written to
   ``data/dead_letter/string_malformed.jsonl`` for forensic inspection
   rather than silently dropped (D5-11).
-- **Circuit Breaker** — ``download_string`` trips after 5 consecutive
+- **Circuit Breaker** -- ``download_string`` trips after 5 consecutive
   failures and stays open for 1 hour to avoid hammering string-db.org
   during outages (R6-12).
 
 Public API
 ----------
-Backward compatibility (master prompt Rule R3) — the three original
+Backward compatibility (master prompt Rule R3) -- the three original
 public functions remain importable with the SAME signatures, SAME types,
 and SAME default behaviors:
 
@@ -118,7 +118,7 @@ and SAME default behaviors:
 - ``parse_string_ppi(filepath=None, score_threshold=None) -> pd.DataFrame``
 - ``string_to_edge_records(df, crosswalk=None) -> List[Dict]``
 
-New public functions (additive only — Rule R2/R3):
+New public functions (additive only -- Rule R2/R3):
 
 - ``parse_string_raw(filepath=None) -> pd.DataFrame``
 - ``filter_by_score(df, threshold) -> pd.DataFrame``
@@ -136,7 +136,7 @@ Aliases (additive, no rename):
 
 New public classes:
 
-- ``StringLoader``  (Loader Protocol adapter — A1-01)
+- ``StringLoader``  (Loader Protocol adapter -- A1-01)
 
 Environment Variables
 ---------------------
@@ -184,7 +184,7 @@ SCHEMA CHANGELOG
 - Added ``organism_taxid``, ``directed``, ``source_version``,
   ``crosswalk_version``, ``load_id`` to every edge ``props`` (S3-03,
   I7-06, I7-07, I7-09).
-- ``combined_score`` is now ``Optional[int]`` — ``None`` for missing,
+- ``combined_score`` is now ``Optional[int]`` -- ``None`` for missing,
   never the ``0`` sentinel (S3-02).
 - Preserved the six legacy ``props`` keys verbatim (Rule R3):
   ``source``, ``combined_score``, ``src_id_resolved``,
@@ -193,7 +193,7 @@ SCHEMA CHANGELOG
 **Migration path:** downstream consumers that read the legacy 6 keys
 continue to work unchanged. New consumers SHOULD prefer the ``_``-prefixed
 keys (``_source``, ``_license``, ``_attribution``, ``_schema_version``,
-``_provenance``) — the legacy ``source`` alias is scheduled for removal
+``_provenance``) -- the legacy ``source`` alias is scheduled for removal
 in v2.0.0.
 
 How to Update the Pinned Version
@@ -208,8 +208,8 @@ When STRING publishes a new release (e.g. v12.0 -> v12.5):
    new row count from the STRING release notes.
 5. Update ``DATA_SOURCES["string"]["size_bytes"]`` to the new file size.
 6. Optionally set ``DATA_SOURCES["string"]["sha256"]`` to the published
-   checksum (STRING does not always publish one — leave ``None`` if not).
-7. Run ``pytest tests/test_string_loader.py -v`` — all 186 regression
+   checksum (STRING does not always publish one -- leave ``None`` if not).
+7. Run ``pytest tests/test_string_loader.py -v`` -- all 186 regression
    tests MUST pass.
 8. Run ``load_string(skip_neo4j=True, force=True)`` to download the new
    file and verify row counts are within [0.5x, 2.0x] of expected (D5-03).
@@ -224,21 +224,21 @@ CHANGELOG
 
 See Also
 --------
-- ``drugos_graph/chembl_loader.py`` — gold-standard reference loader
-- ``drugos_graph/uniprot_loader.py`` — second reference loader
-- ``drugos_graph/id_crosswalk.py`` — Ensembl-to-UniProt translation
-- ``drugos_graph/schemas.py`` — TypedDict contracts (StringEdgeRecord etc.)
-- ``drugos_graph/exceptions.py`` — STRING exception hierarchy
-- ``docs/string_data_dictionary.md`` — column + edge props documentation
-- ``docs/string_lineage.md`` — forward/reverse lineage + rollback Cypher
-- ``docs/SCHEMA_CHANGELOG.md`` — cross-loader schema change history
+- ``drugos_graph/chembl_loader.py`` -- gold-standard reference loader
+- ``drugos_graph/uniprot_loader.py`` -- second reference loader
+- ``drugos_graph/id_crosswalk.py`` -- Ensembl-to-UniProt translation
+- ``drugos_graph/schemas.py`` -- TypedDict contracts (StringEdgeRecord etc.)
+- ``drugos_graph/exceptions.py`` -- STRING exception hierarchy
+- ``docs/string_data_dictionary.md`` -- column + edge props documentation
+- ``docs/string_lineage.md`` -- forward/reverse lineage + rollback Cypher
+- ``docs/SCHEMA_CHANGELOG.md`` -- cross-loader schema change history
 
 Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 ``# Fixes <audit-id>:`` comments for per-fix attribution.
 """
 
 # =============================================================================
-# AUDIT ID COVERAGE BLOCK — All 186 audit IDs from
+# AUDIT ID COVERAGE BLOCK -- All 186 audit IDs from
 # string_loader_forensic_audit.md are addressed below.
 #
 # Each ID appears either as an inline `# Fixes <id>:` comment at the
@@ -249,7 +249,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Verify with: grep -oE '# Fixes [A-Z][0-9]+-[0-9]+' \
 #   drugos_graph/string_loader.py | sort -u | wc -l  # MUST be 186
 # =============================================================================
-# ── Domain 3 — Scientific Correctness (S3) ──
+# ── Domain 3 -- Scientific Correctness (S3) ──
 # Fixes S3-01: Validate score_threshold range [0, 1000]
 # Fixes S3-02: Replace combined_score=0 sentinel with None
 # Fixes S3-03: Add organism (taxid) filter, default 9606
@@ -263,7 +263,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes S3-11: Method-change guard via _assert_score_distribution_plausible
 # Fixes S3-12: emit_gene_edges kwarg for Protein-encodes-Gene
 #
-# ── Domain 5 — Data Quality & Integrity (D5) ──
+# ── Domain 5 -- Data Quality & Integrity (D5) ──
 # Fixes D5-01: SHA-256 verification via _compute_sha256 + _verify_checksum
 # Fixes D5-02: File-size validation via _verify_size
 # Fixes D5-03: Row-count validation via _verify_row_count
@@ -280,7 +280,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes D5-14: df.reset_index(drop=True) after every filter
 # Fixes D5-15: _check_freshness with WARN/INFO thresholds
 #
-# ── Domain 7 — Idempotency & Reproducibility (I7) ──
+# ── Domain 7 -- Idempotency & Reproducibility (I7) ──
 # Fixes I7-01: Version-skew detection via .version sidecar
 # Fixes I7-02: Idempotent Neo4j load (TODO in cross-module-changes.md)
 # Fixes I7-03: DataFrame provenance via df.attrs['provenance'] (13+ keys)
@@ -292,7 +292,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes I7-09: crosswalk_version field on every edge props
 # Fixes I7-10: Edge sort by (src_id, dst_id) before returning
 #
-# ── Domain 1 — Architecture (A1) ──
+# ── Domain 1 -- Architecture (A1) ──
 # Fixes A1-01: StringLoader class satisfying Loader Protocol
 # Fixes A1-02: Top-of-file import (no late import)
 # Fixes A1-03: PARSER_VERSION + SCHEMA_VERSION constants
@@ -304,7 +304,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes A1-09: Explicit __all__ list
 # Fixes A1-10: string_to_node_records returns [] (nodes from UniProt)
 #
-# ── Domain 9 — Security & Privacy (S9) ──
+# ── Domain 9 -- Security & Privacy (S9) ──
 # Fixes S9-01: TLS verification via ssl.create_default_context + certifi
 # Fixes S9-02: URL allowlist via ALLOWED_STRING_URLS (SSRF guard)
 # Fixes S9-03: _validate_filename_safe against path traversal
@@ -316,7 +316,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes S9-09: _validate_ensembl_id via ENSEMBL_PROTEIN_ID_REGEX
 # Fixes S9-10: Secret scanning recommendation in module docstring
 #
-# ── Domain 2 — Design (D2) ──
+# ── Domain 2 -- Design (D2) ──
 # Fixes D2-01: Optional[int]=None convention documented
 # Fixes D2-02: Type-annotate crosswalk: Optional[IDCrosswalk]
 # Fixes D2-03: StringEdgeRecord TypedDict; tight return type
@@ -330,7 +330,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes D2-11: comment='#' choice documented for STRING v12.0
 # Fixes D2-12: Design Patterns section in module docstring
 #
-# ── Domain 14 — Compliance & Standards (C14) ──
+# ── Domain 14 -- Compliance & Standards (C14) ──
 # Fixes C14-01: _license='CC BY 4.0' + _attribution on every edge
 # Fixes C14-02: SCHEMA_VERSION + SCHEMA CHANGELOG in module docstring
 # Fixes C14-03: Linting: from __future__ import annotations + lazy logging
@@ -342,7 +342,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes C14-09: _append_transformation_log to logs/audit/transformations.jsonl
 # Fixes C14-10: PEP 8/257/563/544 + DrugOS Coding Standards referenced
 #
-# ── Domain 6 — Reliability & Resilience (R6) ──
+# ── Domain 6 -- Reliability & Resilience (R6) ──
 # Fixes R6-01: _retry_with_backoff with exponential backoff + jitter
 # Fixes R6-02: _atomic_download via .part + os.replace
 # Fixes R6-03: BadGzipFile handling: probe + raise StringParseError
@@ -356,7 +356,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes R6-11: force=True warn before overwrite
 # Fixes R6-12: Circuit breaker with 5-failure threshold + 3600s cooldown
 #
-# ── Domain 10 — Testing & Validation (T10) ──
+# ── Domain 10 -- Testing & Validation (T10) ──
 # Fixes T10-01: download_string tests in tests/test_string_loader.py
 # Fixes T10-02: parse_string_ppi tests with 12 fixture .txt.gz files
 # Fixes T10-03: Edge-case tests: empty/missing/nan/self_interaction/duplicates
@@ -373,7 +373,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes T10-14: test_malformed_row_goes_to_dlq verifying JSONL structure
 # Fixes T10-15: test_string_loader_satisfies_protocol
 #
-# ── Domain 4 — Coding (C4) ──
+# ── Domain 4 -- Coding (C4) ──
 # Fixes C4-01: gzip import used in iter_string_ppi streaming path
 # Fixes C4-02: crosswalk: Optional[IDCrosswalk] type annotation
 # Fixes C4-03: List comprehension instead of edges.append() loop
@@ -390,7 +390,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes C4-14: Subtract self_loops from n_resolved denominator
 # Fixes C4-15: Helper docstrings on all private functions
 #
-# ── Domain 8 — Performance & Scalability (P8) ──
+# ── Domain 8 -- Performance & Scalability (P8) ──
 # Fixes P8-01: Vectorized resolve_ids using df['protein1'].map
 # Fixes P8-02: Single batched lookup via .map vectorization
 # Fixes P8-03: List comprehension over df.itertuples()
@@ -404,7 +404,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes P8-11: Streaming decompression via gzip.open in iter_string_ppi
 # Fixes P8-12: pytest-benchmark regression tracking (TODO in tests/bench/)
 #
-# ── Domain 11 — Logging & Observability (L11) ──
+# ── Domain 11 -- Logging & Observability (L11) ──
 # Fixes L11-01: Log-level taxonomy INFO/WARNING/ERROR/DEBUG
 # Fixes L11-02: Structured logging via logger.info(event, extra={...})
 # Fixes L11-03: StringLoggerAdapter injecting source/version/load_id
@@ -418,7 +418,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes L11-11: string_loader does NOT configure handlers/levels
 # Fixes L11-12: RotatingFileHandler recommendation in cross-module-changes.md
 #
-# ── Domain 12 — Configuration & Environment (C12) ──
+# ── Domain 12 -- Configuration & Environment (C12) ──
 # Fixes C12-01: MB = 1_000_000 constant
 # Fixes C12-02: DRUGOS_STRING_SCORE_THRESHOLD env override at call time
 # Fixes C12-03: DRUGOS_STRING_FILE via _resolve_string_filepath
@@ -432,7 +432,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes C12-11: force env var covered by C12-05
 # Fixes C12-12: _load_yaml_config honoring DRUGOS_STRING_CONFIG
 #
-# ── Domain 15 — Interoperability & Integration (I15) ──
+# ── Domain 15 -- Interoperability & Integration (I15) ──
 # Fixes I15-01: _schema_version field on every edge props
 # Fixes I15-02: rel_type from EDGE_TYPE_TO_RELATION_STRING config
 # Fixes I15-03: src_type/dst_type from CANONICAL_NODE_TYPES (via config)
@@ -446,7 +446,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes I15-11: Whitespace sep via sep=r'\s+'
 # Fixes I15-12: docs/SCHEMA_CHANGELOG.md (cross-module deliverable)
 #
-# ── Domain 16 — Data Lineage & Traceability (L16) ──
+# ── Domain 16 -- Data Lineage & Traceability (L16) ──
 # Fixes L16-01: df.attrs provenance covered by I7-03
 # Fixes L16-02: _provenance field on every edge covered by D2-06
 # Fixes L16-03: Transformation log covered by L11-06
@@ -463,7 +463,7 @@ Fixes: All 186 audit IDs from S3-01 through D13-15. See inline
 # Fixes L16-14: test_parse_string_sets_provenance in tests/test_string_loader.py
 # Fixes L16-15: docs/string_lineage.md (cross-module deliverable)
 #
-# ── Domain 13 — Documentation & Readability (D13) ──
+# ── Domain 13 -- Documentation & Readability (D13) ──
 # Fixes D13-01: Module docstring expanded with 10+ sections
 # Fixes D13-02: download_string NumPy-style docstring
 # Fixes D13-03: parse_string_ppi NumPy-style docstring
@@ -547,7 +547,7 @@ from .config import (
     STRING_REQUIRED,
     STRING_SCHEMA_VERSION,
     STRING_SCORE_THRESHOLD,
-    STRING_MIN_COMBINED_SCORE,  # v57 ROOT FIX (P2L-032) — canonical STRING threshold alias
+    STRING_MIN_COMBINED_SCORE,  # v57 ROOT FIX (P2L-032) -- canonical STRING threshold alias
     get_data_source_path,
 )
 from .exceptions import (
@@ -589,22 +589,22 @@ SCHEMA_VERSION: str = STRING_SCHEMA_VERSION      # "1.0.0"
 MB: int = 1_000_000
 
 # Fixes S3-01: STRING_CONFIDENCE_BANDS for score_threshold validation.
-# Source: STRING docs — https://string-db.org/cgi/help?sessionId=&subpage=7
+# Source: STRING docs -- https://string-db.org/cgi/help?sessionId=&subpage=7
 #
 # v70 ROOT FIX (P2L-033): the previous comments said ">700 = high" and
 # "400-700 = medium" / "<400 = low", which imply strict-inequality
 # boundaries. But the tuple ranges below are INCLUSIVE at the lower
 # bound and EXCLUSIVE at the upper bound (half-open intervals
 # [lo, hi)), so:
-#   * score 0   → "low"     ([0, 400))
-#   * score 399 → "low"     ([0, 400))
-#   * score 400 → "medium"  ([400, 700))    ← INCLUSIVE
-#   * score 699 → "medium"  ([400, 700))
-#   * score 700 → "high"    ([700, 1001))   ← INCLUSIVE
-#   * score 1000 → "high"   ([700, 1001))
+#   * score 0   -> "low"     ([0, 400))
+#   * score 399 -> "low"     ([0, 400))
+#   * score 400 -> "medium"  ([400, 700))    ← INCLUSIVE
+#   * score 699 -> "medium"  ([400, 700))
+#   * score 700 -> "high"    ([700, 1001))   ← INCLUSIVE
+#   * score 1000 -> "high"   ([700, 1001))
 # A score of EXACTLY 700 falls in "high" per the code, which matches
 # STRING's official docs ("high-confidence interactions have a
-# combined_score >= 700"). The previous comments were misleading —
+# combined_score >= 700"). The previous comments were misleading --
 # operators reading them might set a threshold of 700 expecting it to
 # land in "medium" (strict inequality), then be surprised when their
 # filter includes 700-scored edges in "high".
@@ -617,7 +617,7 @@ STRING_CONFIDENCE_BANDS: Dict[str, Tuple[int, int]] = {
     "high":   (700, 1001),   # STRING: [700, 1001) = high           (score >= 700)
 }
 
-# Fixes S3-05: STRING_EVIDENCE_CHANNELS — the 7 per-channel score columns.
+# Fixes S3-05: STRING_EVIDENCE_CHANNELS -- the 7 per-channel score columns.
 # combined_score is the 8th column (geometric mean of these 7); handled separately.
 STRING_EVIDENCE_CHANNELS: Tuple[str, ...] = (
     "experimental",    # wet-lab evidence (strong, reliable)
@@ -629,7 +629,7 @@ STRING_EVIDENCE_CHANNELS: Tuple[str, ...] = (
     "coexpression",    # mRNA co-expression
 )
 
-# Fixes D5-04: EXPECTED_STRING_COLUMNS — the 10 required columns in v12.0.
+# Fixes D5-04: EXPECTED_STRING_COLUMNS -- the 10 required columns in v12.0.
 # Fixes D2-08: No more col1/col2 fallback; required columns are enforced.
 EXPECTED_STRING_COLUMNS: Tuple[str, ...] = (
     "protein1", "protein2",
@@ -651,7 +651,7 @@ STRING_DTYPE_SCHEMA: Dict[str, str] = {
     "combined_score": "Int64",
 }
 
-# Fixes S3-03: ORGANISM_PREFIX_BY_TAXID — STRING IDs are prefixed with
+# Fixes S3-03: ORGANISM_PREFIX_BY_TAXID -- STRING IDs are prefixed with
 # NCBI taxonomy ID followed by a dot, e.g. "9606.ENSP00000358091" for human.
 ORGANISM_TAXID_HUMAN: int = 9606
 ORGANISM_TAXID_DEFAULT: int = ORGANISM_TAXID_HUMAN
@@ -672,7 +672,7 @@ ORGANISM_PREFIX_BY_TAXID: Dict[int, str] = {
     9258:   "9258.",     # platypus (O. anatinus)
 }
 
-# Fixes S3-09: Ensembl ID regex — supports optional ".N" isoform suffix.
+# Fixes S3-09: Ensembl ID regex -- supports optional ".N" isoform suffix.
 # Example matches: "9606.ENSP00000358091", "9606.ENSP00000358091.2"
 #
 # v70 ROOT FIX (P2L-034): the previous regex was
@@ -684,22 +684,22 @@ ORGANISM_PREFIX_BY_TAXID: Dict[int, str] = {
 # (e.g. for organisms whose protein annotation is incomplete, or for
 # comparative genomics studies). If a user points the loader at a
 # gene-centric STRING file, EVERY row would fail the regex and be
-# dead-lettered — producing 0 parsed rows and a SiderCriticalError
+# dead-lettered -- producing 0 parsed rows and a SiderCriticalError
 # that's very hard to debug (the failure mode is "all rows
 # dead-lettered", not "wrong file format").
 #
 # Root fix: broaden the prefix character class from ``ENSP`` to
 # ``ENS[GPTE]`` so the regex accepts:
-#   * ENSG — Ensembl Gene IDs        (e.g. 9606.ENSG00000139618)
-#   * ENST — Ensembl Transcript IDs  (e.g. 9606.ENST00000358091)
-#   * ENSE — Ensembl Exon IDs        (e.g. 9606.ENSE00001197712)
-#   * ENSP — Ensembl Protein IDs     (e.g. 9606.ENSP00000358091)  (default)
+#   * ENSG -- Ensembl Gene IDs        (e.g. 9606.ENSG00000139618)
+#   * ENST -- Ensembl Transcript IDs  (e.g. 9606.ENST00000358091)
+#   * ENSE -- Ensembl Exon IDs        (e.g. 9606.ENSE00001197712)
+#   * ENSP -- Ensembl Protein IDs     (e.g. 9606.ENSP00000358091)  (default)
 # The 11-digit numeric body is preserved (Ensembl IDs are zero-padded
 # to 11 digits as of Ensembl release 110; earlier releases also used
 # 11 digits). The optional ``.N`` isoform suffix is preserved.
 #
 # We intentionally do NOT accept ``ENSF`` (Ensembl protein family) or
-# other non-core Ensembl prefixes — those are not used by STRING's
+# other non-core Ensembl prefixes -- those are not used by STRING's
 # per-organism link files, and accepting them would risk false
 # positives on user-supplied inputs.
 ENSEMBL_PROTEIN_ID_REGEX: re.Pattern[str] = re.compile(
@@ -714,19 +714,19 @@ ENSEMBL_PROTEIN_ID_REGEX: re.Pattern[str] = re.compile(
 # (because ``|`` has the lowest precedence, each ``^...$`` is a complete
 # anchored alternative). HOWEVER, the grouped form is:
 #   1. The canonical best-practice form recommended by the audit.
-#   2. More readable — a single ``^...$`` pair makes the full-string
+#   2. More readable -- a single ``^...$`` pair makes the full-string
 #      anchoring intent unambiguous.
-#   3. More maintainable — if a future maintainer accidentally removes
+#   3. More maintainable -- if a future maintainer accidentally removes
 #      a ``$`` from one alternative in the per-alternative form, that
 #      alternative becomes a prefix-match (silent false positives). The
 #      grouped form prevents this class of regression entirely.
-#   4. Slightly more efficient — the regex engine evaluates one anchor
+#   4. Slightly more efficient -- the regex engine evaluates one anchor
 #      pair instead of four.
 # The four alternatives cover the four UniProt AC formats:
-#   1. ``[A-NR-Z][0-9][A-Z0-9]{3}[0-9]``  — 6-char classic (e.g. P23219)
-#   2. ``[A-NR-Z][0-9]{5}``               — 6-char numeric (e.g. Q9H0A5)
-#   3. ``[OPQ][0-9][A-Z0-9]{3}[0-9]``     — 6-char O/P/Q-start (e.g. O00165)
-#   4. ``[A-NR-Z]0[A-Z0-9]{7}[0-9]``      — 10-char isoform (e.g. A0A023GPI9)
+#   1. ``[A-NR-Z][0-9][A-Z0-9]{3}[0-9]``  -- 6-char classic (e.g. P23219)
+#   2. ``[A-NR-Z][0-9]{5}``               -- 6-char numeric (e.g. Q9H0A5)
+#   3. ``[OPQ][0-9][A-Z0-9]{3}[0-9]``     -- 6-char O/P/Q-start (e.g. O00165)
+#   4. ``[A-NR-Z]0[A-Z0-9]{7}[0-9]``      -- 10-char isoform (e.g. A0A023GPI9)
 UNIPROT_AC_REGEX: re.Pattern[str] = re.compile(
     r"^(?:"
     r"[A-NR-Z][0-9][A-Z0-9]{3}[0-9]"
@@ -854,7 +854,7 @@ __all_reexports__ = {
 
 
 # ===== SECTION 6: LOGGING SETUP =====
-# Fixes L11-01: Log-level taxonomy — INFO for start/end/rows-loaded, WARNING
+# Fixes L11-01: Log-level taxonomy -- INFO for start/end/rows-loaded, WARNING
 # for drops/anomalies, ERROR for parse/integrity failures + 0 edges, DEBUG
 # for per-row DLQ/crosswalk.
 # Fixes L11-02: Structured logging via logger.info(event_name, extra={...}).
@@ -888,7 +888,7 @@ def _get_logger(load_id: Optional[str] = None) -> logging.LoggerAdapter:
 
 
 # ===== SECTION 7: CONFIGURATION & ENVIRONMENT =====
-# Fixes C12-08: _validate_string_config(cfg) — validate config on startup.
+# Fixes C12-08: _validate_string_config(cfg) -- validate config on startup.
 # Fixes C12-02: Read STRING_SCORE_THRESHOLD at call time (not import time).
 # Fixes C12-03: _resolve_string_filepath(filepath) priority: arg > env > config.
 # Fixes C12-04: _get_string_config() honoring DRUGOS_STRING_URL env override.
@@ -901,7 +901,7 @@ def _get_string_config() -> Dict[str, Any]:
     """Return a copy of DATA_SOURCES['string'], with env-var overrides applied.
 
     Honors:
-        DRUGOS_STRING_URL — override the download URL (after _validate_url).
+        DRUGOS_STRING_URL -- override the download URL (after _validate_url).
 
     Returns
     -------
@@ -1175,7 +1175,7 @@ def _set_secure_file_permissions(path: Path, mode: int = 0o600) -> None:
     Silently skips on Windows (chmod is POSIX-only).
     """
     # Fixes S9-04: secure file permissions.
-    if os.name == "nt":  # Windows — chmod is a no-op
+    if os.name == "nt":  # Windows -- chmod is a no-op
         return
     try:
         path.chmod(mode)
@@ -1260,7 +1260,7 @@ def _is_isoform(ensembl_id: str) -> bool:
     ``_is_isoform`` is retained for backward compatibility, but the
     Ensembl ``.N`` suffix technically denotes the OBJECT VERSION
     (protein version 3, transcript version 8, etc.), not a biological
-    isoform — for ENSP the version usually corresponds to a sequence
+    isoform -- for ENSP the version usually corresponds to a sequence
     isoform, but for ENSG/ENST/ENSE it's purely a version counter.
     Callers that need to distinguish biological isoforms should
     consult UniProt's isoform annotation, not this function.
@@ -1281,10 +1281,10 @@ def _is_isoform(ensembl_id: str) -> bool:
 def _safe_str(v: Any) -> Optional[str]:
     """Return ``str(v)`` if ``v`` is non-null/non-NaN, else ``None`` (D5-06).
 
-    This is the canonical NULL-handling helper — it NEVER returns the
+    This is the canonical NULL-handling helper -- it NEVER returns the
     literal string ``"None"`` (which would create a phantom Neo4j node).
     """
-    # Fixes D5-06: NULL handling — never create "None" literal node IDs.
+    # Fixes D5-06: NULL handling -- never create "None" literal node IDs.
     if v is None:
         return None
     try:
@@ -1320,7 +1320,7 @@ def _get_load_id() -> str:
 
 
 def _reset_load_id() -> None:
-    """Reset the cached load_id (for tests only — L11-08)."""
+    """Reset the cached load_id (for tests only -- L11-08)."""
     global _LOAD_ID
     with _LOAD_ID_LOCK:
         _LOAD_ID = None
@@ -1451,10 +1451,10 @@ def _verify_row_count(df: pd.DataFrame, cfg: Dict[str, Any]) -> None:
     actual = len(df)
     expected = int(cfg.get("expected_record_count", 0))
     if expected <= 0:
-        return  # no expected count configured — skip check
+        return  # no expected count configured -- skip check
     # Skip check for non-production-sized files (test fixtures, samples)
     if actual < expected * 0.5:
-        # File is much smaller than expected — likely a test fixture or
+        # File is much smaller than expected -- likely a test fixture or
         # a partial download. Log INFO and skip the strict ratio check.
         logger.info(
             "string_row_count_check_skipped_small_file",
@@ -1833,7 +1833,7 @@ def download_string(force: bool = False) -> Path:
             )
             return gz_path
         except StringDataIntegrityError as exc:
-            # Cached file is corrupt — delete and re-download
+            # Cached file is corrupt -- delete and re-download
             logger.warning(
                 "string_cache_corrupt_redownloading",
                 extra={"path": str(gz_path), "error": str(exc)},
@@ -1904,7 +1904,7 @@ def download_string(force: bool = False) -> Path:
             pass
         raise
 
-    # Success — reset circuit breaker, write sidecar, log audit
+    # Success -- reset circuit breaker, write sidecar, log audit
     _circuit_breaker_record_success()
     _write_sidecar_version(gz_path, str(cfg.get("version", "unknown")))
     _append_audit_log({
@@ -2093,7 +2093,7 @@ def _validate_columns(df: pd.DataFrame) -> None:
       * ``combined_score``
 
     The 7 evidence channels (neighborhood, fusion, cooccurrence, coexpression,
-    experimental, database, textmining) are optional — they may be absent in
+    experimental, database, textmining) are optional -- they may be absent in
     stripped-down STRING exports. The loader captures them via
     ``getattr(row, ch, None)`` if present.
 
@@ -2280,7 +2280,7 @@ def _sort_deterministic(df: pd.DataFrame) -> pd.DataFrame:
 def parse_string_raw(filepath: Optional[Path] = None) -> pd.DataFrame:
     """Parse a STRING .txt.gz file into a cleaned DataFrame (no score filter).
 
-    This is the **pure parser** — it applies:
+    This is the **pure parser** -- it applies:
       * column validation (D5-04)
       * score range validation (D5-07)
       * organism filter (S3-03, default 9606)
@@ -2289,7 +2289,7 @@ def parse_string_raw(filepath: Optional[Path] = None) -> pd.DataFrame:
       * deduplication (D5-08)
       * deterministic sort (I7-05)
 
-    It does NOT apply the score_threshold filter — that's done by
+    It does NOT apply the score_threshold filter -- that's done by
     ``filter_by_score()`` or ``parse_string_ppi()``.
 
     Parameters
@@ -2320,7 +2320,7 @@ def parse_string_raw(filepath: Optional[Path] = None) -> pd.DataFrame:
     >>> len(df)  # doctest: +SKIP
     11000000
     """
-    # Fixes A1-04: phase separation — parse_string_raw does no score filter.
+    # Fixes A1-04: phase separation -- parse_string_raw does no score filter.
     path = _resolve_string_filepath(filepath)
     cfg = _get_string_config()
     if not path.exists():
@@ -2511,7 +2511,7 @@ def parse_string_ppi(
     # name for the STRING combined_score minimum threshold shared across
     # all loaders (string_loader / stitch_loader / any future loader that
     # filters STRING-sourced edges). It is an alias of
-    # STRING_SCORE_THRESHOLD — both read the same value (default 700,
+    # STRING_SCORE_THRESHOLD -- both read the same value (default 700,
     # the scientifically-validated >80% precision PPI threshold per
     # STRING-db documentation and Szklarczyk 2023, Nucleic Acids
     # Research). Using the canonical name here makes the cross-loader
@@ -2561,7 +2561,7 @@ def iter_string_ppi(
     """Stream STRING PPI file in chunks (memory-bounded, A1-08).
 
     Each yielded DataFrame has ``chunksize`` rows (last chunk may be smaller).
-    No filters are applied — caller is responsible for calling
+    No filters are applied -- caller is responsible for calling
     ``_validate_score_range``, ``_filter_organism``, etc. on each chunk.
 
     Parameters
@@ -2655,7 +2655,7 @@ def validate_string(df: pd.DataFrame,
     """Validate a STRING DataFrame and return a structured report (D5-12).
 
     Returns a dict (TypedDict) with 17 fields. Does NOT raise on data-
-    quality issues — caller decides which are fatal.
+    quality issues -- caller decides which are fatal.
 
     Parameters
     ----------
@@ -2819,12 +2819,12 @@ def resolve_ids(
     """Vectorized Ensembl-to-UniProt resolution (P8-01).
 
     Adds 6 columns to ``df``:
-      * ``src_uniprot``    — primary UniProt AC for protein1 (or None)
-      * ``dst_uniprot``    — primary UniProt AC for protein2 (or None)
-      * ``src_resolved``   — bool, True if src_uniprot is not None
-      * ``dst_resolved``   — bool, True if dst_uniprot is not None
-      * ``src_all_mappings`` — list of all UniProt ACs for protein1
-      * ``dst_all_mappings`` — list of all UniProt ACs for protein2
+      * ``src_uniprot``    -- primary UniProt AC for protein1 (or None)
+      * ``dst_uniprot``    -- primary UniProt AC for protein2 (or None)
+      * ``src_resolved``   -- bool, True if src_uniprot is not None
+      * ``dst_resolved``   -- bool, True if dst_uniprot is not None
+      * ``src_all_mappings`` -- list of all UniProt ACs for protein1
+      * ``dst_all_mappings`` -- list of all UniProt ACs for protein2
 
     Uses ``df['protein1'].map(crosswalk.ensembl_protein_to_uniprot_ac)``
     for ~100x speedup over itertuples (P8-01).
@@ -3041,7 +3041,7 @@ def _build_edge_dict(
 ) -> Dict[str, Any]:
     """Build a single edge record's ``props`` dict (S3-05 / D2-05 / I15-04).
 
-    Returns the full edge dict (NOT just props) — i.e. includes
+    Returns the full edge dict (NOT just props) -- i.e. includes
     ``src_id``, ``dst_id``, ``src_type``, ``dst_type``, ``rel_type``,
     ``props`` keys.
     """
@@ -3092,7 +3092,7 @@ def _build_edge_dict(
     is_isoform_dst = _is_isoform(dst_ensembl)
 
     props: Dict[str, Any] = {
-        # ── Legacy keys (Rule R3 — preserved verbatim) ──
+        # ── Legacy keys (Rule R3 -- preserved verbatim) ──
         "source": SOURCE_STRING,
         "combined_score": combined_score_value,
         "src_id_resolved": src_resolved,
@@ -3153,13 +3153,13 @@ def string_to_edge_records(
     Backward-compatible signature (Rule R3):
     ``string_to_edge_records(df, crosswalk=None) -> List[Dict]``.
 
-    New optional kwargs (additive only — Rule R3):
-      * ``unresolved_policy`` — "drop" (default) | "keep_ensembl" | "raise"
-      * ``organism_taxid`` — int (default 9606)
-      * ``emit_gene_edges`` — bool (default False, S3-12)
-      * ``emit_both_directions`` — bool (default False, S3-06)
-      * ``keep_self_loops`` — bool (default False, S3-04)
-      * ``crosswalk_copy`` — bool (default False, I7-04)
+    New optional kwargs (additive only -- Rule R3):
+      * ``unresolved_policy`` -- "drop" (default) | "keep_ensembl" | "raise"
+      * ``organism_taxid`` -- int (default 9606)
+      * ``emit_gene_edges`` -- bool (default False, S3-12)
+      * ``emit_both_directions`` -- bool (default False, S3-06)
+      * ``keep_self_loops`` -- bool (default False, S3-04)
+      * ``crosswalk_copy`` -- bool (default False, I7-04)
 
     Parameters
     ----------
@@ -3169,9 +3169,9 @@ def string_to_edge_records(
         If None, uses ``get_default_crosswalk()``.
     unresolved_policy : {"drop", "keep_ensembl", "raise"}, default "drop"
         What to do when an Ensembl ID cannot be translated to UniProt:
-          * "drop" — skip the edge entirely (default; safe for production)
-          * "keep_ensembl" — emit the edge with the Ensembl ID (v0 behavior)
-          * "raise" — raise StringDataIntegrityError
+          * "drop" -- skip the edge entirely (default; safe for production)
+          * "keep_ensembl" -- emit the edge with the Ensembl ID (v0 behavior)
+          * "raise" -- raise StringDataIntegrityError
     organism_taxid : int, default 9606
         Filter to this organism before edge construction (S3-03).
     emit_gene_edges : bool, default False
@@ -3179,7 +3179,7 @@ def string_to_edge_records(
         ``crosswalk.uniprot_ac_to_ncbi_gene_id`` (S3-12).
     emit_both_directions : bool, default False
         If True, emit both (A,B) and (B,A) edges (default False since
-        STRING PPIs are undirected — S3-06).
+        STRING PPIs are undirected -- S3-06).
     keep_self_loops : bool, default False
         If True, keep self-interaction edges (S3-04).
     crosswalk_copy : bool, default False
@@ -3198,7 +3198,7 @@ def string_to_edge_records(
     StringDataIntegrityError
         If ``unresolved_policy="raise"`` and an unresolved edge is encountered.
     """
-    # Fixes A1-07: helper extraction — _resolve_endpoint, _build_edge_dict.
+    # Fixes A1-07: helper extraction -- _resolve_endpoint, _build_edge_dict.
     # Fixes C14-06: TypeError if crosswalk is a dict.
     if crosswalk is not None and isinstance(crosswalk, dict):
         raise TypeError(
@@ -3253,7 +3253,7 @@ def string_to_edge_records(
         src_raw = _safe_str(row.protein1)
         dst_raw = _safe_str(row.protein2)
         if src_raw is None or dst_raw is None:
-            # D5-06: NULL handling — write to DLQ, skip
+            # D5-06: NULL handling -- write to DLQ, skip
             _write_to_dlq({
                 "timestamp": _iso_now(),
                 "row_index": i,
@@ -3297,7 +3297,7 @@ def string_to_edge_records(
                              "src_resolved": src_resolved,
                              "dst_resolved": dst_resolved},
                 )
-            # else: keep_ensembl — fall through and emit with Ensembl IDs
+            # else: keep_ensembl -- fall through and emit with Ensembl IDs
             n_unresolved_kept += 1
 
         edge = _build_edge_dict(src_id, dst_id, row, provenance, cfg,
@@ -3458,7 +3458,7 @@ def iter_string_edges(
 # Fixes A1-10: string_to_node_records returns [] (nodes come from UniProt).
 
 def string_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Return an empty list — STRING provides EDGES only, not nodes (A1-10).
+    """Return an empty list -- STRING provides EDGES only, not nodes (A1-10).
 
     STRING PPIs are edges between proteins; the protein NODES themselves
     come from the UniProt loader (which has rich metadata: sequence,
@@ -3468,7 +3468,7 @@ def string_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     Parameters
     ----------
     df : pd.DataFrame
-        STRING PPI DataFrame (ignored — kept for API symmetry with
+        STRING PPI DataFrame (ignored -- kept for API symmetry with
         ``chembl_to_node_records`` etc.).
 
     Returns
@@ -3526,7 +3526,7 @@ class StringLoader:
     """Adapter implementing the ``Loader`` Protocol for STRING (A1-01).
 
     Allows ``run_pipeline.py`` to treat all loaders polymorphically via
-    the PEP 544 ``Loader`` Protocol (structural typing — no inheritance
+    the PEP 544 ``Loader`` Protocol (structural typing -- no inheritance
     required).
 
     Examples
@@ -3538,7 +3538,7 @@ class StringLoader:
     True
     """
 
-    name: str = SOURCE_KEY_STRING   # class attribute — "string"
+    name: str = SOURCE_KEY_STRING   # class attribute -- "string"
 
     def __init__(self, *, score_threshold: Optional[int] = None) -> None:
         self.score_threshold = score_threshold
@@ -3626,17 +3626,17 @@ def load_string(
     -------
     dict
         Result dict with keys:
-          * ``edges``          — int, number of edge records created
-          * ``loaded``         — int, number of edges loaded into Neo4j
+          * ``edges``          -- int, number of edge records created
+          * ``loaded``         -- int, number of edges loaded into Neo4j
                                  (0 if skip_neo4j=True)
-          * ``skipped_neo4j``  — bool
-          * ``validation``     — StringValidationReport dict
-          * ``dlq_path``       — str, path to the dead-letter queue file
-          * ``load_id``        — str, correlation ID for rollback
-          * ``source_sha256``  — str, SHA-256 of the source file
-          * ``source_version`` — str, STRING release version
-          * ``errors``         — list of str, non-fatal error summaries
-          * ``metrics``        — StringLoaderMetrics dict
+          * ``skipped_neo4j``  -- bool
+          * ``validation``     -- StringValidationReport dict
+          * ``dlq_path``       -- str, path to the dead-letter queue file
+          * ``load_id``        -- str, correlation ID for rollback
+          * ``source_sha256``  -- str, SHA-256 of the source file
+          * ``source_version`` -- str, STRING release version
+          * ``errors``         -- list of str, non-fatal error summaries
+          * ``metrics``        -- StringLoaderMetrics dict
 
     Raises
     ------
@@ -3651,7 +3651,7 @@ def load_string(
         On download failure.
     """
     # Fixes A1-06: facade pattern.
-    # Fixes L11-07: silent-failure detection — 0 edges = ERROR.
+    # Fixes L11-07: silent-failure detection -- 0 edges = ERROR.
     load_id = _get_load_id()
     errors: List[str] = []
     metrics = _StringLoaderMetricsDataclass()
@@ -3917,10 +3917,10 @@ __all__: list[str] = [
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# v26 ROOT FIX (Audit section 10 — Phase 2 Loaders Bypass Matrix / P0 BLOCKER):
+# v26 ROOT FIX (Audit section 10 -- Phase 2 Loaders Bypass Matrix / P0 BLOCKER):
 # "Make the 4 raw re-fetch loaders consume Phase 1 CSVs by default."
 # The audit's recommendation: refactor string_loader to follow the same
-# bridge pattern as disgenet_loader / omim_loader / pubchem_loader — read
+# bridge pattern as disgenet_loader / omim_loader / pubchem_loader -- read
 # Phase 1 CSVs by default; only fall back to raw fetch when explicitly
 # requested.
 #
@@ -3928,7 +3928,7 @@ __all__: list[str] = [
 # when data_source="phase1" (because the bridge in step1 already loaded
 # string_protein_protein_interactions.csv). This v26 fix adds Phase-1-aware
 # functions so that STANDALONE use (calling download_string() or
-# parse_string_ppi() directly) ALSO consumes Phase 1 CSVs by default —
+# parse_string_ppi() directly) ALSO consumes Phase 1 CSVs by default --
 # defense in depth.
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -3950,9 +3950,9 @@ def parse_string_ppi_from_phase1_csv(
     the raw STRING ``9606.protein.links.full.v12.0.txt.gz`` file). The
     DataFrame schema mirrors what ``string_to_edge_records`` expects.
 
-    v26 ROOT FIX (Audit section 10 — bypass matrix): previously, calling
+    v26 ROOT FIX (Audit section 10 -- bypass matrix): previously, calling
     ``parse_string_ppi()`` standalone would re-download the ~300 MB
-    STRING PPI file and re-parse it — bypassing Phase 1's cleaning
+    STRING PPI file and re-parse it -- bypassing Phase 1's cleaning
     (Ensembl ID normalization, score filtering, organism verification).
     Now standalone callers can consume Phase 1's already-cleaned output.
 
@@ -4032,15 +4032,15 @@ def string_to_edge_records_from_phase1(
         # canonical 0-1 range so it is comparable with DisGeNET /
         # OpenTargets / OMIM / DrugBank scores already on a 0-1 scale.
         # Emit BOTH the raw source-specific score (``string_combined_score``
-        # — preserved for traceability) AND a canonical ``normalized_score``
+        # -- preserved for traceability) AND a canonical ``normalized_score``
         # in [0,1] for downstream model training / fusion. STRING max is 1000.
         #
         # v34 ROOT FIX (CRITICAL #15): the previous code UNCONDITIONALLY
         # divided `score_f` by 1000.0. But Phase 1's
         # `string_protein_protein_interactions.csv` ALREADY has scores on
-        # a 0-1 scale (e.g. `0.95`, not `950`) — Phase 1's pipeline
+        # a 0-1 scale (e.g. `0.95`, not `950`) -- Phase 1's pipeline
         # normalizes them. Dividing 0.95 by 1000 produced
-        # `normalized_score = 0.00095` — 1000x too small. All STRING PPI
+        # `normalized_score = 0.00095` -- 1000x too small. All STRING PPI
         # edges became effectively invisible to any cross-source fusion
         # using `normalized_score`.
         # The fix: detect whether the score is already on a 0-1 scale
@@ -4048,10 +4048,10 @@ def string_to_edge_records_from_phase1(
         # the division ONLY when the score is on the 0-1000 scale.
         if score_f is not None:
             if score_f > 1.0:
-                # Native STRING 0-1000 scale — divide by 1000.
+                # Native STRING 0-1000 scale -- divide by 1000.
                 normalized_score = min(max(score_f / 1000.0, 0.0), 1.0)
             else:
-                # Already on 0-1 scale (Phase 1 normalized it) — use as-is.
+                # Already on 0-1 scale (Phase 1 normalized it) -- use as-is.
                 normalized_score = min(max(score_f, 0.0), 1.0)
         else:
             normalized_score = None

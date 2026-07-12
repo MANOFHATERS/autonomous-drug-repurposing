@@ -22,6 +22,27 @@ logger = logging.getLogger(__name__)
 class _SafeBatchNorm1d(nn.Module):
     """BatchNorm1d wrapper that handles batch_size=1 in train mode.
 
+    P3-025 ROOT FIX (DEAD-CODE DOCUMENTATION): this class is REACHED
+    only when ``NodeTypeProjection`` is constructed with
+    ``feature_norm="batch"``. The default model construction path
+    (``DrugRepurposingGraphTransformer.__init__`` -> ``NodeTypeProjection``)
+    does NOT pass ``feature_norm`` (it defaults to ``"none"``), and the
+    bridge's ``build_model`` does not expose a ``feature_norm`` parameter.
+    Therefore ``_SafeBatchNorm1d`` is NEVER instantiated on the default
+    demo / production code path.
+
+    It is RETAINED (not deleted) because ``feature_norm="batch"`` is a
+    PUBLIC API option of ``NodeTypeProjection`` that advanced users may
+    exercise directly (e.g., for ablation studies comparing layer vs
+    batch normalization on node features). Removing the class would
+    silently break that public API. The previous docstring did NOT
+    document this reachability gap, misleading readers into thinking
+    the class was active on the default path. This update makes the
+    situation explicit so a future developer can decide whether to
+    (a) wire ``feature_norm`` through ``DrugRepurposingGraphTransformer``
+    to actually use BatchNorm, or (b) remove the ``feature_norm="batch"``
+    branch entirely if it remains unused after a deprecation cycle.
+
     ROOT FIX (FORENSIC-AUDIT-I10): ``nn.BatchNorm1d`` raises
     ``ValueError: Expected more than 1 value per channel when training``
     when called with batch_size=1 in train mode. This happens if a user
@@ -34,12 +55,12 @@ class _SafeBatchNorm1d(nn.Module):
 
     ROOT FIX (X-07): the audit found that the previous "silent fallback"
     was dangerous: "If a user sets ``batch_size=1`` for debugging, every
-    BatchNorm layer runs in eval mode using RUNNING STATS — which are
+    BatchNorm layer runs in eval mode using RUNNING STATS -- which are
     initialized to mean=0, var=1 (untrained). So the BatchNorm does
     nothing useful. The user sees the model 'train' without errors but
     the BatchNorm layers are effectively identity layers. The model's
     behavior with ``batch_size=1`` is DIFFERENT from ``batch_size=32``
-    — silently."
+    -- silently."
 
     The fix: emit a LOUD CRITICAL-level warning the FIRST time
     batch_size=1 is detected in train mode (per instance). This makes
@@ -93,7 +114,7 @@ class _SafeBatchNorm1d(nn.Module):
                     f"BatchNorm is effectively an IDENTITY layer. "
                     f"The model's behavior with batch_size=1 is "
                     f"DIFFERENT from batch_size>=2. Do NOT use "
-                    f"batch_size=1 for training or evaluation — use "
+                    f"batch_size=1 for training or evaluation -- use "
                     f"batch_size>=2 to get correct BatchNorm behavior. "
                     f"(This warning is emitted ONCE per _SafeBatchNorm1d "
                     f"instance to avoid log spam.)"
@@ -127,7 +148,7 @@ class NodeTypeEmbedding(nn.Module):
     which exposes the learned type embeddings for downstream consumers
     (dashboard visualization, model inspection, etc.). Previously it
     was only used internally by ``NodeTypeProjection`` and exported in
-    ``models/__init__.py`` without any external caller — making the
+    ``models/__init__.py`` without any external caller -- making the
     export "API surface pollution". The V11 fix wires it into the
     public API of the main model class.
 

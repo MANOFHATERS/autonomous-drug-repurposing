@@ -26,12 +26,12 @@ DrugBank, UniProt, STRING, DisGeNET, OMIM, and PubChem.
 
 Three run modes
 ---------------
-1. ``run()`` — full pipeline (download + clean + load).
-2. ``run_download_and_clean_only()`` — download + clean, persist the
+1. ``run()`` -- full pipeline (download + clean + load).
+2. ``run_download_and_clean_only()`` -- download + clean, persist the
    cleaned DataFrame to ``PROCESSED_DATA_DIR``, return the raw path.
    Used by the master DAG so entity resolution can run between the
    clean and load phases.
-3. ``run_load_only()`` — load the most recent cleaned CSV from disk
+3. ``run_load_only()`` -- load the most recent cleaned CSV from disk
    into the staging DB. Used by the master DAG after entity resolution.
 
 Audit philosophy
@@ -136,16 +136,16 @@ except ImportError:  # pragma: no cover
 # ``_count_parquet_records`` method below as dead code because no pipeline
 # in the current codebase emits Parquet files. The audit's fix gives two
 # options: (a) remove the code, OR (b) document that Parquet support is
-# planned for future use. We choose (b) — keep the code as a defensive
+# planned for future use. We choose (b) -- keep the code as a defensive
 # future-use handler. Rationale:
 #   - ``_count_parquet_records`` IS dispatched via the
 #     ``_FILE_FORMAT_HANDLERS`` registry (line ~348). Removing the handler
 #     would mean a future Parquet-emitting pipeline would silently fall
 #     back to ``_count_lines_fast`` (line count, not row count), producing
 #     wrong counts with no error.
-#   - The pyarrow import is optional (try/except ImportError) — it adds
+#   - The pyarrow import is optional (try/except ImportError) -- it adds
 #     ZERO runtime cost when pyarrow is not installed and ~5ms when it is.
-#   - Future Phase 1 pipelines (e.g. Reactome pathway RDB→Parquet export)
+#   - Future Phase 1 pipelines (e.g. Reactome pathway RDB->Parquet export)
 #     will need this handler.
 # So the dead-code label is technically true today (no caller emits
 # parquet) but the code is a defensive forward-compatibility hook, not
@@ -192,7 +192,7 @@ if _log_level_name:
         pass
 
 # ---------------------------------------------------------------------------
-# Constants — no magic numbers in methods (CFG-12.1 through CFG-12.7)
+# Constants -- no magic numbers in methods (CFG-12.1 through CFG-12.7)
 # ---------------------------------------------------------------------------
 SCHEMA_VERSION: str = "v1"
 SCHEMA_PATH: Path = Path(__file__).resolve().parent / "schema" / "v1.json"
@@ -215,12 +215,12 @@ VALID_SOURCE_NAMES: frozenset[str] = frozenset({
 #:
 #: FIX-P2-9 (audit P2): the previous set included ``http`` and ``ftp``,
 #: both of which transmit drug data in PLAINTEXT. For a clinical platform
-#: this is unacceptable — a MITM (rogue Wi-Fi, BGP hijack, transparent
+#: this is unacceptable -- a MITM (rogue Wi-Fi, BGP hijack, transparent
 #: proxy) can silently alter drug records (e.g. flip ``is_fda_approved``,
 #: swap a ``smiles`` string for a different molecule) without detection.
 #: HTTPS provides transport integrity + server authentication; FTP and
 #: HTTP provide neither. The previous set also included ``ftp`` even
-#: though no production pipeline actually fetches via FTP — the entries
+#: though no production pipeline actually fetches via FTP -- the entries
 #: in ALLOWED_DOMAINS like ``ftp.ebi.ac.uk`` are accessed via the
 #: ``https://`` EBI mirror. Removing ``http`` and ``ftp`` fails closed
 #: (raises ValueError in _validate_url) for any plaintext URL; operators
@@ -264,7 +264,7 @@ RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 # retryable set. ``OSError`` is the parent of MANY permanent errors
 # (``PermissionError``, ``FileNotFoundError``, ``IsADirectoryError``,
 # ``NotADirectoryError``, ``BlockingIOError`` with non-blocking sockets).
-# Retrying these is pointless — they will fail forever. The previous
+# Retrying these is pointless -- they will fail forever. The previous
 # code retried ``PermissionError`` and ``FileNotFoundError`` as if they
 # were transient network errors, masking the real cause and burning
 # retry budget. The fix: list ONLY the transient network-related OSError
@@ -286,18 +286,18 @@ RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
     # former is a subclass of the latter and calling the requests entry
     # "redundant but kept for documentation." Redundant exception entries
     # in a catch-all tuple are harmless at runtime (the subclass match
-    # fires first) but misleading in code review — a reader may assume
+    # fires first) but misleading in code review -- a reader may assume
     # they catch DIFFERENT things. However, removing requests.exceptions
     # entries would lose the explicit documentation that these are HTTP-
     # layer errors. The fix: keep BOTH but add an explicit comment on
     # EACH explaining the subclass relationship, and add a note that
     # requests.exceptions.Timeout is NOT a subclass of TimeoutError
-    # (it inherits from RequestException → IOError, not OSError).
+    # (it inherits from RequestException -> IOError, not OSError).
     #
-    # NOTE: do NOT add bare OSError here — it includes PermissionError,
+    # NOTE: do NOT add bare OSError here -- it includes PermissionError,
     # FileNotFoundError, IsADirectoryError, etc. which are PERMANENT.
     # NOTE: requests.exceptions.Timeout IS NOT a subclass of Python's
-    # TimeoutError — it inherits from requests.RequestException →
+    # TimeoutError -- it inherits from requests.RequestException ->
     # IOError. Both must be listed separately.
 )
 
@@ -318,7 +318,7 @@ SENSITIVE_HEADER_KEYS: frozenset[str] = frozenset({
 # dataset, negative numbers are FAR more common than actual
 # CSV injection attempts starting with "-". Per OWASP and the
 # Excel CSV injection analysis, "-" is NOT a formula prefix
-# in any modern spreadsheet application — only "=", "+", "@",
+# in any modern spreadsheet application -- only "=", "+", "@",
 # "\t", "\r" are. The "+" was also removed because positive
 # numbers like "+1.5" are not injection risks either, and
 # scientific notation can use "+" (e.g. "+1e6"). Removing both
@@ -344,7 +344,7 @@ _REDACT_BEARER_RE = re.compile(
 #: segment: https://data.omim.org/downloads/{API_KEY}/morbidmap.txt
 #: The key is a 36-char UUID (8-4-4-4-12 hex pattern). This regex redacts the
 #: path segment after "downloads/" so logs/errors never expose the raw key.
-#: Added additively — does not change behavior of any existing URL.
+#: Added additively -- does not change behavior of any existing URL.
 _REDACT_OMIM_PATH_KEY_RE = re.compile(
     r"(downloads/)[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}",
     re.IGNORECASE,
@@ -354,9 +354,9 @@ _REDACT_OMIM_APIKEY_HEADER_RE = re.compile(
     r"(ApiKey\s+)[a-f0-9-]{36}", re.IGNORECASE,
 )
 
-#: InChIKey pattern — IUPAC International Chemical Identifier spec (SCI-3.12).
+#: InChIKey pattern -- IUPAC International Chemical Identifier spec (SCI-3.12).
 # v64 ROOT FIX (P1-023): this module-level constant was previously dead
-# code at the validation path — validate_output() uses the schema's
+# code at the validation path -- validate_output() uses the schema's
 # `spec.get("pattern")` directly (line 2039+), not this constant. However,
 # the constant IS the canonical single-source-of-truth reference for the
 # InChIKey spec, and is re-exported in `pipelines.__init__` for downstream
@@ -372,12 +372,12 @@ _REDACT_OMIM_APIKEY_HEADER_RE = re.compile(
 # by the same consistency check and is actively imported by
 # disgenet_pipeline.py:206 / string_pipeline.py:152.
 # v84 FORENSIC ROOT FIX (BUG #52): ``INCHIKEY_PATTERN`` is now an ALIAS
-# to ``cleaning._constants.CANONICAL_INCHIKEY_REGEX`` — the SINGLE source
+# to ``cleaning._constants.CANONICAL_INCHIKEY_REGEX`` -- the SINGLE source
 # of truth. The codebase previously had THREE divergent InChIKey regex
 # copies (``_constants.CANONICAL_INCHIKEY_REGEX``, ``_INCHIKEY_RE`` in
 # drugbank_pipeline, and this ``INCHIKEY_PATTERN``). If any copy
 # diverged, InChIKeys that passed cleaning could fail dedup or DB
-# insert — silent data loss at stage boundaries. The alias preserves
+# insert -- silent data loss at stage boundaries. The alias preserves
 # backward compatibility for the many modules that import
 # ``INCHIKEY_PATTERN`` from this module, while guaranteeing there is
 # exactly one regex definition. The schema/v1.json consistency check
@@ -385,13 +385,13 @@ _REDACT_OMIM_APIKEY_HEADER_RE = re.compile(
 # schema-declared pattern matches this regex.
 from cleaning._constants import CANONICAL_INCHIKEY_REGEX as INCHIKEY_PATTERN  # noqa: E402
 
-#: UniProt ID pattern — UniProt knowledgebase identifier spec (SCI-3.12).
+#: UniProt ID pattern -- UniProt knowledgebase identifier spec (SCI-3.12).
 # v38 ROOT FIX (Phase 1 Issue #8): the previous pattern was
-# ``^[OPQ]...$ | ^[A-NR-Z]...$`` — the alternation was NOT wrapped in
+# ``^[OPQ]...$ | ^[A-NR-Z]...$`` -- the alternation was NOT wrapped in
 # a group, so the ``$`` anchor only applied to the SECOND alternative.
 # The first alternative ``^[OPQ][0-9][A-Z0-9]{3}[0-9]`` had NO end
 # anchor, so it matched ANY string STARTING with a valid 6-char UniProt
-# accession — e.g. ``"P12345extra"`` matched (the ``extra`` was ignored).
+# accession -- e.g. ``"P12345extra"`` matched (the ``extra`` was ignored).
 # This let invalid UniProt IDs (with trailing garbage) pass validation.
 # The fix: wrap the alternation in a non-capturing group and anchor the
 # WHOLE group with ``^...$`` so both alternatives are fully anchored.
@@ -441,7 +441,7 @@ class DownloadError(PipelineError):
 
 
 # ---------------------------------------------------------------------------
-# Dataclasses — structured results (DESIGN-2.4, DQ-5.3)
+# Dataclasses -- structured results (DESIGN-2.4, DQ-5.3)
 # ---------------------------------------------------------------------------
 @dataclass
 class LoadResult:
@@ -521,9 +521,9 @@ class _CircuitBreaker:
     succeeds, the breaker closes; if it fails, the breaker re-opens.
 
     v40 ROOT FIX (P1 #9): the previous ``is_open`` method transitioned
-    OPEN → HALF_OPEN and immediately returned False (allowing the call).
+    OPEN -> HALF_OPEN and immediately returned False (allowing the call).
     But in HALF_OPEN state, EVERY subsequent ``is_open`` call also
-    returned False — there was no "single probe" gate. Multiple
+    returned False -- there was no "single probe" gate. Multiple
     concurrent calls could flood through, defeating the purpose of the
     half-open state. The fix: track a ``_half_open_probe_in_flight``
     flag. When transitioning to HALF_OPEN, the FIRST call is allowed
@@ -553,22 +553,22 @@ class _CircuitBreaker:
             self._last_failure_time = time.time()
             if self._failure_count >= self._failure_threshold:
                 self._state = "open"
-            # v40: reset the probe flag — the probe failed.
+            # v40: reset the probe flag -- the probe failed.
             self._half_open_probe_in_flight = False
 
     def record_success(self) -> None:
         with self._lock:
             self._failure_count = 0
             self._state = "closed"
-            # v40: reset the probe flag — the probe succeeded.
+            # v40: reset the probe flag -- the probe succeeded.
             self._half_open_probe_in_flight = False
 
     def is_open(self) -> bool:
         """Return True if the breaker is open and calls should be refused.
 
         v92 ROOT FIX (BUG P1-073): is_open() is now a PURE OBSERVATION
-        method — it does NOT transition state or reserve probe slots.
-        Previously, is_open() mutated state (OPEN→half_open, set
+        method -- it does NOT transition state or reserve probe slots.
+        Previously, is_open() mutated state (OPEN->half_open, set
         _half_open_probe_in_flight=True), which meant monitoring/dashboard
         code that called is_open() inadvertently broke subsequent
         allow_request() calls. Callers who want to actually acquire a
@@ -587,7 +587,7 @@ class _CircuitBreaker:
         """Try to acquire a probe slot in half_open state.
 
         v92 ROOT FIX (BUG P1-073): This method performs the state mutation
-        that was previously done by is_open(). It transitions OPEN→half_open
+        that was previously done by is_open(). It transitions OPEN->half_open
         when the reset timeout has elapsed and reserves a probe slot. Returns
         True if the request should proceed, False if refused.
 
@@ -606,8 +606,8 @@ class _CircuitBreaker:
             if self._state == "half_open":
                 # If a probe is already in flight, refuse.
                 if self._half_open_probe_in_flight:
-                    return True  # refuse — wait for probe to complete
-                # No probe in flight — allow this call as the new probe.
+                    return True  # refuse -- wait for probe to complete
+                # No probe in flight -- allow this call as the new probe.
                 self._half_open_probe_in_flight = True
                 return False
             return False
@@ -664,12 +664,12 @@ class BasePipeline(ABC):
 
     The 7 existing subclasses (ChEMBL, DrugBank, UniProt, STRING,
     DisGeNET, OMIM, PubChem) work with this base class without any
-    modification — every new method has a default implementation, and
+    modification -- every new method has a default implementation, and
     every existing method signature is preserved.
     """
 
     # ------------------------------------------------------------------
-    # Class attributes — all configuration, no magic numbers (CFG-12.x)
+    # Class attributes -- all configuration, no magic numbers (CFG-12.x)
     # ------------------------------------------------------------------
     source_name: str = ""
     raw_dir: Path | None = None
@@ -701,7 +701,7 @@ class BasePipeline(ABC):
     # P1-10 ROOT FIX: empty-body 200 OK responses were previously
     # treated as success (line ~3118 ``return dest``). For most source
     # endpoints an empty body indicates a server bug or a transient
-    # cache miss — silently persisting a 0-byte file causes downstream
+    # cache miss -- silently persisting a 0-byte file causes downstream
     # parsers to emit ``Empty DataFrame`` warnings and the run appears
     # successful while the data is missing. Subclasses that genuinely
     # allow empty responses (e.g. optional metadata endpoints) opt in
@@ -724,7 +724,7 @@ class BasePipeline(ABC):
     continue_on_error: bool = False
     stage_timeout: int = 3600
 
-    # v29 ROOT FIX (audit P1-23): was 5min TTL — too short for real ETL. Increased to 30min.
+    # v29 ROOT FIX (audit P1-23): was 5min TTL -- too short for real ETL. Increased to 30min.
     # Real ETL runs (STRING 2 GB download + parse, DrugBank 600 MB XML parse,
     # DisGeNET 100 k-row load) routinely exceed 5 minutes when a concurrent
     # download/parse holds the run lock or file lock. The 5-minute timeout
@@ -749,23 +749,23 @@ class BasePipeline(ABC):
     # Incremental load (INT-15.12)
     incremental: bool = False
 
-    # Field lineage (LIN-16.12) — subclasses may override
+    # Field lineage (LIN-16.12) -- subclasses may override
     _field_lineage: dict[str, str] = {}
 
-    # Security (SEC-9.1) — class-level so subclasses can extend
+    # Security (SEC-9.1) -- class-level so subclasses can extend
     ALLOWED_DOMAINS: frozenset[str] = ALLOWED_DOMAINS
     ALLOWED_SCHEMES: frozenset[str] = ALLOWED_SCHEMES
 
-    # v49 ROOT FIX (DRUGOS_DOWNLOAD_MODE — sample / full / skip):
+    # v49 ROOT FIX (DRUGOS_DOWNLOAD_MODE -- sample / full / skip):
     # The v48 pipelines had no notion of "download a small sample vs
     # download the full dataset". Every pipeline tried to download
     # the full dataset (ChEMBL 2M compounds, STRING 4M PPIs, etc.),
     # which on a laptop took hours or failed entirely. ROOT FIX: add
     # a `download_mode` class attribute that subclasses consult in
     # their `download()` method:
-    #   "sample" — download 50-200 records (runs in seconds)
-    #   "full"   — download the full dataset (hours)
-    #   "skip"   — skip download entirely (use existing files)
+    #   "sample" -- download 50-200 records (runs in seconds)
+    #   "full"   -- download the full dataset (hours)
+    #   "skip"   -- skip download entirely (use existing files)
     # The mode is read from the DRUGOS_DOWNLOAD_MODE env var at
     # __init__ time, defaulting to "sample" so the platform runs
     # out-of-the-box on a fresh clone.
@@ -842,7 +842,7 @@ class BasePipeline(ABC):
         _mode = os.environ.get("DRUGOS_DOWNLOAD_MODE", self.DEFAULT_DOWNLOAD_MODE).lower().strip()
         if _mode not in self.VALID_DOWNLOAD_MODES:
             logger.warning(
-                "Invalid DRUGOS_DOWNLOAD_MODE=%r — must be one of %s. "
+                "Invalid DRUGOS_DOWNLOAD_MODE=%r -- must be one of %s. "
                 "Falling back to default %r.",
                 _mode, self.VALID_DOWNLOAD_MODES, self.DEFAULT_DOWNLOAD_MODE,
             )
@@ -853,7 +853,7 @@ class BasePipeline(ABC):
             self.__class__.__name__, self.download_mode,
         )
 
-        # State — populated during run() (ARCH-1.7: no dir creation here)
+        # State -- populated during run() (ARCH-1.7: no dir creation here)
         self.start_time: datetime | None = None
         self.source_version: str | None = None
         self.source_publication_date: datetime | None = None
@@ -879,7 +879,7 @@ class BasePipeline(ABC):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Validate ``source_name`` at class definition time (ARCH-1.14).
 
-        Catches empty / whitespace source names early — at import time
+        Catches empty / whitespace source names early -- at import time
         rather than at instantiation time.
         """
         super().__init_subclass__(**kwargs)
@@ -907,7 +907,7 @@ class BasePipeline(ABC):
         """Lazily create ``raw_dir`` and ``PROCESSED_DATA_DIR`` on first use.
 
         Called from ``run()``, ``run_download_and_clean_only()``, and
-        ``run_load_only()`` — NOT from ``__init__``. This makes
+        ``run_load_only()`` -- NOT from ``__init__``. This makes
         ``__init__`` side-effect-free, which is important for test
         isolation and for Airflow DAG parsing (where pipelines are
         constructed but not run).
@@ -975,7 +975,7 @@ class BasePipeline(ABC):
             # ``except Exception``. DB init can fail with connection errors
             # (OSError), SQL errors (ValueError), or missing drivers
             # (ImportError). Programming bugs now propagate.
-            # Re-raise as a clear, actionable error — do NOT silently
+            # Re-raise as a clear, actionable error -- do NOT silently
             # swallow. The user needs to know the DB cannot be reached.
             raise RuntimeError(
                 f"Pipeline '{self.source_name}' could not initialise the "
@@ -1035,7 +1035,7 @@ class BasePipeline(ABC):
         return os.environ.get("PIPELINE_SKIP_INTEGRITY", "false").lower() == "true"
 
     # ------------------------------------------------------------------
-    # Abstract methods — subclasses MUST implement
+    # Abstract methods -- subclasses MUST implement
     # ------------------------------------------------------------------
     @abstractmethod
     def download(self) -> Path | list[Path]:
@@ -1236,7 +1236,7 @@ class BasePipeline(ABC):
 
                 if count_records and raw_paths:
                     # v84 FORENSIC ROOT FIX (BUG #41): the previous code
-                    # called ``self._count_records(p)`` TWICE per path —
+                    # called ``self._count_records(p)`` TWICE per path --
                     # once in the ``sum()`` at line 1178, and again in
                     # the ``any()`` check at line 1182-1185. For a 2GB
                     # STRING file, this DOUBLED the counting time
@@ -1325,7 +1325,7 @@ class BasePipeline(ABC):
                 # NOTE: ``clean()`` receives only the FIRST file. For
                 # multi-file sources (e.g. STRING's ``links`` + ``aliases``
                 # downloads), the remaining files are not passed to
-                # ``clean()`` here — pipeline subclasses that need to
+                # ``clean()`` here -- pipeline subclasses that need to
                 # process multiple files MUST override ``run()`` to call
                 # ``clean()`` once per file. This contract is documented
                 # here (FIX-P2-C-12, audit P2) so subclasses do not rely
@@ -1340,7 +1340,7 @@ class BasePipeline(ABC):
             # Reject NULL primary keys (DQ-5.19)
             clean_df = self._drop_null_primary_keys(clean_df)
 
-            # Count valid records (DQ-5.2) — distinct from len(df)
+            # Count valid records (DQ-5.2) -- distinct from len(df)
             records_cleaned = self._count_valid_records(clean_df)
             total_rows = len(clean_df)
             logger.info(
@@ -1378,7 +1378,7 @@ class BasePipeline(ABC):
                     records_cleaned / max(1, records_downloaded),
                     self.min_clean_ratio,
                 )
-                # v83 FORENSIC ROOT FIX (P0-C11 — pipeline_runs.status
+                # v83 FORENSIC ROOT FIX (P0-C11 -- pipeline_runs.status
                 #   CHECK constraint violation):
                 #   The DB CHECK (migration 001 line 177-178) only allows
                 #   ('running', 'success', 'failed', 'partial'). The
@@ -1387,7 +1387,7 @@ class BasePipeline(ABC):
                 #   The INSERT was raising `CHECK constraint failed:
                 #   chk_pipeline_runs_status`, caught by the audit-log
                 #   exception handler at line ~1577 and silently logged
-                #   as `Audit log write failed` — meaning NO audit trail
+                #   as `Audit log write failed` -- meaning NO audit trail
                 #   was being recorded for any pipeline run with a
                 #   sub-threshold clean ratio. This is a silent audit-
                 #   trail deletion that violates the institutional-grade
@@ -1529,7 +1529,7 @@ class BasePipeline(ABC):
                         # ``records_cleaned`` / ``records_loaded`` keys.
                         # These were ALREADY passed as positional args to
                         # ``_write_run_log`` at lines 1419-1421, so the
-                        # audit JSON had each field twice — redundant and
+                        # audit JSON had each field twice -- redundant and
                         # confusing for any consumer parsing the JSON.
                     },
                 )
@@ -1609,7 +1609,7 @@ class BasePipeline(ABC):
             # ``sum(self._count_records(p) for p in raw_paths)``
             # which INCLUDED -1 sentinel values (SENTINEL_COUNT_FAILED)
             # in the sum, producing misleading counts (e.g. 3 files
-            # with 1000, 500, -1 records → sum=1499 instead of 1500
+            # with 1000, 500, -1 records -> sum=1499 instead of 1500
             # with one unknown). If ALL counts failed, sum=-N instead
             # of "unknown". ROOT FIX: filter out sentinel values before
             # summing; if any count is -1, set the total to -1 (unknown)
@@ -1639,11 +1639,11 @@ class BasePipeline(ABC):
             # FIX-P2-C-12 (audit P2): the previous code did
             # ``clean(raw_paths[0] if raw_paths else Path())`` which
             # passed an EMPTY ``Path()`` to ``clean()`` when
-            # ``download()`` returned no paths — producing a confusing
+            # ``download()`` returned no paths -- producing a confusing
             # ``FileNotFoundError`` with an empty-path message instead
             # of a clear "no raw files" error. For multi-file sources
             # (STRING downloads links + aliases), only the first file is
-            # passed to ``clean()`` — this is documented above at the
+            # passed to ``clean()`` -- this is documented above at the
             # other call site (around line 1146); subclasses that need
             # multi-file cleaning MUST override ``run()``.
             if not raw_paths:
@@ -1661,7 +1661,7 @@ class BasePipeline(ABC):
                 records_cleaned,
             )
 
-            # Persist cleaned data (ARCH-1.3) — side effect, not return value
+            # Persist cleaned data (ARCH-1.3) -- side effect, not return value
             clean_df = self._sanitize_csv_output(clean_df)
             cleaned_path = self._persist_cleaned_data(clean_df)
             logger.info(
@@ -1675,7 +1675,7 @@ class BasePipeline(ABC):
                 records_cleaned=records_cleaned,
             )
 
-            # v83 FORENSIC ROOT FIX (P0-C11 — pipeline_runs.status
+            # v83 FORENSIC ROOT FIX (P0-C11 -- pipeline_runs.status
             #   CHECK constraint violation):
             #   The DB CHECK only allows ('running', 'success', 'failed',
             #   'partial'). The previous code wrote
@@ -1849,7 +1849,7 @@ class BasePipeline(ABC):
                 self.source_name,
                 records_loaded,
             )
-            # v83 FORENSIC ROOT FIX (P0-C11 — pipeline_runs.status
+            # v83 FORENSIC ROOT FIX (P0-C11 -- pipeline_runs.status
             #   CHECK constraint violation):
             #   Same root cause as 'download_clean_success' above. The DB
             #   CHECK only allows ('running', 'success', 'failed',
@@ -1965,7 +1965,7 @@ class BasePipeline(ABC):
         """Check that the staging DB is reachable (P1-22 ROOT FIX).
 
         Previous code used ``pd.io.sql.text(...) if hasattr(pd.io.sql,
-        "text") else __import__("sqlalchemy").text(...)`` — a fragile
+        "text") else __import__("sqlalchemy").text(...)`` -- a fragile
         pandas-internals hack that breaks on every pandas release where
         the ``pd.io.sql.text`` symbol is moved or removed. The fix uses
         the top-level ``sqlalchemy.text`` import (added to the module-
@@ -1977,7 +1977,7 @@ class BasePipeline(ABC):
         """
         if not _HAS_SQLALCHEMY:
             logger.error(
-                "[%s] SQLAlchemy not installed — cannot verify DB "
+                "[%s] SQLAlchemy not installed -- cannot verify DB "
                 "reachability. Pre-check failing closed (P1-22).",
                 self.source_name,
             )
@@ -2001,7 +2001,7 @@ class BasePipeline(ABC):
         exceeds the threshold, False otherwise.
 
         P1-7 ROOT FIX: the previous code returned ``True`` on ANY
-        exception — including OSError raised by ``shutil.disk_usage``
+        exception -- including OSError raised by ``shutil.disk_usage``
         when the volume is unmounted, the path is invalid, or the
         underlying statvfs syscall fails. A disk-full condition MUST
         fail the pre-flight so operators see it BEFORE the pipeline
@@ -2018,7 +2018,7 @@ class BasePipeline(ABC):
         except OSError as exc:
             logger.error(
                 "[%s] Disk-space pre-check FAILED: could not stat %s: %s. "
-                "Failing closed — disk-full MUST abort the run BEFORE "
+                "Failing closed -- disk-full MUST abort the run BEFORE "
                 "mid-pipeline corruption (P1-7 ROOT FIX).",
                 self.source_name,
                 RAW_DATA_DIR,
@@ -2087,7 +2087,7 @@ class BasePipeline(ABC):
             self.raw_dir = RAW_DATA_DIR / self.source_name
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.raw_dir / ".run.lock"
-        # v29 ROOT FIX (audit P1-23): was 5min TTL — too short for real ETL. Increased to 30min.
+        # v29 ROOT FIX (audit P1-23): was 5min TTL -- too short for real ETL. Increased to 30min.
         lock_timeout = self.file_lock_timeout_sec
         lock = FileLock(lock_path, timeout=lock_timeout)
         try:
@@ -2223,7 +2223,7 @@ class BasePipeline(ABC):
         """
         errors: list[str] = []
         if df is None or df.empty:
-            # Empty DataFrame is valid — a query that returned 0 rows
+            # Empty DataFrame is valid -- a query that returned 0 rows
             # should produce a valid empty file (DQ-5.15).
             return True, []
 
@@ -2234,7 +2234,7 @@ class BasePipeline(ABC):
         file_key = self._get_processed_filename()
         file_schema = schema.get("properties", {}).get(file_key, {})
         if not file_schema:
-            # No schema for this file — validation is a no-op
+            # No schema for this file -- validation is a no-op
             return True, []
 
         properties = file_schema.get("properties", {})
@@ -2245,21 +2245,21 @@ class BasePipeline(ABC):
             if col not in df.columns:
                 errors.append(f"Required column '{col}' is missing")
                 continue
-            # v82 FORENSIC ROOT FIX (P1-6 — required-column NULL check
+            # v82 FORENSIC ROOT FIX (P1-6 -- required-column NULL check
             # inconsistent with pattern-check NaN-sentinel filter):
             #   The previous check used ONLY ``df[col].isna().any()``, which
             #   catches genuine pandas NaN/None but NOT the literal string
             #   sentinels "nan", "none", "null", "" that the pattern-check
             #   block (lines ~2105-2110) filters out. A required column
             #   with values ["BSYNRYMUTXBXSQ-UHFFFAOYSA-N", "nan", ""]
-            #   PASSED this NULL check (pd.isna("nan") is False — it's a
+            #   PASSED this NULL check (pd.isna("nan") is False -- it's a
             #   string), then the literal "nan" survived the pattern check
             #   (filtered out as a sentinel BEFORE the regex ran), and the
             #   row with inchikey="nan" was loaded into the DB. Downstream
             #   entity resolution's ``_inchikey_index.get("nan")`` then
             #   returned this row for EVERY future lookup that resolved
             #   to "nan" (e.g. a missing-InChIKey biologic with a
-            #   synthetic key collision) — wrong-row joins silently
+            #   synthetic key collision) -- wrong-row joins silently
             #   corrupted the KG.
             # ROOT FIX: extend the NULL check to ALSO flag literal
             #   NaN-string sentinels. The sentinel set is the SAME one
@@ -2277,7 +2277,7 @@ class BasePipeline(ABC):
                 errors.append(
                     f"Required column '{col}' has {null_count} NULL values "
                     f"(includes NaN-string sentinels: 'nan', 'none', 'null', "
-                    f"'') — v82 P1-6 root fix"
+                    f"'') -- v82 P1-6 root fix"
                 )
 
         # 2-9. Pattern and range validation per column
@@ -2291,7 +2291,7 @@ class BasePipeline(ABC):
             # P1-19 ROOT FIX: Apply ANY regex pattern declared in the schema
             # directly via re.compile(spec["pattern"]).match on the series.
             # Previously, only the InChIKey pattern was matched via brittle
-            # string equality (`spec.get("pattern") == r"^[A-Z]{14}-..."`) —
+            # string equality (`spec.get("pattern") == r"^[A-Z]{14}-..."`) --
             # any equivalent regex edit (whitespace, reordered alternatives,
             # re-anchoring, escape tweaks) would silently disable validation.
             # The UniProt branch used a substring check (`"OPQ" in
@@ -2381,14 +2381,14 @@ class BasePipeline(ABC):
         """Count data records in a downloaded file.
 
         Format-aware (SCI-3.17):
-        - ``.json`` — bracket-counting on the top-level array or the
+        - ``.json`` -- bracket-counting on the top-level array or the
           first array-valued key of an object (SCI-3.3, SCI-3.4).
-        - ``.jsonl`` / ``.ndjson`` — line count.
-        - ``.csv`` / ``.tsv`` / ``.txt`` — proper CSV parsing with
+        - ``.jsonl`` / ``.ndjson`` -- line count.
+        - ``.csv`` / ``.tsv`` / ``.txt`` -- proper CSV parsing with
           multi-line quoted field support (SCI-3.1).
-        - ``.gz`` — detect inner format and delegate (SCI-3.18).
-        - ``.parquet`` — read metadata only, no data load.
-        - ``.xml`` — count top-level elements via iterparse.
+        - ``.gz`` -- detect inner format and delegate (SCI-3.18).
+        - ``.parquet`` -- read metadata only, no data load.
+        - ``.xml`` -- count top-level elements via iterparse.
 
         Returns
         -------
@@ -2423,14 +2423,14 @@ class BasePipeline(ABC):
                 self.source_name,
                 path,
             )
-            # v43 ROOT FIX (P1 — _count_records returns 0 not SENTINEL):
+            # v43 ROOT FIX (P1 -- _count_records returns 0 not SENTINEL):
             # The docstring says "Returns SENTINEL_COUNT_FAILED (-1) on
             # error (file missing, encoding error, malformed data)."
             # But the previous code returned 0 for missing files, which
             # made the "any count failed" check at line 1087-1090 NEVER
             # fire (0 != -1). This caused silent empty-pipeline success:
-            # a missing raw file → records_downloaded=0 → clean-ratio
-            # check 0 < 0*0.3 = False (no warning) → pipeline "succeeds"
+            # a missing raw file -> records_downloaded=0 -> clean-ratio
+            # check 0 < 0*0.3 = False (no warning) -> pipeline "succeeds"
             # with 0 records loaded. Returning SENTINEL_COUNT_FAILED
             # makes the check fire correctly.
             return SENTINEL_COUNT_FAILED
@@ -2448,7 +2448,7 @@ class BasePipeline(ABC):
         # resolution on ext4. Two consecutive ``path.stat()`` calls on a
         # file being written can return different ``st_mtime`` values,
         # defeating the cache. The fix: use ``int(st_mtime)`` (second
-        # resolution) as the cache key component. This is conservative —
+        # resolution) as the cache key component. This is conservative --
         # if the file is modified within the same second, the stale cache
         # entry is returned (one extra file read), but this is far less
         # harmful than the current behaviour where the cache NEVER hits
@@ -2469,7 +2469,7 @@ class BasePipeline(ABC):
         suffix = path.suffix.lower()
         handler_name = _FILE_FORMAT_HANDLERS.get(suffix)
         if handler_name is None:
-            # Unknown format — best-effort line count
+            # Unknown format -- best-effort line count
             logger.warning(
                 "[%s] Unknown file format %s, falling back to line count",
                 self.source_name,
@@ -2549,8 +2549,8 @@ class BasePipeline(ABC):
         """Count records in a JSON file without loading it into memory.
 
         Handles two shapes (SCI-3.3, SCI-3.4):
-        - ``[{...}, {...}]`` — top-level array. Returns the item count.
-        - ``{"key": [...], ...}`` — object with one or more array
+        - ``[{...}, {...}]`` -- top-level array. Returns the item count.
+        - ``{"key": [...], ...}`` -- object with one or more array
           values. Returns the item count of the first array-valued
           key. If no array value is found, returns 1 (single object).
 
@@ -2674,7 +2674,7 @@ class BasePipeline(ABC):
                     elif ch == "}":
                         depth -= 1
                         if depth == 0:
-                            # End of object — no array found
+                            # End of object -- no array found
                             return 1
                         in_key = True
                     elif ch == "," and depth == 1:
@@ -2702,7 +2702,7 @@ class BasePipeline(ABC):
         in_string = False
         escape_next = False
         count = 0
-        # Track whether the array has any content at all — distinguishes
+        # Track whether the array has any content at all -- distinguishes
         # `[]` (0 items) from `[1]` (1 item with 0 commas).
         array_had_content = False
 
@@ -2724,7 +2724,7 @@ class BasePipeline(ABC):
                     continue
                 if in_string:
                     continue
-                # Track both array and object depth — a comma inside
+                # Track both array and object depth -- a comma inside
                 # an object literal is NOT an item separator.
                 if ch == "[" or ch == "{":
                     depth += 1
@@ -2845,7 +2845,7 @@ class BasePipeline(ABC):
         elif inner_format == "jsonl":
             return self._count_gz_jsonl_records(path)
         elif inner_format == "parquet":
-            # Write to temp file? Too complex — use the parquet counter
+            # Write to temp file? Too complex -- use the parquet counter
             # directly on the gzip stream
             logger.warning(
                 "[%s] Gzipped Parquet not supported for counting in %s",
@@ -2869,7 +2869,7 @@ class BasePipeline(ABC):
         magic bytes:
         - ``PAR1`` -> parquet
         - ``{`` or ``[`` -> json (could be JSON object, JSON array,
-          or JSONL — disambiguated by checking for a newline within
+          or JSONL -- disambiguated by checking for a newline within
           the first 200 bytes)
         - ``<`` -> xml
         - Otherwise, heuristic: if the first line contains ``,`` or
@@ -2925,12 +2925,12 @@ class BasePipeline(ABC):
                             if nl_stripped.startswith("{"):
                                 return "jsonl"
                             else:
-                                break  # next line is not an object — not JSONL
-                    # Single-line JSON object → could be JSON or JSONL with 1 record
+                                break  # next line is not an object -- not JSONL
+                    # Single-line JSON object -> could be JSON or JSONL with 1 record
                     # Treat as JSON (the bracket counter will handle it)
                     return "json"
                 # First line starts with { but doesn't end with } on the same line
-                # → multi-line JSON object
+                # -> multi-line JSON object
                 return "json"
             except UnicodeDecodeError:
                 return "unknown"
@@ -2960,7 +2960,7 @@ class BasePipeline(ABC):
         rows. On a 2 GB STRING links file this would OOM the worker.
         The streaming design documented in surrounding docstrings was
         violated by that single line. Now we stream line-by-line
-        directly through ``csv.reader`` — constant memory regardless
+        directly through ``csv.reader`` -- constant memory regardless
         of file size.
         """
         count = 0
@@ -3043,8 +3043,8 @@ class BasePipeline(ABC):
         """Validate integrity of a text (non-gzip) download (M5, REL-6.16).
 
         Fast chunk-based check that does NOT read the entire file:
-        1. Read first 1KB — verify the file has content.
-        2. Seek to last 1KB — verify it ends with ``\\n`` or ``\\r``.
+        1. Read first 1KB -- verify the file has content.
+        2. Seek to last 1KB -- verify it ends with ``\\n`` or ``\\r``.
         3. If ``allow_empty=True``, an empty file is considered valid.
 
         Parameters
@@ -3091,12 +3091,12 @@ class BasePipeline(ABC):
                 # (REL-6.16: don't read the entire file)
                 # We check that there are at least 2 lines (header + 1 data)
                 # by reading just the first 8KB.
-                # v43 ROOT FIX (P2 — large-file integrity check too permissive):
+                # v43 ROOT FIX (P2 -- large-file integrity check too permissive):
                 # The previous check `sample.count(b"\n") < 2 and size < 8192`
                 # only fired for files < 8KB. A truncated 2GB STRING file
                 # (truncated at 1.9GB, missing the last row) had many
-                # newlines in the first 8KB → passed integrity. Fix: also
-                # check the TAIL of the file — read the last 1KB and
+                # newlines in the first 8KB -> passed integrity. Fix: also
+                # check the TAIL of the file -- read the last 1KB and
                 # verify it ends with a complete row (newline + content).
                 fh.seek(0)
                 sample = fh.read(8192)
@@ -3105,7 +3105,7 @@ class BasePipeline(ABC):
                     if size > 0 and sample.count(b"\n") >= 1:
                         return True
                     return False
-                # v43: tail check for large files — verify the last 1KB
+                # v43: tail check for large files -- verify the last 1KB
                 # ends with a newline (complete last row).
                 if size > 8192:
                     fh.seek(max(0, size - 1024))
@@ -3113,7 +3113,7 @@ class BasePipeline(ABC):
                     if tail and not tail.endswith(b"\n"):
                         logger.warning(
                             "[%s] _validate_text_file_integrity: file %s "
-                            "does not end with newline — may be truncated",
+                            "does not end with newline -- may be truncated",
                             self.source_name, path,
                         )
                         return False
@@ -3162,10 +3162,10 @@ class BasePipeline(ABC):
         """Multi-layered download integrity validation (SCI-3.7).
 
         Layers:
-        1. Structural — file is non-empty (or empty is allowed).
-        2. Encoding — file is valid UTF-8 (SCI-3.2).
-        3. Checksum — SHA-256 matches sidecar or expected value (SCI-3.9).
-        4. Format-specific — CSV delimiter consistency, JSON parses.
+        1. Structural -- file is non-empty (or empty is allowed).
+        2. Encoding -- file is valid UTF-8 (SCI-3.2).
+        3. Checksum -- SHA-256 matches sidecar or expected value (SCI-3.9).
+        4. Format-specific -- CSV delimiter consistency, JSON parses.
 
         Parameters
         ----------
@@ -3468,7 +3468,7 @@ class BasePipeline(ABC):
                     dest.name,
                 )
                 return dest
-            # Cache is stale or invalid — re-download
+            # Cache is stale or invalid -- re-download
             logger.info(
                 "[%s] Cached file %s is stale, re-downloading",
                 self.source_name,
@@ -3528,7 +3528,7 @@ class BasePipeline(ABC):
                 # gzip magic (0x1f 0x8b). A truncated gzip file passes
                 # that check (the magic is at the start of the file, so
                 # it survives any truncation after byte 2) but is not
-                # parseable — resuming such a file produces a chimeric
+                # parseable -- resuming such a file produces a chimeric
                 # output that mixes the original (truncated) compressed
                 # stream with the appended resume bytes, yielding an
                 # unparseable gzip that crashes downstream readers. The
@@ -3567,7 +3567,7 @@ class BasePipeline(ABC):
                                     _probe = gz_fh.read(1)
                                 # If _probe is empty, the file was a
                                 # valid-but-empty gzip (rare for a resume
-                                # candidate — treat as truncation).
+                                # candidate -- treat as truncation).
                                 if not _probe:
                                     raise _gzip_mod.BadGzipFile(
                                         "gzip stream decompressed to 0 bytes"
@@ -3579,7 +3579,7 @@ class BasePipeline(ABC):
                             ) as gz_exc:
                                 logger.warning(
                                     "[%s] Partial gzip file %s is not "
-                                    "parseable (%s: %s) — truncated CRC32/"
+                                    "parseable (%s: %s) -- truncated CRC32/"
                                     "size trailer or mid-stream cut. "
                                     "Deleting and restarting download "
                                     "(P1-32 ROOT FIX).",
@@ -3617,7 +3617,7 @@ class BasePipeline(ABC):
                     verify=self.verify_tls,
                 )
 
-                # Handle 412 Precondition Failed — source has changed (SCI-3.6)
+                # Handle 412 Precondition Failed -- source has changed (SCI-3.6)
                 if resp.status_code == 412:
                     logger.warning(
                         "[%s] Source has changed (412 Precondition Failed) "
@@ -3632,7 +3632,7 @@ class BasePipeline(ABC):
                     resp.close()
                     continue  # retry from scratch
 
-                # Handle 304 Not Modified — use cached file (SCI-3.15, COMP-14.12)
+                # Handle 304 Not Modified -- use cached file (SCI-3.15, COMP-14.12)
                 if resp.status_code == 304:
                     logger.info(
                         "[%s] Source not modified (304), using cached file: %s",
@@ -3643,7 +3643,7 @@ class BasePipeline(ABC):
                     self._circuit_breaker.record_success()
                     return dest
 
-                # Handle 416 Range Not Satisfiable — restart from scratch (CODE-4.29)
+                # Handle 416 Range Not Satisfiable -- restart from scratch (CODE-4.29)
                 if resp.status_code == 416:
                     logger.warning(
                         "[%s] Server returned 416, restarting from scratch",
@@ -3659,7 +3659,7 @@ class BasePipeline(ABC):
                     # calling ``self._rate_limiter.wait()`` first. The
                     # main GET above (line ~2996) is preceded by a rate-
                     # limiter wait (line ~2953), but the 416 retry path
-                    # bypassed it — meaning every 416 doubled the
+                    # bypassed it -- meaning every 416 doubled the
                     # effective request rate to the source, risking 429
                     # throttling or IP banning on sources like STRING /
                     # ChEMBL / PubChem that enforce tight rate limits.
@@ -3677,10 +3677,10 @@ class BasePipeline(ABC):
 
                 # Retry on 5xx / 429 (REL-6.4)
                 if resp.status_code in RETRYABLE_STATUS_CODES:
-                    # v43 ROOT FIX (P2 — closed response in HTTPError):
+                    # v43 ROOT FIX (P2 -- closed response in HTTPError):
                     # Capture status_code before close, then pass
                     # response=None to HTTPError. The previous code passed
-                    # the closed resp → accessing .text or .headers on the
+                    # the closed resp -> accessing .text or .headers on the
                     # closed response raises a secondary ValueError that
                     # masks the original HTTPError.
                     _status = resp.status_code
@@ -3731,7 +3731,7 @@ class BasePipeline(ABC):
                 # Empty body handling (REL-6.8)
                 if total == 0 and content_length == 0:
                     # P1-10 ROOT FIX: previously ANY empty-body 200 OK
-                    # returned ``dest`` as if successful — silently
+                    # returned ``dest`` as if successful -- silently
                     # persisting a 0-byte file that downstream parsers
                     # would emit ``Empty DataFrame`` warnings on. The
                     # run appeared successful while the data was
@@ -3747,7 +3747,7 @@ class BasePipeline(ABC):
                     # (instead of a silent 0-byte "success").
                     if self.allow_empty_response:
                         logger.info(
-                            "[%s] Server returned empty body for %s — "
+                            "[%s] Server returned empty body for %s -- "
                             "subclass allows empty responses (P1-10).",
                             self.source_name,
                             dest.name,
@@ -3757,7 +3757,7 @@ class BasePipeline(ABC):
                         return dest
                     logger.error(
                         "[%s] Server returned empty body (Content-Length: 0) "
-                        "for %s — subclass does not allow empty responses. "
+                        "for %s -- subclass does not allow empty responses. "
                         "Deleting 0-byte file and retrying (P1-10 ROOT FIX).",
                         self.source_name,
                         dest.name,
@@ -3769,7 +3769,7 @@ class BasePipeline(ABC):
                         pass
                     self._circuit_breaker.record_failure()
                     last_exc = DownloadError(
-                        f"Empty response body from {url} — source may be "
+                        f"Empty response body from {url} -- source may be "
                         f"temporarily unavailable. Set "
                         f"allow_empty_response=True on the subclass if "
                         f"this is an optional-metadata endpoint."
@@ -3843,7 +3843,7 @@ class BasePipeline(ABC):
                     # (``except RETRYABLE_EXCEPTIONS`` and the subsequent
                     # ``except HTTPError``) did NOT catch ``IOError``, so a
                     # truncated download (server closed the connection early)
-                    # was never retried — it propagated up as a hard
+                    # was never retried -- it propagated up as a hard
                     # failure. Raising ``requests.exceptions.ConnectionError``
                     # makes the truncated-download case retryable while
                     # preserving the v38 ROOT FIX's exclusion of bare
@@ -3962,7 +3962,7 @@ class BasePipeline(ABC):
                     )
                     time.sleep(backoff)
                 else:
-                    # Permanent error — don't retry (REL-6.4)
+                    # Permanent error -- don't retry (REL-6.4)
                     raise DownloadError(
                         f"HTTP {status_code} (permanent error)"
                     ) from exc
@@ -3994,7 +3994,7 @@ class BasePipeline(ABC):
         if dest.suffix == ".gz":
             # FIX-P2-8 (audit P2): the previous ``gfh.seek(-1, 2)``
             # required decompressing the ENTIRE stream to compute the
-            # uncompressed size — minutes for STRING's 2 GB links file.
+            # uncompressed size -- minutes for STRING's 2 GB links file.
             # Delegate to ``_validate_gzip_integrity`` which performs a
             # fast O(1) magic + trailer + small-chunk-decompress check.
             if not self._validate_gzip_integrity(dest):
@@ -4057,7 +4057,7 @@ class BasePipeline(ABC):
                 pass
 
         if not cond_headers:
-            # No stored metadata — can't check freshness, assume fresh
+            # No stored metadata -- can't check freshness, assume fresh
             return False
 
         try:
@@ -4070,9 +4070,9 @@ class BasePipeline(ABC):
                 allow_redirects=True,
             )
             if resp.status_code == 304:
-                return False  # not modified — cache is fresh
+                return False  # not modified -- cache is fresh
             elif resp.status_code == 200:
-                return True  # source has new version — cache is stale
+                return True  # source has new version -- cache is stale
             else:
                 logger.warning(
                     "[%s] Freshness check returned HTTP %d for %s",
@@ -4155,7 +4155,7 @@ class BasePipeline(ABC):
         ``gfh.seek(-1, 2)`` on a ``gzip.GzipFile`` to "verify it's not
         truncated". ``seek(whence=2)`` on a ``GzipFile`` requires
         decompressing the ENTIRE stream to compute the uncompressed
-        size — for STRING's 2 GB protein-links file this took MINUTES
+        size -- for STRING's 2 GB protein-links file this took MINUTES
         on every cache freshness check, dominating pipeline runtime.
 
         The new implementation uses a fast two-stage check:
@@ -4173,7 +4173,7 @@ class BasePipeline(ABC):
            that a trailer-only check would miss, without paying the
            cost of full decompression.
 
-        This is O(1) in the file size — the previous O(N) decompress-
+        This is O(1) in the file size -- the previous O(N) decompress-
         everything check has been removed.
         """
         try:
@@ -4198,7 +4198,7 @@ class BasePipeline(ABC):
                     )
                     return False
                 # Read the 8-byte gzip trailer (CRC32 + ISIZE) directly
-                # from the end of the file — no decompression required.
+                # from the end of the file -- no decompression required.
                 fh.seek(-8, 2)
                 trailer = fh.read(8)
                 # ISIZE is the last 4 bytes, little-endian unsigned int,
@@ -4206,7 +4206,7 @@ class BasePipeline(ABC):
                 # have either the wrong bytes here (if cut mid-payload)
                 # or, more reliably, the read will return fewer than
                 # 8 bytes if the file is too short (already guarded
-                # above). We accept any non-zero trailer presence — a
+                # above). We accept any non-zero trailer presence -- a
                 # more rigorous CRC validation would require
                 # decompressing, which defeats the purpose of this
                 # fast check.
@@ -4301,7 +4301,7 @@ class BasePipeline(ABC):
         in the morbidmap downloads URL
         (``https://data.omim.org/downloads/{KEY}/morbidmap.txt``).
         The key is a 36-char UUID; the redaction is additive and only
-        fires for URLs containing that exact pattern — every other URL
+        fires for URLs containing that exact pattern -- every other URL
         passes through unchanged.
         """
         # Redact query-param-style keys (legacy behavior, unchanged).
@@ -4363,17 +4363,17 @@ class BasePipeline(ABC):
         but a column of mostly-floats with one "=A1" string stays
         object), it would be MISSED.
 
-        v82 FORENSIC ROOT FIX (P1-5 — ``df.astype(object)`` destroys
+        v82 FORENSIC ROOT FIX (P1-5 -- ``df.astype(object)`` destroys
         numeric dtypes on round-trip):
-          The v65 fix was OVERLY AGGRESSIVE — it cast EVERY column to
+          The v65 fix was OVERLY AGGRESSIVE -- it cast EVERY column to
           object dtype, including genuine int64/float64/bool columns.
-          The CSV write then serialized Python objects (int → str), and
+          The CSV write then serialized Python objects (int -> str), and
           the read-back re-inferred dtypes. For most columns this
           round-tripped correctly, but for nullable Int64 columns with
           NaN, the object-dtype intermediate could produce
           ``float('nan')`` instead of ``pd.NA``, breaking downstream
           ``pd.isna()`` checks (the pubchem_cid column in the drugs
-          schema is the canonical victim — ``pubchem_cid is None``
+          schema is the canonical victim -- ``pubchem_cid is None``
           checks failed because ``nan != None``).
         ROOT FIX: scan ALL columns for dangerous-string cells (preserving
           the v65 coverage guarantee) but WITHOUT the global
@@ -4383,13 +4383,13 @@ class BasePipeline(ABC):
              with a dangerous prefix. This is computed via
              ``Series.astype(str).str.startswith(CSV_DANGEROUS_PREFIXES)``
              which works for both object and numeric dtypes (numeric
-             values are stringified first — they will never start with
+             values are stringified first -- they will never start with
              ``=``/``@``/``\\t``/``\\r`` because their str
              representation is purely numeric/scientific).
           2. For columns where ``_has_dangerous.any()`` is True, cast
              JUST that column to object and apply the escape lambda.
           3. For columns where no cell is dangerous, leave the dtype
-             untouched — the CSV writer handles numeric dtypes natively
+             untouched -- the CSV writer handles numeric dtypes natively
              and the read-back preserves the original dtype.
         This preserves the v65 security fix (every dangerous cell is
         escaped) while eliminating the P1-5 dtype-destruction regression.
@@ -4401,7 +4401,7 @@ class BasePipeline(ABC):
         # contain a dangerous-string cell. Genuine numeric columns (int64,
         # float64, bool, Int64, Float64) never have dangerous-string cells
         # because their stringified form never starts with ``=``/``+``/
-        # ``-``/``@``/``\t``/``\r`` — so they pass through unchanged.
+        # ``-``/``@``/``\t``/``\r`` -- so they pass through unchanged.
         for col in df.columns:
             series = df[col]
             # Stringify every cell to detect dangerous prefixes uniformly.
@@ -4410,12 +4410,12 @@ class BasePipeline(ABC):
             _str_view = series.astype(str)
             _danger_mask = _str_view.str.startswith(CSV_DANGEROUS_PREFIXES)
             if not _danger_mask.any():
-                # No dangerous cells in this column — leave dtype intact.
+                # No dangerous cells in this column -- leave dtype intact.
                 continue
-            # Column has at least one dangerous cell — cast to object and
+            # Column has at least one dangerous cell -- cast to object and
             # escape ONLY the dangerous cells. Non-dangerous cells keep
-            # their original Python object representation (int → int,
-            # float → float, str → str).
+            # their original Python object representation (int -> int,
+            # float -> float, str -> str).
             _obj_series = series.astype(object)
             _escaped = _obj_series.where(
                 ~_danger_mask.values,
@@ -4467,7 +4467,7 @@ class BasePipeline(ABC):
         if not _HAS_FILELOCK or FileLock is None:
             return None
         lock_path = dest.with_suffix(dest.suffix + ".lock")
-        # v29 ROOT FIX (audit P1-23): was 5min TTL — too short for real ETL. Increased to 30min.
+        # v29 ROOT FIX (audit P1-23): was 5min TTL -- too short for real ETL. Increased to 30min.
         lock_timeout = self.file_lock_timeout_sec
         lock = FileLock(lock_path, timeout=lock_timeout)
         try:
@@ -4507,7 +4507,7 @@ class BasePipeline(ABC):
         ``index=False``, and ``QUOTE_MINIMAL`` quoting for
         interoperability (INT-15.4). P1-26 ROOT FIX: the previous
         write used ``QUOTE_NONNUMERIC`` while the corresponding read
-        (``_load_cleaned_data``, line ~1406) used ``QUOTE_MINIMAL`` —
+        (``_load_cleaned_data``, line ~1406) used ``QUOTE_MINIMAL`` --
         the asymmetric quoting caused NaN values to round-trip as
         empty strings (``""``) instead of NaN, breaking downstream
         ``pd.isna()`` filters. Both sides now use ``QUOTE_MINIMAL``
@@ -4656,7 +4656,7 @@ class BasePipeline(ABC):
         """Deterministically tag rows as train/test/validate (SCI-3.14).
 
         Uses a hash of the primary key columns so the split is
-        deterministic and idempotent — the same data always gets the
+        deterministic and idempotent -- the same data always gets the
         same split regardless of row order. This prevents data
         leakage between runs.
 
@@ -4728,7 +4728,7 @@ class BasePipeline(ABC):
     ) -> tuple[bool, list[str]]:
         """Check foreign keys reference known entities (SCI-3.16).
 
-        Best-effort check — only validates against files that exist
+        Best-effort check -- only validates against files that exist
         on disk in ``PROCESSED_DATA_DIR``. Reports dangling
         references as warnings, not errors.
 
@@ -4755,7 +4755,7 @@ class BasePipeline(ABC):
         # is then checked against ``known_uniprots`` (which doesn't
         # contain "nan" because pandas' CSV reader drops NaN rows by
         # default in usecols), so EVERY NaN row was flagged as a
-        # "dangling reference" — false-positive warnings on every row
+        # "dangling reference" -- false-positive warnings on every row
         # where uniprot_id was legitimately missing. The fix: drop NaN
         # rows BEFORE the astype(str) conversion so they're not counted
         # as dangling (missing != dangling).
@@ -4768,7 +4768,7 @@ class BasePipeline(ABC):
                             "uniprot_id"
                         ].dropna().astype(str)
                     )
-                    # Drop NaN rows from the check — missing != dangling.
+                    # Drop NaN rows from the check -- missing != dangling.
                     _df_non_null = df[df["uniprot_id"].notna()]
                     dangling = _df_non_null[
                         ~_df_non_null["uniprot_id"].astype(str).isin(known_uniprots)
@@ -4785,7 +4785,7 @@ class BasePipeline(ABC):
                     )
 
         # Check inchikey references against drugs.csv
-        # v37 ROOT FIX (Phase 1 Issue #11): same NaN-to-'nan' bug —
+        # v37 ROOT FIX (Phase 1 Issue #11): same NaN-to-'nan' bug --
         # drop NaN rows before the astype(str) check.
         if "inchikey" in df.columns:
             drugs_path = PROCESSED_DATA_DIR / "drugs.csv"
@@ -4897,9 +4897,9 @@ class BasePipeline(ABC):
         dict
             Dictionary with keys:
             - ``total_rows``
-            - ``null_counts`` — column -> NULL count
+            - ``null_counts`` -- column -> NULL count
             - ``duplicate_count``
-            - ``unique_counts`` — column -> unique value count
+            - ``unique_counts`` -- column -> unique value count
         """
         if df is None or df.empty:
             return {
@@ -4925,7 +4925,7 @@ class BasePipeline(ABC):
         Combines:
         - Completeness (non-NULL fraction averaged across required columns).
         - Uniqueness (1 - duplicate fraction).
-        - Validity (schema compliance fraction — computed by
+        - Validity (schema compliance fraction -- computed by
           ``validate_output``).
 
         Returns
@@ -4953,7 +4953,19 @@ class BasePipeline(ABC):
             completeness = 1.0
 
         # Uniqueness
+        # P1-024 ROOT FIX (Team-2 — document the div-by-zero guard):
+        #   The ``len(df) > 0`` check below guards the division
+        #   ``int(df.duplicated().sum()) / len(df)`` from div-by-zero.
+        #   The guard is correct but the previous code did NOT document
+        #   WHY it's there — a future refactor that moves the division
+        #   out of the guarded block would introduce a div-by-zero.
+        #   ROOT FIX: add an explicit comment on the division line so
+        #   the invariant is visible at the point of risk. This is a
+        #   documentation-only fix; no code change.
         if len(df) > 0:
+            # Safe: guarded by ``len(df) > 0`` check above — no div-by-zero.
+            # If a future refactor moves this division out of the guarded
+            # block, add an explicit ``if len(df) == 0: return 1.0`` guard.
             uniqueness = 1.0 - (int(df.duplicated().sum()) / len(df))
         else:
             uniqueness = 1.0
@@ -5060,7 +5072,7 @@ class BasePipeline(ABC):
             ``'running'``, ``'success'``, ``'failed'``, ``'partial'``.
             The previous code also wrote ``'warning'``,
             ``'download_clean_success'``, and ``'load_success'`` which
-            the CHECK rejected (silently deleting the audit trail — see
+            the CHECK rejected (silently deleting the audit trail -- see
             the v83 P0-C11 root-cause comment at the call sites).
             Callers MUST now use only the 4 canonical statuses. The
             pipeline PHASE (download_clean / load / full) is recorded
@@ -5175,7 +5187,7 @@ class BasePipeline(ABC):
         # ``except Exception`` which caught programming bugs
         # (AttributeError, KeyError, NameError) and silently fell
         # back to local JSONL. A typo in a PipelineRun field name
-        # was masked as "DB unavailable" — the audit trail went to
+        # was masked as "DB unavailable" -- the audit trail went to
         # a local file nobody read. Root fix: catch ONLY DB-related
         # errors (OperationalError, IntegrityError, InterfaceError,
         # ProgrammingError for schema drift) plus OS/import errors.
@@ -5194,7 +5206,7 @@ class BasePipeline(ABC):
                 _db_exc_types.append(_SAProgrammingError)
             if _db_exc_types and not isinstance(exc, tuple(_db_exc_types)):
                 # Check if it's one of our allowed non-DB exceptions;
-                # otherwise re-raise (programming bug — propagate).
+                # otherwise re-raise (programming bug -- propagate).
                 pass  # allowed non-DB error, fall back to JSONL
             if (
                 _HAS_SQLALCHEMY
@@ -5302,7 +5314,7 @@ class BasePipeline(ABC):
             return 0
 
     # v90 ROOT FIX (BUG #15): maximum retry count for audit buffer
-    # replay. The previous code retried failed records FOREVER —
+    # replay. The previous code retried failed records FOREVER --
     # if a record's schema is incompatible with the DB (e.g. a
     # column was dropped), every pipeline run retries it, adding
     # it back to the buffer each time, growing the buffer without
@@ -5663,7 +5675,7 @@ class BasePipeline(ABC):
            (``PROCESSED_DATA_DIR / _get_processed_filename()``).
         2. If found and the run_context sidecar is valid, attempt
            ``run_load_only`` to load the cleaned data.
-        3. If not found, log a warning — the caller should restart
+        3. If not found, log a warning -- the caller should restart
            the full pipeline via ``run()``.
         """
         logger.info(
@@ -5752,7 +5764,7 @@ class BasePipeline(ABC):
         """Download multiple files in parallel (PERF-8.10).
 
         Uses ``concurrent.futures.ThreadPoolExecutor``. Each download
-        is independent — a failure in one does not affect the others.
+        is independent -- a failure in one does not affect the others.
 
         Parameters
         ----------
@@ -5777,7 +5789,7 @@ class BasePipeline(ABC):
                 # FIX-P2-C-10 (audit P2): ``Path(url).name`` produced
                 # broken filenames for URLs with query strings
                 # (``https://example.com/file.csv?v=1`` ->
-                # ``file.csv?v=1`` — an invalid filename containing a
+                # ``file.csv?v=1`` -- an invalid filename containing a
                 # question mark) or trailing slashes (``.../dir/`` ->
                 # empty string). Strip the query and fragment FIRST via
                 # ``urlparse(url).path`` so ``Path(...).name`` sees only
@@ -5801,7 +5813,7 @@ class BasePipeline(ABC):
                 # ``except Exception`` swallowed EVERY exception including
                 # permanent HTTP errors (4xx except 429, malformed URL,
                 # PermissionError on the destination path). The caller
-                # received ``None`` and treated it as "soft failure —
+                # received ``None`` and treated it as "soft failure --
                 # continue without this file", masking real configuration
                 # problems (e.g. a 404 because the URL template changed,
                 # a 403 because the API key expired). _download_file

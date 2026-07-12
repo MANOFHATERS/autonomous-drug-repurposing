@@ -1,10 +1,10 @@
 """Shared entry point for cross-database entity resolution.
 
-v75 ROOT FIX (T-025 — download_parallel.py skips entity resolution):
+v75 ROOT FIX (T-025 -- download_parallel.py skips entity resolution):
     The forensic audit found that ``scripts/download_parallel.py`` and
     the Makefile's ``download-all`` / ``download-samples`` targets all
-    called ``cls(run_id=...).run()`` for each pipeline — the FULL run
-    including LOAD to DB — but NEVER ran entity resolution. The
+    called ``cls(run_id=...).run()`` for each pipeline -- the FULL run
+    including LOAD to DB -- but NEVER ran entity resolution. The
     knowledge graph built from such a DB had no ``entity_mapping`` rows
     and ``proteins.string_id`` was never updated. The master Airflow
     DAG was the ONLY caller that ran entity resolution (inline in the
@@ -25,17 +25,17 @@ v75 ROOT FIX (T-025 — download_parallel.py skips entity resolution):
          becomes a thin wrapper that calls this function.
       3. ``scripts/download_parallel.py`` calls this function between
          SECOND_PASS and THIRD_PASS (PubChem needs drugs in DB, so
-         resolution MUST run before PubChem download — same ordering
+         resolution MUST run before PubChem download -- same ordering
          as the master DAG).
       4. The Makefile's ``download-all`` and ``download-samples``
-         targets continue to call ``.run()`` (full run) — they are
+         targets continue to call ``.run()`` (full run) -- they are
          documented as "unresolved DB" targets. The Makefile now
          points operators at ``download-parallel`` for the resolved
          path. (Refactoring the Makefile to use the two-phase design
          for every target is out of scope for T-025; the parallel
          path is the canonical CLI entry point for resolved DBs.)
 
-    This module has NO Airflow dependency — it can be imported and
+    This module has NO Airflow dependency -- it can be imported and
     called from any Python context (CLI, pytest, notebook). The only
     dependencies are pandas, SQLAlchemy, and the Phase 1 package
     (config.settings, database.connection, entity_resolution resolvers).
@@ -84,7 +84,7 @@ def run_entity_resolution() -> Dict[str, Any]:
     # ------------------------------------------------------------------
     # Drug entity resolution
     # ------------------------------------------------------------------
-    logger.info("Starting drug entity resolution …")
+    logger.info("Starting drug entity resolution ...")
     drug_resolver = DrugResolver()
 
     chembl_path = PROCESSED_DATA_DIR / "drugs.csv"
@@ -142,7 +142,7 @@ def run_entity_resolution() -> Dict[str, Any]:
     # ------------------------------------------------------------------
     # Protein entity resolution
     # ------------------------------------------------------------------
-    logger.info("Starting protein entity resolution …")
+    logger.info("Starting protein entity resolution ...")
     protein_resolver = ProteinResolver()
 
     proteins_path = PROCESSED_DATA_DIR / "proteins.csv"
@@ -160,22 +160,22 @@ def run_entity_resolution() -> Dict[str, Any]:
     # conformant column names `uniprot_id_a` / `uniprot_id_b` (was
     # `uniprot_a` / `uniprot_b`).
     #
-    # v80 FORENSIC ROOT FIX (P0-D2 — _string_to_uniprot cross-reference
+    # v80 FORENSIC ROOT FIX (P0-D2 -- _string_to_uniprot cross-reference
     #   index NEVER populated):
     #   The previous code only loaded the STRING PPI edges file
     #   (``protein_protein_interactions.csv``), extracted unique UniProt
     #   IDs from it, and passed that as ``string_df`` to
     #   ``protein_resolver.build_mapping``. But ``string_df`` only
-    #   creates ``string_derived`` provisional entries — it does NOT
+    #   creates ``string_derived`` provisional entries -- it does NOT
     #   populate the resolver's ``_string_to_uniprot`` cross-reference
     #   index. That index is populated ONLY from ``string_aliases_df``
-    #   (STRING alias data containing the STRING→UniProt mapping).
+    #   (STRING alias data containing the STRING->UniProt mapping).
     #   Without that index, ``resolve_single(string_id=...)`` is a dead
     #   path: it looks up ``self._string_to_uniprot.get(string_id)``
     #   which always returns None because the dict was never populated.
     #   STRING-derived protein IDs therefore NEVER resolve to UniProt,
     #   and STRING PPI edges never merge into the canonical Protein
-    #   subgraph — a silent integration gap that produced a KG with
+    #   subgraph -- a silent integration gap that produced a KG with
     #   disconnected STRING and UniProt protein clusters.
     #
     #   ROOT FIX: also load the STRING aliases file
@@ -184,13 +184,13 @@ def run_entity_resolution() -> Dict[str, Any]:
     #   in raw_dir as a fallback) and pass it as ``string_aliases_df``.
     #   This populates ``_string_to_uniprot`` so ``resolve_single`` works.
     #
-    # v80 FORENSIC ROOT FIX (P0-D5 — fragile STRING column-name check):
+    # v80 FORENSIC ROOT FIX (P0-D5 -- fragile STRING column-name check):
     #   The previous code only checked for columns named
     #   ``uniprot_id_a`` / ``uniprot_id_b`` (the v49 schema). If the
     #   STRING pipeline emitted the legacy ``uniprot_a`` / ``uniprot_b``
     #   schema (or the v50 sample's ``uniprot_ac_a`` / ``uniprot_ac_b``,
     #   or the embedded ``uniprot_id1`` / ``uniprot_id2``), the
-    #   ``string_protein_df`` was silently empty — 0 Protein-Protein
+    #   ``string_protein_df`` was silently empty -- 0 Protein-Protein
     #   edges in the KG, missing the entire PPI subgraph.
     #
     #   ROOT FIX: check ALL known column-name variants and use whichever
@@ -205,7 +205,7 @@ def run_entity_resolution() -> Dict[str, Any]:
         try:
             string_df = pd.read_csv(string_path, low_memory=False)
             if not string_df.empty:
-                # v89 FORENSIC ROOT FIX (BUG #16 P1 — UniProt/STRING column
+                # v89 FORENSIC ROOT FIX (BUG #16 P1 -- UniProt/STRING column
                 #   detection used DIFFERENT variant lists):
                 #   The previous code had TWO separate variant lists:
                 #     - _COLUMN_PAIR_VARIANTS (5 pairs) for UniProt IDs
@@ -215,7 +215,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                 #   _string_col_variants), the STRING ID pairing was
                 #   silently skipped. ``uniprot_to_string_id`` remained
                 #   empty, and the organism inference (Source 3 in
-                #   build_mapping) never fired — non-human proteins were
+                #   build_mapping) never fired -- non-human proteins were
                 #   mislabeled as "Homo sapiens" (BUG #18).
                 #   ROOT FIX: UNIFY the column-pair detection. Each
                 #   variant entry is a 4-tuple
@@ -254,19 +254,19 @@ def run_entity_resolution() -> Dict[str, Any]:
                         break
                 if col_a and col_b:
                     uniprot_ids = set()
-                    # v89 FORENSIC ROOT FIX (BUG #7 P1 — uniprot_to_string_id
+                    # v89 FORENSIC ROOT FIX (BUG #7 P1 -- uniprot_to_string_id
                     #   overwrote previous value, last STRING ID won):
                     #   The previous code used a single-valued dict
                     #   ``uniprot_to_string_id[uid_str] = sid_str``. If
                     #   the same UniProt accession appeared in multiple
-                    #   STRING PPI rows (common — a protein has many
+                    #   STRING PPI rows (common -- a protein has many
                     #   interaction partners), the dictionary assignment
                     #   overwrote the previous value. The LAST STRING ID
                     #   encountered won, with no consistency check. If
                     #   uid_str was paired with sid_a in row 1 (human)
                     #   and sid_b in row 2 (mouse, due to BUG #2
-                    #   mispairing), the final mapping was uid_str →
-                    #   sid_b — non-deterministic, depending on row
+                    #   mispairing), the final mapping was uid_str ->
+                    #   sid_b -- non-deterministic, depending on row
                     #   ordering.
                     #   ROOT FIX: use a MULTI-VALUED dict
                     #   ``uniprot_to_string_ids: dict[str, set[str]]``.
@@ -275,19 +275,19 @@ def run_entity_resolution() -> Dict[str, Any]:
                     #   share the SAME taxonomy prefix (the part before
                     #   the first "."). If they conflict (e.g. one human
                     #   9606.* and one mouse 10090.*), the UniProt
-                    #   accession is AMBIGUOUS — we DEAD-LETTER it (log
+                    #   accession is AMBIGUOUS -- we DEAD-LETTER it (log
                     #   a WARNING and exclude it from the string_id
                     #   column) so the resolver's organism inference
                     #   (Source 3) does not pick a random taxonomy.
                     uniprot_to_string_ids: Dict[str, set] = {}
-                    # v89 FORENSIC ROOT FIX (BUG #2 P0 — STRING ID
+                    # v89 FORENSIC ROOT FIX (BUG #2 P0 -- STRING ID
                     #   mispairing):
                     #   The previous code iterated
                     #   ``for col in (col_a, col_b):`` and for EACH col
                     #   checked ``for scol in (_string_col_a,
                     #   _string_col_b):``. For uid_b (from col_b), it
                     #   ALSO checked _string_col_a FIRST, found sid_a
-                    #   (the SAME value as for uid_a), and broke —
+                    #   (the SAME value as for uid_a), and broke --
                     #   WRONG. uid_b should be paired with sid_b (from
                     #   _string_col_b), not sid_a. The result: BOTH
                     #   UniProt accessions in a PPI edge were paired
@@ -296,7 +296,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                     #   (human ↔ mouse), both UniProt accessions got
                     #   paired with the human STRING ID, so the mouse
                     #   UniProt accession was labeled "Homo sapiens" via
-                    #   taxonomy-prefix inference — corrupting organism
+                    #   taxonomy-prefix inference -- corrupting organism
                     #   assignment.
                     #   ROOT FIX: iterate
                     #   ``zip((col_a, col_b), (_string_col_a,
@@ -312,7 +312,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                                 if not uid_str or uid_str == "nan":
                                     continue
                                 # Normalize UniProt accession to UPPERCASE
-                                # (per UniProt spec — accessions are
+                                # (per UniProt spec -- accessions are
                                 # case-sensitive and MUST be uppercase).
                                 # This prevents duplicate canonical
                                 # entries for the same protein (v89
@@ -325,7 +325,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                                     if sid_str and "." in sid_str:
                                         uniprot_to_string_ids.setdefault(uid_str, set()).add(sid_str)
                     else:
-                        # No STRING ID columns — just collect UniProt IDs.
+                        # No STRING ID columns -- just collect UniProt IDs.
                         for idx in string_df.index:
                             for _col in (col_a, col_b):
                                 uid = string_df.at[idx, _col]
@@ -344,10 +344,10 @@ def run_entity_resolution() -> Dict[str, Any]:
                     for _uid, _sids in uniprot_to_string_ids.items():
                         _taxids = {_s.split(".")[0] for _s in _sids if "." in _s}
                         if len(_taxids) > 1:
-                            # Conflicting taxonomy prefixes — dead-letter.
+                            # Conflicting taxonomy prefixes -- dead-letter.
                             logger.warning(
                                 "STRING PPI: UniProt accession %s paired "
-                                "with STRING IDs from MULTIPLE taxa (%s) — "
+                                "with STRING IDs from MULTIPLE taxa (%s) -- "
                                 "organism is ambiguous. Excluding from "
                                 "string_id column to prevent cross-species "
                                 "contamination.",
@@ -355,14 +355,14 @@ def run_entity_resolution() -> Dict[str, Any]:
                             )
                             _dead_lettered_uids.append(_uid)
                         elif len(_taxids) == 1:
-                            # Consistent — pick the first (deterministic).
+                            # Consistent -- pick the first (deterministic).
                             uniprot_to_string_id[_uid] = sorted(_sids)[0]
-                        # else: no valid taxonomy prefix — skip (will be
+                        # else: no valid taxonomy prefix -- skip (will be
                         # handled by the resolver's default-organism path).
 
                     if uniprot_ids:
                         _data = {"uniprot_id": list(uniprot_ids)}
-                        # v89 ROOT FIX (BUG #43 — string_id column
+                        # v89 ROOT FIX (BUG #43 -- string_id column
                         # conditionally added defeats downstream
                         # presence checks):
                         #   The previous code ONLY added the ``string_id``
@@ -372,7 +372,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                         #   NOT added. Downstream code
                         #   (protein_resolver.build_mapping line ~2594)
                         #   checks ``"string_id" in string_df.columns``
-                        #   — if the column is absent, Source 3
+                        #   -- if the column is absent, Source 3
                         #   (taxonomy-prefix inference) doesn't fire,
                         #   and STRING-derived proteins default to
                         #   "Homo sapiens" (cross-species contamination).
@@ -429,16 +429,16 @@ def run_entity_resolution() -> Dict[str, Any]:
         try:
             from config.settings import RAW_DATA_DIR
             _string_raw_dir = RAW_DATA_DIR / "string"
-            # v89 FORENSIC ROOT FIX (BUG #3 P0 — alias file glob matched
+            # v89 FORENSIC ROOT FIX (BUG #3 P0 -- alias file glob matched
             #   NON-HUMAN organism files):
             #   The previous code used ``*aliases*.txt.gz`` which matched
-            #   ANY aliases file in the STRING raw directory — including
+            #   ANY aliases file in the STRING raw directory -- including
             #   non-human organism files (10090.protein.aliases.v12.0.txt.gz
             #   = mouse, 7227.protein.aliases.v12.0.txt.gz = fly). The
             #   code picked ``_alias_files[0]`` (alphabetically first by
             #   default glob ordering). If 10090.protein.aliases... sorted
             #   before 9606.protein.aliases..., the MOUSE aliases file was
-            #   loaded — and every UniProt accession in it was treated as
+            #   loaded -- and every UniProt accession in it was treated as
             #   a mouse-to-STRING mapping. All protein mappings were
             #   wrong. The organism override table (~250 entries) did NOT
             #   catch this because most UniProt accessions are not in the
@@ -455,15 +455,15 @@ def run_entity_resolution() -> Dict[str, Any]:
                 else []
             )
             if _alias_files:
-                # v89 ROOT FIX (BUG #28 — corrupt aliases file silently
-                # disables STRING→UniProt cross-reference):
+                # v89 ROOT FIX (BUG #28 -- corrupt aliases file silently
+                # disables STRING->UniProt cross-reference):
                 #   The previous code opened the first matching aliases
                 #   file with ``gzip.open`` and iterated. If the file
                 #   was corrupt (truncated download, partial write,
                 #   disk corruption), ``gzip.open`` raised
                 #   ``gzip.BadGzipFile`` (Python 3.8+) or ``OSError``.
                 #   The broad ``except Exception`` at the bottom caught
-                #   it and logged a WARNING — but ``string_aliases_df``
+                #   it and logged a WARNING -- but ``string_aliases_df``
                 #   remained empty. The organism inference (Source 3
                 #   in build_mapping) then didn't fire, and
                 #   STRING-derived proteins defaulted to "Homo sapiens"
@@ -481,7 +481,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                 # Pre-flight: verify the gzip integrity by reading the
                 # first byte. ``gzip.BadGzipFile`` is raised on corrupt
                 # files; ``OSError`` on truncated files. We read up to
-                # 1 byte — if that succeeds, the file is a valid gzip.
+                # 1 byte -- if that succeeds, the file is a valid gzip.
                 try:
                     with gzip.open(_alias_file, "rb") as _probe:
                         _probe.read(1)
@@ -516,21 +516,21 @@ def run_entity_resolution() -> Dict[str, Any]:
                     ) from _gz_exc
                 # The raw aliases file is gzipped, space/tab-separated,
                 # with columns: string_protein_id, source, alias, source_database.
-                # We only need the STRING→UniProt mapping (where source_database
+                # We only need the STRING->UniProt mapping (where source_database
                 # contains "UniProt").
-                # v89 FORENSIC ROOT FIX (BUG #17 P1 — fragile raw aliases
+                # v89 FORENSIC ROOT FIX (BUG #17 P1 -- fragile raw aliases
                 #   parsing):
                 #   The previous code split each line on tab (or
                 #   whitespace as fallback) and took the first 4 fields.
                 #   Problems:
-                #   (a) No header validation — STRING could change the
+                #   (a) No header validation -- STRING could change the
                 #       column order and we'd silently produce wrong
                 #       mappings.
                 #   (b) The fallback ``_line.split()`` splits on ANY
                 #       whitespace, which would break if an alias
                 #       contains spaces.
                 #   (c) The filter ``"UniProt" in _src_db or
-                #       _source == "UniProt_AC"`` was case-sensitive —
+                #       _source == "UniProt_AC"`` was case-sensitive --
                 #       STRING uses ``UniProt_AC`` (exact) but some
                 #       files use ``uniprot_ac`` (lowercase).
                 #   ROOT FIX: use pandas with explicit ``sep="\t"`` and
@@ -539,7 +539,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                 #   ``#`` header line). Make the UniProt filter
                 #   case-insensitive (lowercase both sides). Skip lines
                 #   that don't have exactly 4 fields after splitting
-                #   (defensive — corrupt lines are logged and skipped).
+                #   (defensive -- corrupt lines are logged and skipped).
                 import gzip
                 _alias_records = []
                 _skipped_lines = 0
@@ -550,13 +550,13 @@ def run_entity_resolution() -> Dict[str, Any]:
                         if not _line:
                             continue
                         if _line.startswith("#"):
-                            # Header comment — STRING aliases files have
+                            # Header comment -- STRING aliases files have
                             # a ``#`` line describing the columns. Mark
                             # that we've seen it (so we know the file is
                             # well-formed) but don't parse it.
                             _header_seen = True
                             continue
-                        # STRICT tab split — do NOT fall back to
+                        # STRICT tab split -- do NOT fall back to
                         # whitespace split (BUG #17b: whitespace split
                         # breaks on aliases containing spaces).
                         _parts = _line.split("\t")
@@ -581,7 +581,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                             })
                 if not _header_seen:
                     logger.warning(
-                        "STRING aliases file %s has no '#' header comment — "
+                        "STRING aliases file %s has no '#' header comment -- "
                         "file format may have changed. Proceeding with "
                         "best-effort parsing.",
                         _alias_file.name,
@@ -603,12 +603,12 @@ def run_entity_resolution() -> Dict[str, Any]:
             # operator sees a clear failure. Do NOT swallow it.
             raise
         except FileNotFoundError as exc:
-            # v93 ROOT FIX (P1-030 — asymmetric exception handling):
+            # v93 ROOT FIX (P1-030 -- asymmetric exception handling):
             # the previous ``except Exception`` clause SILENTLY
             # SWALLOWED FileNotFoundError, logging only a WARNING.
             # This meant a missing STRING aliases file (operator
-            # error — file not downloaded, wrong path, etc.) was
-            # silently ignored, and STRING→UniProt cross-reference
+            # error -- file not downloaded, wrong path, etc.) was
+            # silently ignored, and STRING->UniProt cross-reference
             # was disabled with NO visible error. The KG then had
             # disconnected STRING and UniProt clusters, and the
             # operator had no way to know why.
@@ -620,19 +620,19 @@ def run_entity_resolution() -> Dict[str, Any]:
             # degradation by setting
             # ``DRUGOS_SKIP_STRING_ALIASES=1`` in the environment.
             # This matches the corrupt-file behavior (RuntimeError
-            # re-raised above) — both missing and corrupt files are
+            # re-raised above) -- both missing and corrupt files are
             # operator-actionable failures, not silent degradations.
             if os.environ.get("DRUGOS_SKIP_STRING_ALIASES", "") == "1":
                 logger.warning(
-                    "STRING aliases file not found: %s — "
+                    "STRING aliases file not found: %s -- "
                     "DRUGOS_SKIP_STRING_ALIASES=1 set, continuing "
-                    "with degraded STRING→UniProt resolution.",
+                    "with degraded STRING->UniProt resolution.",
                     exc,
                 )
             else:
                 logger.error(
-                    "STRING aliases file not found: %s — "
-                    "STRING→UniProt cross-reference cannot be built. "
+                    "STRING aliases file not found: %s -- "
+                    "STRING->UniProt cross-reference cannot be built. "
                     "Either (a) download the file to the expected "
                     "path, or (b) set DRUGOS_SKIP_STRING_ALIASES=1 "
                     "to acknowledge the degradation and continue.",
@@ -641,7 +641,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                 raise
         except Exception as exc:
             logger.warning(
-                "Could not load raw STRING aliases file: %s — "
+                "Could not load raw STRING aliases file: %s -- "
                 "string_aliases_df will be empty, resolve_single(string_id=...) "
                 "will not resolve STRING IDs to UniProt",
                 exc,
@@ -653,9 +653,9 @@ def run_entity_resolution() -> Dict[str, Any]:
             # and a second ``except Exception`` AFTER it (invalid order:
             # Python requires try/except/except/else, not try/except/else/
             # except). The fix places it as a proper try/except/else clause
-            # that runs when NO exception was raised — if the try block
+            # that runs when NO exception was raised -- if the try block
             # succeeded but found no human aliases file, log a clear warning.
-            # v89 BUG #3: no human aliases file found — log clearly.
+            # v89 BUG #3: no human aliases file found -- log clearly.
             if _string_raw_dir.exists():
                 _all_alias_files = list(_string_raw_dir.glob("*aliases*.txt.gz"))
                 logger.warning(
@@ -663,14 +663,14 @@ def run_entity_resolution() -> Dict[str, Any]:
                     "Found %d non-human alias files: %s. "
                     "REFUSING to load non-human aliases (would corrupt "
                     "organism assignment). string_aliases_df will be "
-                    "empty — resolve_single(string_id=...) will not "
+                    "empty -- resolve_single(string_id=...) will not "
                     "resolve STRING IDs to UniProt.",
                     _string_raw_dir,
                     len(_all_alias_files),
                     [f.name for f in _all_alias_files[:5]],
                 )
 
-    # v89 ROOT FIX (BUG #33 — load ChEMBL target data for protein
+    # v89 ROOT FIX (BUG #33 -- load ChEMBL target data for protein
     # resolution):
     #   The previous code loaded UniProt + STRING data but NOT ChEMBL
     #   target data. The ``add_chembl_target_records`` method on
@@ -687,8 +687,8 @@ def run_entity_resolution() -> Dict[str, Any]:
     #   ``chembl_activities_clean.csv``). Pass it as
     #   ``chembl_target_df`` to ``build_mapping`` so the resolver can
     #   link ChEMBL target IDs to UniProt accessions. This completes
-    #   the drug → target → pathway → disease chain (Phase 1 → Phase 2
-    #   → Phase 3 → Phase 4 connectivity).
+    #   the drug -> target -> pathway -> disease chain (Phase 1 -> Phase 2
+    #   -> Phase 3 -> Phase 4 connectivity).
     chembl_target_df = pd.DataFrame()
     chembl_activities_path = PROCESSED_DATA_DIR / "chembl_activities_clean.csv"
     if chembl_activities_path.exists():
@@ -701,7 +701,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                 # ``uniprot_id``, ``gene_symbol``, ``organism``,
                 # ``target_name``. If ``chembl_target_id`` is absent,
                 # the resolver's schema validation (BUG #23 pattern)
-                # will log an ERROR and skip ingestion — surface the
+                # will log an ERROR and skip ingestion -- surface the
                 # issue to the operator instead of silent failure.
                 _chembl_target_cols = [
                     c for c in (
@@ -711,7 +711,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                 ]
                 if "chembl_target_id" in _chembl_acts_df.columns:
                     # Deduplicate by chembl_target_id (keep first
-                    # occurrence of each target — activities CSV has
+                    # occurrence of each target -- activities CSV has
                     # one row per activity, but we only need one row
                     # per target for protein resolution).
                     chembl_target_df = (
@@ -729,7 +729,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                     logger.warning(
                         "ChEMBL activities CSV %s has no 'chembl_target_id' "
                         "column. Available columns: %s. Cannot use for "
-                        "protein resolution — ChEMBL target IDs will not "
+                        "protein resolution -- ChEMBL target IDs will not "
                         "be cross-referenced with UniProt. (v89 BUG #33)",
                         chembl_activities_path.name,
                         list(_chembl_acts_df.columns),
@@ -743,8 +743,8 @@ def run_entity_resolution() -> Dict[str, Any]:
             )
     else:
         logger.info(
-            "ChEMBL activities CSV not found at %s — skipping ChEMBL "
-            "target → UniProt cross-reference. Run the ChEMBL pipeline "
+            "ChEMBL activities CSV not found at %s -- skipping ChEMBL "
+            "target -> UniProt cross-reference. Run the ChEMBL pipeline "
             "first to enable. (v89 BUG #33)",
             chembl_activities_path,
         )
@@ -766,7 +766,7 @@ def run_entity_resolution() -> Dict[str, Any]:
     # Persist drug entity mappings
     # ------------------------------------------------------------------
     if not drug_mapping_df.empty:
-        # Align columns to EntityMapping schema — drop extras, fill missing
+        # Align columns to EntityMapping schema -- drop extras, fill missing
         col_map = {
             "canonical_inchikey": "canonical_inchikey",
             "canonical_name": "canonical_name",
@@ -815,18 +815,18 @@ def run_entity_resolution() -> Dict[str, Any]:
                 )
                 save_df = save_df[~dup_mask].copy()
 
-        # Transactional: temp table + DELETE/INSERT — atomic, rolls back on failure.
+        # Transactional: temp table + DELETE/INSERT -- atomic, rolls back on failure.
         # v9 ROOT FIX (audit F3.5): TRUNCATE TABLE is PostgreSQL-specific
         # syntax. On SQLite-backed dev/test environments it raises
         # sqlite3.OperationalError. Use DELETE FROM which is universally
         # supported (ANSI SQL) and behaves correctly within an explicit
         # transaction on both dialects.
-        # v89 ROOT FIX (BUG #29 — leftover temp tables on failed runs):
+        # v89 ROOT FIX (BUG #29 -- leftover temp tables on failed runs):
         #   The previous code put the ``DROP TABLE IF EXISTS`` INSIDE
         #   the ``with engine.begin()`` transaction. On SQLite, DROP
         #   TABLE within a transaction may behave unexpectedly, AND if
         #   the INSERT failed (constraint violation, type mismatch),
-        #   the transaction rolled back — so the DROP never executed,
+        #   the transaction rolled back -- so the DROP never executed,
         #   leaving an orphaned ``_tmp_entity_mapping_staging`` table
         #   in the DB. Repeated failures accumulated orphaned temp
         #   tables.
@@ -890,7 +890,7 @@ def run_entity_resolution() -> Dict[str, Any]:
             # V90 CI fix: deduplicate on chembl_id (the UNIQUE-constrained
             # column) BEFORE inserting. The previous fix deduplicated on
             # the COMBINATION of (chembl_id, drugbank_id, pubchem_cid),
-            # but the UNIQUE constraint is on chembl_id ALONE — so two
+            # but the UNIQUE constraint is on chembl_id ALONE -- so two
             # rows with the same chembl_id but different drugbank_id
             # still caused a UNIQUE violation. The fix: deduplicate on
             # chembl_id only, keeping the first occurrence. Rows with
@@ -948,14 +948,14 @@ def run_entity_resolution() -> Dict[str, Any]:
             update_df = resolved[["uniprot_id", "string_id"]].copy()
             update_df = update_df.dropna(subset=["uniprot_id", "string_id"])
             if not update_df.empty:
-                # v89 ROOT FIX (BUG #30 — uniprot_id uniqueness not
+                # v89 ROOT FIX (BUG #30 -- uniprot_id uniqueness not
                 # validated before UPDATE):
                 #   The UPDATE below uses a correlated subquery
                 #   (SQLite) / UPDATE...FROM (PostgreSQL) that joins
                 #   ``proteins.uniprot_id`` to the temp table's
                 #   ``uniprot_id``. If the ``proteins`` table has
                 #   DUPLICATE ``uniprot_id`` rows (e.g. from a previous
-                #   bad load), the UPDATE affects ALL matching rows —
+                #   bad load), the UPDATE affects ALL matching rows --
                 #   potentially setting DIFFERENT ``string_id`` values
                 #   on different rows (last-write-wins in the subquery).
                 #   The code assumes ``uniprot_id`` is unique, but this
@@ -963,7 +963,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                 #
                 #   ROOT FIX: pre-flight uniqueness check. If duplicates
                 #   exist, log an ERROR with the duplicate count, dead-
-                #   letter the affected updates, and SKIP the UPDATE —
+                #   letter the affected updates, and SKIP the UPDATE --
                 #   do NOT silently corrupt multiple rows. The operator
                 #   must fix the duplicate ``uniprot_id`` rows in the
                 #   ``proteins`` table before re-running.
@@ -980,7 +980,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                         _dup_rows = _dup_conn.execute(_dup_check_sql).fetchall()
                 except Exception as _dup_exc:  # noqa: BLE001
                     # If the dup-check query itself fails (e.g. proteins
-                    # table doesn't exist yet), log and proceed — the
+                    # table doesn't exist yet), log and proceed -- the
                     # UPDATE will fail with a clearer error.
                     logger.warning(
                         "v89 BUG #30: could not check uniprot_id "
@@ -1001,7 +1001,7 @@ def run_entity_resolution() -> Dict[str, Any]:
                         "resolution.",
                         _dup_count, _dup_examples,
                     )
-                    # Skip the UPDATE — do not corrupt multiple rows.
+                    # Skip the UPDATE -- do not corrupt multiple rows.
                 else:
                     try:
                         with engine.begin() as conn:

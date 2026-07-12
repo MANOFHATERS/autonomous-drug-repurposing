@@ -20,13 +20,29 @@ const RxNormConceptSchema = z.object({
   tty: z.string().optional(),
 });
 
-export const RxNormSearchResultSchema = z.object({
-  idGroup: z
-    .object({
-      name: z.string().optional(),
-      rxnormId: z.array(z.string()).optional(),
-    })
-    .optional(),
+/**
+ * FE-046 ROOT FIX: the previous `RxNormSearchResultSchema` was defined for
+ * the `{ idGroup: { name, rxnormId } }` shape — which is the response of
+ * the `/cuiacquired.json` and `/getSpellingSuggestions.json` endpoints,
+ * NOT the `/approximateTerm.json` endpoint that `searchDrugsByName`
+ * actually calls. The previous code parsed the body with this schema,
+ * extracted `idGroup.rxnormId`, then `void candidateRaw;`-discarded the
+ * result and manually extracted from `body.approximateGroup.candidate`.
+ * The schema was misleading dead weight — future maintainers reading the
+ * file would assume the schema was doing real validation; it was not.
+ *
+ * Root fix: replace with a schema that matches the ACTUAL response shape
+ * of `/approximateTerm.json`. The schema is now used for real validation
+ * (we `safeParse` and bail out on an unexpected shape, rather than
+ * blindly indexing into `body.approximateGroup.candidate`).
+ *
+ * Source for the shape: NIH RxNorm REST API docs,
+ * https://rxnav.nlm.nih.gov/REST/approximateTerm.html
+ */
+export const RxNormApproximateTermSchema = z.object({
+  approximateGroup: z.object({
+    candidate: z.array(RxNormConceptSchema).optional(),
+  }).optional(),
 });
 
 export interface NormalizedDrug {
@@ -54,24 +70,29 @@ export async function searchDrugsByName(query: string, limit = 10): Promise<Norm
   }
   const body = await res.json();
 
-  // ROOT FIX for FE-035: RxNormSearchResultSchema was previously defined
-  // but never used. We now parse the response with it (best-effort —
-  // RxNorm occasionally returns extra fields, so we use `.safeParse` and
-  // fall back to the raw body if the shape is unexpected).
-  const parsed = RxNormSearchResultSchema.safeParse(body);
-  const candidateRaw =
-    (parsed.success ? parsed.data?.idGroup?.rxnormId : undefined) ?? null;
-  // `idGroup.rxnormId` is for a different endpoint (getSpellingSuggestions),
-  // not approximateTerm. The actual candidates live under
-  // `approximateGroup.candidate` — we keep the schema for forward compat
-  // and validation, but extract from the canonical location here.
-  const candidates = (body?.approximateGroup?.candidate || []) as Array<{
-    rxcui?: string;
-    name?: string;
-    synonym?: string;
-    tty?: string;
-  }>;
-  void candidateRaw; // schema-validated; not needed for this endpoint
+  // FE-046: schema-validate the actual response shape. If RxNorm changes
+  // their API shape (or returns an error envelope), safeParse fails and
+  // we return [] — never crash on a missing `.candidate` field.
+  const parsed = RxNormApproximateTermSchema.safeParse(body);
+  if (!parsed.success) {
+    // Best-effort fallback: try the raw shape directly. If that also fails,
+    // return [] (no results) rather than crashing.
+    const candidates = (body?.approximateGroup?.candidate || []) as Array<{
+      rxcui?: string;
+      name?: string;
+      synonym?: string;
+      tty?: string;
+    }>;
+    return candidates
+      .filter((c): c is { rxcui: string; name?: string; synonym?: string; tty?: string } => !!c.rxcui)
+      .map((c) => ({
+        rxcui: c.rxcui,
+        name: c.name || c.synonym || "",
+        synonym: c.synonym,
+        tty: c.tty || "",
+      }));
+  }
+  const candidates = parsed.data?.approximateGroup?.candidate || [];
   const out: NormalizedDrug[] = [];
   for (const c of candidates) {
     if (!c.rxcui) continue;

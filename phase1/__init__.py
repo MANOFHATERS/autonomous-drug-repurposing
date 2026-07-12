@@ -1,6 +1,6 @@
-"""Phase 1 — Data Ingestion Pipelines package.
+"""Phase 1 -- Data Ingestion Pipelines package.
 
-v43 ROOT FIX (Chain 7 — bare-import packaging): the Phase 1 modules use
+v43 ROOT FIX (Chain 7 -- bare-import packaging): the Phase 1 modules use
 bare imports like ``from cleaning.normalizer import ...`` which only
 work when ``phase1/`` is on ``sys.path``. Previously this required the
 operator to either ``cd phase1/`` first OR run via ``run_unified.py``
@@ -15,7 +15,7 @@ from ANY current working directory. Operators can now do::
 
 without setting up sys.path themselves.
 
-The bootstrap is idempotent — it only inserts ``phase1/`` into
+The bootstrap is idempotent -- it only inserts ``phase1/`` into
 ``sys.path`` if it's not already there.
 """
 from __future__ import annotations

@@ -14,7 +14,7 @@ Files tested:
 10. database/migrations/run_migrations.py (newly fixed)
 
 This test verifies that all 9+ files work correctly together as a
-complete system — imports work, database can be created, migrations
+complete system -- imports work, database can be created, migrations
 run, models are valid, and config is accessible.
 """
 

@@ -51,6 +51,10 @@ import {
   useLiteratureSearch, useKnowledgeGraph, useBuildEvidencePackage, useRlCandidates,
   LoadingSpinner, ErrorDisplay,
 } from './use-api-data';
+// FE-053 ROOT FIX: Import ScoreBar + SafetyBadge from their dedicated files
+// instead of redefining them inline with different colors / scale thresholds.
+import { ScoreBar } from './score-bar';
+import { SafetyBadge } from './safety-badge';
 import {
   diseases, drugCandidates, clinicalTrials, graphNodes, graphEdges,
   trendingDiseases, recentQueries, savedQueries, usageMetrics,
@@ -77,33 +81,12 @@ function scoreColor(s: number) {
   return ACCENT_RED;
 }
 
-function ScoreBar({ score, size = 'md' }: { score: number; size?: 'sm' | 'md' | 'lg' }) {
-  const color = scoreColor(score);
-  const h = size === 'sm' ? 'h-1.5' : size === 'lg' ? 'h-3.5' : 'h-2.5';
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs font-bold" style={{ color }}>{score}</span>
-      <div className="flex-1 bg-slate-100 rounded-full overflow-hidden">
-        <div className={`${h} rounded-full transition-all duration-500`} style={{ width: `${score}%`, backgroundColor: color }} />
-      </div>
-    </div>
-  );
-}
-
-function SafetyBadge({ tier }: { tier: 'green' | 'yellow' | 'red' }) {
-  const cfg = {
-    green: { label: 'Safe', bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', dot: 'bg-emerald-500' },
-    yellow: { label: 'Caution', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', dot: 'bg-amber-500' },
-    red: { label: 'High Risk', bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', dot: 'bg-red-500' },
-  };
-  const c = cfg[tier];
-  return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold border ${c.bg} ${c.text} ${c.border}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
-      {c.label}
-    </span>
-  );
-}
+// FE-053 ROOT FIX: The inline ScoreBar and SafetyBadge definitions were
+// removed — they duplicated src/components/drugos/score-bar.tsx and
+// src/components/drugos/safety-badge.tsx with DIFFERENT color thresholds
+// (emerald/amber/red vs #1D9E75/#D4853A/#C0392B) and DIFFERENT size scales.
+// Bug fixes in one never propagated to the other. The shared imports above
+// are now the single source of truth.
 
 function StatCard({ icon: Icon, value, label, color = PRIMARY }: { icon: React.ElementType; value: string | number; label: string; color?: string }) {
   return (
@@ -444,7 +427,9 @@ function SearchResultsScreen() {
   // (passed via navigate({ name })) and use it to query the real RL ranker
   // via /api/rl. Falls back to mock candidates if RL service not deployed.
   const diseaseId = currentRoute.id || 'D001';
-  const diseaseName = (currentRoute as any).name ||
+  // FE-062 ROOT FIX: Route type already has `name?:` (see nav-context.tsx),
+  // so the previous `as any` cast was unnecessary and bypassed type safety.
+  const diseaseName = currentRoute.name ||
     (diseaseId.startsWith('search:') ? decodeURIComponent(diseaseId.slice(7)) : diseaseId);
   const disease = diseases.find(d => d.id === diseaseId) ||
     diseases.find(d => d.name === diseaseName) || {
@@ -463,6 +448,18 @@ function SearchResultsScreen() {
   });
 
   // Map RL candidates to the DrugCandidate shape the UI expects.
+  //
+  // FE-049 ROOT FIX: previously this mapping fabricated `molSimScore: 0`,
+  // `ipStatus: 'Unknown'`, `targets: []`, `pathways: []`. A researcher
+  // seeing "Mol Similarity: 0" may interpret it as "no molecular
+  // similarity to known drugs" (a negative scientific signal), when in
+  // reality the RL ranker does not populate that field at all. Likewise
+  // "IP Status: Unknown" reads as "we checked and could not determine
+  // patent status" — vs. the truth, which is "we have not looked it up".
+  // The fix is to use `null` for any field the RL ranker does not
+  // populate, and have the UI render "N/A" for null values. This is the
+  // difference between "no data" (correct, null) and "data is zero/empty"
+  // (incorrect, fabricated).
   const realCandidates: DrugCandidate[] = (rlData?.candidates || []).map((rc: any, i: number) => ({
     id: `rl-${i}`,
     drugName: rc.drug,
@@ -474,20 +471,27 @@ function SearchResultsScreen() {
     kgScore: Math.round((rc.plausibilityScore || 0) * 100),
     safetyScore: Math.round((rc.safetyScore || 0) * 100),
     clinicalScore: Math.round((rc.efficacyScore || 0) * 100),
-    molSimScore: 0,
+    // FE-049: RL ranker does not compute molecular similarity — null, not 0.
+    molSimScore: null,
     safetyTier: (rc.safetyScore || 0) >= 0.7 ? 'green' : (rc.safetyScore || 0) >= 0.4 ? 'yellow' : 'red',
     mechanism: `RL reward: ${rc.reward?.toFixed(3) || '—'}, policy_prob: ${rc.policyProb?.toFixed(3) || '—'}`,
     clinicalPhase: rc.literatureSupport ? 'Literature-supported' : 'Novel',
-    ipStatus: 'Unknown',
-    targets: [],
-    pathways: [],
+    // FE-049: patent status lookup is a separate pipeline step — null, not "Unknown".
+    ipStatus: null,
+    // FE-049: target/pathway population comes from the KG, not the RL ranker — null, not [].
+    targets: null,
+    pathways: null,
     rank: rc.rank,
   }));
 
-  // Fall back to mock candidates if the RL service is not deployed.
-  const mockCandidates = drugCandidates.filter(c => c.diseaseId === diseaseId);
-  const candidates = realCandidates.length > 0 ? realCandidates : mockCandidates;
-  const usingMock = realCandidates.length === 0;
+  // FE-001 ROOT FIX: NEVER fall back to mock drug candidates in a production
+  // pharma app. If the RL service is not deployed, we render an explicit empty
+  // state instead of fabricating predictions that a researcher could mistake
+  // for real RL output. Mock fallback is a patient-safety hazard.
+  const candidates: DrugCandidate[] = realCandidates;
+  const rlServiceUnavailable =
+    realCandidates.length === 0 &&
+    (Boolean(rlError) || (rlData === null && !rlLoading));
 
   const [filterTier, setFilterTier] = useState<string>('all');
   const [filterPhase, setFilterPhase] = useState<string>('all');
@@ -557,13 +561,40 @@ function SearchResultsScreen() {
           (source: {rlData.source}).
         </div>
       )}
-      {usingMock && (
-        <div className="mb-4 text-xs text-amber-700 p-2 border border-amber-200 rounded bg-amber-50">
-          <strong>Showing demo data.</strong> The Phase 4 RL ranker is not deployed.
-          Set <code>RL_SERVICE_URL</code> or <code>RL_LOCAL_CSV</code> to see real RL predictions.
-        </div>
+
+      {/* FE-001 ROOT FIX: Empty state — never render mock data.
+          If the RL service is unavailable, we surface a hard-blocking empty
+          state so a researcher cannot mistake fabricated rows for real
+          predictions. The table below is only rendered when at least one
+          real candidate exists. */}
+      {rlServiceUnavailable && (
+        <Card className="mb-4 border-amber-300 bg-amber-50">
+          <CardContent className="py-10 text-center">
+            <AlertCircle className="h-10 w-10 mx-auto mb-3 text-amber-600" />
+            <p className="text-sm font-semibold text-amber-900">
+              No RL predictions available for {disease.name}.
+            </p>
+            <p className="text-xs text-amber-800 mt-2 max-w-md mx-auto">
+              The Phase 4 RL ranker service is not deployed. Deploy the RL service
+              (set <code className="bg-amber-100 px-1 rounded">RL_SERVICE_URL</code> or
+              <code className="bg-amber-100 px-1 rounded ml-1">RL_LOCAL_CSV</code>) to
+              see real, scientifically-valid repurposing candidates.
+            </p>
+            <p className="text-[11px] text-amber-700 mt-3 italic">
+              For patient-safety reasons, this platform never displays fabricated
+              candidate data.
+            </p>
+          </CardContent>
+        </Card>
       )}
 
+      {/* FE-001 ROOT FIX: Filter bar + results table only render when there
+          is at least one real candidate. If the RL service is unavailable,
+          we render the empty state above and skip the filter bar entirely
+          so the researcher cannot accidentally interact with a fabricated
+          result set. */}
+      {!rlServiceUnavailable && (
+        <>
       {/* Filter Bar */}
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <span className="text-xs font-medium text-muted-foreground mr-1">Safety:</span>
@@ -624,7 +655,7 @@ function SearchResultsScreen() {
                     <TableCell><SafetyBadge tier={c.safetyTier} /></TableCell>
                     <TableCell><span className="text-xs text-slate-600 line-clamp-2 max-w-[180px]">{c.mechanism}</span></TableCell>
                     <TableCell><Badge variant="outline" className="text-xs">{c.clinicalPhase}</Badge></TableCell>
-                    <TableCell><span className="text-xs">{c.ipStatus}</span></TableCell>
+                    <TableCell><span className="text-xs">{c.ipStatus ?? 'N/A'}</span></TableCell>
                     <TableCell>
                       <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={e => { e.stopPropagation(); setExpandedId(expandedId === c.id ? null : c.id); }}>
                         {expandedId === c.id ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
@@ -636,17 +667,25 @@ function SearchResultsScreen() {
                       <TableCell colSpan={9} className="bg-muted/20 p-4">
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
                           <div><span className="text-muted-foreground">KG Score:</span> <span className="font-semibold">{c.kgScore}</span></div>
-                          <div><span className="text-muted-foreground">Mol Similarity:</span> <span className="font-semibold">{c.molSimScore}</span></div>
+                          <div><span className="text-muted-foreground">Mol Similarity:</span> <span className="font-semibold">{c.molSimScore === null ? 'N/A' : c.molSimScore}</span></div>
                           <div><span className="text-muted-foreground">Safety Score:</span> <span className="font-semibold">{c.safetyScore}</span></div>
                           <div><span className="text-muted-foreground">Clinical Score:</span> <span className="font-semibold">{c.clinicalScore}</span></div>
                         </div>
                         <div className="mt-2">
                           <span className="text-xs text-muted-foreground">Targets: </span>
-                          {c.targets.map(t => <Badge key={t} variant="secondary" className="text-xs mr-1">{t}</Badge>)}
+                          {c.targets === null
+                            ? <span className="text-xs text-muted-foreground">N/A</span>
+                            : c.targets.length === 0
+                              ? <span className="text-xs text-muted-foreground">None</span>
+                              : c.targets.map(t => <Badge key={t} variant="secondary" className="text-xs mr-1">{t}</Badge>)}
                         </div>
                         <div className="mt-1">
                           <span className="text-xs text-muted-foreground">Pathways: </span>
-                          {c.pathways.map(p => <Badge key={p} variant="outline" className="text-xs mr-1">{p}</Badge>)}
+                          {c.pathways === null
+                            ? <span className="text-xs text-muted-foreground">N/A</span>
+                            : c.pathways.length === 0
+                              ? <span className="text-xs text-muted-foreground">None</span>
+                              : c.pathways.map(p => <Badge key={p} variant="outline" className="text-xs mr-1">{p}</Badge>)}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -663,6 +702,8 @@ function SearchResultsScreen() {
           )}
         </CardContent>
       </Card>
+        </>
+      )}
     </FadeIn>
   );
 }
@@ -695,7 +736,7 @@ function CandidateDetailScreen() {
           <div className="flex items-center gap-2">
             <SafetyBadge tier={candidate.safetyTier} />
             <Badge variant="outline">{candidate.clinicalPhase}</Badge>
-            <Badge variant="outline">{candidate.ipStatus}</Badge>
+            <Badge variant="outline">{candidate.ipStatus ?? 'N/A'}</Badge>
           </div>
         }
       />
@@ -730,17 +771,20 @@ function CandidateDetailScreen() {
                 <CardContent className="space-y-3">
                   {[
                     { label: 'Knowledge Graph Score', value: candidate.kgScore },
-                    { label: 'Molecular Similarity', value: candidate.molSimScore },
+                    { label: 'Molecular Similarity', value: candidate.molSimScore === null ? null : candidate.molSimScore },
                     { label: 'Safety Profile', value: candidate.safetyScore },
                     { label: 'Clinical Evidence', value: candidate.clinicalScore },
-                  ].map(s => (
+                  ].map(s => {
+                    const pct = s.value === null ? 0 : (s.value as number);
+                    return (
                     <div key={s.label}>
-                      <div className="flex justify-between text-sm mb-1"><span className="text-muted-foreground">{s.label}</span><span className="font-semibold">{s.value}</span></div>
+                      <div className="flex justify-between text-sm mb-1"><span className="text-muted-foreground">{s.label}</span><span className="font-semibold">{s.value === null ? 'N/A' : s.value}</span></div>
                       <div className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden">
-                        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${s.value}%`, backgroundColor: scoreColor(s.value) }} />
+                        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: scoreColor(pct) }} />
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </CardContent>
               </Card>
               <Card>
@@ -749,11 +793,19 @@ function CandidateDetailScreen() {
                   <p className="text-sm">{candidate.mechanism}</p>
                   <div className="mt-3">
                     <span className="text-xs font-medium text-muted-foreground">Target Proteins: </span>
-                    {candidate.targets.map(t => <Badge key={t} variant="secondary" className="text-xs mr-1 font-mono">{t}</Badge>)}
+                    {candidate.targets === null
+                      ? <span className="text-xs text-muted-foreground">N/A</span>
+                      : candidate.targets.length === 0
+                        ? <span className="text-xs text-muted-foreground">None</span>
+                        : candidate.targets.map(t => <Badge key={t} variant="secondary" className="text-xs mr-1 font-mono">{t}</Badge>)}
                   </div>
                   <div className="mt-2">
                     <span className="text-xs font-medium text-muted-foreground">Pathways: </span>
-                    {candidate.pathways.map(p => <Badge key={p} variant="outline" className="text-xs mr-1">{p}</Badge>)}
+                    {candidate.pathways === null
+                      ? <span className="text-xs text-muted-foreground">N/A</span>
+                      : candidate.pathways.length === 0
+                        ? <span className="text-xs text-muted-foreground">None</span>
+                        : candidate.pathways.map(p => <Badge key={p} variant="outline" className="text-xs mr-1">{p}</Badge>)}
                   </div>
                 </CardContent>
               </Card>
@@ -779,7 +831,7 @@ function CandidateDetailScreen() {
                   <div className="flex justify-between"><span className="text-muted-foreground">Generic</span><span className="font-medium">{candidate.genericName}</span></div>
                   <div className="flex justify-between"><span className="text-muted-foreground">Brand</span><span className="font-medium">{candidate.brandNames.join(', ')}</span></div>
                   <div className="flex justify-between"><span className="text-muted-foreground">Phase</span><Badge variant="outline" className="text-xs">{candidate.clinicalPhase}</Badge></div>
-                  <div className="flex justify-between"><span className="text-muted-foreground">IP</span><Badge variant="outline" className="text-xs">{candidate.ipStatus}</Badge></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">IP</span><Badge variant="outline" className="text-xs">{candidate.ipStatus ?? 'N/A'}</Badge></div>
                 </CardContent>
               </Card>
             </div>
@@ -931,10 +983,10 @@ function CandidateDetailScreen() {
                 <CardHeader className="pb-3"><CardTitle className="text-base">Freedom to Operate</CardTitle></CardHeader>
                 <CardContent>
                   <div className="text-center">
-                    <div className="text-3xl font-bold" style={{ color: candidate.ipStatus === 'Off-Patent' || candidate.ipStatus === 'Patent Expired' ? ACCENT_GREEN : candidate.ipStatus === 'Novel Use Patentable' ? ACCENT_ORANGE : ACCENT_RED }}>
-                      {candidate.ipStatus === 'Off-Patent' || candidate.ipStatus === 'Patent Expired' ? 'Clear' : candidate.ipStatus === 'Novel Use Patentable' ? 'Partial' : 'Restricted'}
+                    <div className="text-3xl font-bold" style={{ color: candidate.ipStatus === 'Off-Patent' || candidate.ipStatus === 'Patent Expired' ? ACCENT_GREEN : candidate.ipStatus === 'Novel Use Patentable' ? ACCENT_ORANGE : candidate.ipStatus === null ? '#94A3B8' /* slate-400 for N/A */ : ACCENT_RED }}>
+                      {candidate.ipStatus === 'Off-Patent' || candidate.ipStatus === 'Patent Expired' ? 'Clear' : candidate.ipStatus === 'Novel Use Patentable' ? 'Partial' : candidate.ipStatus === null ? 'N/A' : 'Restricted'}
                     </div>
-                    <p className="text-sm text-muted-foreground mt-1">IP Status: {candidate.ipStatus}</p>
+                    <p className="text-sm text-muted-foreground mt-1">IP Status: {candidate.ipStatus ?? 'N/A'}</p>
                   </div>
                 </CardContent>
               </Card>
@@ -1002,11 +1054,14 @@ function CandidateDetailScreen() {
 // ═══════════════════════════════════════════
 
 function PathwayDiagram({ candidate, disease }: { candidate: DrugCandidate; disease: Disease }) {
+  // FE-049: guard against null targets/pathways (RL candidates).
+  const targets = candidate.targets ?? [];
+  const pathways = candidate.pathways ?? [];
   const relatedNodes = graphNodes.filter(n =>
-    candidate.targets.includes(n.label) ||
+    targets.includes(n.label) ||
     n.label === candidate.drugName ||
     n.label === disease.name ||
-    candidate.pathways.some(p => n.label.includes(p.split(' ')[0]))
+    pathways.some(p => n.label.includes(p.split(' ')[0]))
   );
   const relatedEdges = graphEdges.filter(e => {
     const srcNode = graphNodes.find(n => n.id === e.source);
@@ -1028,8 +1083,9 @@ function PathwayDiagram({ candidate, disease }: { candidate: DrugCandidate; dise
         {/* Layout nodes in pathway style */}
         {(() => {
           const drugNode = { x: 80, y: 190, label: candidate.drugName, type: 'drug' };
-          const targetNodes = candidate.targets.map((t, i) => ({ x: 260, y: 100 + i * 90, label: t, type: 'gene' }));
-          const pathwayNodes = candidate.pathways.map((p, i) => ({ x: 480, y: 120 + i * 100, label: p, type: 'pathway' }));
+          // FE-049: candidate.targets/pathways may be null for RL candidates.
+          const targetNodes = (candidate.targets ?? []).map((t, i) => ({ x: 260, y: 100 + i * 90, label: t, type: 'gene' }));
+          const pathwayNodes = (candidate.pathways ?? []).map((p, i) => ({ x: 480, y: 120 + i * 100, label: p, type: 'pathway' }));
           const diseaseNode = { x: 700, y: 190, label: disease.name, type: 'disease' };
           const allNodes = [drugNode, ...targetNodes, ...pathwayNodes, diseaseNode];
           return (
@@ -1163,6 +1219,26 @@ function KnowledgeGraphScreen() {
   const { data: kgData, loading: kgLoading, error: kgError } = useKnowledgeGraph({
     drug: searchQuery.length >= 2 ? searchQuery : undefined,
   });
+
+  // FE-067 ROOT FIX: "View candidate detail" button used to look up the
+  // clicked drug node in the MOCK `drugCandidates` array. For real RL
+  // candidates (sourced from /api/rl), the mock lookup returned undefined
+  // and the button silently did nothing. Now we fetch the real RL top-N
+  // candidates via the same /api/rl endpoint the dashboard uses, and look
+  // up the clicked drug by name in that real list. The candidate's `id`
+  // for navigation is synthesized as `${drug}|${disease}` when the API
+  // does not return one (the RL CSV doesn't have a stable row id), so the
+  // navigation is stable across re-renders.
+  const { data: rlData } = useRlCandidates({ limit: 200 });
+  const realRlCandidates = useMemo(() => {
+    const list = rlData?.candidates || [];
+    return list.map((c: any) => ({
+      id: c.id || `${c.drug}|${c.disease}`,
+      drugName: c.drug as string,
+      diseaseName: c.disease as string,
+      overallScore: c.overallScore as number,
+    }));
+  }, [rlData]);
 
   const realNodes = kgData?.nodes || [];
   const realEdges = kgData?.edges || [];
@@ -1317,7 +1393,16 @@ function KnowledgeGraphScreen() {
                   <p className="text-xs text-muted-foreground mt-1">{nodeEdges.length} connections</p>
                   {node.type === 'drug' && (
                     <Button variant="link" size="sm" className="h-6 p-0 text-xs mt-1" onClick={() => {
-                      const cand = drugCandidates.find(c => c.drugName === node.label);
+                      // FE-067 ROOT FIX: Look up the clicked drug in the
+                      // REAL RL candidate list (sourced from /api/rl).
+                      // Previously this searched the mock `drugCandidates`
+                      // array, which silently failed for any drug that
+                      // wasn't in the mock set. Now we prefer the real RL
+                      // data; if the RL service isn't deployed yet, we
+                      // fall back to the mock array so the button still
+                      // works for demo drugs.
+                      const cand = realRlCandidates.find(c => c.drugName === node.label)
+                        || drugCandidates.find(c => c.drugName === node.label);
                       if (cand) navigate({ page: 'app', section: 'candidate', id: cand.id });
                     }}>View candidate detail →</Button>
                   )}
@@ -1685,10 +1770,10 @@ function IPPatentsScreen() {
             <CardHeader className="pb-3"><CardTitle className="text-base">Freedom to Operate</CardTitle></CardHeader>
             <CardContent>
               <div className="text-center">
-                <div className="text-3xl font-bold" style={{ color: candidate?.ipStatus === 'Off-Patent' || candidate?.ipStatus === 'Patent Expired' ? ACCENT_GREEN : ACCENT_ORANGE }}>
-                  {candidate?.ipStatus === 'Off-Patent' || candidate?.ipStatus === 'Patent Expired' ? 'Clear' : candidate?.ipStatus === 'Novel Use Patentable' ? 'Partial' : 'Restricted'}
+                <div className="text-3xl font-bold" style={{ color: candidate?.ipStatus === 'Off-Patent' || candidate?.ipStatus === 'Patent Expired' ? ACCENT_GREEN : candidate?.ipStatus === null ? '#94A3B8' : ACCENT_ORANGE }}>
+                  {candidate?.ipStatus === 'Off-Patent' || candidate?.ipStatus === 'Patent Expired' ? 'Clear' : candidate?.ipStatus === 'Novel Use Patentable' ? 'Partial' : candidate?.ipStatus === null ? 'N/A' : 'Restricted'}
                 </div>
-                <p className="text-sm text-muted-foreground mt-1">{candidate?.ipStatus}</p>
+                <p className="text-sm text-muted-foreground mt-1">{candidate?.ipStatus ?? 'N/A'}</p>
               </div>
             </CardContent>
           </Card>
@@ -2155,7 +2240,7 @@ function DrugComparisonScreen() {
                 </TableRow>
                 <TableRow>
                   <TableCell className="font-medium text-sm">IP Status</TableCell>
-                  {compared.map(c => <TableCell key={c.id} className="text-center text-xs">{c.ipStatus}</TableCell>)}
+                  {compared.map(c => <TableCell key={c.id} className="text-center text-xs">{c.ipStatus ?? 'N/A'}</TableCell>)}
                 </TableRow>
               </TableBody>
             </Table>
@@ -2261,7 +2346,7 @@ function ScoreBreakdownScreen() {
 
   const chartData = [
     { name: 'KG Score', value: candidate.kgScore, fill: PRIMARY },
-    { name: 'Mol Similarity', value: candidate.molSimScore, fill: '#3B82F6' },
+    { name: 'Mol Similarity', value: candidate.molSimScore ?? 0, fill: '#3B82F6' },
     { name: 'Safety', value: candidate.safetyScore, fill: ACCENT_GREEN },
     { name: 'Clinical', value: candidate.clinicalScore, fill: ACCENT_ORANGE },
   ];
@@ -2474,7 +2559,7 @@ function PredictionExplorerScreen() {
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={[
               { name: 'KG Score', value: candidate.kgScore, fill: PRIMARY },
-              { name: 'Molecular', value: candidate.molSimScore, fill: '#3B82F6' },
+              { name: 'Molecular', value: candidate.molSimScore ?? 0, fill: '#3B82F6' },
               { name: 'Safety', value: candidate.safetyScore, fill: ACCENT_GREEN },
               { name: 'Clinical', value: candidate.clinicalScore, fill: ACCENT_ORANGE },
             ]}>
@@ -2537,9 +2622,9 @@ function MechanismOfActionScreen() {
           <CardContent className="space-y-4">
             <p className="text-sm">{candidate.mechanism}</p>
             <div><span className="text-xs font-semibold text-muted-foreground">Target Proteins</span>
-              <div className="flex flex-wrap gap-2 mt-1">{candidate.targets.map(t => <Badge key={t} variant="secondary" className="font-mono">{t}</Badge>)}</div></div>
+              <div className="flex flex-wrap gap-2 mt-1">{(candidate.targets ?? []).length === 0 ? <span className="text-xs text-muted-foreground">N/A</span> : (candidate.targets ?? []).map(t => <Badge key={t} variant="secondary" className="font-mono">{t}</Badge>)}</div></div>
             <div><span className="text-xs font-semibold text-muted-foreground">Pathways</span>
-              <div className="flex flex-wrap gap-2 mt-1">{candidate.pathways.map(p => <Badge key={p} variant="outline">{p}</Badge>)}</div></div>
+              <div className="flex flex-wrap gap-2 mt-1">{(candidate.pathways ?? []).length === 0 ? <span className="text-xs text-muted-foreground">N/A</span> : (candidate.pathways ?? []).map(p => <Badge key={p} variant="outline">{p}</Badge>)}</div></div>
           </CardContent>
         </Card>
         <Card>

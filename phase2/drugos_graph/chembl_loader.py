@@ -1,6 +1,6 @@
-"""DrugOS Graph Module — ChEMBL Loader (v2.0 — Institutional Grade)
+"""DrugOS Graph Module -- ChEMBL Loader (v2.0 -- Institutional Grade)
 ==================================================================
-Downloads, validates, and parses the **ChEMBL bioactivity database** —
+Downloads, validates, and parses the **ChEMBL bioactivity database** --
 the primary source for drug-target interaction data in the DrugOS
 knowledge graph.
 
@@ -12,26 +12,26 @@ implements every guard mandated by the 16-domain forensic audit.
 
 ChEMBL SQLite format (REAL, not fabricated):
     Tar.gz containing a single .db SQLite file with tables including:
-      molecule_dictionary  — compound IDs and names
-      compound_structures  — SMILES and InChI
-      activities           — bioactivity measurements (IC50, Ki, etc.)
-      target_dictionary    — target IDs, names, and types
-      target_components    — mapping from targets to UniProt accessions
-      assays               — assay metadata (type, organism, etc.)
-      organism_classification — NCBI taxonomy
+      molecule_dictionary  -- compound IDs and names
+      compound_structures  -- SMILES and InChI
+      activities           -- bioactivity measurements (IC50, Ki, etc.)
+      target_dictionary    -- target IDs, names, and types
+      target_components    -- mapping from targets to UniProt accessions
+      assays               -- assay metadata (type, organism, etc.)
+      organism_classification -- NCBI taxonomy
 
-Public API (preserved from v1 — ``run_pipeline.py`` unchanged):
+Public API (preserved from v1 -- ``run_pipeline.py`` unchanged):
     download_chembl, parse_chembl_activities, chembl_to_edge_records
 
 New in v2.0 (additive, backward-compatible):
-    ChEMBLLoader          — adapter implementing the ``Loader`` Protocol.
-    PARSER_VERSION, SCHEMA_VERSION — versioning for reproducibility.
-    ChEMBLConfig          — configuration dataclass with validation.
-    validate_chembl       — post-parse data quality validation.
-    iter_chembl_activities — streaming API for large databases.
-    chembl_to_node_records — compound node record generation.
-    chembl_to_graph       — (nodes, edges) pair for KG construction.
-    load_chembl           — end-to-end load pipeline.
+    ChEMBLLoader          -- adapter implementing the ``Loader`` Protocol.
+    PARSER_VERSION, SCHEMA_VERSION -- versioning for reproducibility.
+    ChEMBLConfig          -- configuration dataclass with validation.
+    validate_chembl       -- post-parse data quality validation.
+    iter_chembl_activities -- streaming API for large databases.
+    chembl_to_node_records -- compound node record generation.
+    chembl_to_graph       -- (nodes, edges) pair for KG construction.
+    load_chembl           -- end-to-end load pipeline.
 
 Idempotency (clinical-safety requirement):
     Two runs of ``parse_chembl_activities`` on the same .db file
@@ -40,21 +40,21 @@ Idempotency (clinical-safety requirement):
     randomness. The only non-deterministic field is
     ``df.attrs['provenance']['parsed_at']`` (ISO-8601 timestamp).
 
-Errors raised (Domain 6 — Reliability):
-    ChEMBLDownloadError       — download failure (TLS / allowlist / size /
+Errors raised (Domain 6 -- Reliability):
+    ChEMBLDownloadError       -- download failure (TLS / allowlist / size /
                                 SHA-256 / content-sniff / tar safety).
-    ChEMBLParseError          — SQLite query failure (OperationalError,
+    ChEMBLParseError          -- SQLite query failure (OperationalError,
                                 missing tables, unexpected schema).
-    ChEMBLDataIntegrityError  — content failure (row count, ID format,
+    ChEMBLDataIntegrityError  -- content failure (row count, ID format,
                                 pChEMBL range, entity resolution).
 
 Dead-letter queue: ``data/dead_letter/chembl_malformed.jsonl`` (one JSON
-line per dropped/malformed record — Domain 5 Data Quality).
+line per dropped/malformed record -- Domain 5 Data Quality).
 
 Transformation log: ``logs/transformations/chembl.jsonl`` (one JSON line
-per significant transformation — Domain 16 Lineage).
+per significant transformation -- Domain 16 Lineage).
 
-License: CC BY-SA 3.0 — attribution propagated in ``df.attrs['license']``
+License: CC BY-SA 3.0 -- attribution propagated in ``df.attrs['license']``
 and ``df.attrs['attribution']`` (Domain 14 Compliance).
 
 References:
@@ -63,7 +63,7 @@ References:
     doi:10.1093/nar/gkw1074
 
 CHANGELOG (SCHEMA_VERSION bumps require downstream contract update):
-    v2.0.0 (2026-06-18) — Institutional-grade rewrite. Adds:
+    v2.0.0 (2026-06-18) -- Institutional-grade rewrite. Adds:
         - PARSER_VERSION / SCHEMA_VERSION constants.
         - ``ChEMBLLoader`` Protocol adapter.
         - ``ChEMBLConfig`` dataclass.
@@ -82,16 +82,16 @@ CHANGELOG (SCHEMA_VERSION bumps require downstream contract update):
         - ``iter_chembl_activities`` streaming API.
         - ``chembl_to_node_records`` compound node generation.
         - ``chembl_to_graph`` end-to-edge graph construction.
-    v1.0.0 (initial) — basic download + parse with substring matching.
+    v1.0.0 (initial) -- basic download + parse with substring matching.
 """
 
 from __future__ import annotations
 
 # =============================================================================
-# Section 0 — Imports
+# Section 0 -- Imports
 # =============================================================================
-# Fixes Domain 4 (Coding) — all imports at module top.
-# Fixes Domain 12 (Configuration) — no magic numbers.
+# Fixes Domain 4 (Coding) -- all imports at module top.
+# Fixes Domain 12 (Configuration) -- no magic numbers.
 
 import hashlib
 import io
@@ -169,12 +169,28 @@ from .schemas import (
     ChEMBLActivityRecord,
     ChEMBLEdgeRecord,
 )
+# v102 ROOT FIX (P2-036): route InChIKey normalization through the
+# centralized helper so this loader produces the SAME canonical form
+# as phase1_bridge.py and pubchem_loader.py.
+try:
+    from .utils import normalize_inchikey as _normalize_inchikey
+except Exception:  # pragma: no cover — fallback for direct-script execution
+    def _normalize_inchikey(inchikey):  # type: ignore[no-redef]
+        if inchikey is None:
+            return ""
+        try:
+            ik = str(inchikey).strip()
+        except Exception:
+            return ""
+        if not ik or ik.lower() in ("nan", "none", "null", "na"):
+            return ""
+        return ik.upper()
 
 # =============================================================================
-# Section 1 — Module-level constants & metadata
+# Section 1 -- Module-level constants & metadata
 # =============================================================================
-# Fixes Domain 1 (Architecture) — explicit __all__, version constants.
-# Fixes Domain 14 (Compliance) — schema versioning, naming conventions.
+# Fixes Domain 1 (Architecture) -- explicit __all__, version constants.
+# Fixes Domain 14 (Compliance) -- schema versioning, naming conventions.
 
 PARSER_VERSION: str = CHEMBL_PARSER_VERSION  # "2.0.0"
 SCHEMA_VERSION: str = CHEMBL_SCHEMA_VERSION  # "2.0.0"
@@ -207,11 +223,11 @@ __all__: list[str] = [
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# Section 2 — ChEMBLConfig dataclass
+# Section 2 -- ChEMBLConfig dataclass
 # =============================================================================
-# Fixes Domain 12 (Configuration) — no magic numbers, all thresholds
+# Fixes Domain 12 (Configuration) -- no magic numbers, all thresholds
 # are named, documented, and overridable.
-# Fixes Domain 7 (Idempotency) — deterministic defaults.
+# Fixes Domain 7 (Idempotency) -- deterministic defaults.
 
 
 @dataclass(frozen=True)
@@ -220,7 +236,7 @@ class ChEMBLConfig:
 
     All thresholds are documented with their scientific rationale.
     Instances are frozen (immutable) to prevent accidental mutation
-    during a pipeline run (Domain 7 — Idempotency).
+    during a pipeline run (Domain 7 -- Idempotency).
 
     Parameters
     ----------
@@ -232,7 +248,7 @@ class ChEMBLConfig:
         Reference: https://doi.org/10.1016/j.drudis.2014.10.012
     organism_tax_id : int
         NCBI Taxonomy ID for organism filtering. Default 9606 (human).
-        For drug repurposing, only human targets are relevant — non-human
+        For drug repurposing, only human targets are relevant -- non-human
         proteins create disconnected subgraphs in the KG.
     min_confidence_score : int
         Minimum ChEMBL target-confidence score (0-9). We require >= 7,
@@ -248,7 +264,7 @@ class ChEMBLConfig:
         If True, re-download even if a cached copy exists.
     sort_output : bool
         If True, sort output DataFrame for deterministic ordering
-        (Domain 7 — Idempotency).
+        (Domain 7 -- Idempotency).
     """
 
     min_pchembl: float = CHEMBL_MIN_PCHEMBL_VALUE
@@ -262,7 +278,7 @@ class ChEMBLConfig:
     sort_output: bool = True
 
     def __post_init__(self) -> None:
-        """Validate configuration values (Domain 12 — Config Validation)."""
+        """Validate configuration values (Domain 12 -- Config Validation)."""
         if not (0.0 <= self.min_pchembl <= 14.0):
             raise ValueError(
                 f"min_pchembl must be in [0, 14], got {self.min_pchembl}"
@@ -280,16 +296,16 @@ class ChEMBLConfig:
 
 
 # =============================================================================
-# Section 3 — Scientific mapping: standard_type → relation type
+# Section 3 -- Scientific mapping: standard_type -> relation type
 # =============================================================================
-# Fixes Domain 3 (Scientific Correctness) — the old code used substring
+# Fixes Domain 3 (Scientific Correctness) -- the old code used substring
 # matching ("INHIBIT" in std_type) which was WRONG. For example:
-#   - "Inhibition" → "inhibits" (correct)
-#   - "EC50" → missed, fell through to "inhibits" (WRONG — EC50 implies
+#   - "Inhibition" -> "inhibits" (correct)
+#   - "EC50" -> missed, fell through to "inhibits" (WRONG -- EC50 implies
 #     activation/agonism)
-#   - "Kd" → missed, fell through to "inhibits" (WRONG — Kd measures
+#   - "Kd" -> missed, fell through to "inhibits" (WRONG -- Kd measures
 #     binding affinity, not inhibition)
-#   - "Potency" → missed, fell through to "inhibits" (WRONG — Potency
+#   - "Potency" -> missed, fell through to "inhibits" (WRONG -- Potency
 #     is directionless)
 #
 # This is the SINGLE most important scientific fix in this file. The old
@@ -303,7 +319,7 @@ _RE_INHIBIT = re.compile(
     # ChEMBL label for irreversible / covalent inhibition (aspirin,
     # omeprazole, clopidogrel, penicillin). The v57 fix only prevented
     # the wrong "activates" classification; without this entry,
-    # INACTIVATION fell through to the default "targets" — losing the
+    # INACTIVATION fell through to the default "targets" -- losing the
     # scientific signal that the drug INHIBITS the target.
     # We use the bare stem "INACTIVAT" (no word boundary) so it matches
     # INACTIVATION, INACTIVATOR, INACTIVATE, INACTIVATES, INACTIVATED.
@@ -313,12 +329,12 @@ _RE_INHIBIT = re.compile(
     re.IGNORECASE,
 )
 _RE_ACTIVATE = re.compile(
-    # v57 ROOT FIX (P2L-008 — covalent inhibitors misclassified as activators):
+    # v57 ROOT FIX (P2L-008 -- covalent inhibitors misclassified as activators):
     #   The previous regex `(ACTIVAT|AGONIST|...)` matched the substring
-    #   `ACTIVAT` inside `INACTIVATION` — the standard ChEMBL label for
+    #   `ACTIVAT` inside `INACTIVATION` -- the standard ChEMBL label for
     #   irreversible/covalent inhibitors. As a result, covalent inhibitors
     #   (aspirin, omeprazole, clopidogrel, penicillin) were classified as
-    #   `rel_type='activates'` — INVERTED drug-target semantics.
+    #   `rel_type='activates'` -- INVERTED drug-target semantics.
     #   FIX: use word-boundary matching (\b) so `ACTIVAT` only matches when
     #   it starts a word, not when it's a substring of `INACTIVAT...`.
     #   Also explicitly exclude `INACTIVAT` to be defensive.
@@ -327,13 +343,13 @@ _RE_ACTIVATE = re.compile(
     # accidentally re-introduced ACTIVAT-without-\b, INACTIVAT would
     # still route to "inhibits" first. Defense in depth.
     #
-    # v68 ROOT FIX (P2L-008 — TRIPLE defense-in-depth): the v57/v58 fix
+    # v68 ROOT FIX (P2L-008 -- TRIPLE defense-in-depth): the v57/v58 fix
     # relied on \b (word boundary) alone. While \b correctly prevents
     # matching "ACTIVAT" inside "INACTIVATION" (because "IN" are both
     # word chars, no boundary exists between N and A), we add an
     # EXPLICIT negative lookbehind `(?<![A-Z])` as a third layer of
     # defense. This means ACTIVAT only matches when NOT preceded by an
-    # uppercase letter — so even if a future maintainer accidentally
+    # uppercase letter -- so even if a future maintainer accidentally
     # removes the \b, or if a non-standard ChEMBL variant uses a
     # non-word delimiter before "ACTIVAT", the negative lookbehind
     # still catches "INACTIVAT*". This is the audit's recommended fix.
@@ -365,18 +381,18 @@ def standard_type_to_relation(
        unambiguously implies a relation direction.
 
     2. **Regex fallback** for standard_type strings not in the curated
-       sets. The regexes are conservative — they look for direction-
+       sets. The regexes are conservative -- they look for direction-
        indicating keywords ("inhibit", "agonist", "bind", etc.) in the
        standard_type name.
 
-    3. **Default** — if neither exact match nor regex matches, return
+    3. **Default** -- if neither exact match nor regex matches, return
        "targets" as the conservative default (v21 root fix: the old
        default of "binds" was scientifically incorrect because many
        measurements (EC50, Kd, Potency) do NOT imply binding, and
        "binds" implied a specific mechanism. "targets" is the honest
-       relation — interaction confirmed, mechanism unclassified).
+       relation -- interaction confirmed, mechanism unclassified).
        v24 ROOT FIX (FORENSIC-P2-LOADERS E/§2): the docstring
-       previously said the default was "binds" — contradicting the
+       previously said the default was "binds" -- contradicting the
        actual code at the return statement (which returns "targets").
        Fix the docstring to match the code.
 
@@ -403,7 +419,7 @@ def standard_type_to_relation(
         if strict:
             raise ValueError(f"Invalid standard_type: {standard_type!r}")
         # v35 ROOT FIX (V35-P2-LOADERS-FIXES M-5): return "targets"
-        # consistently for invalid input — previously this branch returned
+        # consistently for invalid input -- previously this branch returned
         # "binds" while the unmapped-default branch at the bottom returned
         # "targets", producing inconsistent defaults for the same logical
         # "we can't classify this" situation. Both now return "targets".
@@ -459,10 +475,10 @@ def standard_type_to_relation(
 
 
 # =============================================================================
-# Section 4 — Input validation helpers
+# Section 4 -- Input validation helpers
 # =============================================================================
-# Fixes Domain 5 (Data Quality) — validates all critical fields.
-# Fixes Domain 10 (Testing) — testable validation functions.
+# Fixes Domain 5 (Data Quality) -- validates all critical fields.
+# Fixes Domain 10 (Testing) -- testable validation functions.
 
 _RE_CHEMBL_ID: Final[re.Pattern[str]] = re.compile(
     CHEMBL_DRUG_IDENTIFIER_REGEX
@@ -567,11 +583,11 @@ def _validate_pchembl(value: float) -> float:
 
 
 # =============================================================================
-# Section 5 — Dead-letter queue & transformation log
+# Section 5 -- Dead-letter queue & transformation log
 # =============================================================================
-# Fixes Domain 5 (Data Quality) — malformed records are quarantined.
-# Fixes Domain 6 (Reliability) — bad records don't crash the pipeline.
-# Fixes Domain 16 (Lineage) — transformation audit trail.
+# Fixes Domain 5 (Data Quality) -- malformed records are quarantined.
+# Fixes Domain 6 (Reliability) -- bad records don't crash the pipeline.
+# Fixes Domain 16 (Lineage) -- transformation audit trail.
 
 
 def _dead_letter_record(
@@ -659,16 +675,16 @@ def _log_transformation(
 
 
 # =============================================================================
-# Section 6 — Download with full security & reliability
+# Section 6 -- Download with full security & reliability
 # =============================================================================
-# Fixes Domain 6 (Reliability) — retry logic, timeout, atomic write.
-# Fixes Domain 7 (Idempotency) — checksum recording.
-# Fixes Domain 8 (Performance) — streaming download.
-# Fixes Domain 9 (Security) — URL allowlist, TLS, path-traversal guard.
+# Fixes Domain 6 (Reliability) -- retry logic, timeout, atomic write.
+# Fixes Domain 7 (Idempotency) -- checksum recording.
+# Fixes Domain 8 (Performance) -- streaming download.
+# Fixes Domain 9 (Security) -- URL allowlist, TLS, path-traversal guard.
 
 
 def _validate_url_against_allowlist(url: str) -> None:
-    """Refuse URLs not in the allowlist (Domain 9 — Security).
+    """Refuse URLs not in the allowlist (Domain 9 -- Security).
 
     Parameters
     ----------
@@ -684,7 +700,7 @@ def _validate_url_against_allowlist(url: str) -> None:
         if url.startswith(prefix):
             return
     raise ChEMBLDownloadError(
-        f"ChEMBL download URL {url!r} rejected — not in ALLOWED_CHEMBL_URLS",
+        f"ChEMBL download URL {url!r} rejected -- not in ALLOWED_CHEMBL_URLS",
         context={"url": url, "allowed_prefixes": list(ALLOWED_CHEMBL_URLS)},
     )
 
@@ -711,12 +727,12 @@ def download_chembl(
     """Download and extract the ChEMBL SQLite database.
 
     This function implements a fully hardened download pipeline:
-    1. URL allowlist check (Domain 9 — Security)
+    1. URL allowlist check (Domain 9 -- Security)
     2. TLS certificate verification (Domain 9)
     3. Streaming download with retry + exponential backoff (Domain 6)
-    4. Atomic write to temporary file, then rename (Domain 7 — Idempotency)
-    5. Size validation (Domain 5 — Data Quality)
-    6. Content sniff — verify it's a gzip file (Domain 5)
+    4. Atomic write to temporary file, then rename (Domain 7 -- Idempotency)
+    5. Size validation (Domain 5 -- Data Quality)
+    6. Content sniff -- verify it's a gzip file (Domain 5)
     7. Path-traversal-safe extraction (Domain 9)
     8. Checksum recording (Domain 7 + Domain 16)
 
@@ -948,18 +964,18 @@ def download_chembl(
 
 
 # =============================================================================
-# Section 7 — Parse ChEMBL activities from SQLite
+# Section 7 -- Parse ChEMBL activities from SQLite
 # =============================================================================
-# Fixes Domain 3 (Scientific Correctness) — correct UniProt resolution.
-# Fixes Domain 5 (Data Quality) — input validation, field population.
-# Fixes Domain 7 (Idempotency) — deterministic output ordering.
-# Fixes Domain 8 (Performance) — vectorized SQL, sorted output.
-# Fixes Domain 11 (Logging) — comprehensive metrics at each stage.
+# Fixes Domain 3 (Scientific Correctness) -- correct UniProt resolution.
+# Fixes Domain 5 (Data Quality) -- input validation, field population.
+# Fixes Domain 7 (Idempotency) -- deterministic output ordering.
+# Fixes Domain 8 (Performance) -- vectorized SQL, sorted output.
+# Fixes Domain 11 (Logging) -- comprehensive metrics at each stage.
 
 
 # The SQL query for extracting bioactivity data.
 # SCIENTIFIC CORRECTNESS NOTES:
-# 1. JOIN target_components provides UniProt accessions — this is the
+# 1. JOIN target_components provides UniProt accessions -- this is the
 #    CORRECT way to resolve ChEMBL target IDs to UniProt (the old code
 #    used td.chembl_id which is a target DICTIONARY ID, not a protein ID).
 # 2. WHERE td.target_type IN (...) filters to target types that have
@@ -969,7 +985,7 @@ def download_chembl(
 #    low-confidence target assignments.
 # 5. We include assay information (assay_type, organism) for downstream
 #    consumers (the RL ranker uses assay_type to weight evidence).
-# SQL template — the {target_type_placeholders} is filled at runtime
+# SQL template -- the {target_type_placeholders} is filled at runtime
 # based on the number of target types in the config. This prevents
 # parameter count mismatches (was hardcoded to 3 placeholders).
 _CHEMBL_SQL_TEMPLATE: str = """
@@ -997,11 +1013,11 @@ LEFT JOIN assay2target a2t    ON ass.assay_id = a2t.assay_id
 -- `target_id` (FK to target_dictionary.tid), NOT `tid`. The previous
 -- `tc.tid = tc.tid` raised `column tc.tid does not exist` on every real
 -- ChEMBL database at runtime, which step7c's try/except silently
--- swallowed — zero ChEMBL bioactivity edges ever loaded. The audit's
+-- swallowed -- zero ChEMBL bioactivity edges ever loaded. The audit's
 -- original PS-10 claim that `target_components.tid` IS a real ChEMBL
 -- column was itself wrong: per the official ChEMBL schema (chembl_35),
 -- the `target_components` table has columns (target_id, component_id,
--- homologue) — there is no `tid` column.
+-- homologue) -- there is no `tid` column.
 LEFT JOIN target_components tc ON td.tid = tc.target_id
 LEFT JOIN component_sequences csq ON tc.component_id = csq.component_id
 LEFT JOIN compound_structures cs ON md.molregno = cs.molregno
@@ -1030,10 +1046,10 @@ def _compute_file_sha256(path: Path) -> str:
 # deterministically pick the largest/newest DB. The previous code had
 # TWO separate sort-key implementations:
 #   - ``parse_chembl_activities`` used a SAFE nested function
-#     ``_db_sort_key`` with try/except OSError → (0, 0.0, str(p)).
+#     ``_db_sort_key`` with try/except OSError -> (0, 0.0, str(p)).
 #   - ``iter_chembl_activities`` used an UNSAFE inline lambda
 #     ``lambda p: (-p.stat().st_size, -p.stat().st_mtime, str(p))`` with
-#     NO try/except — raising OSError if a cached .db file was deleted
+#     NO try/except -- raising OSError if a cached .db file was deleted
 #     between ``rglob`` and the sort (race condition crash).
 #
 # ROOT FIX: extract the safe sort key as a MODULE-LEVEL function so
@@ -1067,12 +1083,12 @@ def parse_chembl_activities(
 
     SCIENTIFIC CORRECTNESS FIX:
     The original query returned ``td.chembl_id`` (e.g. "CHEMBL218") as
-    the target identifier, which is the ChEMBL TARGET dictionary ID —
+    the target identifier, which is the ChEMBL TARGET dictionary ID --
     NOT a UniProt protein accession. This caused ChEMBL "Protein" nodes
     to use a different ID namespace than UniProt, creating disconnected
     subgraphs in Neo4j.
 
-    The fix JOINs through ``target_components`` → ``component_sequences``
+    The fix JOINs through ``target_components`` -> ``component_sequences``
     to fetch the UniProt accession (``csq.accession``) which IS the
     canonical protein ID. Rows where no UniProt accession exists are
     kept but flagged with ``uniprot_accession=None`` so downstream code
@@ -1090,7 +1106,7 @@ def parse_chembl_activities(
     chembl_dir : Path or None
         Path to extracted ChEMBL directory. If None, uses default.
     min_pchembl : float or None
-        Minimum pChEMBL value. DEPRECATED — use cfg.min_pchembl instead.
+        Minimum pChEMBL value. DEPRECATED -- use cfg.min_pchembl instead.
         If provided, overrides cfg.min_pchembl for backward compatibility.
     cfg : ChEMBLConfig or None
         Loader configuration. If None, uses defaults.
@@ -1116,7 +1132,7 @@ def parse_chembl_activities(
             cfg = ChEMBLConfig()
     elif min_pchembl is not None:
         warnings.warn(
-            "min_pchembl parameter is deprecated — use cfg.min_pchembl. "
+            "min_pchembl parameter is deprecated -- use cfg.min_pchembl. "
             "The cfg value is being overridden.",
             DeprecationWarning,
             stacklevel=2,
@@ -1218,7 +1234,7 @@ def parse_chembl_activities(
         #   mask = df["tax_id"].isna() | (pd.to_numeric(...) == cfg.organism_tax_id)
         # This KEPT rows where tax_id is NaN regardless of the organism
         # filter. The comment said "Keep rows where tax_id is NaN (no
-        # organism info)" — but ChEMBL assays on bacterial / fungal /
+        # organism info)" -- but ChEMBL assays on bacterial / fungal /
         # viral targets sometimes have missing tax_id. These non-human
         # edges were silently admitted to the KG as "human" bioactivity,
         # contaminating the human drug-target graph. The GNN learned
@@ -1228,7 +1244,7 @@ def parse_chembl_activities(
         # > 0), DROP rows where tax_id is NaN. Only keep rows where
         # tax_id is present AND matches the filter. This is the
         # scientifically correct behavior: if we're filtering to human
-        # (tax_id=9606), we cannot accept rows with no organism info —
+        # (tax_id=9606), we cannot accept rows with no organism info --
         # they might be bacterial, fungal, or viral.
         #
         # The v42 fix (coerce to numeric before comparing so "9606" ==
@@ -1242,9 +1258,9 @@ def parse_chembl_activities(
         after = len(df)
         if after < before:
             logger.info(
-                "Organism filter (tax_id=%d): %s → %s rows "
+                "Organism filter (tax_id=%d): %s -> %s rows "
                 "(dropped %s non-matching, including NaN tax_id rows "
-                "that were previously silently admitted — v68 ROOT FIX "
+                "that were previously silently admitted -- v68 ROOT FIX "
                 "P2L-010)",
                 cfg.organism_tax_id,
                 f"{before:,}", f"{after:,}",
@@ -1268,7 +1284,7 @@ def parse_chembl_activities(
         after = len(df)
         if after < before:
             logger.info(
-                "Confidence score filter (>= %d): %s → %s rows",
+                "Confidence score filter (>= %d): %s -> %s rows",
                 cfg.min_confidence_score,
                 f"{before:,}", f"{after:,}",
             )
@@ -1325,7 +1341,7 @@ def parse_chembl_activities(
     after = len(df)
     if after < before:
         logger.info(
-            "Deduplication: %s → %s rows (removed %s duplicates)",
+            "Deduplication: %s -> %s rows (removed %s duplicates)",
             f"{before:,}", f"{after:,}",
             f"{before - after:,}",
         )
@@ -1401,9 +1417,9 @@ def parse_chembl_activities(
 
 
 # =============================================================================
-# Section 8 — Streaming iterator for large databases
+# Section 8 -- Streaming iterator for large databases
 # =============================================================================
-# Fixes Domain 8 (Performance) — avoids loading entire DB into memory.
+# Fixes Domain 8 (Performance) -- avoids loading entire DB into memory.
 
 
 def iter_chembl_activities(
@@ -1421,13 +1437,13 @@ def iter_chembl_activities(
     v68 ROOT FIX (P2L-013): the previous implementation yielded RAW SQL
     chunks without applying ANY of the filters that ``parse_chembl_activities``
     applies:
-      - Organism filter (P2L-010 — drop NaN tax_id, match cfg.organism_tax_id)
+      - Organism filter (P2L-010 -- drop NaN tax_id, match cfg.organism_tax_id)
       - Confidence score filter (>= cfg.min_confidence_score)
       - pChEMBL range validation (CHEMBL_PCHEMBL_RANGE)
       - ChEMBL ID format validation (_RE_CHEMBL_ID)
       - Field population check (CHEMBL_MIN_FIELD_POPULATION)
     Downstream consumers using the streaming API got unfiltered,
-    unvalidated, duplicate-containing raw SQL results — completely
+    unvalidated, duplicate-containing raw SQL results -- completely
     different data quality than the bulk path. Silent contamination if
     a downstream pipeline switched from bulk to streaming.
 
@@ -1435,7 +1451,7 @@ def iter_chembl_activities(
     Per-chunk filters (organism, confidence, pchembl range, ID
     validation) are applied to each chunk independently. Cross-chunk
     operations (deduplication, deterministic sort) CANNOT be applied
-    per-chunk (they require the full dataset) — callers requiring
+    per-chunk (they require the full dataset) -- callers requiring
     deduplication / global sort must collect all chunks and apply
     those operations themselves. This is documented in the Notes
     section below.
@@ -1454,7 +1470,7 @@ def iter_chembl_activities(
     pd.DataFrame
         Chunks of ChEMBL activity records, with per-chunk filters
         applied (organism, confidence, pchembl range, ID validation).
-        Deduplication and global sort are NOT applied — callers
+        Deduplication and global sort are NOT applied -- callers
         requiring those must collect all chunks and apply them.
 
     Notes
@@ -1466,7 +1482,7 @@ def iter_chembl_activities(
       4. ChEMBL ID format validation (_RE_CHEMBL_ID)
 
     The following operations are NOT applied (they require the full
-    dataset) — callers must apply them after collecting all chunks:
+    dataset) -- callers must apply them after collecting all chunks:
       - Deduplication (drop_duplicates on the full dataset)
       - Deterministic sort (sort_values on the full dataset)
       - Field population check (CHEMBL_MIN_FIELD_POPULATION)
@@ -1492,16 +1508,16 @@ def iter_chembl_activities(
             context={"chembl_dir": str(chembl_dir)},
         )
     # v24 ROOT FIX (FORENSIC-P2-LOADERS D/§1): the previous code did
-    # ``db_path = db_files[0]`` — non-deterministic when multiple .db
+    # ``db_path = db_files[0]`` -- non-deterministic when multiple .db
     # files are cached (different runs pick different DBs). The sibling
     # function ``parse_chembl_activities`` (line ~1075) was already
     # fixed to sort by size then mtime; apply the same deterministic
     # sort here so ``iter_chembl_activities`` is idempotent.
     # FIX-P1-B-11 (audit P1): the previous sort key
-    # ``(p.stat().st_size, p.stat().st_mtime, str(p))`` was ASCENDING —
+    # ``(p.stat().st_size, p.stat().st_mtime, str(p))`` was ASCENDING --
     # so ``db_files[0]`` selected the SMALLEST DB. But the sibling
     # ``parse_chembl_activities`` (line ~1094-1101) sorts by
-    # ``(-st.st_size, -st.st_mtime, str(p))`` — DESCENDING size — and
+    # ``(-st.st_size, -st.st_mtime, str(p))`` -- DESCENDING size -- and
     # selects ``db_files_sorted[0]``, i.e. the LARGEST DB. The two
     # sibling functions therefore selected DIFFERENT DBs whenever a
     # stale small stub DB was cached alongside the real 2 GB ChEMBL DB.
@@ -1510,7 +1526,7 @@ def iter_chembl_activities(
     #
     # v69 ROOT FIX (P2L-012): replace the UNSAFE inline lambda
     # ``lambda p: (-p.stat().st_size, -p.stat().st_mtime, str(p))``
-    # (which raised OSError on missing files — race condition crash)
+    # (which raised OSError on missing files -- race condition crash)
     # with the module-level ``_chembl_db_sort_key`` (safe against
     # OSError). This eliminates the inconsistency between the two
     # sibling functions AND the race-condition crash if a cached .db
@@ -1545,7 +1561,7 @@ def iter_chembl_activities(
                 # Apply the SAME filters as parse_chembl_activities so
                 # the streaming API produces equivalent data quality.
 
-                # Filter 1: Organism filter (P2L-010 fix — drop NaN tax_id)
+                # Filter 1: Organism filter (P2L-010 fix -- drop NaN tax_id)
                 if "tax_id" in chunk.columns and cfg.organism_tax_id > 0:
                     tax_id_numeric = pd.to_numeric(chunk["tax_id"], errors="coerce")
                     org_mask = (
@@ -1590,10 +1606,10 @@ def iter_chembl_activities(
         ) from exc
 
     logger.info(
-        "iter_chembl_activities: streamed %d chunks, %s rows in → %s rows out "
+        "iter_chembl_activities: streamed %d chunks, %s rows in -> %s rows out "
         "(per-chunk filters applied: organism, confidence, pchembl, ID validation). "
         "Cross-chunk operations (dedup, sort, field-population, provenance) NOT "
-        "applied — caller must handle. v68 ROOT FIX P2L-013.",
+        "applied -- caller must handle. v68 ROOT FIX P2L-013.",
         n_chunks,
         f"{n_rows_in:,}",
         f"{n_rows_out:,}",
@@ -1601,31 +1617,31 @@ def iter_chembl_activities(
 
 
 # =============================================================================
-# Section 9 — Convert activities to edge records
+# Section 9 -- Convert activities to edge records
 # =============================================================================
-# Fixes Domain 3 (Scientific Correctness) — correct relation mapping.
-# Fixes Domain 5 (Data Quality) — validated edges only.
-# Fixes Domain 6 (Reliability) — per-row error isolation.
-# Fixes Domain 16 (Lineage) — resolution path tracking.
+# Fixes Domain 3 (Scientific Correctness) -- correct relation mapping.
+# Fixes Domain 5 (Data Quality) -- validated edges only.
+# Fixes Domain 6 (Reliability) -- per-row error isolation.
+# Fixes Domain 16 (Lineage) -- resolution path tracking.
 
 
 def chembl_to_edge_records(
     df: pd.DataFrame,
     crosswalk: Any = None,
 ) -> List[Dict[str, Any]]:
-    """Convert ChEMBL activities to Compound→Protein edge records.
+    """Convert ChEMBL activities to Compound->Protein edge records.
 
     SCIENTIFIC CORRECTNESS FIX (ARCH-2 / GUARD-INT-3 of id_crosswalk audit):
-    ChEMBL → UniProt resolution is now OWNED by
+    ChEMBL -> UniProt resolution is now OWNED by
     ``IDCrosswalk.chembl_target_to_uniprot_ac()``. The in-loader SQL JOIN
     that previously read ``row.uniprot_accession`` directly is now only a
     FALLBACK for the case where the crosswalk has not been populated.
     This eliminates the "two sources of truth" bug class: a single
-    crosswalk instance is the source of truth for ChEMBL → UniProt.
+    crosswalk instance is the source of truth for ChEMBL -> UniProt.
 
     For multi-subunit complexes (GABA-A receptor with 5 subunits, NMDA
     with 4, etc.), the crosswalk returns the FULL list of UniProt ACs and
-    this loader emits one Compound→Protein edge per subunit (SCI-4).
+    this loader emits one Compound->Protein edge per subunit (SCI-4).
 
     RELATION TYPE FIX (Domain 3):
     The old code used substring matching:
@@ -1646,7 +1662,7 @@ def chembl_to_edge_records(
     df : pd.DataFrame
         DataFrame from ``parse_chembl_activities``.
     crosswalk : IDCrosswalk or None
-        ID crosswalk instance for ChEMBL→UniProt resolution.
+        ID crosswalk instance for ChEMBL->UniProt resolution.
         If None, attempts to get the default crosswalk.
 
     Returns
@@ -1663,7 +1679,7 @@ def chembl_to_edge_records(
         except Exception:
             crosswalk = None
             logger.warning(
-                "chembl_loader: could not get default crosswalk — "
+                "chembl_loader: could not get default crosswalk -- "
                 "using SQL JOIN fallback only"
             )
 
@@ -1742,7 +1758,7 @@ def chembl_to_edge_records(
                     continue
                 n_fallback_resolved += 1
                 logger.debug(
-                    "chembl_loader: crosswalk miss for %s — falling back "
+                    "chembl_loader: crosswalk miss for %s -- falling back "
                     "to SQL JOIN uniprot_accession=%s",
                     target_chembl_id, sql_ac_str,
                 )
@@ -1767,7 +1783,7 @@ def chembl_to_edge_records(
             # IC50/Ki/Kd in nM) and ``standard_units`` (typically "nM")
             # to the edge props. The SQL query SELECTs these columns
             # (lines 975-976), and the DataFrame returned by
-            # ``parse_chembl_activities`` has them — but the edge records
+            # ``parse_chembl_activities`` has them -- but the edge records
             # (which is what kg_builder consumes) DROPPED them.
             # Downstream consumers that need the raw activity value
             # (e.g., to recompute pchembl or to apply a custom unit
@@ -1804,7 +1820,7 @@ def chembl_to_edge_records(
                         "pchembl_value": pchembl,
                         "standard_type": std_type,
                         # v68 ROOT FIX (P2L-009): raw activity value (nM)
-                        # and units — preserved for downstream forensics
+                        # and units -- preserved for downstream forensics
                         # and custom unit conversion. Downstream consumers
                         # MUST NOT confuse standard_value (nM, raw) with
                         # pchembl_value (-log10[M], normalized). The
@@ -1834,7 +1850,7 @@ def chembl_to_edge_records(
                 edges.append(edge)
 
         except Exception as exc:
-            # Per-row error isolation (Domain 6 — Reliability)
+            # Per-row error isolation (Domain 6 -- Reliability)
             n_dead_letter += 1
             row_dict = {}
             try:
@@ -1880,9 +1896,9 @@ def chembl_to_edge_records(
 
 
 # =============================================================================
-# Section 10 — Compound node record generation
+# Section 10 -- Compound node record generation
 # =============================================================================
-# Fixes Domain 2 (Design) — consistent node record schema with other loaders.
+# Fixes Domain 2 (Design) -- consistent node record schema with other loaders.
 
 
 def chembl_to_node_records(
@@ -1939,9 +1955,9 @@ def chembl_to_node_records(
 
 
 # =============================================================================
-# Section 11 — End-to-end graph construction
+# Section 11 -- End-to-end graph construction
 # =============================================================================
-# Fixes Domain 1 (Architecture) — consistent to_graph API with other loaders.
+# Fixes Domain 1 (Architecture) -- consistent to_graph API with other loaders.
 
 
 def chembl_to_graph(
@@ -1952,7 +1968,7 @@ def chembl_to_graph(
 
     This is the main entry point for ``kg_builder`` to consume ChEMBL
     data. It generates both Compound node records and
-    Compound→Protein edge records.
+    Compound->Protein edge records.
 
     Parameters
     ----------
@@ -1976,10 +1992,10 @@ def chembl_to_graph(
 
 
 # =============================================================================
-# Section 12 — Validation
+# Section 12 -- Validation
 # =============================================================================
-# Fixes Domain 5 (Data Quality) — comprehensive post-parse validation.
-# Fixes Domain 10 (Testing) — testable validation function.
+# Fixes Domain 5 (Data Quality) -- comprehensive post-parse validation.
+# Fixes Domain 10 (Testing) -- testable validation function.
 
 
 def validate_chembl(
@@ -2125,9 +2141,9 @@ def validate_chembl(
 
 
 # =============================================================================
-# Section 13 — End-to-end pipeline
+# Section 13 -- End-to-end pipeline
 # =============================================================================
-# Fixes Domain 1 (Architecture) — single entry point for run_pipeline.
+# Fixes Domain 1 (Architecture) -- single entry point for run_pipeline.
 
 
 def load_chembl(
@@ -2189,10 +2205,10 @@ def load_chembl(
 
 
 # =============================================================================
-# Section 14 — Loader Protocol adapter
+# Section 14 -- Loader Protocol adapter
 # =============================================================================
-# Fixes Domain 1 (Architecture) — implements the Loader Protocol.
-# Fixes Domain 15 (Interoperability) — polymorphic with other loaders.
+# Fixes Domain 1 (Architecture) -- implements the Loader Protocol.
+# Fixes Domain 15 (Interoperability) -- polymorphic with other loaders.
 
 
 class ChEMBLLoader:
@@ -2242,7 +2258,7 @@ class ChEMBLLoader:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# v26 ROOT FIX (Audit section 10 — Phase 2 Loaders Bypass Matrix / P0 BLOCKER):
+# v26 ROOT FIX (Audit section 10 -- Phase 2 Loaders Bypass Matrix / P0 BLOCKER):
 # "Make the 4 raw re-fetch loaders consume Phase 1 CSVs by default."
 # The audit's recommendation was to refactor chembl_loader, drugbank_parser,
 # string_loader, uniprot_loader to follow the same bridge pattern as
@@ -2254,12 +2270,12 @@ class ChEMBLLoader:
 # loaded their data). This v26 fix adds Phase-1-aware functions to each
 # loader so that STANDALONE use (calling download_chembl() or
 # parse_chembl_activities() directly) ALSO consumes Phase 1 CSVs by
-# default — defense in depth.
+# default -- defense in depth.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Phase 1 emits two CSVs that this loader can consume:
-#   - chembl_drugs.csv           — Compound-node metadata
-#   - chembl_activities_clean.csv — Compound-{inhibits,activates,targets}-Protein edges
+#   - chembl_drugs.csv           -- Compound-node metadata
+#   - chembl_activities_clean.csv -- Compound-{inhibits,activates,targets}-Protein edges
 _DEFAULT_PHASE1_PROCESSED_DIR: Path = (
     Path(__file__).resolve().parents[2] / "phase1" / "processed_data"
 )
@@ -2278,9 +2294,9 @@ def parse_chembl_activities_from_phase1_csv(
     reads the raw ChEMBL SQLite database). The DataFrame schema mirrors what
     ``chembl_to_edge_records`` expects so downstream code is unchanged.
 
-    v26 ROOT FIX (Audit section 10 — bypass matrix): previously, calling
+    v26 ROOT FIX (Audit section 10 -- bypass matrix): previously, calling
     ``parse_chembl_activities()`` standalone would re-download the ~2 GB
-    ChEMBL SQLite and re-parse it — bypassing the 7 weeks of Phase 1 ETL
+    ChEMBL SQLite and re-parse it -- bypassing the 7 weeks of Phase 1 ETL
     work (cleaning, normalization, pchembl filtering, dedup). Now
     standalone callers can use this function to consume Phase 1's
     already-cleaned output.
@@ -2328,7 +2344,7 @@ def chembl_to_edge_records_from_phase1(
     column name (``molecule_chembl_id``) than the raw ChEMBL SQL output
     (``drug_chembl_id``). The existing ``chembl_to_edge_records`` accesses
     ``row.drug_chembl_id`` via ``itertuples`` and validates against
-    ``_RE_CHEMBL_ID`` — so it returns 0 edges when called on the Phase 1
+    ``_RE_CHEMBL_ID`` -- so it returns 0 edges when called on the Phase 1
     CSV directly. This function handles the Phase 1 schema natively,
     mirroring the bridge's logic in ``phase1_bridge._load_chembl_activities``:
       - reads ``molecule_chembl_id`` (Compound side)
@@ -2343,7 +2359,7 @@ def chembl_to_edge_records_from_phase1(
     directly. Phase 2's KG node-builder keys Compound nodes by their
     canonical InChIKey (see ``chembl_to_node_records_from_phase1``), so
     emitting an edge with ``src_id=CHEMBL25`` would never match a staged
-    Compound node — orphan edges. This fix normalizes the compound ID to
+    Compound node -- orphan edges. This fix normalizes the compound ID to
     InChIKey via the following precedence:
 
       1. If ``compound_canonical_map`` is provided, look up
@@ -2351,7 +2367,7 @@ def chembl_to_edge_records_from_phase1(
       2. Else if the row has a non-empty ``inchikey`` column, use it.
       3. Else fall back to the raw ``compound_id`` (preserves the prior
          behavior so we still emit the edge when no canonical ID is
-         resolvable — better an orphan edge than a silently dropped edge,
+         resolvable -- better an orphan edge than a silently dropped edge,
          since downstream entity resolution may still recover the link).
 
     Parameters
@@ -2381,11 +2397,14 @@ def chembl_to_edge_records_from_phase1(
         if compound_canonical_map is not None:
             looked_up = compound_canonical_map.get(compound_id)
             if looked_up and str(looked_up).strip():
-                src_id = str(looked_up).strip().upper()
+                # v102 P2-036: centralized normalization (strip + upper +
+                # placeholder-collapse) so this loader's canonical_id
+                # matches the form produced by phase1_bridge and pubchem.
+                src_id = _normalize_inchikey(looked_up) or str(looked_up).strip().upper()
         if src_id is None:
             row_inchikey = row.get("inchikey")
             if row_inchikey is not None and str(row_inchikey).strip() not in ("", "nan"):
-                src_id = str(row_inchikey).strip().upper()
+                src_id = _normalize_inchikey(row_inchikey) or None
         if src_id is None:
             # Fall back to the raw ChEMBL ID (last resort).
             src_id = compound_id
@@ -2416,9 +2435,9 @@ def chembl_to_edge_records_from_phase1(
             # v71 ROOT FIX (P2L-014): use pd.isna() instead of
             # ``str(pchembl) != "nan"``. The previous check was fragile:
             # ``str(np.float64('nan'))`` returns "nan" (works), but
-            # ``str(Decimal('nan'))`` returns "NaN" (capital N) — the
+            # ``str(Decimal('nan'))`` returns "NaN" (capital N) -- the
             # case-sensitive check would FAIL for Decimal, letting NaN
-            # slip through as float('nan') → JSON serialization fails.
+            # slip through as float('nan') -> JSON serialization fails.
             # ``pd.isna()`` handles ALL NaN variants (float, np.float32,
             # np.float64, Decimal, None) uniformly.
             pchembl_f = (
@@ -2429,12 +2448,12 @@ def chembl_to_edge_records_from_phase1(
         except (TypeError, ValueError):
             pchembl_f = None
         # v27 ROOT FIX (P2-L-3): normalize ChEMBL pchembl_value from its
-        # native 0-14 scale (per ChEMBL docs — pChEMBL = -log10(molar
+        # native 0-14 scale (per ChEMBL docs -- pChEMBL = -log10(molar
         # activity) for IC50/Ki/Kd/EC50/AC50; range is roughly 0-14, with
         # 14 corresponding to sub-picomolar potency) to a canonical 0-1
         # range so it is comparable with DisGeNET / OpenTargets / OMIM /
         # DrugBank scores already on a 0-1 scale. Emit BOTH the raw
-        # source-specific pchembl_value (preserved for traceability —
+        # source-specific pchembl_value (preserved for traceability --
         # the RL safety ranker needs the absolute potency, not just the
         # normalized form) AND a canonical ``normalized_score`` in [0,1]
         # for downstream model training / cross-source fusion. ChEMBL
@@ -2478,7 +2497,7 @@ def chembl_to_edge_records_from_phase1(
                 # kept for BACKWARD COMPATIBILITY only. pchembl/14 yields a
                 # 0-1 number but does NOT make ChEMBL scores comparable with
                 # DisGeNET/OpenTargets/OMIM association probabilities.
-                # pchembl=7 (≈100nM, decent potency) becomes 0.5 — the same
+                # pchembl=7 (≈100nM, decent potency) becomes 0.5 -- the same
                 # numeric value as a 0.5 DisGeNET association score (moderate
                 # gene-disease evidence). Mixing potency with association
                 # probability is meaningless. Downstream consumers MUST use
@@ -2492,7 +2511,7 @@ def chembl_to_edge_records_from_phase1(
                 # marks this as a potency measure (-log10[M] of IC50/Ki/Kd),
                 # NOT an association probability. ``score_aggregation="single"``
                 # means each ChEMBL activity is a separate measurement
-                # (no dedup aggregation — unlike OpenTargets' "max" and
+                # (no dedup aggregation -- unlike OpenTargets' "max" and
                 # DisGeNET's "sum_normalized"). Downstream fusion MUST
                 # weight by these fields and MUST NOT average
                 # ``normalized_score`` across sources with different
@@ -2524,18 +2543,18 @@ def chembl_to_node_records_from_phase1(
     """Convert Phase 1's ChEMBL drugs DataFrame to Compound node records.
 
     v27 ROOT FIX (P2-L-1): Phase 1's ``chembl_drugs.csv`` uses the column
-    name ``chembl_id`` (NOT ``drug_chembl_id`` — that alias is only present
+    name ``chembl_id`` (NOT ``drug_chembl_id`` -- that alias is only present
     in the raw SQLite SQL emitted by ``parse_chembl_activities``). The
     previous implementation blindly delegated to ``chembl_to_node_records``,
-    which early-returns ``[]`` when ``drug_chembl_id`` is missing — silently
+    which early-returns ``[]`` when ``drug_chembl_id`` is missing -- silently
     dropping 100% of Phase 1 compound rows.
 
     This implementation reads the Phase 1 schema natively:
-      - ``chembl_id``     — ChEMBL molecule ID (CHEMBL<digits>)
-      - ``inchikey``      — preferred canonical ID (uppercased; kg_builder
+      - ``chembl_id``     -- ChEMBL molecule ID (CHEMBL<digits>)
+      - ``inchikey``      -- preferred canonical ID (uppercased; kg_builder
                             ID_PATTERNS requires uppercase InChIKeys)
-      - ``smiles``        — canonical SMILES
-      - ``name``          — preferred compound name
+      - ``smiles``        -- canonical SMILES
+      - ``name``          -- preferred compound name
 
     Node ``id`` is set to ``inchikey`` (preferred) when present, falling
     back to ``chembl_id`` so the node is still emitted for compounds
@@ -2553,11 +2572,17 @@ def chembl_to_node_records_from_phase1(
         chembl_id = str(chembl_id).strip()
 
         inchikey = row.get("inchikey")
-        inchikey_s = (
-            str(inchikey).strip().upper()
-            if inchikey is not None and str(inchikey) != "nan" and str(inchikey).strip() != ""
-            else None
-        )
+        # v102 P2-036: route through centralized normalize_inchikey so
+        # every loader (chembl / pubchem / phase1_bridge) produces the
+        # SAME canonical form. Previously this loader used
+        # ``str(inchikey).strip().upper()`` while pubchem_loader used
+        # ``inchikey.upper()`` (no strip) and phase1_bridge used
+        # ``inchikey.upper() if inchikey else ""`` (no strip, None-
+        # unsafe). The three forms produced different canonical IDs for
+        # the same compound when whitespace or "nan" placeholders were
+        # present, fragmenting entity resolution.
+        _ik_norm = _normalize_inchikey(inchikey)
+        inchikey_s = _ik_norm if _ik_norm else None
 
         smiles = row.get("smiles")
         smiles_s = (

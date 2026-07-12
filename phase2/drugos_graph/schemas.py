@@ -1,17 +1,17 @@
-"""DrugOS Graph Module — Loader Schemas (TypedDicts)
+"""DrugOS Graph Module -- Loader Schemas (TypedDicts)
 =====================================================
 Authoritative, statically-typed schemas for the records produced and
 consumed by the UniProt loader.
 
 Why TypedDict (not Pydantic / dataclasses)?
-  * ``TypedDict`` is stdlib (``typing``) — no new dependency (D1-005).
+  * ``TypedDict`` is stdlib (``typing``) -- no new dependency (D1-005).
   * It describes the *shape* of a ``dict`` without changing runtime
     behaviour, so the existing dict-based callers
     (``entity_resolver.resolve_proteins_from_uniprot``,
     ``id_crosswalk.load_from_uniprot_records``) continue to work with
     zero modifications (D1-003 / D15-001 interface contract).
   * ``total=False`` lets us declare optional fields without runtime
-    validation overhead — the loader's own ``_validate_record`` helper
+    validation overhead -- the loader's own ``_validate_record`` helper
     (in ``uniprot_loader.py``) performs the runtime checks.
 
 These TypedDicts are the **single source of truth** for the field names
@@ -38,13 +38,13 @@ __all__: list[str] = [
     "ProteinNode",
     "UniProtEdge",
     "PROVENANCE_KEYS",
-    # DRKG schemas — added by drkg_loader v2.0 audit fix
-    # (drkg_loader_repair_prompt.md — Domain 2 Design, BUG 2.4 / GAP 2.5).
+    # DRKG schemas -- added by drkg_loader v2.0 audit fix
+    # (drkg_loader_repair_prompt.md -- Domain 2 Design, BUG 2.4 / GAP 2.5).
     "DRKGRecord",
     "DRKGValidationResult",
     "DRKG_PROVENANCE_KEYS",
-    # DrugBank schemas — added by drugbank_parser v2.0 audit fix
-    # (drugbank_parser_fix_prompt.md — Domain 2 Design, FIX 2.2).
+    # DrugBank schemas -- added by drugbank_parser v2.0 audit fix
+    # (drugbank_parser_fix_prompt.md -- Domain 2 Design, FIX 2.2).
     "DrugBankRecord",
     "DrugBankNode",
     "DrugBankEdge",
@@ -52,13 +52,13 @@ __all__: list[str] = [
     "DRUGBANK_PROVENANCE_KEYS",
     "DRUGBANK_NODE_SCHEMA",
     "DRUGBANK_EDGE_SCHEMA",
-    # ChEMBL schemas — added by chembl_loader v2.0 institutional-grade audit fix
-    # (chembl_loader — Domain 2 Design).
+    # ChEMBL schemas -- added by chembl_loader v2.0 institutional-grade audit fix
+    # (chembl_loader -- Domain 2 Design).
     "ChEMBLActivityRecord",
     "ChEMBLEdgeRecord",
     "CHEMBL_PROVENANCE_KEYS",
-    # STRING schemas — added by string_loader v1.0 institutional-grade audit fix
-    # (master_prompt_fix_string_loader.md — Domains 2/4/15/16).
+    # STRING schemas -- added by string_loader v1.0 institutional-grade audit fix
+    # (master_prompt_fix_string_loader.md -- Domains 2/4/15/16).
     "StringPPIRecord",
     "StringEdgeProps",
     "StringEdgeRecord",
@@ -66,8 +66,8 @@ __all__: list[str] = [
     "StringDeadLetterEntry",
     "StringValidationReport",
     "STRING_PROVENANCE_KEYS",
-    # STITCH schemas — added by stitch_loader v1.1.0 institutional-grade audit fix
-    # (master_prompt_fix_stitch_loader.md — Domains 2/4/7/15/16).
+    # STITCH schemas -- added by stitch_loader v1.1.0 institutional-grade audit fix
+    # (master_prompt_fix_stitch_loader.md -- Domains 2/4/7/15/16).
     "StitchCPIRecord",
     "StitchEdgeProps",
     "StitchEdgeRecord",
@@ -75,8 +75,8 @@ __all__: list[str] = [
     "StitchDeadLetterEntry",
     "StitchValidationReport",
     "STITCH_PROVENANCE_KEYS",
-    # SIDER schemas — added by sider_loader v1.0.0 institutional-grade audit fix
-    # (master_prompt — Domains 2/4/7/15/16).
+    # SIDER schemas -- added by sider_loader v1.0.0 institutional-grade audit fix
+    # (master_prompt -- Domains 2/4/7/15/16).
     "SiderSideEffectRow",
     "SiderNodeProps",
     "SiderNodeRecord",
@@ -87,8 +87,8 @@ __all__: list[str] = [
     "SiderDeadLetterEntry",
     "SiderValidationReport",
     "SIDER_PROVENANCE_KEYS",
-    # OpenTargets schemas — added by opentargets_loader v2.0 institutional-grade
-    # audit fix (opentargets_loader_repair_prompt.md — Domains 2/4/7/15/16).
+    # OpenTargets schemas -- added by opentargets_loader v2.0 institutional-grade
+    # audit fix (opentargets_loader_repair_prompt.md -- Domains 2/4/7/15/16).
     "OpenTargetsActivityRecord",
     "OpenTargetsEdgeRecord",
     "OpenTargetsNodeRecord",
@@ -96,8 +96,8 @@ __all__: list[str] = [
     "OpenTargetsDeadLetterEntry",
     "OpenTargetsValidationReport",
     "OPENTARGETS_PROVENANCE_KEYS",
-    # ClinicalTrials schemas — added by clinicaltrials_loader v2.1.0
-    # institutional-grade audit fix (PROMPT_fix_clinicaltrials_loader.md —
+    # ClinicalTrials schemas -- added by clinicaltrials_loader v2.1.0
+    # institutional-grade audit fix (PROMPT_fix_clinicaltrials_loader.md --
     # Domains 2/4/7/15/16). Mirrors the OpenTargets/SIDER/STITCH schema
     # pattern. Every emitted edge record conforms to
     # ``ClinicalTrialEdgeRecord``; the loader's own ``_validate_edge_record``
@@ -109,8 +109,8 @@ __all__: list[str] = [
     "ClinicalTrialsDeadLetterEntry",
     "ClinicalTrialsValidationReport",
     "CLINICALTRIALS_PROVENANCE_KEYS",
-    # GEO schemas — added by geo_loader v1.0.0 institutional-grade audit fix
-    # (GEO_LOADER_MASTER_REPAIR_PROMPT.md — 192 findings across 16 domains,
+    # GEO schemas -- added by geo_loader v1.0.0 institutional-grade audit fix
+    # (GEO_LOADER_MASTER_REPAIR_PROMPT.md -- 192 findings across 16 domains,
     # Domains 2/4/7/15/16). Mirrors the ClinicalTrials/OpenTargets/SIDER/
     # STITCH/STRING schema pattern. Every emitted raw record conforms to
     # ``GeoRawRecord``; every emitted edge conforms to ``GeoEdgeRecord``;
@@ -122,7 +122,7 @@ __all__: list[str] = [
     "GeoDeadLetterEntry",
     "GeoValidationReport",
     "GEO_PROVENANCE_KEYS",
-    # FIX-P3-3: NegativeSampling schemas — defined but missing from __all__.
+    # FIX-P3-3: NegativeSampling schemas -- defined but missing from __all__.
     # Produced by drugos_graph.negative_sampling.NegativeSampler; needed by
     # downstream consumers that import the schema contract via `from
     # drugos_graph.schemas import NegativeSampleDict` etc.
@@ -147,7 +147,7 @@ class UniProtRecord(TypedDict, total=False):
     Field naming rules:
       * Plural nouns (``alternative_names``, ``gene_names``,
         ``gene_ids``, ``ec_numbers``, ``secondary_accessions``) are ALWAYS
-        ``list[str]`` — never a polymorphic ``str | list[str]`` (D2-001).
+        ``list[str]`` -- never a polymorphic ``str | list[str]`` (D2-001).
       * Singular nouns (``accession``, ``gene_name``, ``gene_id``,
         ``protein_name``, ``entry_name``) are ``str`` and represent the
         *primary* (first) value of the corresponding plural field, kept for
@@ -155,46 +155,46 @@ class UniProtRecord(TypedDict, total=False):
       * ``ncbi_taxid`` is ``int`` (D5-003). The original string is kept in
         ``_provenance["raw_ncbi_taxid"]`` for audit.
       * ``cross_references`` is ``dict[str, list[str]]`` keyed by database
-        name (``"GeneID"``, ``"HGNC"``, ``"ChEMBL"``, …) — fixes D2-005.
+        name (``"GeneID"``, ``"HGNC"``, ``"ChEMBL"``, ...) -- fixes D2-005.
       * Every record carries a ``_provenance`` dict (D16-001), a
         ``_source`` tag, a ``_license`` string, and an ``_attribution``
-        string (D14-001 — CC BY 4.0 compliance).
+        string (D14-001 -- CC BY 4.0 compliance).
     """
 
     # ── Identity ────────────────────────────────────────────────────────
     accession: str                       # primary UniProt accession (validated)
-    secondary_accessions: List[str]      # all other ACs (multi-line AC — D3-004)
+    secondary_accessions: List[str]      # all other ACs (multi-line AC -- D3-004)
     entry_name: str                      # e.g. "PGH1_HUMAN" (ID line)
 
     # ── Protein description (DE lines) ──────────────────────────────────
     protein_name: str                    # RecName: Full=
-    alternative_names: List[str]         # AltName: Full=  (always list — D2-001)
+    alternative_names: List[str]         # AltName: Full=  (always list -- D2-001)
     alternative_name: str                # backward-compat: first alt name or ""
     contains_names: List[str]            # DE Contains: sub-record RecNames (D3-002)
     includes_names: List[str]            # DE Includes: sub-record RecNames (D3-002)
     ec_numbers: List[str]                # EC=1.14.99.1 (D3-007)
 
-    # ── Gene names (GN lines — D3-003) ──────────────────────────────────
+    # ── Gene names (GN lines -- D3-003) ──────────────────────────────────
     gene_name: str                       # primary Name= (backward-compat)
     gene_names: List[str]                # all Name= values (handles 'and' separator)
     gene_synonyms: List[str]             # Synonyms=
     gene_orf_names: List[str]            # ORFNames=
     gene_locus_names: List[str]          # LocusNames=
 
-    # ── NCBI Gene cross-reference (DR GeneID — D4-004, D3-001) ──────────
+    # ── NCBI Gene cross-reference (DR GeneID -- D4-004, D3-001) ──────────
     gene_id: str                         # primary, VERIFIED via crosswalk (D3-001)
     gene_ids: List[str]                  # all DR GeneID values (always list)
 
-    # ── Taxonomy (OS / OX lines — D3-005, D5-003) ───────────────────────
+    # ── Taxonomy (OS / OX lines -- D3-005, D5-003) ───────────────────────
     organism: str                        # scientific name from OS line
     ncbi_taxid: int                      # int, cross-checked against OS (D3-005)
 
-    # ── Protein evidence & sequence (PE / SQ lines — D3-008, D3-009) ────
+    # ── Protein evidence & sequence (PE / SQ lines -- D3-008, D3-009) ────
     protein_existence: int               # 1..5
     sequence: str                        # uppercase, whitespace-stripped
     sequence_length: int                 # from SQ header (validated vs sequence)
 
-    # ── All cross-references (DR lines — D2-005) ────────────────────────
+    # ── All cross-references (DR lines -- D2-005) ────────────────────────
     cross_references: Dict[str, List[str]]
 
     # ── Provenance & compliance (D16-001, D14-001) ──────────────────────
@@ -208,7 +208,7 @@ class ProteinNode(TypedDict, total=False):
     """A Protein node ready for the Neo4j knowledge graph.
 
     Produced by ``uniprot_to_node_records``. The canonical primary key is
-    ``uniprot_id`` (matches ``config.CANONICAL_IDS["Protein"]`` — D2-004).
+    ``uniprot_id`` (matches ``config.CANONICAL_IDS["Protein"]`` -- D2-004).
     The legacy ``id`` key is emitted as a backward-compat shim and will be
     removed in schema v3.0.0 (D15-003).
 
@@ -219,7 +219,7 @@ class ProteinNode(TypedDict, total=False):
     # ── Identity ────────────────────────────────────────────────────────
     uniprot_id: str                      # canonical PK (config.CANONICAL_IDS["Protein"])
     id: str                              # backward-compat alias (deprecated, D15-003)
-    uniprot_uri: str                     # identifiers.org URI (FAIR — D14-002)
+    uniprot_uri: str                     # identifiers.org URI (FAIR -- D14-002)
     name: str                            # protein_name | entry_name | accession
     entry_name: str
 
@@ -279,8 +279,8 @@ PROVENANCE_KEYS: tuple[str, ...] = (
 
 
 # =============================================================================
-# DRKG schemas — added by drkg_loader v2.0 audit fix
-# (drkg_loader_repair_prompt.md — Domain 2 Design, BUG 2.4 / GAP 2.5).
+# DRKG schemas -- added by drkg_loader v2.0 audit fix
+# (drkg_loader_repair_prompt.md -- Domain 2 Design, BUG 2.4 / GAP 2.5).
 #
 # These TypedDicts describe the *shape* of the records emitted by
 # ``drugos_graph.drkg_loader.parse_drkg_tsv`` and the result of
@@ -290,11 +290,11 @@ PROVENANCE_KEYS: tuple[str, ...] = (
 #
 # RATIONALE for ``total=False``:
 #   DRKG emits a heterogeneous set of triples (Compound-Disease,
-#   Compound-Gene, Gene-Disease, …). Not every column makes sense for
-#   every triple; for example, ``sensitive`` (rare-disease tag —
+#   Compound-Gene, Gene-Disease, ...). Not every column makes sense for
+#   every triple; for example, ``sensitive`` (rare-disease tag --
 #   GAP 9.6) is only meaningful when ``tail_type == "Disease"``. Using
 #   ``total=False`` lets us declare all possible columns without
-#   forcing every row to populate every field — the loader's own
+#   forcing every row to populate every field -- the loader's own
 #   runtime checks (BUG 15.3) enforce the required columns.
 # =============================================================================
 
@@ -314,7 +314,7 @@ class DRKGRecord(TypedDict, total=False):
         ``relation_dst_type``, ``evidence_strength``, ``source_confidence``,
         ``head_uri``, ``tail_uri``) are ``str``.
       * ``sensitive`` is ``bool`` and is only set when the tail is a
-        rare disease (GAP 9.6 — GDPR/HIPAA-aware tagging).
+        rare disease (GAP 9.6 -- GDPR/HIPAA-aware tagging).
       * ``_provenance`` is a ``dict[str, Any]`` and MUST contain every
         key in ``DRKG_PROVENANCE_KEYS`` (BUG 16.1).
       * ``_license`` and ``_attribution`` propagate the DRKG MIT
@@ -335,11 +335,15 @@ class DRKGRecord(TypedDict, total=False):
     tail_type: str            # "Disease"
     tail_id: str              # "DOID:1438"
 
-    # ── Parsed relation components (BUG 1.5 — uses config.split_drkg_relation)
-    relation_source: str      # "Hetionet"  (also: DRUGBANK, GNBR, bioarx, …)
+    # ── Parsed relation components (BUG 1.5 -- uses config.split_drkg_relation)
+    relation_source: str      # "Hetionet"  (also: DRUGBANK, GNBR, bioarx, ...)
     relation_name: str        # "CtD"       (the abbreviation, NOT a verb)
-    relation_dst_type: str    # "Compound:Disease" (the third token, kept for
-                              #   cross-check against head_type/tail_type — BUG 3.5)
+    relation_dst_type: str    # "compound:disease" (the third token, LOWERCASED
+                              #   per P2-021 root fix — canonical case is
+                              #   config.DRKG_RELATION_CODE_CANONICAL_CASE="lower".
+                              #   head_type/tail_type stay PascalCase for
+                              #   EDGE_EVIDENCE_STRENGTH lookup; the BUG 3.5
+                              #   cross-check compares lowercased versions.)
     relation_human_name: str  # "Compound-treats-Disease"  (GAP 3.7)
 
     # ── Evidence + source-confidence tagging (GAP 3.8, GUARD 3.10) ────
@@ -373,7 +377,7 @@ class DRKGValidationResult(TypedDict, total=False):
     test suite) can rely on a stable schema. Any new key added here
     requires a ``SCHEMA_VERSION`` bump in ``drkg_loader.py``.
 
-    Fixes: BUG 2.4 — replaces the old untyped ``Dict[str, Any]`` return.
+    Fixes: BUG 2.4 -- replaces the old untyped ``Dict[str, Any]`` return.
     """
 
     # ── Counts ────────────────────────────────────────────────────────
@@ -410,7 +414,7 @@ class DRKGValidationResult(TypedDict, total=False):
 
 
 # Keys that every DRKG DataFrame's ``df.attrs['provenance']`` MUST contain
-# (BUG 16.1 — mirrors ``PROVENANCE_KEYS`` for UniProt). Used by
+# (BUG 16.1 -- mirrors ``PROVENANCE_KEYS`` for UniProt). Used by
 # ``parse_drkg_tsv`` to assert provenance completeness before returning.
 DRKG_PROVENANCE_KEYS: tuple[str, ...] = (
     "source",
@@ -429,8 +433,8 @@ DRKG_PROVENANCE_KEYS: tuple[str, ...] = (
 
 
 # =============================================================================
-# DrugBank schemas — added by drugbank_parser v2.0 audit fix
-# (drugbank_parser_fix_prompt.md — Domain 2 Design, FIX 2.2).
+# DrugBank schemas -- added by drugbank_parser v2.0 audit fix
+# (drugbank_parser_fix_prompt.md -- Domain 2 Design, FIX 2.2).
 #
 # These TypedDicts describe the *shape* of the records emitted by
 # ``drugos_graph.drugbank_parser.parse_drugbank_xml`` /
@@ -443,13 +447,13 @@ DRKG_PROVENANCE_KEYS: tuple[str, ...] = (
 # ``SCHEMA_VERSION`` bump in ``drugbank_parser.py`` (FIX 7.2 / FIX 14.11).
 #
 # RATIONALE for ``total=False``:
-#   DrugBank emits a heterogeneous set of compounds — small molecules,
-#   biotech drugs, antibodies, peptides — and not every field makes sense
+#   DrugBank emits a heterogeneous set of compounds -- small molecules,
+#   biotech drugs, antibodies, peptides -- and not every field makes sense
 #   for every drug. For example, ``smiles`` is empty for biotech drugs
 #   (FIX 3.6), ``approval_year`` is None for investigational drugs (FIX
 #   3.1), and ``withdrawn`` is False for the vast majority of drugs (FIX
 #   3.11). Using ``total=False`` lets us declare all possible fields
-#   without forcing every record to populate every field — the loader's
+#   without forcing every record to populate every field -- the loader's
 #   own runtime checks enforce the required fields.
 # =============================================================================
 
@@ -457,7 +461,7 @@ DRKG_PROVENANCE_KEYS: tuple[str, ...] = (
 class DrugInteraction(TypedDict, total=False):
     """A drug-drug interaction parsed from DrugBank <drug-interaction>.
 
-    Fixes FIX[(2.13)] — typed shape for the ``interactions`` list field
+    Fixes FIX[(2.13)] -- typed shape for the ``interactions`` list field
     on every ``DrugRecord``. Replaces the previous untyped
     ``List[Dict]``.
     """
@@ -486,7 +490,7 @@ class DrugBankRecord(TypedDict, total=False):
       * Plural nouns (``targets``, ``enzymes``, ``carriers``,
         ``transporters``, ``atc_codes``, ``categories``,
         ``external_ids``, ``interactions``, ``atc_hierarchy``) are ALWAYS
-        ``list`` — never a polymorphic ``str | list[str]``.
+        ``list`` -- never a polymorphic ``str | list[str]``.
       * Boolean flags (``approved``, ``investigational``, ``withdrawn``,
         ``terminated``, ``illicit``, ``sensitive``, ``_valid``) are
         ``bool``.
@@ -518,38 +522,38 @@ class DrugBankRecord(TypedDict, total=False):
     # ── Regulatory status ──────────────────────────────────────────────
     approved: bool
     investigational: bool
-    withdrawn: bool                  # FIX 3.11 — withdrawn drugs must NOT be recommended
-    terminated: bool                 # FIX 3.11 — clinical trial terminated
-    illicit: bool                    # FIX 3.11 — illicit market use
-    approval_year: int               # FIX 3.1 — for temporal split (training_data)
+    withdrawn: bool                  # FIX 3.11 -- withdrawn drugs must NOT be recommended
+    terminated: bool                 # FIX 3.11 -- clinical trial terminated
+    illicit: bool                    # FIX 3.11 -- illicit market use
+    approval_year: int               # FIX 3.1 -- for temporal split (training_data)
 
     # ── Related entities (always list) ─────────────────────────────────
-    targets: List[Any]               # List[DrugTarget] — drug targets (FIX 3.2)
-    enzymes: List[Any]               # List[DrugTarget] — metabolic enzymes (FIX 3.3)
-    carriers: List[Any]              # List[DrugTarget] — plasma protein carriers (FIX 3.3)
-    transporters: List[Any]          # List[DrugTarget] — membrane transporters (FIX 3.3)
+    targets: List[Any]               # List[DrugTarget] -- drug targets (FIX 3.2)
+    enzymes: List[Any]               # List[DrugTarget] -- metabolic enzymes (FIX 3.3)
+    carriers: List[Any]              # List[DrugTarget] -- plasma protein carriers (FIX 3.3)
+    transporters: List[Any]          # List[DrugTarget] -- membrane transporters (FIX 3.3)
 
     # ── Classifications ────────────────────────────────────────────────
-    atc_codes: List[Any]             # List[Dict[str, Any]] — ATC hierarchy (FIX 3.7)
-    atc_hierarchy: List[Any]         # alias — full hierarchy with level info
+    atc_codes: List[Any]             # List[Dict[str, Any]] -- ATC hierarchy (FIX 3.7)
+    atc_hierarchy: List[Any]         # alias -- full hierarchy with level info
     categories: List[str]            # drug categories (FIX 3.10)
 
     # ── Cross-database identifiers (always dict[str, list[str]]) ──────
-    external_ids: Dict[str, Any]     # FIX 5.8 — multi-valued
+    external_ids: Dict[str, Any]     # FIX 5.8 -- multi-valued
 
     # ── Drug-drug interactions (always list[DrugInteraction]) ─────────
     interactions: List[Any]
 
     # ── Privacy / compliance ───────────────────────────────────────────
-    sensitive: bool                  # FIX 9.8 — rare-disease / PII flag
+    sensitive: bool                  # FIX 9.8 -- rare-disease / PII flag
 
     # ── Provenance + compliance (FIX 14.1, FIX 16.1) ──────────────────
     _provenance: Dict[str, Any]
     _source: str                     # always "drugbank"
     _license: str                    # always "CC BY-NC 4.0 (academic)"
     _attribution: str                # Wishart et al. citation
-    _valid: bool                     # FIX 2.4 — post_init validation result
-    _canonical_id_source: str        # FIX 2.1 — "inchikey" | "drugbank_id (no inchikey)"
+    _valid: bool                     # FIX 2.4 -- post_init validation result
+    _canonical_id_source: str        # FIX 2.1 -- "inchikey" | "drugbank_id (no inchikey)"
 
 
 class DrugBankNode(TypedDict, total=False):
@@ -571,7 +575,7 @@ class DrugBankNode(TypedDict, total=False):
     id: str                          # canonical PK (inchikey or drugbank_id fallback)
     drugbank_id: str                 # always emitted for entity_resolver backward compat
     _canonical_id_source: str        # "inchikey" | "drugbank_id (no inchikey)"
-    drugbank_uri: str                # identifiers.org URI (FAIR — FIX 14.3)
+    drugbank_uri: str                # identifiers.org URI (FAIR -- FIX 14.3)
 
     # ── Chemistry ───────────────────────────────────────────────────────
     name: str
@@ -587,39 +591,39 @@ class DrugBankNode(TypedDict, total=False):
     mechanism_of_action: str
     mechanism_of_action_truncated: bool
     mechanism_of_action_full_sha256: str
-    toxicity: str                    # FIX 3.14 — was parsed but not exported
+    toxicity: str                    # FIX 3.14 -- was parsed but not exported
     toxicity_truncated: bool
     toxicity_full_sha256: str
-    pharmacodynamics: str            # FIX 3.15 — was parsed but not exported
+    pharmacodynamics: str            # FIX 3.15 -- was parsed but not exported
     pharmacodynamics_truncated: bool
     pharmacodynamics_full_sha256: str
 
     # ── Classifications ────────────────────────────────────────────────
     atc_codes: str                   # "|"-joined for entity_resolver (FIX 2.5)
     atc_hierarchy: List[Any]         # full hierarchy (FIX 3.7)
-    categories: List[str]            # FIX 3.10 — JSON-serializable list
+    categories: List[str]            # FIX 3.10 -- JSON-serializable list
 
     # ── Regulatory status (FIX 3.11) ───────────────────────────────────
     approved: bool
     investigational: bool
-    withdrawn: bool                  # FIX 3.11 / FIX G.4 — patient safety
+    withdrawn: bool                  # FIX 3.11 / FIX G.4 -- patient safety
     terminated: bool
     illicit: bool
-    approval_year: int               # FIX 3.1 — for temporal split
+    approval_year: int               # FIX 3.1 -- for temporal split
 
     # ── Cross-references (FIX 3.16) ────────────────────────────────────
     pubchem_cid: str                 # backward-compat: first CID
-    pubchem_cids: List[str]          # FIX 5.8 — all CIDs (stereoisomers)
+    pubchem_cids: List[str]          # FIX 5.8 -- all CIDs (stereoisomers)
     chembl_id: str
     chebi_id: str
     pubchem_uri: str                 # FAIR identifiers.org URI
 
     # ── Privacy / compliance ───────────────────────────────────────────
-    sensitive: bool                  # FIX 9.8 — rare-disease flag
+    sensitive: bool                  # FIX 9.8 -- rare-disease flag
 
     # ── Graph metadata ─────────────────────────────────────────────────
     entity_type: str                 # always "Compound"
-    target_uniprot_ids: List[str]    # FIX G.6 — for downstream validation
+    target_uniprot_ids: List[str]    # FIX G.6 -- for downstream validation
 
     # ── Provenance + compliance (FIX 14.1, FIX 16.1) ──────────────────
     _provenance: Dict[str, Any]
@@ -661,13 +665,13 @@ class DrugBankEdge(TypedDict, total=False):
     gene_name_confidence: str        # "high" | "low" (FIX 3.8)
     organism: str                    # scientific name
     ncbi_taxid: int                  # NCBI TaxID
-    non_human: bool                  # FIX 3.2 — True if organism != human
-    unknown_target: bool             # FIX 3.19 — no <polypeptide> element
+    non_human: bool                  # FIX 3.2 -- True if organism != human
+    unknown_target: bool             # FIX 3.19 -- no <polypeptide> element
     uniprot_id_source: str           # "Swiss-Prot" | "TrEMBL" | "" (FIX 3.5, FIX 3.18)
     polypeptide_source: str          # alias for uniprot_id_source
 
     # ── Confidence / evidence (FIX 2.8) ────────────────────────────────
-    confidence: float                # 0.0–1.0
+    confidence: float                # 0.0-1.0
     evidence_strength: str           # "curated" | "unreviewed" | "low"
 
     # ── Dedup / idempotency (FIX 3.20, FIX 7.9, FIX G.7) ──────────────
@@ -676,7 +680,7 @@ class DrugBankEdge(TypedDict, total=False):
     # ── Drug-drug interaction metadata (FIX 3.9) ───────────────────────
     description: str                 # interaction description
     severity: str                    # "contraindicated" | "major" | "moderate" | "unknown"
-    orphan_interaction: bool         # FIX 5.16 — partner drug not in same XML
+    orphan_interaction: bool         # FIX 5.16 -- partner drug not in same XML
 
     # ── FAIR URIs (FIX 14.3) ───────────────────────────────────────────
     head_uri: str                    # identifiers.org URI for source
@@ -691,7 +695,7 @@ class DrugBankEdge(TypedDict, total=False):
 
 
 # Keys that every DrugBank record's ``_provenance`` MUST contain
-# (FIX 16.1 — mirrors ``PROVENANCE_KEYS`` for UniProt and
+# (FIX 16.1 -- mirrors ``PROVENANCE_KEYS`` for UniProt and
 # ``DRKG_PROVENANCE_KEYS`` for DRKG). Used by ``_validate_record`` in
 # ``drugbank_parser`` to assert provenance completeness before returning.
 DRUGBANK_PROVENANCE_KEYS: tuple[str, ...] = (
@@ -794,8 +798,8 @@ DRUGBANK_EDGE_SCHEMA: Dict[str, type] = {
 
 
 # =============================================================================
-# ChEMBL schemas — added by chembl_loader v2.0 institutional-grade audit fix
-# (chembl_loader — Domain 2 Design).
+# ChEMBL schemas -- added by chembl_loader v2.0 institutional-grade audit fix
+# (chembl_loader -- Domain 2 Design).
 #
 # These TypedDicts describe the *shape* of the records emitted by
 # ``drugos_graph.chembl_loader.parse_chembl_activities`` and the edge
@@ -804,10 +808,10 @@ DRUGBANK_EDGE_SCHEMA: Dict[str, type] = {
 # MUST be accompanied by a ``SCHEMA_VERSION`` bump in ``chembl_loader.py``.
 #
 # RATIONALE for ``total=False``:
-#   ChEMBL activities are heterogeneous — some have SMILES, some don't;
+#   ChEMBL activities are heterogeneous -- some have SMILES, some don't;
 #   some have UniProt accessions via target_components, some don't. Using
 #   ``total=False`` lets us declare all possible columns without forcing
-#   every row to populate every field — the loader's own runtime checks
+#   every row to populate every field -- the loader's own runtime checks
 #   enforce the required columns.
 # =============================================================================
 
@@ -837,7 +841,7 @@ class ChEMBLActivityRecord(TypedDict, total=False):
     target_chembl_id: str            # e.g. "CHEMBL218"
     target_name: str                 # e.g. "Cyclooxygenase-1"
     target_type: str                 # e.g. "SINGLE PROTEIN"
-    uniprot_accession: str           # e.g. "P23219" — from target_components
+    uniprot_accession: str           # e.g. "P23219" -- from target_components
     component_description: str       # target component description
 
     # ── Activity measurement ────────────────────────────────────────────
@@ -863,7 +867,7 @@ class ChEMBLActivityRecord(TypedDict, total=False):
 class ChEMBLEdgeRecord(TypedDict, total=False):
     """An edge record for the knowledge graph, derived from a ChEMBL activity.
 
-    Each record represents a Compound→Protein relationship with properties
+    Each record represents a Compound->Protein relationship with properties
     including the activity measurement, relation type, and resolution path.
 
     Required fields (enforced by the loader at runtime):
@@ -911,8 +915,8 @@ CHEMBL_PROVENANCE_KEYS: tuple[str, ...] = (
 
 
 # =============================================================================
-# STRING schemas — added by string_loader v1.0 institutional-grade audit fix
-# (master_prompt_fix_string_loader.md — Sections 2, 4, 7, 15, 16).
+# STRING schemas -- added by string_loader v1.0 institutional-grade audit fix
+# (master_prompt_fix_string_loader.md -- Sections 2, 4, 7, 15, 16).
 #
 # These TypedDicts and the STRING_PROVENANCE_KEYS tuple mirror the
 # ChEMBL pattern. They are the **single source of truth** for the field
@@ -959,16 +963,16 @@ class StringPPIRecord(TypedDict, total=False):
 
 
 class StringEdgeProps(TypedDict, total=False):
-    """The ``props`` sub-dict on every STRING Protein→Protein edge record.
+    """The ``props`` sub-dict on every STRING Protein->Protein edge record.
 
     Backward-compatibility contract (master prompt Rule R3): the original
-    six keys — ``source, combined_score, src_id_resolved, dst_id_resolved,
-    src_ensembl_original, dst_ensembl_original`` — MUST remain a subset of
+    six keys -- ``source, combined_score, src_id_resolved, dst_id_resolved,
+    src_ensembl_original, dst_ensembl_original`` -- MUST remain a subset of
     this dict. Bump SCHEMA_VERSION if any of those six keys is removed or
     renamed (master prompt Rule R6).
     """
 
-    # ── Legacy keys (preserved verbatim from v0 — Rule R2/R3) ─────────
+    # ── Legacy keys (preserved verbatim from v0 -- Rule R2/R3) ─────────
     source: str                                # "STRING" (legacy alias of _source)
     combined_score: Optional[int]              # None for missing; never 0-sentinel
     src_id_resolved: bool                      # True if src translated to UniProt AC
@@ -1009,7 +1013,7 @@ class StringEdgeProps(TypedDict, total=False):
 class StringEdgeRecord(TypedDict, total=False):
     """An edge record for the knowledge graph, derived from a STRING PPI.
 
-    Each record represents a Protein→Protein ``interacts_with`` relationship.
+    Each record represents a Protein->Protein ``interacts_with`` relationship.
     The endpoints are UniProt accessions (e.g. "P23219") when the crosswalk
     resolved the Ensembl protein ID; otherwise the original Ensembl ID is
     retained and ``props['id_resolved']`` is False (master prompt S3-08).
@@ -1116,13 +1120,13 @@ class StringValidationReport(TypedDict, total=False):
 # (master prompt I7-03 / D2-06 / L16-01).
 #
 # Shape mirrors CHEMBL_PROVENANCE_KEYS but with STRING-specific extras:
-#   * ``string_version``        — STRING release (e.g. "12.0")
-#   * ``score_threshold``       — the combined_score cutoff applied
-#   * ``organism_filter``       — the taxid (e.g. 9606)
-#   * ``resolution_method``     — "crosswalk_with_provenance"
-#   * ``row_count_in / out``    — counts before/after filtering
-#   * ``crosswalk_version``     — BUILTIN_TABLE_VERSION
-#   * ``load_id``               — process-cached UUID for rollback
+#   * ``string_version``        -- STRING release (e.g. "12.0")
+#   * ``score_threshold``       -- the combined_score cutoff applied
+#   * ``organism_filter``       -- the taxid (e.g. 9606)
+#   * ``resolution_method``     -- "crosswalk_with_provenance"
+#   * ``row_count_in / out``    -- counts before/after filtering
+#   * ``crosswalk_version``     -- BUILTIN_TABLE_VERSION
+#   * ``load_id``               -- process-cached UUID for rollback
 STRING_PROVENANCE_KEYS: tuple[str, ...] = (
     "source",
     "source_file",
@@ -1149,8 +1153,8 @@ STRING_PROVENANCE_KEYS: tuple[str, ...] = (
 
 
 # =============================================================================
-# STITCH schemas — added by stitch_loader v1.1.0 institutional-grade audit fix
-# (master_prompt_fix_stitch_loader.md — Domains 2, 4, 7, 15, 16).
+# STITCH schemas -- added by stitch_loader v1.1.0 institutional-grade audit fix
+# (master_prompt_fix_stitch_loader.md -- Domains 2, 4, 7, 15, 16).
 #
 # These TypedDicts and the STITCH_PROVENANCE_KEYS tuple mirror the STRING
 # pattern. They are the single source of truth for the field names emitted
@@ -1178,7 +1182,7 @@ class StitchCPIRecord(TypedDict, total=False):
       * ``CIDm`` prefix  -> stereo-specific form (e.g. S-warfarin, 5x potent)
       * ``CIDs`` prefix  -> racemic mixture (e.g. commercial warfarin)
       * The bare CID (e.g. "00002244") is preserved in ``chemical_cid`` but
-        MUST NOT be used as the sole identifier — ``stitch_chemical_id``
+        MUST NOT be used as the sole identifier -- ``stitch_chemical_id``
         preserves the full ``CIDm00002244`` form.
     """
 
@@ -1213,7 +1217,7 @@ class StitchEdgeProps(TypedDict, total=False):
     SCHEMA_VERSION if any of those five keys is removed or renamed (Rule R6).
     """
 
-    # ── Legacy keys (preserved verbatim from v0 — Rule R2/R3) ─────────
+    # ── Legacy keys (preserved verbatim from v0 -- Rule R2/R3) ─────────
     source: str                                # "STITCH" (legacy alias of _source)
     score: Optional[int]                       # combined_score; None for missing
     action: str                                # raw action string (may be "")
@@ -1357,15 +1361,15 @@ class StitchValidationReport(TypedDict, total=False):
 # (master prompt BUG-7.3 / BUG-16.4 / GAP-16.4 / L16-01).
 #
 # Shape mirrors STRING_PROVENANCE_KEYS but with STITCH-specific extras:
-#   * ``stitch_version``        — STITCH release (e.g. "5.0")
-#   * ``score_threshold``       — the combined_score cutoff applied
-#   * ``organism_filter``       — the taxid (e.g. 9606)
-#   * ``resolution_method``     — "crosswalk_with_provenance"
-#   * ``row_count_in / out``    — counts before/after filtering
-#   * ``crosswalk_version``     — BUILTIN_TABLE_VERSION
-#   * ``load_id``               — process-cached UUID for rollback
-#   * ``input_sha256``          — SHA-256 of source file (alias of source_sha256)
-#   * ``output_sha256``         — SHA-256 of sorted edges (idempotency check)
+#   * ``stitch_version``        -- STITCH release (e.g. "5.0")
+#   * ``score_threshold``       -- the combined_score cutoff applied
+#   * ``organism_filter``       -- the taxid (e.g. 9606)
+#   * ``resolution_method``     -- "crosswalk_with_provenance"
+#   * ``row_count_in / out``    -- counts before/after filtering
+#   * ``crosswalk_version``     -- BUILTIN_TABLE_VERSION
+#   * ``load_id``               -- process-cached UUID for rollback
+#   * ``input_sha256``          -- SHA-256 of source file (alias of source_sha256)
+#   * ``output_sha256``         -- SHA-256 of sorted edges (idempotency check)
 STITCH_PROVENANCE_KEYS: tuple[str, ...] = (
     "source",
     "source_file",
@@ -1392,15 +1396,15 @@ STITCH_PROVENANCE_KEYS: tuple[str, ...] = (
 
 
 # =============================================================================
-# SIDER schemas — added by sider_loader v1.0.0 institutional-grade audit fix
-# (master_prompt — Domains 2/4/7/15/16).
+# SIDER schemas -- added by sider_loader v1.0.0 institutional-grade audit fix
+# (master_prompt -- Domains 2/4/7/15/16).
 #
 # These TypedDicts document the contract of every SIDER output record. The
 # loader emits dicts that match these TypedDicts at runtime; static type
 # checkers (mypy/pyright) can verify the contract at development time.
 #
 # Backward-compatibility contract (master prompt Rule R3): the original
-# five fields — ``src_id, dst_id, src_type, dst_type, rel_type, props`` —
+# five fields -- ``src_id, dst_id, src_type, dst_type, rel_type, props`` --
 # MUST remain a subset of every edge record. Bump SIDER_SCHEMA_VERSION if
 # any of those five fields is removed or renamed (Rule R6).
 # =============================================================================
@@ -1409,7 +1413,7 @@ STITCH_PROVENANCE_KEYS: tuple[str, ...] = (
 class SiderSideEffectRow(TypedDict, total=False):
     """A single parsed row from SIDER ``meddra_all_se.tsv.gz``.
 
-    SIDER v2023 file format (tab-separated, no header — SIDER ships a
+    SIDER v2023 file format (tab-separated, no header -- SIDER ships a
     header-less file):
 
         CIDm00002244\tCIDs00002244\tC0018790\tPT\tC0018790\tRash
@@ -1428,13 +1432,13 @@ class SiderSideEffectRow(TypedDict, total=False):
     ======  =======================  =============  ====================================
 
     Plus derived columns added by the parser:
-      * ``pubchem_cid``       — Int64, the integer PubChem CID (CIDm/CIDs
+      * ``pubchem_cid``       -- Int64, the integer PubChem CID (CIDm/CIDs
                                 prefix stripped, leading zeros stripped).
                                 Cross-loader canonical Compound ID.
-      * ``stereochemistry``   — "flat" / "stereo" / "both" (D3.2).
-      * ``stitch_id_raw``     — the original (CIDm/CIDs) string.
-      * ``_source_row``       — 1-indexed line number in the source TSV.
-      * ``_provenance``       — see SIDER_PROVENANCE_KEYS.
+      * ``stereochemistry``   -- "flat" / "stereo" / "both" (D3.2).
+      * ``stitch_id_raw``     -- the original (CIDm/CIDs) string.
+      * ``_source_row``       -- 1-indexed line number in the source TSV.
+      * ``_provenance``       -- see SIDER_PROVENANCE_KEYS.
     """
 
     stitch_id_flat: str          # e.g. "CIDm00002244"
@@ -1448,7 +1452,7 @@ class SiderSideEffectRow(TypedDict, total=False):
     pubchem_cid: int             # canonical int Compound ID
     stereochemistry: str         # "flat" / "stereo" / "both"
     stitch_id_raw: str           # original CIDm/CIDs string
-    drug_cid: str                # DEPRECATED — zero-padded str alias of pubchem_cid
+    drug_cid: str                # DEPRECATED -- zero-padded str alias of pubchem_cid
 
     # Provenance & compliance
     _source_row: int
@@ -1478,7 +1482,7 @@ class SiderNodeProps(TypedDict, total=False):
 class SiderNodeRecord(TypedDict, total=False):
     """A node record for the knowledge graph, derived from a SIDER side effect.
 
-    Each record represents a MedDRA_Term node — the canonical adverse-event
+    Each record represents a MedDRA_Term node -- the canonical adverse-event
     vocabulary term per ``config.CORE_NODE_TYPES``.
 
     Required top-level fields (enforced by the loader at runtime):
@@ -1499,15 +1503,15 @@ class SiderNodeRecord(TypedDict, total=False):
 
 
 class SiderEdgeProps(TypedDict, total=False):
-    """The ``props`` sub-dict on every SIDER Compound→MedDRA_Term edge record.
+    """The ``props`` sub-dict on every SIDER Compound->MedDRA_Term edge record.
 
     Backward-compatibility contract (master prompt Rule R3): the original
-    three keys — ``source, meddra_type, umls_id_label`` — MUST remain a
+    three keys -- ``source, meddra_type, umls_id_label`` -- MUST remain a
     subset of this dict. Bump SIDER_SCHEMA_VERSION if any of those three
     keys is removed or renamed (Rule R6).
     """
 
-    # ── Legacy keys (preserved verbatim from v0 — Rule R3) ─────────────
+    # ── Legacy keys (preserved verbatim from v0 -- Rule R3) ─────────────
     source: str                                # "SIDER"
     meddra_type: Optional[str]                 # PT / LLT / HLT / HLGT / SOC, or None
     umls_id_label: Optional[str]               # UMLS CUI of label, or None
@@ -1547,16 +1551,16 @@ class SiderEdgeProps(TypedDict, total=False):
 class SiderEdgeRecord(TypedDict, total=False):
     """An edge record for the knowledge graph, derived from a SIDER side effect.
 
-    Each record represents a Compound→MedDRA_Term relationship
+    Each record represents a Compound->MedDRA_Term relationship
     (``causes_adverse_event``). The Compound endpoint is a PubChem CID
     (int); the MedDRA_Term endpoint is a UMLS CUI prefixed with
-    ``"MedDRA:"`` (per D15.2 — prevents collision with Disease UMLS CUIs).
+    ``"MedDRA:"`` (per D15.2 -- prevents collision with Disease UMLS CUIs).
 
     Required top-level fields (enforced by the loader at runtime):
         id, src_id, dst_id, src_type, dst_type, rel_type, props
     """
 
-    # ── Edge identity (deterministic — D2.8) ────────────────────────────
+    # ── Edge identity (deterministic -- D2.8) ────────────────────────────
     id: str                          # sha1(src_id|dst_id|rel_type|SIDER)[:16]
 
     # ── Edge endpoints ──────────────────────────────────────────────────
@@ -1577,17 +1581,17 @@ class SiderEdgeRecord(TypedDict, total=False):
 
 
 class SiderLegacyEdgeRecord(TypedDict, total=False):
-    """A LEGACY edge record (Compound→Side Effect, causes_side_effect).
+    """A LEGACY edge record (Compound->Side Effect, causes_side_effect).
 
     Kept for migration-period dual-write (Phase 0.3 / D2.10). New code
     SHOULD use ``SiderEdgeRecord`` (canonical). This legacy record will
     be removed in v2.0.
 
     The legacy record differs from the canonical record in:
-      * ``dst_type`` is ``"Side Effect"`` (with space) — NOT ``"MedDRA_Term"``.
-      * ``rel_type`` is ``"causes_side_effect"`` — NOT ``"causes_adverse_event"``.
+      * ``dst_type`` is ``"Side Effect"`` (with space) -- NOT ``"MedDRA_Term"``.
+      * ``rel_type`` is ``"causes_side_effect"`` -- NOT ``"causes_adverse_event"``.
       * ``id`` is suffixed with ``"|SIDER_LEGACY"`` so canonical and legacy
-        edges have different deterministic IDs (D2.8 — prevents id
+        edges have different deterministic IDs (D2.8 -- prevents id
         collision in MERGE).
     """
 
@@ -1679,14 +1683,14 @@ class SiderValidationReport(TypedDict, total=False):
 # (master prompt BUG-7.3 / BUG-16.4 / GAP-16.4 / L16-01).
 #
 # Shape mirrors STITCH_PROVENANCE_KEYS but with SIDER-specific extras:
-#   * ``sider_version``        — SIDER release (e.g. "2023-10-25")
-#   * ``meddra_version``       — MedDRA vocabulary version (e.g. "26.0")
-#   * ``meddra_type_filter``   — the meddra_type cutoff applied (default "PT")
-#   * ``stereo_mode``          — "flat" / "stereo" / "both"
-#   * ``row_count_in / out``   — counts before/after filtering
-#   * ``load_id``              — process-cached UUID for rollback
-#   * ``input_sha256``         — SHA-256 of source file (alias of source_sha256)
-#   * ``output_sha256``        — SHA-256 of sorted edges (idempotency check)
+#   * ``sider_version``        -- SIDER release (e.g. "2023-10-25")
+#   * ``meddra_version``       -- MedDRA vocabulary version (e.g. "26.0")
+#   * ``meddra_type_filter``   -- the meddra_type cutoff applied (default "PT")
+#   * ``stereo_mode``          -- "flat" / "stereo" / "both"
+#   * ``row_count_in / out``   -- counts before/after filtering
+#   * ``load_id``              -- process-cached UUID for rollback
+#   * ``input_sha256``         -- SHA-256 of source file (alias of source_sha256)
+#   * ``output_sha256``        -- SHA-256 of sorted edges (idempotency check)
 SIDER_PROVENANCE_KEYS: tuple[str, ...] = (
     "source",
     "source_file",
@@ -1712,8 +1716,8 @@ SIDER_PROVENANCE_KEYS: tuple[str, ...] = (
 
 
 # =============================================================================
-# OpenTargets schemas — added by opentargets_loader v2.0 institutional-grade
-# audit fix (opentargets_loader_repair_prompt.md — Section 2.6).
+# OpenTargets schemas -- added by opentargets_loader v2.0 institutional-grade
+# audit fix (opentargets_loader_repair_prompt.md -- Section 2.6).
 #
 # These TypedDicts describe the records produced and consumed by the
 # OpenTargets loader. They are the **single source of truth** for the
@@ -1731,7 +1735,7 @@ SIDER_PROVENANCE_KEYS: tuple[str, ...] = (
 # drug-target-disease triples feeding the Graph Transformer's confidence
 # training objective. If this loader silently drops 100% of records
 # (the v1 SCI-1 condition), the model trains on an empty OpenTargets
-# signal — worse than no signal. These schemas MUST match the real
+# signal -- worse than no signal. These schemas MUST match the real
 # OpenTargets JSONL format exactly.
 #
 # Fixes: SCI-1 (flat schema), SCI-2 (datasourceId+datatypeId),
@@ -1750,35 +1754,35 @@ class OpenTargetsActivityRecord(TypedDict, total=False):
     ``opentargets_to_node_records``.
 
     The flat-schema fields mirror the REAL OpenTargets 25.03 JSONL
-    (NOT the fabricated nested schema in v1 — fixes SCI-1).
+    (NOT the fabricated nested schema in v1 -- fixes SCI-1).
 
     Fields
     ------
     drug_id : str
-        CHEMBLxxxxx — validated by ``^CHEMBL\\d+$`` (SCI-4).
+        CHEMBLxxxxx -- validated by ``^CHEMBL\\d+$`` (SCI-4).
     target_id : str
-        ENSG\\d{11} — validated by ``^ENSG\\d{11}$`` (SCI-10); organism-filtered
+        ENSG\\d{11} -- validated by ``^ENSG\\d{11}$`` (SCI-10); organism-filtered
         to human (targetTaxId == 9606, SCI-7).
     disease_id : str
         EFO_xxxxxxxx / MONDO_xxxxxxxx / HP_xxxxxxxx / MP_xxxxxxxx /
-        Orphanet_xxxxx / SNOMEDCT_xxxxx / OTAR_xxxxxxxx — validated against
+        Orphanet_xxxxx / SNOMEDCT_xxxxx / OTAR_xxxxxxxx -- validated against
         ``OPENTARGETS_DISEASE_ID_PATTERNS`` (DQ-11). Empty string if the
         record has no disease association.
     drug_name : str
-        Optional drug display name (sanitized for Cypher — SEC-4).
+        Optional drug display name (sanitized for Cypher -- SEC-4).
     disease_name : str
-        Optional disease display name (sanitized for Cypher — SEC-4).
+        Optional disease display name (sanitized for Cypher -- SEC-4).
     score : float
         Validated float in [0, 1] (SCI-5, DQ-8). NaN/Infinity/bool rejected.
     evidence_score : float
-        Alias of ``score`` — OpenTargets emits both ``score`` and
+        Alias of ``score`` -- OpenTargets emits both ``score`` and
         ``evidenceScore``; we read either.
     datasource_id : str
         e.g. "chembl", "evrot", "crispr", "ot_genetics_portal" (SCI-2).
     datatype_id : str
         e.g. "known_drug", "genetic_association", "literature" (SCI-2).
     target_tax_id : int
-        NCBI Taxonomy ID — 9606 for human (SCI-7). Default 9606 when absent.
+        NCBI Taxonomy ID -- 9606 for human (SCI-7). Default 9606 when absent.
     _provenance : dict
         Full provenance dict with all ``OPENTARGETS_PROVENANCE_KEYS`` (LIN-1..5).
     _source : str
@@ -1791,17 +1795,17 @@ class OpenTargetsActivityRecord(TypedDict, total=False):
         Always matches ``SCHEMA_VERSION`` (COMP-3).
     """
 
-    # Identity (flat — fixes SCI-1)
-    drug_id: str           # CHEMBLxxxxx — validated by _RE_CHEMBL_ID
-    target_id: str         # ENSG\d{11}  — validated; organism-filtered
+    # Identity (flat -- fixes SCI-1)
+    drug_id: str           # CHEMBLxxxxx -- validated by _RE_CHEMBL_ID
+    target_id: str         # ENSG\d{11}  -- validated; organism-filtered
     disease_id: str        # EFO/MONDO/HP/MP/Orphanet/SNOMED/OTAR
-    # Names (optional, sanitized — fixes SEC-4)
+    # Names (optional, sanitized -- fixes SEC-4)
     drug_name: str
     disease_name: str
-    # Scores (validated float in [0,1] — fixes SCI-5, DQ-8, COD-1..4)
+    # Scores (validated float in [0,1] -- fixes SCI-5, DQ-8, COD-1..4)
     score: float
-    evidence_score: float  # alias — OpenTargets emits both `score` and `evidenceScore`
-    # Evidence typing (real fields — fixes SCI-2)
+    evidence_score: float  # alias -- OpenTargets emits both `score` and `evidenceScore`
+    # Evidence typing (real fields -- fixes SCI-2)
     datasource_id: str     # "chembl", "evrot", "crispr", etc.
     datatype_id: str       # "known_drug", "genetic_association", "literature", etc.
     # Organism (fixes SCI-7)
@@ -1827,7 +1831,7 @@ class OpenTargetsEdgeRecord(TypedDict, total=False):
         Source node ID (always a ChEMBL Compound ID, e.g. "CHEMBL123").
     dst_id : str
         Destination node ID (UniProt AC for Protein, NCBI Gene ID for Gene,
-        UMLS CUI for Disease — depends on ``dst_type``).
+        UMLS CUI for Disease -- depends on ``dst_type``).
     src_type : str
         Always "Compound" (D15.8).
     dst_type : str
@@ -1905,13 +1909,13 @@ class OpenTargetsLoaderMetrics(TypedDict, total=False):
     n_diseases_unresolved : int
         Records where disease_id could not be crosswalked (orphan, flagged).
     n_edges_compound_targets_protein : int
-        Compound→targets→Protein edges emitted (after UniProt resolution).
+        Compound->targets->Protein edges emitted (after UniProt resolution).
     n_edges_compound_targets_gene : int
-        Compound→targets→Gene edges emitted (NCBI or ENSG-prefixed).
+        Compound->targets->Gene edges emitted (NCBI or ENSG-prefixed).
     n_edges_compound_disease : int
-        Compound→{binds|tested_for|associated_with}→Disease edges emitted.
+        Compound->{binds|tested_for|associated_with}->Disease edges emitted.
     n_edges_protein_disease : int
-        Protein→associated_with→Disease edges emitted.
+        Protein->associated_with->Disease edges emitted.
     n_edges_deduped : int
         Edges removed by the dedupe step (SCI-13).
     elapsed_seconds : float
@@ -1990,7 +1994,7 @@ class OpenTargetsValidationReport(TypedDict, total=False):
     is_valid : bool
         True if no errors (warnings are non-blocking).
     errors : list of str
-        Blocking errors — pipeline cannot continue in CLINICAL+ mode.
+        Blocking errors -- pipeline cannot continue in CLINICAL+ mode.
     warnings : list of str
         Non-blocking warnings (e.g. low resolution rate in DEV mode).
     metrics : OpenTargetsLoaderMetrics
@@ -2014,17 +2018,17 @@ class OpenTargetsValidationReport(TypedDict, total=False):
 #
 # Shape mirrors SIDER_PROVENANCE_KEYS / STITCH_PROVENANCE_KEYS but with
 # OpenTargets-specific extras:
-#   * ``opentargets_release``      — OpenTargets release (e.g. "25.03")
-#   * ``min_score``                — min-score threshold applied
-#   * ``per_evidence_type_thresholds`` — per-datasource thresholds
-#   * ``organism_filter``          — "9606" (human)
-#   * ``organism_match_mode``      — "exact_taxid" / "ensg_prefix"
-#   * ``row_count_in / out``       — counts before/after filtering
-#   * ``n_dead_letter``            — DLQ count for this run
-#   * ``crosswalk_version``        — ENSG→UniProt crosswalk version
-#   * ``disease_crosswalk_version`` — Disease→UMLS crosswalk version
-#   * ``resolution_rate``          — UniProt resolution rate (target edges)
-#   * ``resolution_path``          — How the ID was resolved (e.g.
+#   * ``opentargets_release``      -- OpenTargets release (e.g. "25.03")
+#   * ``min_score``                -- min-score threshold applied
+#   * ``per_evidence_type_thresholds`` -- per-datasource thresholds
+#   * ``organism_filter``          -- "9606" (human)
+#   * ``organism_match_mode``      -- "exact_taxid" / "ensg_prefix"
+#   * ``row_count_in / out``       -- counts before/after filtering
+#   * ``n_dead_letter``            -- DLQ count for this run
+#   * ``crosswalk_version``        -- ENSG->UniProt crosswalk version
+#   * ``disease_crosswalk_version`` -- Disease->UMLS crosswalk version
+#   * ``resolution_rate``          -- UniProt resolution rate (target edges)
+#   * ``resolution_path``          -- How the ID was resolved (e.g.
 #                                    "ensembl_to_uniprot_direct")
 OPENTARGETS_PROVENANCE_KEYS: tuple[str, ...] = (
     "source",
@@ -2053,8 +2057,8 @@ OPENTARGETS_PROVENANCE_KEYS: tuple[str, ...] = (
 
 
 # =============================================================================
-# ClinicalTrials schemas — added by clinicaltrials_loader v2.1.0
-# institutional-grade audit fix (PROMPT_fix_clinicaltrials_loader.md —
+# ClinicalTrials schemas -- added by clinicaltrials_loader v2.1.0
+# institutional-grade audit fix (PROMPT_fix_clinicaltrials_loader.md --
 # Domains 2 / 4 / 7 / 15 / 16).
 #
 # These TypedDicts describe the *shape* of the records emitted by
@@ -2069,7 +2073,7 @@ OPENTARGETS_PROVENANCE_KEYS: tuple[str, ...] = (
 #   sense for every trial; for example, ``why_stopped`` is only populated
 #   for terminated trials, and ``drug_mesh`` may be NULL when the MeSH
 #   crosswalk fails. Using ``total=False`` lets us declare all possible
-#   columns without forcing every row to populate every field — the loader's
+#   columns without forcing every row to populate every field -- the loader's
 #   own runtime checks (Issue 5.1, 5.10, 5.11) enforce the required columns.
 # =============================================================================
 
@@ -2090,7 +2094,7 @@ class ClinicalTrialTrialRecord(TypedDict, total=False):
         ``primary_outcome``, ``brief_title``, ``start_date``,
         ``completion_date``, ``drug_role``, ``description``) are ``str`` or
         ``Optional[str]``.
-      * ``enrollment`` is ``Optional[int]`` — AACT may store NULL for
+      * ``enrollment`` is ``Optional[int]`` -- AACT may store NULL for
         trials with unknown enrollment.
       * ``_provenance`` is a ``dict[str, Any]`` and MUST contain every key
         in ``CLINICALTRIALS_PROVENANCE_KEYS`` (Issue 16.1).
@@ -2130,7 +2134,7 @@ class ClinicalTrialTrialRecord(TypedDict, total=False):
     primary_outcome: Optional[str]       # GROUP_CONCAT of primary_outcomes.measure (Issue 3.9)
 
     # ── Drug / condition (one row per cross-join combination) ───────────
-    drug_name: str                       # interventions.name (Issue 15.10 — normalized)
+    drug_name: str                       # interventions.name (Issue 15.10 -- normalized)
     drug_mesh: Optional[str]             # interventions_mesh_terms.mesh_term (Issue 3.1, 3.14)
     drug_role: str                       # "experimental" | "comparator_or_placebo" (Issue 3.3)
     description: Optional[str]           # interventions.description (Issue 3.3)
@@ -2153,8 +2157,8 @@ class ClinicalTrialEdgeRecord(TypedDict, total=False):
     ``(Compound)-[:tested_for]->(Disease)`` edges in Neo4j.
 
     SCIENTIFIC CORRECTNESS CONTRACT (Issue 2.1, 14.1, 15.3):
-      * ``rel_type`` is ALWAYS ``"tested_for"`` — NEVER ``"clinical_trial"``
-        (DEPRECATED v0 name) and NEVER ``"treats"`` (FORBIDDEN — reserved
+      * ``rel_type`` is ALWAYS ``"tested_for"`` -- NEVER ``"clinical_trial"``
+        (DEPRECATED v0 name) and NEVER ``"treats"`` (FORBIDDEN -- reserved
         for FDA-approved drugs from DrugBank).
       * ``src_type`` is ALWAYS ``"Compound"`` (Issue 15.9).
       * ``dst_type`` is ALWAYS ``"Disease"`` (Issue 15.9).
@@ -2164,14 +2168,14 @@ class ClinicalTrialEdgeRecord(TypedDict, total=False):
     src_id : str
         Canonical Compound node ID. Preference order:
         1. MeSH term crosswalked to DrugBank ID via id_crosswalk (Issue 15.7)
-        2. MeSH term (raw) — id_confidence="low"
-        3. drug_name (normalized) — id_confidence="low"
+        2. MeSH term (raw) -- id_confidence="low"
+        3. drug_name (normalized) -- id_confidence="low"
         Never empty (Issue 4.7).
     dst_id : str
         Canonical Disease node ID. Preference order:
         1. MeSH term crosswalked to UMLS CUI via id_crosswalk (Issue 15.8)
-        2. MeSH term (raw) — id_confidence="low"
-        3. condition_name (normalized) — id_confidence="low"
+        2. MeSH term (raw) -- id_confidence="low"
+        3. condition_name (normalized) -- id_confidence="low"
         Never empty (Issue 4.7).
     src_type : str
         Always ``"Compound"`` (Issue 15.9).
@@ -2179,7 +2183,7 @@ class ClinicalTrialEdgeRecord(TypedDict, total=False):
         Always ``"Disease"`` (Issue 15.9).
     rel_type : str
         Always ``"tested_for"`` (Issue 2.1, 14.1, 15.3). Never
-        ``"clinical_trial"`` (deprecated). Never ``"treats"`` (forbidden —
+        ``"clinical_trial"`` (deprecated). Never ``"treats"`` (forbidden --
         reserved for FDA-approved drugs from DrugBank).
     edge_id : str
         Deterministic SHA-1 hash of
@@ -2193,10 +2197,10 @@ class ClinicalTrialEdgeRecord(TypedDict, total=False):
         why_stopped, drug_role (Issue 2.5). Comparator/placebo edges get
         ``evidence_strength *= 0.3`` (Issue 3.3).
     confidence : str
-        ``"high"`` / ``"medium"`` / ``"low"`` — RL ranker safety dimension
+        ``"high"`` / ``"medium"`` / ``"low"`` -- RL ranker safety dimension
         (Issue 2.5, 2.6).
     id_confidence : str
-        ``"high"`` / ``"medium"`` / ``"low"`` — ID resolution confidence.
+        ``"high"`` / ``"medium"`` / ``"low"`` -- ID resolution confidence.
         ``"low"`` when src_id or dst_id is a free-text fallback, when the
         MeSH crosswalk failed, when drug_role="comparator_or_placebo",
         when why_stopped matched safety pattern, or when referential
@@ -2208,9 +2212,9 @@ class ClinicalTrialEdgeRecord(TypedDict, total=False):
             ``condition_mesh``, ``drug_role``, ``allocation``, ``masking``,
             ``intervention_model``, ``primary_purpose``, ``primary_outcome``,
             ``brief_title``, ``start_date``, ``completion_date``,
-            ``safety_signal`` (when stopped for safety — Issue 3.5),
+            ``safety_signal`` (when stopped for safety -- Issue 3.5),
             ``orphan_src`` / ``orphan_dst`` (when referential integrity
-            fails — Issue 5.4).
+            fails -- Issue 5.4).
           * Lineage fields: ``source_url``, ``downloaded_at``,
             ``source_sha256``, ``source_version``, ``pipeline_version``,
             ``schema_version``, ``license``, ``citation`` (Issue 16.1-16.6).
@@ -2234,11 +2238,11 @@ class ClinicalTrialEdgeRecord(TypedDict, total=False):
 class ClinicalTrialNodeRecord(TypedDict, total=False):
     """A ClinicalTrials node record (emitted for completeness).
 
-    The ClinicalTrials loader emits edges ONLY — Compound and Disease nodes
+    The ClinicalTrials loader emits edges ONLY -- Compound and Disease nodes
     are owned by DrugBank / ChEMBL / OpenTargets and DisGeNET / OMIM
-    respectively (Issue 15.2 — schema matches sibling loaders). However,
+    respectively (Issue 15.2 -- schema matches sibling loaders). However,
     a minimal node record is emitted for the rare case where a clinical
-    trial references a Compound or Disease not in the KG — the KG builder
+    trial references a Compound or Disease not in the KG -- the KG builder
     can then create a placeholder node.
 
     Fields
@@ -2381,7 +2385,7 @@ class ClinicalTrialsDeadLetterEntry(TypedDict, total=False):
     timestamp : str
         ISO-8601 UTC timestamp when the entry was written.
     nct_id : str or None
-        The NCT ID of the row (if known — may be NULL for the
+        The NCT ID of the row (if known -- may be NULL for the
         ``null_or_empty_nct_id`` reason).
     reason : str
         Quarantine reason. One of:
@@ -2428,7 +2432,7 @@ class ClinicalTrialsValidationReport(TypedDict, total=False):
     is_valid : bool
         True if no errors (warnings are non-blocking).
     errors : list of str
-        Blocking errors — pipeline cannot continue in CLINICAL+ mode.
+        Blocking errors -- pipeline cannot continue in CLINICAL+ mode.
     warnings : list of str
         Non-blocking warnings (e.g. low resolution rate in DEV mode).
     metrics : ClinicalTrialsLoaderMetrics
@@ -2448,24 +2452,24 @@ class ClinicalTrialsValidationReport(TypedDict, total=False):
 
 
 # Keys that every ClinicalTrials edge record's _provenance MUST contain
-# (PROMPT_fix_clinicaltrials_loader.md Section 16 — Data Lineage &
+# (PROMPT_fix_clinicaltrials_loader.md Section 16 -- Data Lineage &
 # Traceability, Issues 16.1-16.12).
 #
 # Shape mirrors OPENTARGETS_PROVENANCE_KEYS / SIDER_PROVENANCE_KEYS /
 # STITCH_PROVENANCE_KEYS but with ClinicalTrials-specific extras:
-#   * ``aact_release``             — AACT snapshot release date
-#   * ``phases_filter``            — tuple of phases applied (Issue 16.7)
-#   * ``intervention_types_filter`` — tuple of intervention_types (Issue 16.7)
-#   * ``study_types_filter``       — tuple of study_types (Issue 16.7)
-#   * ``statuses_filter``          — tuple of allowed_statuses (Issue 16.7)
-#   * ``min_enrollment_filter``    — min_enrollment applied (Issue 16.7)
-#   * ``max_trial_age_years``      — max_trial_age_years applied (Issue 16.7)
-#   * ``row_count_in / out``       — counts before/after filtering
-#   * ``n_dead_letter``            — DLQ count for this run
-#   * ``n_orphan_src / dst``       — referential integrity failures
-#   * ``n_safety_signal``          — edges with safety_signal set
-#   * ``n_comparator``             — edges with drug_role=comparator_or_placebo
-#   * ``crosswalk_version``        — MeSH→DrugBank/UMLS crosswalk version
+#   * ``aact_release``             -- AACT snapshot release date
+#   * ``phases_filter``            -- tuple of phases applied (Issue 16.7)
+#   * ``intervention_types_filter`` -- tuple of intervention_types (Issue 16.7)
+#   * ``study_types_filter``       -- tuple of study_types (Issue 16.7)
+#   * ``statuses_filter``          -- tuple of allowed_statuses (Issue 16.7)
+#   * ``min_enrollment_filter``    -- min_enrollment applied (Issue 16.7)
+#   * ``max_trial_age_years``      -- max_trial_age_years applied (Issue 16.7)
+#   * ``row_count_in / out``       -- counts before/after filtering
+#   * ``n_dead_letter``            -- DLQ count for this run
+#   * ``n_orphan_src / dst``       -- referential integrity failures
+#   * ``n_safety_signal``          -- edges with safety_signal set
+#   * ``n_comparator``             -- edges with drug_role=comparator_or_placebo
+#   * ``crosswalk_version``        -- MeSH->DrugBank/UMLS crosswalk version
 CLINICALTRIALS_PROVENANCE_KEYS: tuple[str, ...] = (
     "source",
     "source_file",
@@ -2497,8 +2501,8 @@ CLINICALTRIALS_PROVENANCE_KEYS: tuple[str, ...] = (
 
 
 # =============================================================================
-# GEO schemas — added by geo_loader v1.0.0 institutional-grade audit fix
-# (GEO_LOADER_MASTER_REPAIR_PROMPT.md — 192 findings across 16 domains).
+# GEO schemas -- added by geo_loader v1.0.0 institutional-grade audit fix
+# (GEO_LOADER_MASTER_REPAIR_PROMPT.md -- 192 findings across 16 domains).
 #
 # These TypedDicts and the GEO_PROVENANCE_KEYS tuple mirror the
 # ClinicalTrials/OpenTargets/SIDER/STITCH/STRING schema pattern. Every
@@ -2508,14 +2512,14 @@ CLINICALTRIALS_PROVENANCE_KEYS: tuple[str, ...] = (
 # ``validate_geo_edge`` enforce required fields at runtime.
 #
 # SCIENTIFIC CORRECTNESS CONTRACT (Phase 0.2 / GEO-3.1):
-#   * GEO emits ``Protein→expressed_in→Anatomy`` edges (NOT
-#     ``Gene→expressed_in→Anatomy`` — that is DRKG's domain, see
+#   * GEO emits ``Protein->expressed_in->Anatomy`` edges (NOT
+#     ``Gene->expressed_in->Anatomy`` -- that is DRKG's domain, see
 #     ``config.py:3705``). The KG is protein-centric because drug targets
 #     are proteins. GEO measures mRNA (a proxy for protein expression),
-#     so we map probe → gene → UniProt accession to produce a Protein
+#     so we map probe -> gene -> UniProt accession to produce a Protein
 #     edge.
 #   * ``head`` is ALWAYS a UniProt accession (e.g. ``"P23219"`` for
-#     PTGS1/COX-1) — NEVER a gene symbol or NCBI Gene ID.
+#     PTGS1/COX-1) -- NEVER a gene symbol or NCBI Gene ID.
 #   * ``tail`` is ALWAYS a UBERON URI (e.g.
 #     ``"http://purl.obolibrary.org/obo/UBERON_0002048"`` for lung).
 #   * ``relation`` is ALWAYS ``"expressed_in"``.
@@ -2556,7 +2560,7 @@ class GeoRawRecord(TypedDict, total=False):
                        ``_parser_version``
     Safety / Privacy : ``sensitive`` (GEO-9.1)
 
-    Fixes: GEO-2.2 (typed record), GEO-3.4 (probe→gene→UniProt),
+    Fixes: GEO-2.2 (typed record), GEO-3.4 (probe->gene->UniProt),
            GEO-3.9 (expression_unit), GEO-3.13 (organism filter),
            GEO-5.1 (data quality), GEO-7.2 (deterministic ordering),
            GEO-9.1 (sensitive flag), GEO-14.12 (ISO 8601 dates),
@@ -2613,14 +2617,14 @@ class GeoEdgeRecord(TypedDict, total=False):
 
     SCIENTIFIC CORRECTNESS CONTRACT (Phase 0.2 / GEO-3.1):
       * ``head`` is ALWAYS a UniProt accession (e.g. ``"P23219"``).
-      * ``head_type`` is ALWAYS ``"Protein"`` (NOT ``"Gene"`` — that is
+      * ``head_type`` is ALWAYS ``"Protein"`` (NOT ``"Gene"`` -- that is
         DRKG's domain).
       * ``tail`` is ALWAYS a UBERON URI (e.g.
         ``"http://purl.obolibrary.org/obo/UBERON_0002048"``).
       * ``tail_type`` is ALWAYS ``"Anatomy"``.
       * ``relation`` is ALWAYS ``"expressed_in"``.
 
-    An edge ``Protein P → expressed_in → Anatomy A`` is emitted when GEO
+    An edge ``Protein P -> expressed_in -> Anatomy A`` is emitted when GEO
     records show mRNA abundance for the gene encoding P in samples
     derived from tissue A, with expression value above
     ``expression_threshold`` (default log2 = 4.0, ~16 TPM) OR a
@@ -2639,7 +2643,7 @@ class GeoEdgeRecord(TypedDict, total=False):
     relation : str
         Always "expressed_in".
     evidence_strength : str
-        "strong" | "moderate" | "weak" — from EVIDENCE_STRENGTH_BY_EDGE_TYPE.
+        "strong" | "moderate" | "weak" -- from EVIDENCE_STRENGTH_BY_EDGE_TYPE.
     expression_value : float
         The expression value backing this edge (max across aggregated records).
     n_samples : int
@@ -2694,14 +2698,14 @@ class GeoEdgeRecord(TypedDict, total=False):
     #   - ``log2_fold_change``: log2(disease_mean / healthy_mean) when
     #     differential. None when absolute-threshold fallback.
     #   - ``direction``: "up" (upregulated in disease), "down" (downregulated
-    #     in disease), or "absolute" (no disease/healthy grouping — edge
+    #     in disease), or "absolute" (no disease/healthy grouping -- edge
     #     came from absolute expression threshold only).
     #   - ``p_value``: raw t-test p-value (before BH correction). None
     #     when absolute-threshold fallback.
     #   - ``n_disease_samples`` / ``n_healthy_samples``: sample counts per
     #     condition. None when absolute-threshold fallback.
     # These fields let downstream consumers (GNN, RL ranker) distinguish
-    # direction-aware edges from absolute-threshold edges — critical for
+    # direction-aware edges from absolute-threshold edges -- critical for
     # learning disease-specific expression signatures.
     is_differential: bool    # v69 P2L-049: True if from diff-expression call
     log2_fold_change: Optional[float]  # v69 P2L-049: log2FC disease vs healthy
@@ -2881,20 +2885,20 @@ class GeoValidationReport(TypedDict, total=False):
 # Shape mirrors CLINICALTRIALS_PROVENANCE_KEYS / OPENTARGETS_PROVENANCE_KEYS
 # / SIDER_PROVENANCE_KEYS / STITCH_PROVENANCE_KEYS but with GEO-specific
 # extras:
-#   * ``source_series``     — the GSE accession that produced this record
-#   * ``input_sha256``      — sha256 of the SOFT file (streamed, 64KB chunks)
-#   * ``parser_version``    — geo_loader.PARSER_VERSION ("1.0.0")
-#   * ``schema_version``    — "GEO-SOFT-2.0"
-#   * ``sample_taxid``      — NCBI Taxonomy ID (organism filter audit)
-#   * ``tissue_uberon``     — UBERON URI after ontology mapping
-#   * ``is_differential``   — whether the record came from a DE call
-#   * ``fdr``               — BH-corrected FDR (if differential)
-#   * ``batch_corrected``   — always False in v1.0.0 (GEO-3.6)
-#   * ``sensitive``         — True if PII fields detected (GEO-9.1)
-#   * ``n_records_in``      — count before filtering
-#   * ``n_records_out``     — count after filtering
-#   * ``n_dead_letter``     — DLQ count for this run
-#   * ``crosswalk_version`` — VERIFIED_UNIPROT_GENE_CROSSWALK version
+#   * ``source_series``     -- the GSE accession that produced this record
+#   * ``input_sha256``      -- sha256 of the SOFT file (streamed, 64KB chunks)
+#   * ``parser_version``    -- geo_loader.PARSER_VERSION ("1.0.0")
+#   * ``schema_version``    -- "GEO-SOFT-2.0"
+#   * ``sample_taxid``      -- NCBI Taxonomy ID (organism filter audit)
+#   * ``tissue_uberon``     -- UBERON URI after ontology mapping
+#   * ``is_differential``   -- whether the record came from a DE call
+#   * ``fdr``               -- BH-corrected FDR (if differential)
+#   * ``batch_corrected``   -- always False in v1.0.0 (GEO-3.6)
+#   * ``sensitive``         -- True if PII fields detected (GEO-9.1)
+#   * ``n_records_in``      -- count before filtering
+#   * ``n_records_out``     -- count after filtering
+#   * ``n_dead_letter``     -- DLQ count for this run
+#   * ``crosswalk_version`` -- VERIFIED_UNIPROT_GENE_CROSSWALK version
 # ======================================================================
 # Negative Sampling TypedDict (Fix 1.2)
 # ======================================================================
@@ -2905,20 +2909,20 @@ class NegativeSampleDict(TypedDict, total=False):
     Produced by ``drugos_graph.negative_sampling.NegativeSampler``.
 
     Required fields:
-      drug_id (str)        — Compound entity ID from the KG
-      disease_id (str)     — Disease entity ID from the KG
-      strategy (str)        — One of: "random", "wrong_class", "failed_phase3"
-      confidence (float)    — Estimated P(true negative), range [0.3, 0.9]
-      evidence_type (str)   — "absence_of_evidence" | "mechanistic_mismatch"
+      drug_id (str)        -- Compound entity ID from the KG
+      disease_id (str)     -- Disease entity ID from the KG
+      strategy (str)        -- One of: "random", "wrong_class", "failed_phase3"
+      confidence (float)    -- Estimated P(true negative), range [0.3, 0.9]
+      evidence_type (str)   -- "absence_of_evidence" | "mechanistic_mismatch"
                               | "clinical_failure"
 
     Optional fields:
-      nct_id (str)               — ClinicalTrials.gov ID (failed_phase3 only)
-      trial_status (str)         — Trial status (failed_phase3 only)
-      atc_class_known (str)      — Drug's known ATC class (wrong_class only)
-      atc_class_sampled (str)    — Disease's ATC class (wrong_class only)
-      _provenance (dict)         — Lineage metadata
-      _schema_version (str)      — Schema version "2.1.0"
+      nct_id (str)               -- ClinicalTrials.gov ID (failed_phase3 only)
+      trial_status (str)         -- Trial status (failed_phase3 only)
+      atc_class_known (str)      -- Drug's known ATC class (wrong_class only)
+      atc_class_sampled (str)    -- Disease's ATC class (wrong_class only)
+      _provenance (dict)         -- Lineage metadata
+      _schema_version (str)      -- Schema version "2.1.0"
 
     Fixes: D1.2 (schema contract), D3.4 (evidence_type), D16.1 (provenance),
            D13.3 (confidence documentation).
@@ -2986,14 +2990,14 @@ GEO_PROVENANCE_KEYS: tuple[str, ...] = (
 )
 
 
-# ─── v57 ROOT FIX (P2C-002 + P2C-007) — canonical ID reverse-check ───────────
+# ─── v57 ROOT FIX (P2C-002 + P2C-007) -- canonical ID reverse-check ───────────
 # Add canonical IDs for ClinicalOutcome/MedDRA_Term/Anatomy and enforce
 # reverse-check in schema validator. The existing
 # ``_validate_scientific_schema`` (in ``__init__.py``) only FORWARD-checked
 # that ``CANONICAL_IDS`` keys must be known node types. It did NOT
 # reverse-check that every entry in ``CORE_NODE_TYPES`` has a corresponding
 # entry in ``CANONICAL_IDS``. This let ClinicalOutcome/MedDRA_Term/Anatomy
-# ship without canonical IDs — ``entity_resolver.resolve_canonical_id``
+# ship without canonical IDs -- ``entity_resolver.resolve_canonical_id``
 # returned None silently for those types. The reverse-check below closes
 # the gap. The non-strict form (``_validate_canonical_ids_reverse``)
 # returns a list of issue strings (consistent with
@@ -3012,7 +3016,7 @@ class SchemaValidationError(Exception):
 def _validate_canonical_ids_reverse() -> list[str]:
     """Return a list of issue strings for missing canonical IDs.
 
-    v57 ROOT FIX (P2C-002 + P2C-007): REVERSE check — every entry in
+    v57 ROOT FIX (P2C-002 + P2C-007): REVERSE check -- every entry in
     ``CORE_NODE_TYPES`` (and ``DRKG_NODE_TYPES``) MUST have a
     corresponding entry in ``CANONICAL_IDS``. The existing forward
     check (``CANONICAL_IDS`` keys must be node types) is preserved in
@@ -3033,22 +3037,22 @@ def _validate_canonical_ids_reverse() -> list[str]:
         return [f"Cannot import config for reverse-check: {exc}"]
 
     issues: list[str] = []
-    # CORE_NODE_TYPES — every entry MUST have a canonical ID.
+    # CORE_NODE_TYPES -- every entry MUST have a canonical ID.
     for nt in CORE_NODE_TYPES:
         if nt not in CANONICAL_IDS:
             issues.append(
                 f"CORE_NODE_TYPES entry {nt!r} has no CANONICAL_IDS "
-                f"entry — entity_resolver.resolve_canonical_id returns "
+                f"entry -- entity_resolver.resolve_canonical_id returns "
                 f"None silently for this node type. (v57 P2C-002 + "
                 f"P2C-007 root fix)"
             )
-    # DRKG_NODE_TYPES — same check (DRKG types also need canonical IDs
+    # DRKG_NODE_TYPES -- same check (DRKG types also need canonical IDs
     # so DRKG-loaded nodes can be canonicalised).
     for nt in DRKG_NODE_TYPES:
         if nt not in CANONICAL_IDS:
             issues.append(
                 f"DRKG_NODE_TYPES entry {nt!r} has no CANONICAL_IDS "
-                f"entry — entity_resolver.resolve_canonical_id returns "
+                f"entry -- entity_resolver.resolve_canonical_id returns "
                 f"None silently for this node type. (v57 P2C-002 + "
                 f"P2C-007 root fix)"
             )
@@ -3065,7 +3069,7 @@ def _validate_canonical_ids_reverse_strict() -> None:
     issues = _validate_canonical_ids_reverse()
     if issues:
         raise SchemaValidationError(
-            "Schema reverse-check failed — the following node types "
+            "Schema reverse-check failed -- the following node types "
             "have no CANONICAL_IDS entry:\n  - " + "\n  - ".join(issues)
         )
 

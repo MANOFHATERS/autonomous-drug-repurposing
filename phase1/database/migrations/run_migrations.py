@@ -22,7 +22,7 @@ Public API
 - verify_schema_matches_orm(engine) -> dict
 - get_sql_migration_files() -> list[Path]
 - get_migration_runner() -> Callable
-- rollback_migration(migration_name, engine) -> None  [PLANNED — not yet implemented]
+- rollback_migration(migration_name, engine) -> None  [PLANNED -- not yet implemented]
 - verify_package_exports() -> dict[str, bool]
 - get_database_fingerprint(engine) -> dict
 - create_test_migrations_dir(tmp_path) -> Path
@@ -109,7 +109,7 @@ PLANNED_MIGRATION_FRAMEWORK: str = "alembic"
 MIGRATION_FILENAME_PATTERN: str = r"^\d{1,3}_[a-z][a-z0-9_]*\.sql$"
 
 # ---------------------------------------------------------------------------
-# Migration directory (CFG-MIG-03 — overridable via MigrationConfig)
+# Migration directory (CFG-MIG-03 -- overridable via MigrationConfig)
 # BUG-CFG-01: Computed at import time but overridable via config.
 # ---------------------------------------------------------------------------
 MIGRATIONS_DIR = Path(__file__).parent
@@ -164,10 +164,10 @@ REQUIRED_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "proteins": [
         ("gene_symbol", "VARCHAR(50)"),
         ("protein_name", "TEXT"),
-        # v43 ROOT FIX (P1 — type mismatch): was "TEXT", but migration 001
+        # v43 ROOT FIX (P1 -- type mismatch): was "TEXT", but migration 001
         # and ORM both declare VARCHAR(10000). When the SQL migration fails
         # on SQLite, the Python fallback creates function_desc as unbounded
-        # TEXT instead of VARCHAR(10000) — schema drift on degraded installs.
+        # TEXT instead of VARCHAR(10000) -- schema drift on degraded installs.
         ("function_desc", "VARCHAR(10000)"),
     ],
     "drugs": [
@@ -176,14 +176,14 @@ REQUIRED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("drug_type", "VARCHAR(50)"),
         ("mechanism_of_action", "TEXT"),
         # LIFE-SAFETY CRITICAL: withdrawn drug tracking columns
-        # v89 ROOT FIX (BUG #23 — standardize on DEFAULT FALSE):
+        # v89 ROOT FIX (BUG #23 -- standardize on DEFAULT FALSE):
         #   The previous ``DEFAULT 0`` is a non-portable integer literal
         #   that happens to work on SQLite (no native BOOLEAN type) and
         #   PostgreSQL (implicit cast) but is REJECTED by strict-mode
         #   MySQL/MariaDB. ``DEFAULT FALSE`` is the SQL-standard boolean
         #   literal and works on ALL dialects. This aligns the fallback
         #   with migration 001 (which uses ``DEFAULT FALSE``) and the ORM
-        #   (which uses ``server_default='0'`` — functionally equivalent
+        #   (which uses ``server_default='0'`` -- functionally equivalent
         #   on SQLite/PostgreSQL). Three-way drift eliminated.
         ("is_withdrawn", "BOOLEAN NOT NULL DEFAULT FALSE"),
         ("clinical_status", "VARCHAR(30)"),
@@ -199,11 +199,11 @@ REQUIRED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # v17 ROOT FIX (PS-6 fallback gap): REQUIRED_COLUMNS is the
         # Python-side fallback that runs when a SQL migration fails to
         # apply (e.g. SQLite translation error). Migration 006 adds the
-        # ``groups`` column (DrugBank <groups> field — semicolon-separated
+        # ``groups`` column (DrugBank <groups> field -- semicolon-separated
         # regulatory states: approved;investigational;withdrawn;...).
         # Without ``groups`` in this fallback list, a SQLite dev/test DB
         # where migration 006 was skipped would have NO ``groups`` column
-        # at all — so bulk_upsert_drugs (which now includes 'groups' in
+        # at all -- so bulk_upsert_drugs (which now includes 'groups' in
         # updatable_cols per the PS-6 fix) would raise
         # ``sqlite3.OperationalError: table 'drugs' has no column named
         # 'groups'``. Adding it here ensures the Python fallback creates
@@ -224,7 +224,7 @@ REQUIRED_COLUMNS: dict[str, list[tuple[str, str]]] = {
     ],
     "gene_disease_associations": [
         # v14 ROOT FIX (FIX4 / CD-3): protein_id column was REMOVED from
-        # the GDA table — the table uses the STRING uniprot_id FK as the
+        # the GDA table -- the table uses the STRING uniprot_id FK as the
         # canonical protein reference. The loader never populated
         # protein_id; the migration 003 backfill was a no-op; the index
         # was unused; the column produced false-positive schema drift.
@@ -290,7 +290,7 @@ def _build_expected_schema_from_orm() -> dict[str, list[str]]:
     except Exception as _exc:  # pragma: no cover - fallback for tests
         # If SQLAlchemy is not installed (e.g. lightweight CI), fall back
         # to a static dict that matches the ORM as of the last edit.
-        # This is intentionally minimal — the production path uses the
+        # This is intentionally minimal -- the production path uses the
         # ORM introspection above.
         return {
             "drugs": sorted([
@@ -304,7 +304,7 @@ def _build_expected_schema_from_orm() -> dict[str, list[str]]:
                 "created_at", "updated_at", "is_deleted", "deleted_at",
             ]),
             # v14 ROOT FIX: proteins table was MISSING from the fallback
-            # dict — caused test_expected_schema_defined to fail in test
+            # dict -- caused test_expected_schema_defined to fail in test
             # contexts where the ORM import fails. Added to match the
             # ORM's Protein model columns.
             # FIX-P1-C-18: the previous fallback listed 7 PHANTOM columns
@@ -336,7 +336,7 @@ def _build_expected_schema_from_orm() -> dict[str, list[str]]:
                 "disease_type", "disease_class", "disease_class_source",
                 "disease_id_type", "disease_name_was_filled",
                 # v14 ROOT FIX (FIX4 / CD-3): protein_id column was REMOVED
-                # from the GDA table — the table uses the STRING uniprot_id
+                # from the GDA table -- the table uses the STRING uniprot_id
                 # FK as the canonical protein reference. The loader never
                 # populated protein_id; the migration 003 backfill was a
                 # no-op; the index was unused; the column produced false-
@@ -395,7 +395,7 @@ EXPECTED_SCHEMA = _build_expected_schema_from_orm()
 
 # ---------------------------------------------------------------------------
 # Compiled regexes for analyze_migration_impact (GUARD-CODE-12, GUARD-CODE-13)
-# Moved to module level for performance — compiled once, not per call.
+# Moved to module level for performance -- compiled once, not per call.
 # ---------------------------------------------------------------------------
 _ALTER_TABLE_ADD_COL_PATTERN = re.compile(
     r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)", re.IGNORECASE,
@@ -427,7 +427,7 @@ _UPDATE_PATTERN = re.compile(r"UPDATE\s+(\w+)\s+SET", re.IGNORECASE)
 # Allowing digits made this regex inconsistent with the other 5 InChIKey
 # regexes in the codebase (normalizer.py, models.py, resolver_utils.py)
 # which all use ``[A-Z]{10}``. A key accepted by run_migrations could be
-# rejected by normalizer — the F3.8 "6 different InChIKey regexes"
+# rejected by normalizer -- the F3.8 "6 different InChIKey regexes"
 # compound-destruction pattern. Now standardised to ``[A-Z]{10}`` (no
 # digits) to match the spec and all other modules.
 _INCHIKEY_STANDARD_RE = re.compile(r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$")
@@ -780,7 +780,7 @@ def _strip_psql_meta_commands(sql_content: str) -> str:
     with a backslash at the beginning of a line, while preserving all valid
     SQL including DO $$ blocks.
 
-    GAP-TEST-03 — Known edge cases:
+    GAP-TEST-03 -- Known edge cases:
     (a) '\\c mydb' -> stripped
     (b) "SELECT '\\\\';" -> preserved (backslash inside string)
     (c) 'DO $$ ... $$' -> preserved
@@ -860,7 +860,7 @@ def _ensure_migration_tracking_table(engine) -> None:
         else:
             id_type = "SERIAL PRIMARY KEY"
 
-        # _migration_history — tracks applied migrations
+        # _migration_history -- tracks applied migrations
         conn.execute(
             text(f"""
                 CREATE TABLE IF NOT EXISTS _migration_history (
@@ -878,7 +878,7 @@ def _ensure_migration_tracking_table(engine) -> None:
             """)
         )
 
-        # Add audit columns if they don't exist (SEC-MIG-03) — idempotent
+        # Add audit columns if they don't exist (SEC-MIG-03) -- idempotent
         _add_column_if_not_exists(
             conn, engine, "_migration_history", "applied_by", "VARCHAR(100)"
         )
@@ -898,7 +898,7 @@ def _ensure_migration_tracking_table(engine) -> None:
             conn, engine, "_migration_history", "phase_at_interrupt", "VARCHAR(50)"
         )
 
-        # _failed_migrations — dead letter queue (REL-MIG-06)
+        # _failed_migrations -- dead letter queue (REL-MIG-06)
         conn.execute(
             text(f"""
                 CREATE TABLE IF NOT EXISTS _failed_migrations (
@@ -919,7 +919,7 @@ def _ensure_migration_tracking_table(engine) -> None:
             conn, engine, "_failed_migrations", "resolution_note", "TEXT"
         )
 
-        # _migration_provenance — data lineage (LINE-MIG-01)
+        # _migration_provenance -- data lineage (LINE-MIG-01)
         conn.execute(
             text(f"""
                 CREATE TABLE IF NOT EXISTS _migration_provenance (
@@ -935,7 +935,7 @@ def _ensure_migration_tracking_table(engine) -> None:
             """)
         )
 
-        # _migration_data_changes — data transformation audit trail (LINE-MIG-06)
+        # _migration_data_changes -- data transformation audit trail (LINE-MIG-06)
         conn.execute(
             text(f"""
                 CREATE TABLE IF NOT EXISTS _migration_data_changes (
@@ -1234,7 +1234,7 @@ def _is_test_mode() -> bool:
     try:
         import pytest as _pytest  # noqa: F401
         # pytest is importable AND we got here without PYTEST_CURRENT_TEST
-        # — only treat as test mode if pytest is actually running (i.e.
+        # -- only treat as test mode if pytest is actually running (i.e.
         # already in sys.modules). Otherwise importability alone is not
         # enough (pytest may be installed in the env but not running).
         return False
@@ -1254,7 +1254,7 @@ def _record_failure_fallback(
     with 22 test artifacts (all migration_name="test", generated by pytest
     runs that hit the fallback path because the test DB did not have a
     _failed_migrations table). The production audit trail was contaminated
-    — operators inspecting the file could not distinguish real production
+    -- operators inspecting the file could not distinguish real production
     failures from test noise. Fix: skip writing to the fallback file when
     running in test mode (detected via PYTEST_CURRENT_TEST env var,
     APP_ENV=test, MIGRATIONS_TEST_MODE=1, or pytest in sys.modules).
@@ -1271,7 +1271,7 @@ def _record_failure_fallback(
         redirect = os.environ.get("MIGRATIONS_FALLBACK_DIR")
         if not redirect:
             logger.debug(
-                "Skipping fallback file write for migration '%s' — "
+                "Skipping fallback file write for migration '%s' -- "
                 "test mode detected (audit D-8 fix). Set "
                 "MIGRATIONS_FALLBACK_DIR to capture test fallbacks.",
                 name,
@@ -1601,7 +1601,7 @@ def validate_scientific_constraints(engine) -> list[str]:
 
         # BUG-SCI-01: disease_id_type validity check
         # CRITICAL FIX (patient safety): the allowed vocabulary MUST include
-        # 'hpo', 'icd10', 'efo', 'orphanet' — without these, real disease
+        # 'hpo', 'icd10', 'efo', 'orphanet' -- without these, real disease
         # associations from HPO, ICD-10, EFO, and Orphanet would be flagged
         # as invalid and could be silently dropped from the model's training
         # set, hiding drug-disease links from clinicians.
@@ -1657,7 +1657,7 @@ def _verify_post_migration_state(engine, migration_name: str) -> list[str]:
 
         # DQ-MIG-04: Check for orphaned GDA records (uniprot_id FK).
         # v14 ROOT FIX (FIX4 / CD-3): was previously checking the integer
-        # protein_id column — that column has been removed. The canonical
+        # protein_id column -- that column has been removed. The canonical
         # FK is now the STRING uniprot_id, which references
         # proteins.uniprot_id (NOT proteins.id).
         if _table_exists(inspector, "gene_disease_associations") and _table_exists(inspector, "proteins"):
@@ -1950,13 +1950,13 @@ def _execute_with_retry(
     transient failure rolls back ONLY the failed statement, not the
     entire outer transaction. Without the SAVEPOINT, PostgreSQL
     poisons the transaction after any statement-level error and the
-    retry attempt fails with "current transaction is aborted" — the
+    retry attempt fails with "current transaction is aborted" -- the
     retry logic was effectively dead code. With the SAVEPOINT, the
     retry actually re-executes the statement cleanly within the same
     outer ``engine.begin()`` block (which is the explicit per-
     migration transaction wrapper added by the D-14 fix). Partial
     failure of one statement no longer leaves the schema in an
-    inconsistent state — either the entire migration commits
+    inconsistent state -- either the entire migration commits
     (all statements + bookkeeping) or it rolls back atomically.
     """
     last_exc: Exception | None = None
@@ -1966,7 +1966,7 @@ def _execute_with_retry(
         # poisoning the outer transaction. ``conn.begin_nested()``
         # emits ``SAVEPOINT sp_N`` on PostgreSQL and is a no-op on
         # SQLite (which does not poison transactions on statement
-        # errors in the same way — SQLite rolls back to the last
+        # errors in the same way -- SQLite rolls back to the last
         # successful statement automatically within a transaction).
         savepoint = None
         try:
@@ -1975,13 +1975,13 @@ def _execute_with_retry(
             savepoint.commit()
             return
         except (OperationalError, InterfaceError) as exc:
-            # Transient error — roll back the SAVEPOINT and retry.
+            # Transient error -- roll back the SAVEPOINT and retry.
             if savepoint is not None:
                 try:
                     savepoint.rollback()
                 except Exception:
                     # SAVEPOINT rollback failure means the outer
-                    # transaction is also poisoned — propagate the
+                    # transaction is also poisoned -- propagate the
                     # original error so the outer ``engine.begin()``
                     # rolls back atomically (D-14 guarantee).
                     pass
@@ -2000,7 +2000,7 @@ def _execute_with_retry(
                     max_retries + 1, migration_name,
                 )
         except (ProgrammingError, DataError):
-            # Non-transient — roll back the SAVEPOINT (so the outer
+            # Non-transient -- roll back the SAVEPOINT (so the outer
             # transaction isn't poisoned by the failed statement) and
             # propagate to abort the entire migration transaction.
             if savepoint is not None:
@@ -2035,23 +2035,23 @@ _DESTRUCTIVE_PATTERNS = (
     re.compile(r"DROP\s+TABLE", re.IGNORECASE),
     re.compile(r"DROP\s+INDEX", re.IGNORECASE),
     re.compile(r"TRUNCATE\s+TABLE?", re.IGNORECASE),
-    # v90 ROOT FIX (BUG #14 — P1 UPDATE regex caught ALL UPDATEs):
+    # v90 ROOT FIX (BUG #14 -- P1 UPDATE regex caught ALL UPDATEs):
     #   The previous regex ``UPDATE\s+\w+\s+SET\s+.*;`` matched ANY UPDATE
-    #   statement — the ``.*`` was greedy and consumed the WHERE clause.
+    #   statement -- the ``.*`` was greedy and consumed the WHERE clause.
     #   The comment said "UPDATE without WHERE" but the regex caught ALL
     #   UPDATEs. Migration 006 has many ``UPDATE drugs SET is_withdrawn =
-    #   TRUE WHERE lower(name) = 'rofecoxib'`` — all flagged as
+    #   TRUE WHERE lower(name) = 'rofecoxib'`` -- all flagged as
     #   "destructive". An operator who set ``allow_destructive_sql=False``
     #   for safety BLOCKED migration 006 entirely, and the is_withdrawn
     #   backfill never ran. Vioxx stayed is_withdrawn=FALSE.
     #   ROOT FIX: replace the regex with a function-based check that
     #   parses each statement and only flags UPDATEs that lack a WHERE
     #   clause. The DELETE regex had the same issue (``DELETE FROM \w+ ;``
-    #   only matched DELETEs ending immediately with ``;`` — missed
+    #   only matched DELETEs ending immediately with ``;`` -- missed
     #   multi-line DELETEs). Both are now handled by
     #   ``_scan_destructive_sql`` below, which splits on ``;`` and checks
     #   each statement for a WHERE clause.
-    # DELETE without WHERE — handled by _scan_destructive_sql (regex kept
+    # DELETE without WHERE -- handled by _scan_destructive_sql (regex kept
     # for backwards-compatibility with any code that imports the tuple).
     re.compile(r"DELETE\s+FROM\s+\w+\s*;", re.IGNORECASE),  # DELETE without WHERE
 )
@@ -2069,9 +2069,9 @@ def _scan_destructive_sql(sql_content: str) -> list[str]:
     ``UPDATE drugs SET is_withdrawn = TRUE WHERE lower(name) =
     'rofecoxib'`` was flagged as "destructive" even though it has a
     WHERE clause. An operator who enabled the destructive-SQL guard
-    silently blocked the life-safety backfill in migration 006 — Vioxx
+    silently blocked the life-safety backfill in migration 006 -- Vioxx
     stayed is_withdrawn=FALSE. ROOT FIX: split the SQL into statements
-    (naive split on ``;`` — sufficient for migration files which use
+    (naive split on ``;`` -- sufficient for migration files which use
     ``;`` as the statement terminator) and check each UPDATE / DELETE
     statement for a WHERE clause. Only flag statements WITHOUT a WHERE.
     """
@@ -2083,7 +2083,7 @@ def _scan_destructive_sql(sql_content: str) -> list[str]:
             found.append(m.group(0).strip())
 
     # v90: per-statement WHERE-clause check for UPDATE and DELETE.
-    # Split on ';' — naive but sufficient for migration files. Strip
+    # Split on ';' -- naive but sufficient for migration files. Strip
     # comments (lines starting with '--') so a WHERE in a comment doesn't
     # mask a missing WHERE in the actual statement.
     _stripped_lines = [
@@ -2143,18 +2143,18 @@ def _validate_migration_path(sql_file: Path, migrations_dir: Path) -> None:
 # Postgres-only statements that have NO SQLite equivalent and must be
 # stripped (with a WARNING if encountered).
 _PG_ONLY_STATEMENT_PATTERNS = [
-    # pg_advisory_lock / pg_advisory_unlock — no SQLite equivalent.
+    # pg_advisory_lock / pg_advisory_unlock -- no SQLite equivalent.
     (re.compile(r"SELECT\s+pg_advisory_lock\s*\([^)]*\)\s*;?", re.IGNORECASE), "-- [SQLite-skip] pg_advisory_lock"),
     (re.compile(r"SELECT\s+pg_advisory_unlock\s*\([^)]*\)\s*;?", re.IGNORECASE), "-- [SQLite-skip] pg_advisory_unlock"),
-    # RAISE NOTICE inside DO blocks — converted to SELECT (SQLite doesn't have RAISE NOTICE outside triggers).
+    # RAISE NOTICE inside DO blocks -- converted to SELECT (SQLite doesn't have RAISE NOTICE outside triggers).
     # v59 ROOT FIX (compound of T-001): SQLite does not have a search_path
-    # concept — ``SET search_path TO public`` raises ``OperationalError:
+    # concept -- ``SET search_path TO public`` raises ``OperationalError:
     # near "SET": syntax error``. Strip it on SQLite. PostgreSQL keeps it
     # (the migration runner uses the raw SQL on PostgreSQL).
     (re.compile(r"SET\s+search_path\s+TO\s+\w+\s*;?", re.IGNORECASE), "-- [SQLite-skip] SET search_path"),
     # v59 ROOT FIX: ANALYZE is a PostgreSQL command (recomputes query
     # planner stats). SQLite accepts the syntax but treats it as a no-op
-    # for forward-compatibility — actually no, SQLite raises
+    # for forward-compatibility -- actually no, SQLite raises
     # ``OperationalError: near "ANALYZE": syntax error`` on the
     # ``ANALYZE <table_name>`` form. Strip it on SQLite.
     (re.compile(r"^\s*ANALYZE\s+\w+\s*;", re.IGNORECASE | re.MULTILINE), "-- [SQLite-skip] ANALYZE"),
@@ -2169,32 +2169,32 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     leaving SQLite dev/test DBs without CHECK/UNIQUE/FK constraints.
     This function performs a best-effort translation:
 
-    - ``GENERATED ALWAYS AS IDENTITY`` → ``AUTOINCREMENT``
-    - ``TIMESTAMP WITH TIME ZONE`` → ``TIMESTAMP``
-    - ``DO $$ ... END $$;`` blocks → wrapped in a BEGIN/COMMIT (SQLite
+    - ``GENERATED ALWAYS AS IDENTITY`` -> ``AUTOINCREMENT``
+    - ``TIMESTAMP WITH TIME ZONE`` -> ``TIMESTAMP``
+    - ``DO $$ ... END $$;`` blocks -> wrapped in a BEGIN/COMMIT (SQLite
       doesn't have PL/pgSQL, but the SQL inside the DO block is usually
-      plain SQL with control flow — we strip the control flow and
+      plain SQL with control flow -- we strip the control flow and
       keep the SQL statements).
-    - ``RAISE NOTICE '...'`` lines → ``-- RAISE NOTICE '...'`` (commented out)
-    - ``IF EXISTS (SELECT 1 FROM pg_constraint ...)`` → ``1=1`` (always true
-      — the guard is a no-op on SQLite since SQLite doesn't enforce
+    - ``RAISE NOTICE '...'`` lines -> ``-- RAISE NOTICE '...'`` (commented out)
+    - ``IF EXISTS (SELECT 1 FROM pg_constraint ...)`` -> ``1=1`` (always true
+      -- the guard is a no-op on SQLite since SQLite doesn't enforce
       constraint names).
-    - ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` → ``ALTER TABLE ... ADD COLUMN``
+    - ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` -> ``ALTER TABLE ... ADD COLUMN``
       (SQLite doesn't support IF NOT EXISTS on ADD COLUMN before 3.35;
       we wrap the call in a try/except in the runner).
-    - ``GET DIAGNOSTICS _var = ROW_COUNT;`` → commented out (no SQLite equivalent;
+    - ``GET DIAGNOSTICS _var = ROW_COUNT;`` -> commented out (no SQLite equivalent;
       downstream audit_log INSERTs that reference _var will get NULL).
-    - ``CREATE INDEX ... WHERE`` → ``CREATE INDEX ...`` (partial indexes
+    - ``CREATE INDEX ... WHERE`` -> ``CREATE INDEX ...`` (partial indexes
       require SQLite 3.8+; we strip the WHERE to be safe).
-    - ``STRING_AGG(expr, sep)`` → ``GROUP_CONCAT(expr, sep)`` (v35 root fix
-      issue 33 — argument order is the same, so a direct name swap is
+    - ``STRING_AGG(expr, sep)`` -> ``GROUP_CONCAT(expr, sep)`` (v35 root fix
+      issue 33 -- argument order is the same, so a direct name swap is
       semantically correct).
-    - ``<agg>(expr) FILTER (WHERE cond)`` → ``<agg>(CASE WHEN cond THEN expr END)``
-      (v35 root fix issue 33 — SQLite does not support the SQL:2003 FILTER
+    - ``<agg>(expr) FILTER (WHERE cond)`` -> ``<agg>(CASE WHEN cond THEN expr END)``
+      (v35 root fix issue 33 -- SQLite does not support the SQL:2003 FILTER
       clause; this rewrite preserves semantics for COUNT/SUM/AVG/MIN/MAX).
 
     The translation is best-effort. Statements that cannot be translated
-    are left as-is and will raise OperationalError at execution time —
+    are left as-is and will raise OperationalError at execution time --
     the runner catches the error and logs WARNING (don't block the
     migration chain on SQLite).
     """
@@ -2202,21 +2202,21 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     # 1. Strip pg_advisory_lock calls.
     for pat, repl in _PG_ONLY_STATEMENT_PATTERNS:
         out = pat.sub(repl, out)
-    # 2. GENERATED ALWAYS AS IDENTITY → AUTOINCREMENT (only valid as part
+    # 2. GENERATED ALWAYS AS IDENTITY -> AUTOINCREMENT (only valid as part
     # of INTEGER PRIMARY KEY, so we use a regex that requires that context).
     out = re.sub(
         r"INTEGER\s+GENERATED\s+ALWAYS\s+AS\s+IDENTITY\s+PRIMARY\s+KEY",
         "INTEGER PRIMARY KEY AUTOINCREMENT",
         out, flags=re.IGNORECASE,
     )
-    # 3. TIMESTAMP WITH TIME ZONE → TIMESTAMP
+    # 3. TIMESTAMP WITH TIME ZONE -> TIMESTAMP
     out = re.sub(
         r"TIMESTAMP\s+WITH\s+TIME\s+ZONE",
         "TIMESTAMP", out, flags=re.IGNORECASE,
     )
-    # 3b. v59 ROOT FIX (compound of T-001): ``DEFAULT NOW()`` →
+    # 3b. v59 ROOT FIX (compound of T-001): ``DEFAULT NOW()`` ->
     # ``DEFAULT CURRENT_TIMESTAMP``. SQLite does NOT have a ``NOW()``
-    # function — every ``DEFAULT NOW()`` in the migrations raised
+    # function -- every ``DEFAULT NOW()`` in the migrations raised
     # ``OperationalError: near "(": syntax error`` because SQLite
     # parsed ``NOW`` as a column name and ``(`` as unexpected. The
     # SQLAlchemy ORM already uses ``func.now()`` which SQLAlchemy
@@ -2229,7 +2229,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
         "DEFAULT CURRENT_TIMESTAMP",
         out, flags=re.IGNORECASE,
     )
-    # 3c. v59 ROOT FIX: bare ``NOW()`` (not in DEFAULT context) →
+    # 3c. v59 ROOT FIX: bare ``NOW()`` (not in DEFAULT context) ->
     # ``CURRENT_TIMESTAMP``. Used in UPDATE SET clauses and trigger
     # bodies. Same SQLite limitation as 3b.
     out = re.sub(
@@ -2237,8 +2237,8 @@ def _translate_sql_for_sqlite(sql: str) -> str:
         "CURRENT_TIMESTAMP",
         out, flags=re.IGNORECASE,
     )
-    # 4. DO $$ ... END $$; → strip the PL/pgSQL wrapper, keep inner SQL.
-    # The inner SQL often uses BEGIN/END/IF/RAISE NOTICE — we leave those
+    # 4. DO $$ ... END $$; -> strip the PL/pgSQL wrapper, keep inner SQL.
+    # The inner SQL often uses BEGIN/END/IF/RAISE NOTICE -- we leave those
     # in (they'll cause warnings at execution time but won't block the
     # rest of the migration since each statement is independent).
     def _strip_do_block(m: "re.Match[str]") -> str:
@@ -2248,7 +2248,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
         # block (inside a SAVEPOINT section). The v59 _strip_do_block
         # function had a ``bare string literal continuation`` regex
         # (runs later) that matched individual string-literal lines of
-        # the COMMENT ON statement and replaced them with comments —
+        # the COMMENT ON statement and replaced them with comments --
         # breaking the COMMENT ON syntax. The broken COMMENT ON then
         # survived to execution time and SQLite raised
         # ``near "COMMENT": syntax error``. Fix: strip COMMENT ON
@@ -2267,7 +2267,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
         # variable declarations with a regex that only matched ``_\w+``
         # (underscore-prefixed names). But migration 001's verification
         # DO block declares ``tbl TEXT``, ``col_count INTEGER``,
-        # ``table_count INTEGER`` — none start with ``_``. The un-stripped
+        # ``table_count INTEGER`` -- none start with ``_``. The un-stripped
         # ``col_count INTEGER`` then appeared as a bare SQL statement,
         # causing ``OperationalError: near "col_count": syntax error``.
         # The fix: strip the ENTIRE DECLARE ... BEGIN section in one shot.
@@ -2287,7 +2287,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
         # EXCEPTION stripping AFTER BEGIN/END stripping, so by the time
         # the EXCEPTION regex tried to match ``EXCEPTION ... END``,
         # the ``END`` keyword had already been replaced with ``-- END``
-        # — the regex failed, the ``WHEN ... THEN`` body survived, and
+        # -- the regex failed, the ``WHEN ... THEN`` body survived, and
         # SQLite raised ``OperationalError: near "OR": syntax error``
         # (from ``WHEN feature_not_supported OR syntax_error THEN`` in
         # migration 009). Verified failing by actually running migrations.
@@ -2333,7 +2333,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
         # "OR": syntax error`` on whatever non-SQL token came first.
         # Verified failing by actually running migrations on SQLite.
         # Fix: replace the entire RAISE statement with a FIXED comment
-        # (no truncation, no content echo) — this guarantees no unclosed
+        # (no truncation, no content echo) -- this guarantees no unclosed
         # string literals can leak into the translated SQL.
         inner = re.sub(
             r"RAISE\s+(?:NOTICE|WARNING|EXCEPTION)\s+.*?;",
@@ -2417,7 +2417,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
                 if (text[i:i+4].upper() == 'WITH' and
                     (i == 0 or text[i-1] in '\n\r\t ') and
                     (i+4 >= n or text[i+4] in '\n\r\t (')):
-                    # Found a CTE start — find the end (next ; outside a string)
+                    # Found a CTE start -- find the end (next ; outside a string)
                     j = i + 4
                     in_string = False
                     while j < n:
@@ -2494,11 +2494,11 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     #   (a) Modern SQLite (3.35+, released 2021-03) DOES support
     #       ADD COLUMN IF NOT EXISTS. Stripping it on modern SQLite
     #       means re-running migration 006 raises
-    #       ``duplicate column name: groups`` — the runner catches it
+    #       ``duplicate column name: groups`` -- the runner catches it
     #       as WARNING + marks the migration as "skipped", silently
     #       leaving the schema divergent.
     #   (b) Even on older SQLite, stripping IF NOT EXISTS makes re-runs
-    #       raise — exactly the opposite of idempotency.
+    #       raise -- exactly the opposite of idempotency.
     # The fix: detect SQLite version (via sqlite3.sqlite_version) at
     # translate-time. On 3.35+, KEEP the IF NOT EXISTS clause (modern
     # behavior). On older SQLite, strip it BUT wrap the runner's call
@@ -2508,7 +2508,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     # and marks the migration as "skipped", the simpler path is to
     # detect the version and only strip when needed.
     # v59 ROOT FIX (compound of T-001): SQLite does NOT support
-    # ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` — even in SQLite
+    # ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` -- even in SQLite
     # 3.53+. The previous version check (``>= (3, 35)``) incorrectly
     # assumed that SQLite 3.35+ added this syntax. In reality, SQLite
     # 3.35 added ``IF NOT EXISTS`` for ``CREATE TABLE`` and ``CREATE
@@ -2519,7 +2519,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     # FIX: ALWAYS strip ``IF NOT EXISTS`` from ``ALTER TABLE ADD COLUMN``
     # on SQLite. The runner's exception handler at line ~3680 already
     # catches ``duplicate column name`` errors and treats them as
-    # successful no-ops (the column already exists — the migration's
+    # successful no-ops (the column already exists -- the migration's
     # intent is satisfied).
     out = re.sub(
         r"(ALTER\s+TABLE\s+\w+\s+ADD\s+COLUMN)\s+IF\s+NOT\s+EXISTS",
@@ -2532,7 +2532,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     # which raised ``OperationalError: near "EXISTS": syntax error``.
     # FIX: strip the entire ``DROP CONSTRAINT`` clause on SQLite. The
     # subsequent ``ADD CONSTRAINT`` is handled by the next regex
-    # (SQLite doesn't support ADD CONSTRAINT either — it's stripped too).
+    # (SQLite doesn't support ADD CONSTRAINT either -- it's stripped too).
     # v62 ROOT FIX: add ``;`` to replacement so SQL splitter sees
     # statement boundary (the regex consumes the ``;`` but the v59
     # replacement didn't preserve it, causing statement merging).
@@ -2547,7 +2547,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
         out, flags=re.IGNORECASE,
     )
     # v59 ROOT FIX #3 / v62 ROOT FIX (compound): SQLite does NOT support
-    # ``ALTER TABLE ... ADD CONSTRAINT`` — constraints must be defined at
+    # ``ALTER TABLE ... ADD CONSTRAINT`` -- constraints must be defined at
     # CREATE TABLE time. Strip the entire ``ADD CONSTRAINT`` clause on
     # SQLite. The constraint is enforced via the ORM's CheckConstraint on
     # SQLite (via Base.metadata.create_all).
@@ -2555,14 +2555,14 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     # v62 ROOT FIX (T-001 compound): the v59 regex required the form
     # ``ADD CONSTRAINT <name> CHECK(...)`` (constraint name immediately
     # after ``ADD CONSTRAINT``). But migration 002 line ~775 emits
-    # ``ADD CONSTRAINT IF NOT EXISTS <name> UNIQUE (...)`` — PostgreSQL
+    # ``ADD CONSTRAINT IF NOT EXISTS <name> UNIQUE (...)`` -- PostgreSQL
     # accepts the optional ``IF NOT EXISTS`` between ``CONSTRAINT`` and
     # the name. The v59 regex didn't match this form, so the statement
     # was passed through verbatim to SQLite, which raised
     # ``OperationalError: near "NOT": syntax error`` and blocked the
     # ENTIRE 10-migration chain on SQLite (Phase 1 had no database).
     # Verified failing by actually running ``run_migrations()`` on a
-    # fresh SQLite DB — previous AIs claimed this was fixed but never
+    # fresh SQLite DB -- previous AIs claimed this was fixed but never
     # ran it. Fix: make ``IF NOT EXISTS`` optional in ALL three
     # ``ADD CONSTRAINT`` regexes (CHECK / UNIQUE / FK).
     # v62 ROOT FIX: add ``;`` to replacements so SQL splitter sees
@@ -2584,7 +2584,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     )
     # v59 ROOT FIX: SQLite does NOT support ``ALTER TABLE ... ALTER
     # COLUMN ... TYPE ...`` (PostgreSQL-specific). SQLite columns can't
-    # have their type changed after creation. Strip these statements —
+    # have their type changed after creation. Strip these statements --
     # the column type is already correct from migration 001's CREATE
     # TABLE (which the translator made SQLite-compatible).
     out = re.sub(
@@ -2597,7 +2597,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     # COLUMN`` (SQLite 3.35+ supports it but the syntax is different).
     # Strip DROP CONSTRAINT and DROP DEFAULT statements.
     #
-    # v76 ROOT FIX (T-037 compound — DROP COLUMN IF EXISTS translation):
+    # v76 ROOT FIX (T-037 compound -- DROP COLUMN IF EXISTS translation):
     #   SQLite 3.35+ supports ``ALTER TABLE ... DROP COLUMN`` but does NOT
     #   support the ``IF EXISTS`` clause. The rollback files use
     #   ``DROP COLUMN IF EXISTS`` (PostgreSQL syntax) for idempotency.
@@ -2612,7 +2612,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
         r"\1 \2",
         out, flags=re.IGNORECASE,
     )
-    # v76 ROOT FIX (T-037 compound — DROP TABLE/INDEX ... CASCADE translation):
+    # v76 ROOT FIX (T-037 compound -- DROP TABLE/INDEX ... CASCADE translation):
     #   PostgreSQL supports ``DROP TABLE ... CASCADE`` and
     #   ``DROP INDEX ... CASCADE`` to automatically drop dependent objects.
     #   SQLite does NOT support the ``CASCADE`` keyword on DROP statements.
@@ -2643,7 +2643,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     # specific). Migration 008 uses these to tighten the
     # is_globally_approved column. SQLite columns get their DEFAULT and
     # NOT NULL from the CREATE TABLE statement (or ORM), not from ALTER.
-    # Skip these statements — the ORM-created SQLite schema already has
+    # Skip these statements -- the ORM-created SQLite schema already has
     # the correct column definition.
     out = re.sub(
         r"ALTER\s+TABLE\s+\w+\s+ALTER\s+COLUMN\s+\w+\s+SET\s+DEFAULT\s+[^;]+;",
@@ -2660,7 +2660,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     # does. Migration 003 uses this for PPI dedup:
     #   DELETE FROM protein_protein_interactions ppi WHERE ppi.protein_a_id > ...
     # SQLite raises ``OperationalError: near "ppi": syntax error``.
-    # Strip these DELETE statements — they're dedup operations not
+    # Strip these DELETE statements -- they're dedup operations not
     # needed on SQLite (tests use clean DBs).
     out = re.sub(
         r"DELETE\s+FROM\s+\w+\s+\w+\s+WHERE[^;]*;",
@@ -2670,9 +2670,9 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     # v59 ROOT FIX: SQLite does NOT support ``UPDATE ... SET col1 = col2,
     # col2 = col1`` (swap). SQLite evaluates the SET clauses left-to-right,
     # so the swap doesn't work (col1 gets col2's value, then col2 gets
-    # the NEW col1 value which is the old col2 — net effect: both equal
+    # the NEW col1 value which is the old col2 -- net effect: both equal
     # old col2). PostgreSQL evaluates all RHS first. Strip these swap
-    # statements — they're dedup operations not needed on SQLite.
+    # statements -- they're dedup operations not needed on SQLite.
     out = re.sub(
         r"UPDATE\s+\w+\s+SET\s+\w+\s*=\s*\w+,\s*\w+\s*=\s*\w+\s+WHERE[^;]*;",
         "-- [SQLite-skip] UPDATE swap (PostgreSQL-specific semantics)\n;",
@@ -2684,16 +2684,16 @@ def _translate_sql_for_sqlite(sql: str) -> str:
         r"(CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+\w+\s+ON\s+\w+\s*\([^)]+\))\s+WHERE\s+[^;]+(;)",
         r"\1\2", out, flags=re.IGNORECASE,
     )
-    # 7. JSONB → TEXT (SQLite has no JSONB type; JSON is stored as TEXT).
+    # 7. JSONB -> TEXT (SQLite has no JSONB type; JSON is stored as TEXT).
     out = re.sub(r"\bJSONB\b", "TEXT", out, flags=re.IGNORECASE)
-    # 8. ::type casts → remove (SQLite ignores Postgres-style casts).
+    # 8. ::type casts -> remove (SQLite ignores Postgres-style casts).
     out = re.sub(r"::\w+(?:\([^)]*\))?", "", out)
-    # 9. COMMENT ON ... IS '...'; → strip (SQLite has no COMMENT ON).
+    # 9. COMMENT ON ... IS '...'; -> strip (SQLite has no COMMENT ON).
     # v59 ROOT FIX: expanded the keyword list to include FUNCTION and
     # TRIGGER (PostgreSQL supports COMMENT ON FUNCTION, COMMENT ON
     # TRIGGER, etc.). The previous regex only matched TABLE/COLUMN/
     # INDEX/CONSTRAINT, leaving ``COMMENT ON FUNCTION update_updated_at()
-    # IS '...'`` in the translated SQL — SQLite raised ``OperationalError:
+    # IS '...'`` in the translated SQL -- SQLite raised ``OperationalError:
     # near "COMMENT": syntax error``.
     # v59 ROOT FIX #2: the previous regex ``[^;]+;`` broke on COMMENT ON
     # statements where the string literal contained a ``;`` (e.g.
@@ -2706,15 +2706,15 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     #
     # v62 ROOT FIX (T-001 compound of COMMENT ON eating CREATE TABLE):
     # The v59 precise regex required the object name to match
-    # ``[\w.\s\"]+`` — which does NOT include parentheses. So
+    # ``[\w.\s\"]+`` -- which does NOT include parentheses. So
     # ``COMMENT ON FUNCTION update_updated_at() IS '...'`` was NOT
     # matched by the precise regex, and fell through to the v59
     # fallback regex ``COMMENT\s+ON\s+[^;]*;``. That fallback regex
-    # matches ``COMMENT ON`` ANYWHERE in the SQL — including inside
+    # matches ``COMMENT ON`` ANYWHERE in the SQL -- including inside
     # ``--`` comments left behind by earlier replacements (e.g.
     # ``-- [SQLite-skip] COMMENT ON ...``). The greedy ``[^;]*`` then
     # ate everything from the comment's ``COMMENT ON`` to the next
-    # ``;`` — which could be the ``;`` at the end of a CREATE TABLE
+    # ``;`` -- which could be the ``;`` at the end of a CREATE TABLE
     # statement (e.g. ``CREATE TABLE proteins (...);``). This SILENTLY
     # DELETED the proteins, drug_protein_interactions,
     # protein_protein_interactions, gene_disease_associations,
@@ -2749,7 +2749,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     # ``OperationalError: near "FUNCTION": syntax error`` on every
     # migration that created a trigger function (001, 002). The functions
     # are only used by PostgreSQL triggers (which SQLite also can't
-    # create — see next pattern). On SQLite, the ORM's BulkUpdate
+    # create -- see next pattern). On SQLite, the ORM's BulkUpdate
     # mechanism handles ``updated_at`` auto-update at the application
     # layer (see database/base.py TimestampMixin).
     out = re.sub(
@@ -2767,7 +2767,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     # v62 ROOT FIX (T-001 compound of CREATE TRIGGER): the v59 regex
     # only matched ``BEFORE UPDATE ON <table>``. Migration 006 emits
     # ``BEFORE INSERT OR UPDATE OF groups, name ON drugs FOR EACH ROW
-    # EXECUTE FUNCTION trg_drugs_sync_withdrawn()`` — the v59 regex
+    # EXECUTE FUNCTION trg_drugs_sync_withdrawn()`` -- the v59 regex
     # missed this form, so the statement was passed to SQLite which
     # raised ``OperationalError: near "OR": syntax error``. This broke
     # migration 006 (the patient-safety withdrawn-drug trigger) on
@@ -2800,18 +2800,18 @@ def _translate_sql_for_sqlite(sql: str) -> str:
         "-- [SQLite-skip] DROP TRIGGER\n;",
         out, flags=re.IGNORECASE,
     )
-    # 9e. v59 ROOT FIX (compound of InChIKey fix — SQLite regex operator
+    # 9e. v59 ROOT FIX (compound of InChIKey fix -- SQLite regex operator
     # ``~`` in CHECK constraints): the migration 001 SQL uses PostgreSQL's
     # regex operator ``~`` in three CHECK constraints:
     #   - chk_drugs_inchikey_format: inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'
     #   - chk_gda_disease_id_format: 9 patterns (omim/disgenet/doid/...)
     #   - chk_gda_pmid_list: pmid_list ~ '^[\\d;,\\s]*$'
-    # SQLite does NOT support ``~`` — every CREATE TABLE containing one
+    # SQLite does NOT support ``~`` -- every CREATE TABLE containing one
     # of these CHECKs raised ``OperationalError: near "~": syntax error``
     # on SQLite, causing the entire drugs + GDA table creation to fail.
     # The ORM's CheckConstraint was already fixed (v59 compound fix) to
     # use portable forms. The migration SQL keeps the regex (PostgreSQL-
-    # native — works on PG). On SQLite, we replace ``<col> ~ '<regex>'``
+    # native -- works on PG). On SQLite, we replace ``<col> ~ '<regex>'``
     # with a portable equivalent (see the v76 specific-regex handling
     # below for the InChIKey case; all other regexes fall back to the
     # generic ``LENGTH(TRIM(<col>)) > 0`` non-empty backstop).
@@ -2827,14 +2827,14 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     # 006's UPDATE statement (the T-002 withdrawn-drug backfill). The
     # ``~`` survived translation, SQLite raised
     # ``OperationalError: near "~": syntax error``, and migration 006
-    # was marked FAILED — breaking the patient-safety invariant that
+    # was marked FAILED -- breaking the patient-safety invariant that
     # ``is_withdrawn=TRUE`` for Vioxx/Bextra/Meridia/Avandia/Redux.
     # Verified failing by actually running ``run_migrations()`` on
-    # SQLite — previous AIs claimed this was fixed. Fix: extend the
+    # SQLite -- previous AIs claimed this was fixed. Fix: extend the
     # LHS pattern to accept either a bare identifier OR a function
     # call ``name(args)``.
     #
-    # v76 ROOT FIX (T-038 — InChIKey regex gets a STRONG portable
+    # v76 ROOT FIX (T-038 -- InChIKey regex gets a STRONG portable
     # equivalent, not the weak LENGTH(TRIM()) > 0 backstop):
     #   The v59/v62 generic translation replaced EVERY ``<col> ~ '<regex>'``
     #   with ``LENGTH(TRIM(<col>)) > 0``. For the InChIKey CHECK, this was
@@ -2842,51 +2842,67 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     #   LIKE 'SYNTH%'`` (a reasonable backstop), but after v76 T-038
     #   changed the SQL to ``inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'``,
     #   the generic translator would have produced ``LENGTH(TRIM(inchikey))
-    #   > 0`` — WEAKER than the original LENGTH=27 check. A 1-char
+    #   > 0`` -- WEAKER than the original LENGTH=27 check. A 1-char
     #   InChIKey would pass on SQLite.
-    #   ROOT FIX: add a SPECIFIC translation for the InChIKey regex
-    #   pattern ``inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'`` that
-    #   produces a STRONG portable equivalent using LENGTH + SUBSTR
-    #   (both ANSI SQL, work identically on PostgreSQL and SQLite):
-    #     LENGTH(inchikey) = 27
-    #     AND SUBSTR(inchikey, 15, 1) = '-'
-    #     AND SUBSTR(inchikey, 26, 1) = '-'
-    #   This validates: (1) length is exactly 27, (2) the hyphen between
-    #   the connectivity layer (14 chars) and hash layer (10 chars) is
-    #   at position 15, (3) the hyphen between the hash layer and the
-    #   1-char protonation indicator is at position 26. It does NOT
-    #   validate that the non-hyphen chars are uppercase letters (SQLite
-    #   cannot do this portably without GLOB), but the Python validator
-    #   (is_canonical_inchikey) enforces the full regex on both dialects.
-    #   This specific translation runs BEFORE the generic one so the
-    #   InChIKey regex is matched first; all other regexes fall through
-    #   to the generic LENGTH(TRIM()) > 0 backstop.
+    #
+    # P1-015 ROOT FIX (Team-2 — use real REGEXP instead of LENGTH+SUBSTR
+    #   backstop):
+    #   The v76 T-038 fix translated the InChIKey regex to
+    #   ``LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND
+    #   SUBSTR(inchikey, 26, 1) = '-'``. This was STRONGER than the
+    #   generic LENGTH>0 backstop but STILL accepted any 27-char string
+    #   with hyphens at positions 15 and 26 — including digits, lowercase,
+    #   punctuation (e.g. ``11111111111111-2222222222-3``,
+    #   ``aaaaaaaaaaaaaa-bbbbbbbbbb-c``, ``!!!!!!!!!!!!!!-!!!!!!!!!!-!``).
+    #   Dev DBs (SQLite) accepted gibberish InChIKeys that prod PostgreSQL
+    #   rejected. ROOT FIX: ``database/connection.py`` now registers a
+    #   SQLite REGEXP function via ``create_function`` (see
+    #   ``_register_sqlite_regexp_function`` in ``_attach_lifecycle_events``).
+    #   This lets SQLite execute the SAME regex as PostgreSQL. The
+    #   translation below converts ``<col> ~ '<regex>'`` to
+    #   ``<col> REGEXP '<regex>'`` for SQLite — IDENTICAL semantics to
+    #   PostgreSQL's ``~``. Dev/prod behavior is now identical for ALL
+    #   regex-based CHECK constraints (InChIKey, disease_id, pmid_list,
+    #   withdrawn-drug backfill, etc.). The previous LENGTH+SUBSTR
+    #   backstop is removed — it was a workaround for SQLite's lack of
+    #   native regex, which is no longer needed.
+    #
+    #   The specific InChIKey translation (v76 T-038) is REMOVED — the
+    #   generic REGEXP translation handles it correctly. All regexes
+    #   (InChIKey, disease_id, pmid_list, etc.) now use the SAME
+    #   ``<col> REGEXP '<regex>'`` form on SQLite.
+    #
+    #   SAFETY: if the REGEXP function is NOT registered (e.g. a test
+    #   that creates a SQLite engine without going through
+    #   ``connection.py``), SQLite raises ``OperationalError: no such
+    #   function: REGEXP`` on the first INSERT. This is BY DESIGN — it
+    #   surfaces the missing registration immediately rather than
+    #   silently accepting invalid data. Tests that bypass
+    #   ``connection.py`` must register the REGEXP function themselves
+    #   (see ``tests/conftest.py`` or copy the ``_sqlite_regexp``
+    #   function from ``connection.py``).
+    # Translate ``<col> ~ '<regex>'`` → ``<col> REGEXP '<regex>'`` for
+    # SQLite. The REGEXP function is registered in connection.py at
+    # engine creation time (P1-015 ROOT FIX).
     out = re.sub(
-        r"inchikey\s*~\s*'\^\[A-Z\]\{14\}-\[A-Z\]\{10\}-\[A-Z\]\$'",
-        r"LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND SUBSTR(inchikey, 26, 1) = '-'",
+        r"(\w+(?:\s*\([^)]*\))?)\s*~\s*('[^']*')",
+        r"\1 REGEXP \2",
         out, flags=re.IGNORECASE,
     )
-    # Generic fallback for all other ``<col> ~ '<regex>'`` patterns
-    # (disease_id format, pmid_list format, withdrawn-drug backfill, etc.).
-    out = re.sub(
-        r"(\w+(?:\s*\([^)]*\))?)\s*~\s*'[^']*'",
-        r"LENGTH(TRIM(\1)) > 0",
-        out, flags=re.IGNORECASE,
-    )
-    # 10. v35 ROOT FIX (issue 33): STRING_AGG(...) → GROUP_CONCAT(...).
+    # 10. v35 ROOT FIX (issue 33): STRING_AGG(...) -> GROUP_CONCAT(...).
     # PostgreSQL's ``STRING_AGG(expr, sep)`` is the equivalent of SQLite's
-    # ``GROUP_CONCAT(expr, sep)`` — the argument order is the SAME (expr
+    # ``GROUP_CONCAT(expr, sep)`` -- the argument order is the SAME (expr
     # first, separator second), so a direct name swap is semantically
     # correct. Without this translation, any migration that uses
     # STRING_AGG (e.g. to build a delimited list of values per group)
     # raises ``OperationalError: no such function: STRING_AGG`` on SQLite
-    # and is skipped — silently leaving the migration's intended data
+    # and is skipped -- silently leaving the migration's intended data
     # transformation unapplied.
     out = re.sub(r"\bSTRING_AGG\s*\(", "GROUP_CONCAT(", out, flags=re.IGNORECASE)
-    # 11. v35 ROOT FIX (issue 33): FILTER (WHERE ...) → CASE WHEN ... END.
+    # 11. v35 ROOT FIX (issue 33): FILTER (WHERE ...) -> CASE WHEN ... END.
     # PostgreSQL supports the SQL:2003 ``FILTER`` clause for aggregate
     # functions: ``COUNT(*) FILTER (WHERE condition)``. SQLite does NOT
-    # support FILTER (as of 3.46) — the equivalent is
+    # support FILTER (as of 3.46) -- the equivalent is
     # ``COUNT(CASE WHEN condition THEN 1 END)`` (or ``SUM(CASE WHEN
     # condition THEN 1 ELSE 0 END)``). The translation below rewrites
     # ``<agg>(<expr>) FILTER (WHERE <cond>)`` to
@@ -2914,7 +2930,7 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     # v62 ROOT FIX (T-001 compound of adjacent string literal concatenation):
     # PostgreSQL supports adjacent string literal concatenation:
     #   'abc' 'def'  =>  'abcdef'
-    # SQLite does NOT support this — it raises ``syntax error`` when it
+    # SQLite does NOT support this -- it raises ``syntax error`` when it
     # encounters two string literals separated only by whitespace.
     # Migration 009's INSERT INTO schema_version uses this PostgreSQL
     # feature for multi-line descriptions. Fix: insert ``||`` (SQL
@@ -3177,7 +3193,7 @@ class MigrationResult:
     schema_version_after: int | None
     row_count_changes: dict[str, tuple[int, int]] = field(default_factory=dict)
     data_checksums: dict[str, str] = field(default_factory=dict)
-    # v22 ROOT FIX (audit section 5 finding 11 — Type contract violation):
+    # v22 ROOT FIX (audit section 5 finding 11 -- Type contract violation):
     # was ``list[str]`` but dicts were appended at runtime. Consumers that
     # did ``err.upper()`` would crash. Unify: all entries are dicts with
     # keys {migration, dialect, error, phase}. String-only sites wrap
@@ -3291,7 +3307,7 @@ def _resolve_engine(engine, config: MigrationConfig | None = None):
     return engine
 
 
-# v75 ROOT FIX (T-026 — migration 007 DO $$ block fails on SQLite):
+# v75 ROOT FIX (T-026 -- migration 007 DO $$ block fails on SQLite):
 # PostgreSQL-only post-migration upgrades that the portable SQL files
 # cannot express (because SQLite has no JSONB type, no ALTER COLUMN
 # TYPE, no pg_constraint catalog). Each entry is keyed by the migration
@@ -3300,13 +3316,13 @@ def _resolve_engine(engine, config: MigrationConfig | None = None):
 # upgrade has already been applied (so the runner skips it on re-runs).
 #
 # This hook is called ONLY on PostgreSQL (dialect_name == DIALECT_POSTGRESQL).
-# SQLite dev/test DBs use the TEXT column directly — the SQLAlchemy JSON
+# SQLite dev/test DBs use the TEXT column directly -- the SQLAlchemy JSON
 # dialect serialises Python dicts to TEXT transparently on both dialects,
 # so application code is identical.
 _POSTGRES_ONLY_UPGRADES: dict[str, list[tuple[str, str, str]]] = {
     "007_pipeline_run_metadata.sql": [
         (
-            "Upgrade pipeline_runs.metadata_json TEXT → JSONB",
+            "Upgrade pipeline_runs.metadata_json TEXT -> JSONB",
             # The column was added as TEXT by the portable migration file
             # (works on both SQLite and PostgreSQL). On PostgreSQL we
             # upgrade it to JSONB for indexable, deduplicated JSON storage.
@@ -3328,7 +3344,7 @@ _POSTGRES_ONLY_UPGRADES: dict[str, list[tuple[str, str, str]]] = {
 def _apply_postgres_only_upgrades(conn, migration_name: str) -> None:
     """Apply PostgreSQL-only upgrades for a migration (v75 ROOT FIX T-026).
 
-    v90 ROOT FIX (BUG #15 — P1 _apply_postgres_only_upgrades outside
+    v90 ROOT FIX (BUG #15 -- P1 _apply_postgres_only_upgrades outside
     transaction):
       The previous signature was ``_apply_postgres_only_upgrades(engine,
       migration_name)`` and it opened its OWN ``with engine.begin() as
@@ -3342,7 +3358,7 @@ def _apply_postgres_only_upgrades(conn, migration_name: str) -> None:
       ROOT FIX: accept a ``conn`` parameter (the connection from the
       per-migration transaction) and execute the upgrade INSIDE the
       caller's transaction. If the upgrade fails, the entire migration
-      rolls back (including the ``_record_migration`` bookkeeping) — the
+      rolls back (including the ``_record_migration`` bookkeeping) -- the
       migration is NOT marked as applied, and the operator can fix the
       root cause (e.g. clean up invalid JSON) and re-run. This is the
       fail-closed approach appropriate for an institutional-grade pharma
@@ -3370,19 +3386,19 @@ def _apply_postgres_only_upgrades(conn, migration_name: str) -> None:
                 continue
         except Exception as guard_exc:
             # Guard failure (e.g. information_schema not accessible)
-            # — log and proceed with the upgrade attempt. The upgrade
+            # -- log and proceed with the upgrade attempt. The upgrade
             # itself is idempotent via IF NOT EXISTS / TYPE guards.
             logger.debug(
                 "  [WARN] Postgres-only upgrade guard failed for %s: %s",
                 description, guard_exc,
             )
-        # v90: let failures propagate — the caller's transaction will
+        # v90: let failures propagate -- the caller's transaction will
         # roll back, and the migration will NOT be marked as applied.
         # This is the fail-closed behavior: if the JSONB upgrade fails
         # (e.g. invalid JSON in metadata_json), the operator must fix
         # the data and re-run the migration. The previous non-blocking
         # behavior silently left the column as TEXT while marking the
-        # migration as applied — schema drift.
+        # migration as applied -- schema drift.
         conn.execute(text(sql))
         logger.info(
             "  [OK] Applied Postgres-only upgrade: %s",
@@ -3444,7 +3460,7 @@ def _finalize_result(
     applied: list[str],
     skipped: list[str],
     failed: list[str],
-    # v22 ROOT FIX: type contract — dicts are appended (not strings).
+    # v22 ROOT FIX: type contract -- dicts are appended (not strings).
     errors: list[dict[str, str]],
     per_migration_timing: dict[str, float],
     dialect_name: str,
@@ -3603,10 +3619,10 @@ def run_migrations(
     # connection to the pool. For psycopg2 + SQLAlchemy's QueuePool,
     # the connection is not closed but it CAN be handed to another
     # caller, and the session-level advisory lock is bound to the
-    # backend PID — once the PID is recycled or the connection
+    # backend PID -- once the PID is recycled or the connection
     # returned, the lock is effectively released (or worse, held by
     # an unrelated caller). Two concurrent ``run_migrations()`` calls
-    # therefore did NOT actually serialize — both acquired the lock
+    # therefore did NOT actually serialize -- both acquired the lock
     # on their own short-lived connections, both proceeded in
     # parallel, and both "released" a lock they may not have held.
     #
@@ -3691,7 +3707,7 @@ def _run_migrations_inner(
     applied: list[str] = []
     skipped: list[str] = []
     failed: list[str] = []
-    # v22 ROOT FIX (audit section 5 finding 11 — "Type contract violation"):
+    # v22 ROOT FIX (audit section 5 finding 11 -- "Type contract violation"):
     # the previous annotation was ``list[str]`` but dicts are appended at
     # lines 3344 and 3375. Consumers that do ``err.upper()`` would crash.
     # Change the annotation to ``list[dict[str, str]]`` to match reality.
@@ -3777,7 +3793,7 @@ def _run_migrations_inner(
 
     if dialect_name == DIALECT_POSTGRESQL:
         # Sort by numeric prefix (IDEM-MIG-04). Exclude *_rollback.sql
-        # sidecars — they are recovery scripts, NOT migrations. On PostgreSQL,
+        # sidecars -- they are recovery scripts, NOT migrations. On PostgreSQL,
         # 001_initial_schema_rollback.sql would `DROP TABLE IF EXISTS drugs
         # CASCADE; ...` and destroy the staging schema on every fresh install.
         # On SQLite, multi-statement rollback files abort with "You can only
@@ -3962,7 +3978,7 @@ def _run_migrations_inner(
             with engine.begin() as conn:
                 pre_counts = _log_table_state(conn, f"before_{migration_name}", dialect_name)
 
-            # Data checksum before (only when configured — expensive)
+            # Data checksum before (only when configured -- expensive)
             pre_checksums: dict[str, str] = {}
             if config and config.verify_data_checksums:
                 with engine.begin() as conn:
@@ -4004,13 +4020,13 @@ def _run_migrations_inner(
                 # on the SAME connection WITHOUT a SAVEPOINT. After a
                 # transient statement-level failure (e.g. deadlock
                 # victim, unique-violation under concurrent load),
-                # PostgreSQL poisons the entire transaction — the
+                # PostgreSQL poisons the entire transaction -- the
                 # retry attempt would fail with "current transaction
                 # is aborted, commands ignored until end of
                 # transaction block", the outer transaction would
                 # roll back, and partial schema changes from earlier
                 # statements in the SAME migration would be lost
-                # (well, rolled back — but the migration would be
+                # (well, rolled back -- but the migration would be
                 # recorded as failed even though the underlying
                 # statements were valid). Worse, on dialects that
                 # auto-commit per statement (SQLite in some configs),
@@ -4020,12 +4036,12 @@ def _run_migrations_inner(
                 # Fix: ``_execute_with_retry`` now wraps each statement
                 # in a SAVEPOINT (``conn.begin_nested()``). On a
                 # transient failure, only the SAVEPOINT is rolled
-                # back — the outer transaction stays healthy and the
+                # back -- the outer transaction stays healthy and the
                 # retry re-executes the statement cleanly. The entire
                 # migration (all statements + the
                 # ``_record_migration`` bookkeeping) is wrapped in a
                 # single ``engine.begin()`` so a partial failure
-                # rolls back atomically — the schema is never left
+                # rolls back atomically -- the schema is never left
                 # half-migrated. See ``_execute_with_retry`` for the
                 # SAVEPOINT implementation.
                 with engine.begin() as conn:
@@ -4046,19 +4062,19 @@ def _run_migrations_inner(
                             )
                             raise
 
-                    # v90 ROOT FIX (BUG #15 — P1 _apply_postgres_only_upgrades
+                    # v90 ROOT FIX (BUG #15 -- P1 _apply_postgres_only_upgrades
                     # outside transaction): the PostgreSQL-only upgrades
                     # (e.g. JSONB type upgrade for migration 007) MUST run
                     # INSIDE the per-migration transaction so they commit
                     # atomically with the migration. If the upgrade fails
                     # (e.g. ALTER COLUMN metadata_json TYPE JSONB fails
                     # because a row has invalid JSON), the entire migration
-                    # rolls back — the migration is NOT marked as applied,
+                    # rolls back -- the migration is NOT marked as applied,
                     # and the operator can fix the data and re-run. The
                     # previous code called _apply_postgres_only_upgrades
                     # AFTER the transaction committed, so a failed upgrade
                     # left the migration recorded as "applied" but the
-                    # column stayed TEXT — schema drift.
+                    # column stayed TEXT -- schema drift.
                     # v75 ROOT FIX (T-026): the hook is called ONLY on
                     # PostgreSQL (the function checks dialect internally).
                     # The portable SQL file already added the TEXT column
@@ -4070,7 +4086,7 @@ def _run_migrations_inner(
                     # This is INSIDE the same ``engine.begin()`` block as
                     # the migration statements + the Postgres-only upgrades,
                     # so the recording, the schema change, AND the upgrade
-                    # commit atomically — we never have a recorded migration
+                    # commit atomically -- we never have a recorded migration
                     # that didn't actually apply (or vice versa).
                     _record_migration(conn, migration_name, checksum, "applied")
 
@@ -4230,7 +4246,7 @@ def _run_migrations_inner(
         # ``Base.metadata.create_all()``) lacked:
         #   - CHECK constraints from migrations 001/003/005
         #   - UNIQUE constraints from migration 002
-        #   - FK constraints from migration 005 (pubchem.inchikey → drugs)
+        #   - FK constraints from migration 005 (pubchem.inchikey -> drugs)
         #   - Indexes from migrations 001/003/005/006
         #   - The ``schema_version`` table from migration 001
         # Code that passed tests on SQLite could fail on PostgreSQL
@@ -4241,7 +4257,7 @@ def _run_migrations_inner(
         # PostgreSQL-specific syntax (``DO $$ ... END $$`` blocks,
         # ``GENERATED ALWAYS AS IDENTITY``, ``TIMESTAMP WITH TIME ZONE``,
         # ``PRAGMA``-gated FK creation, etc.). The translation is
-        # best-effort — features that cannot be translated (e.g.
+        # best-effort -- features that cannot be translated (e.g.
         # ``pg_advisory_lock``) are skipped with a WARNING.
         logger.info(
             "Running .sql migration files for dialect '%s' with "
@@ -4267,7 +4283,7 @@ def _run_migrations_inner(
             # ``_record_migration`` call, this meant every SQLite run
             # re-executed every migration file. Now that we record applied
             # migrations (fix above), this check skips them on subsequent
-            # runs — the SQLite path now has the same idempotent
+            # runs -- the SQLite path now has the same idempotent
             # skip-logic as the PostgreSQL path.
             migration_name = f.name
             if config and config.skip_migrations and migration_name in config.skip_migrations:
@@ -4295,20 +4311,20 @@ def _run_migrations_inner(
 
             try:
                 content = f.read_text(encoding="utf-8")
-                # v73 ROOT FIX (T-009 — SQLite path never records applied
-                # migrations → every run re-applies every migration):
+                # v73 ROOT FIX (T-009 -- SQLite path never records applied
+                # migrations -> every run re-applies every migration):
                 #   The previous SQLite branch computed NOTHING comparable
                 #   to the PostgreSQL branch's ``checksum`` (line 3761).
                 #   On the next ``run_migrations()`` call,
                 #   ``_is_migration_applied(conn, f.name)`` queried
                 #   ``_migration_history`` and found ZERO rows for every
-                #   migration — because ``_record_migration`` was never
+                #   migration -- because ``_record_migration`` was never
                 #   called on the SQLite path. The PostgreSQL branch
                 #   (line 3904) calls
                 #   ``_record_migration(conn, migration_name, checksum,
                 #   "applied")`` INSIDE the ``engine.begin()`` block so
                 #   the recording and the schema change commit atomically
-                #   — we never have a recorded migration that didn't
+                #   -- we never have a recorded migration that didn't
                 #   actually apply (or vice versa). The SQLite branch
                 #   had only ``applied.append(f.name)`` (line 4199) which
                 #   updated the IN-MEMORY list but never wrote a row to
@@ -4316,13 +4332,13 @@ def _run_migrations_inner(
                 #   invocation on SQLite re-executed ALL 10 migration
                 #   files. The idempotent no-op handler at line 4181
                 #   swallowed ``duplicate column name`` / ``already
-                #   exists`` errors, so the migration "succeeded" — but
+                #   exists`` errors, so the migration "succeeded" -- but
                 #   every run paid the full translation + execution cost,
                 #   AND any non-idempotent migration (e.g. one that
                 #   INSERTs data without ON CONFLICT) duplicated data on
                 #   every run. Migration 002's ``audit_log`` INSERTs
                 #   (lines 488-493, 542-546, etc.) use plain INSERT with
-                #   no ON CONFLICT — so every ``run_migrations()`` call
+                #   no ON CONFLICT -- so every ``run_migrations()`` call
                 #   appended another row to ``audit_log`` with the same
                 #   operation token.
                 #
@@ -4332,20 +4348,20 @@ def _run_migrations_inner(
                 #   ``checksum = _compute_checksum(raw_content)``), then
                 #   call ``_record_migration(conn, f.name, checksum,
                 #   "applied")`` INSIDE the ``with engine.begin() as
-                #   conn:`` block — AFTER all statements have executed
+                #   conn:`` block -- AFTER all statements have executed
                 #   successfully, but BEFORE the context manager commits
                 #   the transaction. If any statement fails, the
                 #   exception propagates and the context manager rolls
                 #   back BOTH the schema changes AND the
-                #   ``_migration_history`` INSERT — leaving the database
+                #   ``_migration_history`` INSERT -- leaving the database
                 #   in the pre-migration state, identical to the
                 #   PostgreSQL branch's atomicity guarantee.
                 checksum = _compute_checksum(content)
                 # Translate PostgreSQL-specific syntax to SQLite-compatible.
                 translated = _translate_sql_for_sqlite(content)
-                # Split into statements (naive — split on semicolons
+                # Split into statements (naive -- split on semicolons
                 # but respect DO $$ ... $$ blocks). For SQLite we just
-                # execute the whole script as one text() call —
+                # execute the whole script as one text() call --
                 # SQLAlchemy's text() supports multiple statements when
                 # executed via engine.connect().execute(text(...)) in
                 # SQLAlchemy 2.x with executemany.
@@ -4357,7 +4373,7 @@ def _run_migrations_inner(
                     # exception) wrapper around the entire SQLite-
                     # translated migration script. A partial failure
                     # (e.g. one statement in the translated script raises)
-                    # rolls back the whole migration atomically — no
+                    # rolls back the whole migration atomically -- no
                     # half-applied schema. This mirrors the PostgreSQL
                     # path's per-migration transaction wrapper (see
                     # ``with engine.begin() as conn:`` in the
@@ -4375,7 +4391,7 @@ def _run_migrations_inner(
                         # file). The comment that was here claimed
                         # "ENH-9: SQLite supports executing multiple
                         # statements in one text() call when using
-                        # connection.exec_driver_sql()" — this is FALSE.
+                        # connection.exec_driver_sql()" -- this is FALSE.
                         # SQLAlchemy's ``exec_driver_sql`` delegates to
                         # ``sqlite3.Connection.execute`` which enforces the
                         # one-statement limit. The result: EVERY SQLite
@@ -4383,7 +4399,7 @@ def _run_migrations_inner(
                         # and the runner fell through to the "Failing hard
                         # per V18 CD-5 root fix" branch, raising
                         # RuntimeError: "Database migration failed".
-                        # This is the user's reported T-001 symptom —
+                        # This is the user's reported T-001 symptom --
                         # migrations blocked on a fresh DB.
                         # FIX: split the translated SQL into individual
                         # statements using the state-machine splitter
@@ -4408,7 +4424,7 @@ def _run_migrations_inner(
                             ]
                             if not non_comment_lines:
                                 continue
-                            # v83 FORENSIC ROOT FIX (P0-C10 — SQLAlchemy
+                            # v83 FORENSIC ROOT FIX (P0-C10 -- SQLAlchemy
                             #   text() mis-parses ``%(...)s`` in SQL comments
                             #   as pyformat parameter placeholders):
                             #   Migration 001 line 398 has a comment
@@ -4419,13 +4435,13 @@ def _run_migrations_inner(
                             #   interprets ``%(table)s`` as a pyformat-style
                             #   named parameter. The compiler then converts
                             #   it to ``?`` (qmark for SQLite) and tries to
-                            #   bind a parameter named ``table`` — which
+                            #   bind a parameter named ``table`` -- which
                             #   doesn't exist in the params dict, raising
                             #   ``StatementError: (builtins.KeyError)
                             #   'table'``. This blocks EVERY Phase 1
                             #   pipeline on a fresh SQLite DB (the dev/CI
                             #   default), which means the master DAG cannot
-                            #   run end-to-end in any non-Postgres env —
+                            #   run end-to-end in any non-Postgres env --
                             #   silently gutting the "V1 on free public data
                             #   + laptop" mandate from the project docx.
                             #
@@ -4440,7 +4456,7 @@ def _run_migrations_inner(
                             #   comment lines stripped (rebuilt from
                             #   ``non_comment_lines``). This is the
                             #   institutional-grade fix because:
-                            #     1. It removes the bug surface entirely —
+                            #     1. It removes the bug surface entirely --
                             #        ``text()`` never sees ``%(...)s`` in a
                             #        comment, so pyformat parsing cannot
                             #        mis-fire.
@@ -4449,7 +4465,7 @@ def _run_migrations_inner(
                             #        one statement per ``conn.execute`` call,
                             #        so the v59 multi-statement fix is
                             #        preserved).
-                            #     3. It is forward-compatible — any future
+                            #     3. It is forward-compatible -- any future
                             #        migration that uses ``%(foo)s`` in a
                             #        comment (e.g. documenting a Python
                             #        format-string convention) is protected.
@@ -4468,7 +4484,7 @@ def _run_migrations_inner(
                                 # ``text()`` wrapper + ``conn.execute()``
                                 # instead of the raw ``exec_driver_sql``.
                                 # ``exec_driver_sql`` bypasses SQLAlchemy's
-                                # SQL execution layer — any future migration
+                                # SQL execution layer -- any future migration
                                 # that constructs SQL from env vars or user
                                 # input would be an injection vector.
                                 # ``text()`` routes through SQLAlchemy's
@@ -4534,7 +4550,7 @@ def _run_migrations_inner(
                                 # statement in the error message (the
                                 # original stmt_stripped may contain a
                                 # ``%(...)s`` comment that masked the real
-                                # SQL — operators need to see the actual
+                                # SQL -- operators need to see the actual
                                 # SQL that failed, not the comment).
                                 raise StatementExecutionError(
                                     f"SQLite migration {f.name}: statement failed: "
@@ -4545,11 +4561,11 @@ def _run_migrations_inner(
                         # same ``engine.begin()`` transaction as the schema
                         # changes. If any statement above raised, the context
                         # manager would have rolled back BOTH the schema changes
-                        # AND this recording — atomicity parity with the
+                        # AND this recording -- atomicity parity with the
                         # PostgreSQL branch (line 3904). The next
                         # ``run_migrations()`` call now finds this migration in
                         # ``_migration_history`` with status='applied' and skips
-                        # it — no more re-applying all 10 migrations on every
+                        # it -- no more re-applying all 10 migrations on every
                         # run, no more duplicate ``audit_log`` rows from
                         # non-idempotent INSERTs in migration 002.
                         _record_migration(conn, f.name, checksum, "applied")
@@ -4564,7 +4580,7 @@ def _run_migrations_inner(
                     # fix, old SQLite (< 3.35) raises ``duplicate column
                     # name: <col>`` when an ALTER TABLE ADD COLUMN is re-
                     # executed (because IF NOT EXISTS was stripped). The
-                    # previous code treated this as a hard SKIP — leaving
+                    # previous code treated this as a hard SKIP -- leaving
                     # the migration recorded as "skipped" forever, even
                     # though the schema was actually fine (the column
                     # already existed). Treat ``duplicate column name``
@@ -4574,7 +4590,7 @@ def _run_migrations_inner(
                     _is_idempotent_noop = (
                         "duplicate column name" in _exc_msg
                         or "already exists" in _exc_msg
-                        # v75 ROOT FIX (T-036): "no such table" — see
+                        # v75 ROOT FIX (T-036): "no such table" -- see
                         # the per-statement handler above for the full
                         # rationale. Mirrored here for the migration-
                         # level catch so rollback scripts that reference
@@ -4592,7 +4608,7 @@ def _run_migrations_inner(
                         # v73 ROOT FIX (T-009 continued): the original
                         # ``with engine.begin() as conn:`` block was
                         # rolled back when the idempotent-noop exception
-                        # raised — so we still need to RECORD this
+                        # raised -- so we still need to RECORD this
                         # migration as applied in a NEW transaction.
                         # Without this, the next ``run_migrations()``
                         # call would see no ``_migration_history`` row
@@ -4622,7 +4638,7 @@ def _run_migrations_inner(
                         # the audit's "code that passes tests on SQLite
                         # may fail on PostgreSQL" risk. When a SQLite
                         # translation failed (e.g. unsupported SQL feature),
-                        # the migration was silently skipped — the SQLite
+                        # the migration was silently skipped -- the SQLite
                         # DB then had a schema that diverged from what
                         # PostgreSQL would have, but tests ran against
                         # the SQLite DB and reported success.
@@ -4643,7 +4659,7 @@ def _run_migrations_inner(
                         logger.error(
                             "  [FAIL] SQLite migration %s failed to apply "
                             "(translated) and is NOT an idempotent no-op: "
-                            "%s. Failing hard per V18 CD-5 root fix — "
+                            "%s. Failing hard per V18 CD-5 root fix -- "
                             "the ORM-created schema is NOT a safe fallback "
                             "because tests against the divergent SQLite "
                             "schema would report success while PostgreSQL "
@@ -4656,7 +4672,7 @@ def _run_migrations_inner(
                         raise RuntimeError(
                             f"SQLite migration {f.name} failed to apply "
                             f"(translated): {exc}. The migration cannot "
-                            f"be silently skipped — see V18 CD-5 root "
+                            f"be silently skipped -- see V18 CD-5 root "
                             f"fix comment for details."
                         ) from exc
             except Exception as exc:
@@ -4706,7 +4722,7 @@ def _run_migrations_inner(
     )
 
 
-# Alias for discoverability — both names work (DES-MIG-03, CMP-MIG-04)
+# Alias for discoverability -- both names work (DES-MIG-03, CMP-MIG-04)
 # NOTE: This alias is DEPRECATED. Use run_migrations instead.
 run_migration_002 = run_migrations
 
@@ -4752,7 +4768,7 @@ def check_migrations(engine=None) -> MigrationHealthResult:
             logger.warning("Could not fetch applied migrations: %s", exc)
 
     # Get all SQL migration files. FIX-C5: exclude *_rollback.sql sidecars
-    # — they are recovery scripts, NOT migrations.
+    # -- they are recovery scripts, NOT migrations.
     sql_files = sorted(
         [f for f in MIGRATIONS_DIR.glob("*.sql") if not f.name.endswith("_rollback.sql")],
         key=lambda f: _extract_migration_number(f.name),
@@ -4843,7 +4859,7 @@ def get_migration_status(engine=None) -> MigrationStatus:
 
     # Get pending
     applied_names = {m["migration_name"] for m in applied_migrations if m.get("status") not in ("failed", "retrying")}
-    # FIX-C5: exclude *_rollback.sql sidecars — they are recovery scripts.
+    # FIX-C5: exclude *_rollback.sql sidecars -- they are recovery scripts.
     sql_files = sorted(
         [f for f in MIGRATIONS_DIR.glob("*.sql") if not f.name.endswith("_rollback.sql")],
         key=lambda f: _extract_migration_number(f.name),
@@ -4887,7 +4903,7 @@ def get_sql_migration_files() -> list[Path]:
 
     Separates access to migration SQL data from the runner code.
 
-    FIX-C5: excludes ``*_rollback.sql`` sidecars — they are recovery
+    FIX-C5: excludes ``*_rollback.sql`` sidecars -- they are recovery
     scripts, NOT migrations. Including them would (on PostgreSQL) execute
     ``DROP TABLE IF EXISTS drugs CASCADE; ...`` and destroy the staging
     schema on every fresh install; on SQLite it aborts with
@@ -5024,7 +5040,7 @@ def _split_sql_statements(sql: str) -> list[str]:
     Returns
     -------
     list[str]
-        List of statement strings (raw, untrimmed — caller is responsible
+        List of statement strings (raw, untrimmed -- caller is responsible
         for stripping whitespace and comment-only fragments).
     """
     statements: list[str] = []
@@ -5059,7 +5075,7 @@ def _split_sql_statements(sql: str) -> list[str]:
                 buf.append(dollar_tag)
                 i = j + 1
                 continue
-            # Not a dollar quote — literal $, fall through to default append.
+            # Not a dollar quote -- literal $, fall through to default append.
 
         # --- single-quoted string literal (handles '' escape) ----------------
         if ch == "'":
@@ -5069,7 +5085,7 @@ def _split_sql_statements(sql: str) -> list[str]:
                 c2 = sql[i]
                 buf.append(c2)
                 if c2 == "'" and i + 1 < n and sql[i + 1] == "'":
-                    # Escaped doubled quote — consume both.
+                    # Escaped doubled quote -- consume both.
                     buf.append("'")
                     i += 2
                     continue
@@ -5140,7 +5156,7 @@ def _split_sql_statements(sql: str) -> list[str]:
             # behaviorally equivalent.
             stmt = "".join(buf)
             upper = stmt.strip().upper()
-            # v76 ROOT FIX (T-047 — filter ALL transaction-control
+            # v76 ROOT FIX (T-047 -- filter ALL transaction-control
             # statements, not just bare BEGIN/COMMIT):
             #   The previous filter only caught EXACT ``BEGIN`` and
             #   ``COMMIT`` (after strip+upper). It did NOT catch:
@@ -5281,7 +5297,7 @@ def rollback_migration(migration_name: str, engine=None) -> dict:
     # the rollback path now does the same.
     dialect_name = engine.dialect.name
 
-    # v76 ROOT FIX (T-037 compound — translate the WHOLE rollback SQL file
+    # v76 ROOT FIX (T-037 compound -- translate the WHOLE rollback SQL file
     # for SQLite BEFORE splitting, matching the forward migration path):
     #   The previous attempt translated per-statement AFTER splitting.
     #   But the splitter strips semicolons, and the translator's regexes
@@ -5312,17 +5328,17 @@ def rollback_migration(migration_name: str, engine=None) -> dict:
                 stmt = raw_stmt.strip()
                 if not stmt:
                     continue
-                # v76 ROOT FIX (T-037 compound — rollback silently no-op'd
+                # v76 ROOT FIX (T-037 compound -- rollback silently no-op'd
                 # every statement that started with a comment line):
                 #   The previous code had ``if not stmt or stmt.startswith("--"):
-                #   continue`` — this skipped ANY statement whose first line
+                #   continue`` -- this skipped ANY statement whose first line
                 #   was a comment, even if the statement contained real SQL
                 #   on subsequent lines. Since EVERY rollback file has
                 #   comment lines before each SQL statement (e.g.
                 #   ``-- Drop the index created by 008.\nDROP INDEX ...``),
                 #   the rollback_migration function silently executed ZERO
                 #   statements on every invocation. The ``rolled_back=True``
-                #   result was a LIE — the transaction committed with no
+                #   result was a LIE -- the transaction committed with no
                 #   changes. This is why the schema_version DELETE in
                 #   rollbacks 003/010/011 (which existed BEFORE v76) never
                 #   actually removed the version row at runtime, and why
@@ -5330,7 +5346,7 @@ def rollback_migration(migration_name: str, engine=None) -> dict:
                 #   ROOT FIX: remove the ``stmt.startswith("--")`` check.
                 #   The comment-stripping logic below already handles
                 #   comment-only statements by making them empty after
-                #   stripping — the ``if not stmt: continue`` check
+                #   stripping -- the ``if not stmt: continue`` check
                 #   catches them. Statements that have a comment header
                 #   followed by real SQL are now correctly executed.
                 # Strip leading/trailing comment lines from the statement.
@@ -5338,7 +5354,7 @@ def rollback_migration(migration_name: str, engine=None) -> dict:
                 stmt = "\n".join(lines).strip()
                 if not stmt:
                     continue
-                # v76 ROOT FIX (T-037 compound — per-statement idempotent
+                # v76 ROOT FIX (T-037 compound -- per-statement idempotent
                 # no-op handling for rollbacks):
                 #   On SQLite, ``DROP COLUMN`` (without IF EXISTS) raises
                 #   ``no such column`` if the column was never added (e.g.
@@ -5346,7 +5362,7 @@ def rollback_migration(migration_name: str, engine=None) -> dict:
                 #   Similarly, ``DROP INDEX`` without IF EXISTS raises
                 #   ``no such index``. The forward migration path handles
                 #   this at line ~4430 with per-statement try/except. The
-                #   rollback path did NOT — any such error aborted the
+                #   rollback path did NOT -- any such error aborted the
                 #   entire rollback.
                 #   ROOT FIX: catch "no such column", "no such index",
                 #   "no such table" errors as idempotent no-ops (the
@@ -5365,7 +5381,7 @@ def rollback_migration(migration_name: str, engine=None) -> dict:
                         or "already exists" in stmt_err
                     )
                     if is_idempotent_noop:
-                        # Log and continue — the rollback's intent is
+                        # Log and continue -- the rollback's intent is
                         # satisfied (the object doesn't exist).
                         import logging
                         logging.getLogger(__name__).debug(
@@ -5582,7 +5598,7 @@ def plan_migrations(engine=None, config=None) -> list[dict[str, Any]]:
         else MIGRATIONS_DIR
     )
 
-    # FIX-C5: exclude *_rollback.sql sidecars — they are recovery scripts.
+    # FIX-C5: exclude *_rollback.sql sidecars -- they are recovery scripts.
     sql_files = sorted(
         [f for f in migrations_dir.glob("*.sql") if not f.name.endswith("_rollback.sql")],
         key=lambda f: _extract_migration_number(f.name),
@@ -5605,13 +5621,13 @@ def plan_migrations(engine=None, config=None) -> list[dict[str, Any]]:
 def _is_migration_applied_safe(conn, name: str) -> bool:
     """Safe version of _is_migration_applied that returns False on error.
 
-    BUG-CODE-07: Does NOT catch OperationalError/InterfaceError — those
+    BUG-CODE-07: Does NOT catch OperationalError/InterfaceError -- those
     indicate database connectivity issues and should propagate.
     """
     try:
         return _is_migration_applied(conn, name)
     except ProgrammingError:
-        # Table doesn't exist yet — migration is not applied
+        # Table doesn't exist yet -- migration is not applied
         return False
 
 
@@ -5724,7 +5740,7 @@ def retry_failed_migration(engine, migration_name: str) -> bool:
                 # Without this strip, retrying a migration whose SQL
                 # contains a ``%(foo)s`` comment (e.g. migration 001's
                 # ``ix_%(table)s_%(column)s`` naming-convention comment)
-                # would crash with ``KeyError: 'foo'`` — defeating the
+                # would crash with ``KeyError: 'foo'`` -- defeating the
                 # retry mechanism.
                 stmt_lines = [
                     ln for ln in stmt.splitlines()
@@ -5735,7 +5751,7 @@ def retry_failed_migration(engine, migration_name: str) -> bool:
                 stmt_clean = "\n".join(stmt_lines)
                 conn.execute(text(stmt_clean))
 
-            # Record success — update the 'retrying' record
+            # Record success -- update the 'retrying' record
             conn.execute(
                 text(
                     "UPDATE _migration_history SET status = 'applied', "

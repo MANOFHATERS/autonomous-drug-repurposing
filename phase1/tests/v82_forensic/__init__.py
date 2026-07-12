@@ -1,9 +1,9 @@
 # v82 Forensic Root-Fix Tests
 """
-v82 FORENSIC ROOT-FIX REGRESSION TESTS — 5 compound/cross-file chains.
+v82 FORENSIC ROOT-FIX REGRESSION TESTS -- 5 compound/cross-file chains.
 
 Each test reproduces the EXACT failure scenario described in the issue
-and verifies the fix holds. These are NOT smoke tests — they exercise
+and verifies the fix holds. These are NOT smoke tests -- they exercise
 the real production code paths (entity resolution, normalizer, dedup,
 confidence) with realistic data shapes.
 
