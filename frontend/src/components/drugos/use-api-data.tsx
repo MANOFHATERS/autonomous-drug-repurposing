@@ -330,6 +330,13 @@ export function useBuildEvidencePackage() {
 
 /**
  * Fetch RL-ranked candidates via the real /api/rl endpoint.
+ *
+ * FE-067 ROOT FIX: When `drug` and `disease` are both unset, the hook now
+ * issues a GET /api/rl (default top-N list) instead of short-circuiting
+ * with no fetch. This lets the Knowledge Graph Explorer look up real RL
+ * candidates by drug name when the user clicks a drug node — previously
+ * the lookup hit the mock `drugCandidates` array and silently failed for
+ * any drug that wasn't in the mock set.
  */
 export function useRlCandidates(params: { drug?: string; disease?: string; limit?: number }) {
   const [state, setState] = useState<AsyncState<{ candidates: any[]; source?: string; total?: number }>>({
@@ -340,18 +347,26 @@ export function useRlCandidates(params: { drug?: string; disease?: string; limit
 
   const paramsKey = JSON.stringify(params);
   useEffect(() => {
-    if (!params.drug && !params.disease) {
-      setState({ data: null, loading: false, error: null });
-      return;
-    }
     let cancelled = false;
     setState({ data: null, loading: true, error: null });
-    fetch(`/api/rl`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params),
-    })
+
+    // FE-067: if no drug/disease filter is provided, fetch the default
+    // top-N list via GET. Otherwise POST with the filter params.
+    const hasFilter = !!(params.drug || params.disease);
+    const fetchInit: RequestInit = hasFilter
+      ? {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(params),
+        }
+      : {
+          method: "GET",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+        };
+
+    fetch(`/api/rl`, fetchInit)
       .then(async (res) => {
         const text = await res.text();
         let body: any = null;

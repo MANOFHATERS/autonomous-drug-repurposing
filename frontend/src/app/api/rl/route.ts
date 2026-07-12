@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { checkRlAvailability } from "@/lib/services/ml-stubs";
 import { db } from "@/lib/db";
 import { writeAuditLog, requireAuth, badRequest, internalError } from "@/lib/api-helpers";
-import { parse } from "csv-parse/sync";
+import { checkUserRateLimit } from "@/lib/auth/per-user-rate-limit";
+import {
+  readRlCsvCached,
+  filterAndRankCandidates,
+  type RlCandidate,
+} from "@/lib/services/rl-csv-cache";
 
 /**
  * POST /api/rl
@@ -10,43 +15,66 @@ import { parse } from "csv-parse/sync";
  *
  * FE-002 ROOT FIX: The previous code unconditionally returned 501 — even
  * when RL_SERVICE_URL was set. There was NO code anywhere in src/ that
- * read the Phase 4 RL ranker's output CSV. A grep for
- * validated_hypotheses, policy_prob, gnn_score, rl_drug_ranker,
- * candidates.csv returned ZERO matches. The candidate fields (drug,
+ * read the Phase 4 RL ranker's output CSV. The candidate fields (drug,
  * disease, reward, rank, policy_prob, safety_score, literature_support)
  * appeared NOWHERE in the Next.js codebase.
  *
- * The Phase 4 → API handoff was non-existent. The RL ranker's predictions
- * never reached the dashboard.
+ * FE-069 ROOT FIX (this revision): The previous revision parsed the CSV
+ * on EVERY request — O(n) disk I/O + parsing per call. A single
+ * authenticated user could DoS the platform by spamming GET/POST /api/rl.
  *
- * ROOT FIX: This endpoint now implements TWO real integration paths:
+ * Root fix applied:
+ *   1. CSV parse result is cached in memory with a 60s TTL (rl-csv-cache.ts).
+ *      A file watcher invalidates the cache immediately when the RL agent
+ *      writes a new CSV — so re-running the ranker is reflected instantly.
+ *   2. Per-user rate limiting: 60 req/min (per-user-rate-limit.ts). Spam
+ *      from a single account is rejected with 429 + Retry-After before
+ *      touching disk.
+ *   3. The expensive filter+sort+slice now runs against the cached array
+ *      (zero disk I/O on cache hits).
  *
- *   1. HTTP proxy (production): If RL_SERVICE_URL is set, we POST the
- *      query to the standalone RL service (a FastAPI app wrapping
- *      rl_drug_ranker.py) and stream back the ranked candidates as JSON.
- *      The RL service is the source of truth — we never fabricate.
+ * Two integration paths remain:
+ *   1. HTTP proxy (production): If RL_SERVICE_URL is set, POST to the
+ *      standalone RL FastAPI service and stream back its JSON.
+ *   2. Local CSV (dev/demo): If RL_LOCAL_CSV is set, parse it in-process
+ *      (cached) and return the ranked candidates.
  *
- *   2. Local CSV (dev/demo): If RL_LOCAL_CSV is set (path to a CSV file
- *      produced by `python rl/rl_drug_ranker.py`), we parse it in-process
- *      and return the ranked candidates. This lets the dashboard show
- *      REAL RL output during development without standing up the FastAPI
- *      service. The CSV columns are documented in rl/rl_drug_ranker.py
- *      (drug, disease, gnn_score, safety_score, market_score, reward,
- *      rank, policy_prob, literature_support, etc.).
- *
- * In BOTH cases, the response is mapped to the Hypothesis schema fields
- * (plausibilityScore, safetyScore, marketScore, overallScore) so the
- * dashboard can render real RL predictions instead of mock data.
- *
- * If NEITHER env var is set, we return 503 service_not_deployed — we NEVER
+ * If NEITHER env var is set, return 503 service_not_deployed — we NEVER
  * fabricate predictions. A pharma company might act on a fake "high
  * confidence" prediction — that's a patient-safety violation.
  */
+
+// FE-069: 60 requests per minute per authenticated user. The RL endpoint
+// is read-mostly (the dashboard polls for top-N candidates); 60/min is
+// generous for legitimate use but stops a single user from DoSing the
+// platform via CSV re-parsing.
+const RL_RATE_LIMIT = { max: 60, windowSeconds: 60 };
+
+function rateLimitedResponse(userId: string): NextResponse | null {
+  const rl = checkUserRateLimit(userId, RL_RATE_LIMIT);
+  if (rl.blocked) {
+    return NextResponse.json(
+      {
+        error: "rate_limited",
+        message: `Too many RL requests. Retry after ${rl.retryAfterSeconds}s.`,
+        retryAfterSeconds: rl.retryAfterSeconds,
+      },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfterSeconds) },
+      }
+    );
+  }
+  return null;
+}
+
 export async function POST(req: NextRequest) {
-  // FE-001 (related): the dashboard must call this endpoint, so we require
-  // auth. An unauthenticated caller could enumerate RL predictions.
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
+
+  // FE-069: rate-limit BEFORE any disk I/O.
+  const blocked = rateLimitedResponse(auth.user.userId);
+  if (blocked) return blocked;
 
   let body: { drug?: string; disease?: string; limit?: number };
   try {
@@ -99,9 +127,6 @@ export async function POST(req: NextRequest) {
         );
       }
       const data = await upstream.json();
-      // Persist each candidate as a Hypothesis row so the user can
-      // reference them later. We upsert by (drugName, diseaseName) within
-      // the user's first project (or skip persistence if no project).
       await persistRlCandidates(auth.user.userId, data.candidates || []);
       await writeAuditLog({
         user: auth.user,
@@ -115,11 +140,13 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Path 2: Local CSV (dev/demo mode).
+  // Path 2: Local CSV (dev/demo mode). FE-069: cached parse + in-memory
+  // filter. No disk I/O on cache hit.
   const csvPath = process.env.RL_LOCAL_CSV;
   if (csvPath) {
     try {
-      const candidates = await parseRlCsv(csvPath, { drug, disease, limit });
+      const all = await readRlCsvCached(csvPath);
+      const candidates = filterAndRankCandidates(all, { drug, disease, limit });
       await persistRlCandidates(auth.user.userId, candidates);
       await writeAuditLog({
         user: auth.user,
@@ -150,10 +177,16 @@ export async function GET() {
   // FE-001: dashboard calls GET for a default top-N list.
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
+
+  // FE-069: rate-limit BEFORE any disk I/O.
+  const blocked = rateLimitedResponse(auth.user.userId);
+  if (blocked) return blocked;
+
   const csvPath = process.env.RL_LOCAL_CSV;
   if (csvPath) {
     try {
-      const candidates = await parseRlCsv(csvPath, { limit: 50 });
+      const all = await readRlCsvCached(csvPath);
+      const candidates = filterAndRankCandidates(all, { limit: 50 });
       return NextResponse.json({ candidates, source: "local_csv", total: candidates.length });
     } catch (e: any) {
       return internalError(`RL CSV parse failed: ${e.message}`);
@@ -166,112 +199,6 @@ export async function GET() {
 }
 
 // ---------------------------------------------------------------------------
-// CSV parser — reads the RL ranker's output CSV and maps it to the
-// Hypothesis schema fields that the dashboard expects.
-// ---------------------------------------------------------------------------
-
-interface RlCandidate {
-  drug: string;
-  disease: string;
-  reward: number;
-  rank: number;
-  policyProb: number;
-  plausibilityScore: number; // from gnn_score
-  safetyScore: number;
-  marketScore: number;
-  overallScore: number; // weighted composite
-  literatureSupport: boolean;
-  isKnownPositive: boolean;
-  confidence: number;
-  pathwayScore: number;
-  unmetNeedScore: number;
-  efficacyScore: number;
-  admeScore: number;
-}
-
-async function parseRlCsv(
-  path: string,
-  filter: { drug?: string; disease?: string; limit?: number }
-): Promise<RlCandidate[]> {
-  const fs = await import("fs/promises");
-  const content = await fs.readFile(path, "utf8");
-  const records = parse(content, {
-    columns: true,
-    skip_empty_lines: true,
-    trim: true,
-  }) as Record<string, string>[];
-
-  let candidates: RlCandidate[] = records.map((r, idx) => {
-    const gnn = num(r, "gnn_score", 0);
-    const safety = num(r, "safety_score", 0);
-    const market = num(r, "market_score", 0);
-    const reward = num(r, "reward", 0);
-    const rank = num(r, "rank", idx + 1);
-    const policyProb = num(r, "policy_prob", 0);
-    const confidence = num(r, "confidence", 0);
-    const pathwayScore = num(r, "pathway_score", 0);
-    const unmetNeedScore = num(r, "unmet_need_score", 0);
-    const efficacyScore = num(r, "efficacy_score", 0);
-    const admeScore = num(r, "adme_score", 0);
-    // Composite overall score — weighted sum of the three dimensions the
-    // project docx specifies (plausibility, safety, market). Weights match
-    // the RL reward function's default weights in rl_drug_ranker.py.
-    const overall = 0.4 * gnn + 0.3 * safety + 0.3 * market;
-    return {
-      drug: r.drug || "",
-      disease: r.disease || "",
-      reward,
-      rank,
-      policyProb,
-      plausibilityScore: gnn,
-      safetyScore: safety,
-      marketScore: market,
-      overallScore: overall,
-      literatureSupport: bool(r, "literature_support"),
-      isKnownPositive: bool(r, "is_known_positive"),
-      confidence,
-      pathwayScore,
-      unmetNeedScore,
-      efficacyScore,
-      admeScore,
-    };
-  });
-
-  // Filter by optional drug/disease query.
-  if (filter.drug) {
-    const q = filter.drug.toLowerCase();
-    candidates = candidates.filter((c) => c.drug.toLowerCase().includes(q));
-  }
-  if (filter.disease) {
-    const q = filter.disease.toLowerCase();
-    candidates = candidates.filter((c) => c.disease.toLowerCase().includes(q));
-  }
-
-  // Sort by overall score (desc) — the RL agent's ranking.
-  candidates.sort((a, b) => b.overallScore - a.overallScore);
-
-  // Reassign rank after sort.
-  candidates = candidates.map((c, i) => ({ ...c, rank: i + 1 }));
-
-  if (filter.limit) {
-    candidates = candidates.slice(0, filter.limit);
-  }
-  return candidates;
-}
-
-function num(r: Record<string, string>, key: string, fallback: number): number {
-  const v = r[key];
-  if (v === undefined || v === null || v === "") return fallback;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function bool(r: Record<string, string>, key: string): boolean {
-  const v = (r[key] || "").toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
-}
-
-// ---------------------------------------------------------------------------
 // Persistence — store RL candidates as Hypothesis rows so the user can
 // reference them in projects. Best-effort; failures are logged not thrown.
 // ---------------------------------------------------------------------------
@@ -279,9 +206,6 @@ function bool(r: Record<string, string>, key: string): boolean {
 async function persistRlCandidates(userId: string, candidates: RlCandidate[]): Promise<void> {
   if (candidates.length === 0) return;
   try {
-    // Find or create a default project for RL hypotheses.
-    // We look for the user's first project; if none exists, skip persistence
-    // (the candidates are still returned in the response).
     const membership = await db.organizationMember.findFirst({
       where: { userId },
       orderBy: { joinedAt: "asc" },
@@ -293,9 +217,6 @@ async function persistRlCandidates(userId: string, candidates: RlCandidate[]): P
     });
     if (!project) return;
 
-    // Upsert each candidate as a Hypothesis. We use upsert keyed on
-    // (projectId, drugName, diseaseName) so re-running the RL agent
-    // updates scores rather than creating duplicates.
     for (const c of candidates.slice(0, 50)) {
       const existing = await db.hypothesis.findFirst({
         where: {
@@ -334,7 +255,6 @@ async function persistRlCandidates(userId: string, candidates: RlCandidate[]): P
       }
     }
   } catch (e) {
-    // Persistence is best-effort — the response still returns the candidates.
     console.error("persistRlCandidates failed:", e);
   }
 }
