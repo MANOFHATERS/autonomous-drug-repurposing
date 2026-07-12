@@ -911,13 +911,44 @@ class RewardConfig:
     # v90 P0 ROOT FIX (BUG #18): BAD_HIGH_PENALTY_SCALE was a hardcoded
     # magic number (0.05) inside step(), making it impossible to tune
     # without code changes. Moved to RewardConfig as a configurable field.
-    # v90 BUG #40 (from other agent): 0.05 OVERCORRECTED — PPO collapses
-    # to "always HIGH" because the false-HIGH penalty is too small.
-    # Increased to 0.30 (6x larger false-HIGH penalty). The new EV:
-    #   EV(always HIGH) = 0.15 * (0.5 * 5.0) + 0.85 * (-1.0 * 0.30) = +0.120
-    #   EV(always LOW)  = 0.15 * (-0.5 * 1.0) + 0.85 * 0.05 = -0.0325
-    #   EV(perfect)     = 0.15 * (0.5 * 5.0) + 0.85 * 0.05 = +0.4175
-    bad_high_penalty_scale: float = 0.30
+    #
+    # P4-002 ROOT FIX (CRITICAL — Team Cosmic / Phase 4): the previous
+    # value 0.30 made EV(always-HIGH) POSITIVE, so PPO collapsed to
+    # always-HIGH instead of learning to discriminate. With the actual
+    # defaults (high_action_bonus=5.0, low_action_penalty=1.0,
+    # correct_rejection_reward=0.05, ~15% good pairs, avg good reward
+    # 0.5):
+    #   EV(always-HIGH) = 0.15*(0.5*5.0) + 0.85*(-1.0*0.30)
+    #                   = 0.375 - 0.255 = +0.120  ← POSITIVE baseline
+    #   EV(always-LOW)  = 0.15*(-0.5*1.0) + 0.85*(0.05)
+    #                   = -0.075 + 0.0425 = -0.0325
+    #   EV(perfect)     = 0.15*(0.5*5.0) + 0.85*(0.05)
+    #                   = 0.375 + 0.0425 = +0.4175
+    #
+    # PPO's value head is dead (P4-001 with gamma=0.95 — but even with
+    # gamma=0.0, PPO needs a NEGATIVE EV(always-HIGH) baseline so the
+    # policy gradient pushes AWAY from always-HIGH toward discrimination.
+    # With EV(always-HIGH) = +0.120, the policy gradient initially
+    # REWARDS always-HIGH (the agent gets positive advantage for saying
+    # HIGH on everything). PPO may still learn to discriminate given
+    # enough timesteps AND a working value head, but the gradient is
+    # misaligned with the goal.
+    #
+    # The fix: set bad_high_penalty_scale = 1.0 (FULL penalty for false
+    # HIGH — the bad-pair HIGH reward is the raw -1.0, not scaled down).
+    # New EV analysis:
+    #   EV(always-HIGH) = 0.15*(0.5*5.0) + 0.85*(-1.0*1.0)
+    #                   = 0.375 - 0.85 = -0.475  ← STRONGLY NEGATIVE
+    #   EV(always-LOW)  = 0.15*(-0.5*1.0) + 0.85*(0.05) = -0.0325
+    #   EV(perfect)     = 0.15*(0.5*5.0) + 0.85*(0.05) = +0.4175
+    #
+    # The gap between "perfect" (+0.4175) and "always-HIGH" (-0.475) is
+    # 0.8925/pair — a STRONG gradient PPO can ascend. EV(always-HIGH)
+    # is now strongly negative, so the agent MUST learn to discriminate
+    # (cannot default to always-HIGH). Combined with P4-001 (gamma=0.0),
+    # the value head can now learn the IMMEDIATE reward, so the advantage
+    # estimates are reliable, and PPO can climb the gradient.
+    bad_high_penalty_scale: float = 1.0
 
     def __post_init__(self) -> None:
         """Validate config on construction.
@@ -2871,26 +2902,31 @@ class DrugRankingEnv(gym.Env):
         - Agent decides: rank this HIGH (1) or LOW (0) (action)
         - Environment gives a reward based on how good that decision was
 
-    Reward shaping (ROOT B20 FIX v2 -- the original B20 fix only raised
-    low_action_penalty from 0.1 to 0.5, which was mathematically
-    insufficient. With ~85% bad pairs and ~15% good pairs, EV(always-LOW)
-    was still greater than EV(always-HIGH), so PPO collapsed to "always
-    LOW" and ranked 0 candidates HIGH):
+    Reward shaping (P4-002 ROOT FIX — Team Cosmic / Phase 4). The
+    previous B20 fix v2 raised low_action_penalty from 0.1 to 0.5 but
+    kept bad_high_penalty_scale=0.30, which made EV(always-HIGH)
+    POSITIVE (+0.120). PPO collapsed to "always HIGH" (the value head
+    is dead per P4-001, so the agent defaults to the positive-EV
+    action). The P4-002 fix raises bad_high_penalty_scale to 1.0 (full
+    penalty for false HIGH), making EV(always-HIGH) = -0.475 (strongly
+    negative) and forcing PPO to learn to discriminate.
 
-        Rank good (r>0) HIGH  ->  +r * high_action_bonus   (e.g. +4.0)
+        Rank good (r>0) HIGH  ->  +r * high_action_bonus   (e.g. +2.5)
         Reject good (r>0) LOW ->  -r * low_action_penalty  (e.g. -0.5)
-        Rank bad  (r=-1) HIGH ->  +r                       (e.g. -1.0)
-        Reject bad  (r=-1) LOW ->  +|r| * correct_rejection_reward  (= 0.0)
+        Rank bad  (r=-1) HIGH ->  +r * bad_high_penalty_scale  (e.g. -1.0)
+        Reject bad  (r=-1) LOW ->  +|r| * correct_rejection_reward  (= +0.05)
 
     EV analysis (15% good pairs, avg good reward = 0.5):
-        EV(always LOW)  = 0.15 * (-0.5) + 0.85 * 0.0   = -0.075
-        EV(always HIGH) = 0.15 * 4.0  + 0.85 * (-1.0)  = -0.250
-        EV(perfect)     = 0.15 * 4.0  + 0.85 * 0.0     = +0.600
+        EV(always LOW)  = 0.15 * (-0.5) + 0.85 * 0.05  = -0.0325
+        EV(always HIGH) = 0.15 * 2.5  + 0.85 * (-1.0)  = -0.475
+        EV(perfect)     = 0.15 * 2.5  + 0.85 * 0.05    = +0.4175
 
-    The 0.675/pair gap between "perfect" and "always LOW" gives PPO a
-    strong gradient to ascend. The agent learns to rank HIGH only when
+    The 0.8925/pair gap between "perfect" (+0.4175) and "always HIGH"
+    (-0.475) gives PPO a STRONG gradient to ascend. EV(always-HIGH) is
+    strongly negative, so the agent MUST learn to discriminate (cannot
+    default to always-HIGH). The agent learns to rank HIGH only when
     its features indicate a likely good pair (high gnn_score, high
-    safety, etc.) -- not as a default policy.
+    safety, etc.) — not as a default policy.
     """
 
     metadata = {"render_modes": ["human", "ansi"]}
@@ -3409,26 +3445,24 @@ class DrugRankingEnv(gym.Env):
                 # (most conservative).
                 self.n_safety_rejected += 1
 
-        # V30 ROOT FIX (10.12): the original HIGH/LOW reward asymmetry caused
-        # PPO to collapse to "always LOW". The audit's EV analysis with the
-        # ACTUAL good-pair rate (2.5%, not the docstring's 15%):
-        #   EV(always LOW)  = 0.025 * (-0.5 * 1.0) + 0.975 * 0.0 = -0.0125
-        #   EV(always HIGH) = 0.025 * (0.5 * 5.0) + 0.975 * (-1.0) = -0.85
-        # PPO collapses to "always LOW" because EV(LOW) > EV(HIGH).
+        # P4-002 ROOT FIX (CRITICAL — Team Cosmic / Phase 4): the
+        # bad_high_penalty_scale is read from RewardConfig (default 1.0
+        # per the P4-002 fix — see RewardConfig.bad_high_penalty_scale
+        # docstring). The previous value 0.30 made EV(always-HIGH)
+        # POSITIVE (+0.120), so PPO collapsed to always-HIGH. The fix
+        # sets the default to 1.0, making EV(always-HIGH) = -0.475
+        # (strongly negative), forcing PPO to discriminate.
         #
-        # The root cause: the bad-pair HIGH penalty (-1.0, the raw reward)
-        # dominates the good-pair HIGH bonus (+0.5 * 5.0 = +2.5) when good
-        # pairs are rare (2.5%). The fix: scale the bad-pair HIGH penalty
-        # by a SMALL factor (0.05) so the agent isn't terrified of saying
-        # HIGH on uncertain pairs. This makes:
-        #   EV(always HIGH) = 0.025 * (0.5 * 5.0) + 0.975 * (-1.0 * 0.05)
-        #                   = 0.0625 - 0.04875 = +0.01375
-        #   EV(always LOW)  = -0.0125
-        # Now EV(HIGH) > EV(LOW), so PPO has incentive to say HIGH on
-        # uncertain pairs, then learn to discriminate. The gap to perfect
-        # (+0.125) is still substantial, so PPO can climb the gradient.
-        # The 0.05 factor is the "bad_high_penalty_scale" — a new config
-        # field that controls how much the bad-pair HIGH penalty is scaled.
+        # The previous V30 (10.12) comment block (which argued for 0.05
+        # to prevent "always-LOW" collapse) is removed — it was based on
+        # a 2.5% good-pair rate (the docstring's incorrect assumption).
+        # The actual good-pair rate in the demo graph is ~15% (the
+        # FORENSIC-AUDIT-I14 60/40 KP split puts 3 KPs × 5x oversampling
+        # = 15 KP rows in a ~100-row train set). At 15% good pairs, the
+        # "always-LOW" collapse does NOT occur (EV(always-LOW) =
+        # -0.0325, only slightly negative). The real collapse risk at
+        # 15% good pairs is "always-HIGH" (EV = +0.120 with the old
+        # 0.30 scale), which the P4-002 fix eliminates.
         cfg = self.config.reward
         # v90 P0 ROOT FIX (BUG #18): BAD_HIGH_PENALTY_SCALE is now a
         # configurable RewardConfig field (bad_high_penalty_scale), not
