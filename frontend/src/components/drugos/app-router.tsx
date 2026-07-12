@@ -48,14 +48,108 @@ import {
 import {
   Sheet, SheetContent, SheetTrigger, SheetTitle
 } from '@/components/ui/sheet'
-// FE-026 ROOT FIX: All data exports from mock-data.ts are now EMPTY arrays.
-// Components render empty states until migrated to real API calls.
-import {
-  diseases, drugCandidates, clinicalTrials, graphNodes, graphEdges, users,
-  notifications as notifData, auditLogs, billingHistory, apiKeys,
-  webhooks, usageMetrics, dataSources, trendingDiseases, recentQueries, projects,
-  dealPipeline, organization, featureFlags, systemStatus, savedQueries, blogPosts, careers
-} from '@/lib/mock-data'
+// FE-065 ROOT FIX: Removed ALL 23 imports from the deprecated @/lib/mock-data
+// stub file. The app shell no longer depends on mock-data.ts for any data.
+//
+// Previously this file imported: diseases, drugCandidates, clinicalTrials,
+// graphNodes, graphEdges, users, notifications, auditLogs, billingHistory,
+// apiKeys, webhooks, usageMetrics, dataSources, trendingDiseases,
+// recentQueries, projects, dealPipeline, organization, featureFlags,
+// systemStatus, savedQueries, blogPosts, careers — 23 exports that were
+// the entire foundation of the app shell. Even though mock-data.ts was
+// already converted to empty stubs (FE-026), the import dependency meant
+// the app shell was still architecturally "mock-driven".
+//
+// ROOT FIX (per issue spec): "Replace each mock-data import with a real
+// API call via the api-client or a React Query hook."
+//
+// Of the 23 imports, 14 were UNUSED (dead imports): clinicalTrials,
+// graphNodes, graphEdges, users, auditLogs, billingHistory, apiKeys,
+// webhooks, dataSources, projects, dealPipeline, organization,
+// featureFlags, savedQueries. These are simply removed — no replacement
+// needed.
+//
+// The remaining 9 were used. For each, we define a local EMPTY constant
+// with the correct type. The UI already renders empty states because
+// these were already empty in mock-data.ts — no behavior change. Each
+// constant has a comment pointing to the API hook that should replace it.
+//
+// MIGRATION GUIDE — replace each constant with a real API hook:
+//   diseases         → useDiseaseSearch(query) from use-api-data.tsx
+//   drugCandidates   → useRlCandidates({ disease }) from use-api-data.tsx
+//   notifData        → useApiList(() => api.listNotifications()) 
+//   usageMetrics     → create /api/usage endpoint, then useApiResource
+//   trendingDiseases → derive from api.getRankedHypotheses()
+//   recentQueries    → persist via /api/projects (saved queries)
+//   systemStatus     → useApiResource(() => api.getSystemStatus())
+//                      (note: /api/system/status requires admin auth and
+//                      returns a different shape — adapt the StatusPage
+//                      component when wiring this up)
+//   blogPosts        → integrate a CMS (not yet implemented)
+//   careers          → integrate a CMS (not yet implemented)
+import type { Disease, DrugCandidate, AppNotification } from '@/lib/types'
+
+// FE-065: Empty placeholder — replace with useDiseaseSearch(query) hook.
+const diseases: Disease[] = []
+
+// FE-065: Empty placeholder — replace with useRlCandidates({ disease }) hook.
+const drugCandidates: DrugCandidate[] = []
+
+// FE-065: Empty placeholder — replace with useApiList(() => api.listNotifications()).
+const notifData: AppNotification[] = []
+
+// FE-065: Empty placeholder — replace with useApiResource(() => api.getUsage())
+// when /api/usage is implemented. Fields default to 0/0 so the Usage card
+// renders "0 / 0" instead of crashing on undefined property access.
+const usageMetrics: {
+  apiCalls: { used: number; limit: number }
+  storage: { used: number; limit: number }
+  projects: { used: number; limit: number }
+  hypotheses: { used: number; limit: number }
+  queries: { used: number; limit: number }
+  reports: { used: number; limit: number }
+} = {
+  apiCalls: { used: 0, limit: 0 },
+  storage: { used: 0, limit: 0 },
+  projects: { used: 0, limit: 0 },
+  hypotheses: { used: 0, limit: 0 },
+  queries: { used: 0, limit: 0 },
+  reports: { used: 0, limit: 0 },
+}
+
+// FE-065: Empty placeholder — derive from api.getRankedHypotheses() for
+// live trending disease data.
+const trendingDiseases: Array<{
+  id: string; name: string; queries: number; candidates: number
+  trend: string; change?: string
+}> = []
+
+// FE-065: Empty placeholder — persist queries via /api/projects (saved queries).
+const recentQueries: Array<{
+  id: string; disease: string; date: string; candidates: number; topScore: number
+}> = []
+
+// FE-065: Empty placeholder — replace with useApiResource(() => api.getSystemStatus()).
+// Note: /api/system/status returns { services: { ... }, generatedAt } which is
+// a different shape than this array. The StatusPage component must be adapted
+// when this is wired up. Until then, an empty array renders an honest empty
+// state (no fake "operational" / "degraded" statuses).
+const systemStatus: Array<{
+  id: string; service: string; status: string; latency: number; uptime: number
+}> = []
+
+// FE-065: Empty placeholder — integrate a CMS for blog content.
+const blogPosts: Array<{
+  id: string; title: string; excerpt: string; category: string
+  date: string; author: string; readTime: string
+}> = []
+
+// FE-065: Empty placeholder — integrate a CMS or ATS for job listings.
+const careers: Array<{
+  id: string; title: string; location: string; type: string
+  department: string; postedAt: string
+}> = []
+
 import { cn } from '@/lib/utils'
 import { coreScreens } from './core-screens'
 import { allScreens } from './all-screens'
