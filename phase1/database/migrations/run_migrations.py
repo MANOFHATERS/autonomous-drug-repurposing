@@ -2844,33 +2844,49 @@ def _translate_sql_for_sqlite(sql: str) -> str:
     #   the generic translator would have produced ``LENGTH(TRIM(inchikey))
     #   > 0`` -- WEAKER than the original LENGTH=27 check. A 1-char
     #   InChIKey would pass on SQLite.
-    #   ROOT FIX: add a SPECIFIC translation for the InChIKey regex
-    #   pattern ``inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'`` that
-    #   produces a STRONG portable equivalent using LENGTH + SUBSTR
-    #   (both ANSI SQL, work identically on PostgreSQL and SQLite):
-    #     LENGTH(inchikey) = 27
-    #     AND SUBSTR(inchikey, 15, 1) = '-'
-    #     AND SUBSTR(inchikey, 26, 1) = '-'
-    #   This validates: (1) length is exactly 27, (2) the hyphen between
-    #   the connectivity layer (14 chars) and hash layer (10 chars) is
-    #   at position 15, (3) the hyphen between the hash layer and the
-    #   1-char protonation indicator is at position 26. It does NOT
-    #   validate that the non-hyphen chars are uppercase letters (SQLite
-    #   cannot do this portably without GLOB), but the Python validator
-    #   (is_canonical_inchikey) enforces the full regex on both dialects.
-    #   This specific translation runs BEFORE the generic one so the
-    #   InChIKey regex is matched first; all other regexes fall through
-    #   to the generic LENGTH(TRIM()) > 0 backstop.
+    #
+    # P1-015 ROOT FIX (Team-2 — use real REGEXP instead of LENGTH+SUBSTR
+    #   backstop):
+    #   The v76 T-038 fix translated the InChIKey regex to
+    #   ``LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND
+    #   SUBSTR(inchikey, 26, 1) = '-'``. This was STRONGER than the
+    #   generic LENGTH>0 backstop but STILL accepted any 27-char string
+    #   with hyphens at positions 15 and 26 — including digits, lowercase,
+    #   punctuation (e.g. ``11111111111111-2222222222-3``,
+    #   ``aaaaaaaaaaaaaa-bbbbbbbbbb-c``, ``!!!!!!!!!!!!!!-!!!!!!!!!!-!``).
+    #   Dev DBs (SQLite) accepted gibberish InChIKeys that prod PostgreSQL
+    #   rejected. ROOT FIX: ``database/connection.py`` now registers a
+    #   SQLite REGEXP function via ``create_function`` (see
+    #   ``_register_sqlite_regexp_function`` in ``_attach_lifecycle_events``).
+    #   This lets SQLite execute the SAME regex as PostgreSQL. The
+    #   translation below converts ``<col> ~ '<regex>'`` to
+    #   ``<col> REGEXP '<regex>'`` for SQLite — IDENTICAL semantics to
+    #   PostgreSQL's ``~``. Dev/prod behavior is now identical for ALL
+    #   regex-based CHECK constraints (InChIKey, disease_id, pmid_list,
+    #   withdrawn-drug backfill, etc.). The previous LENGTH+SUBSTR
+    #   backstop is removed — it was a workaround for SQLite's lack of
+    #   native regex, which is no longer needed.
+    #
+    #   The specific InChIKey translation (v76 T-038) is REMOVED — the
+    #   generic REGEXP translation handles it correctly. All regexes
+    #   (InChIKey, disease_id, pmid_list, etc.) now use the SAME
+    #   ``<col> REGEXP '<regex>'`` form on SQLite.
+    #
+    #   SAFETY: if the REGEXP function is NOT registered (e.g. a test
+    #   that creates a SQLite engine without going through
+    #   ``connection.py``), SQLite raises ``OperationalError: no such
+    #   function: REGEXP`` on the first INSERT. This is BY DESIGN — it
+    #   surfaces the missing registration immediately rather than
+    #   silently accepting invalid data. Tests that bypass
+    #   ``connection.py`` must register the REGEXP function themselves
+    #   (see ``tests/conftest.py`` or copy the ``_sqlite_regexp``
+    #   function from ``connection.py``).
+    # Translate ``<col> ~ '<regex>'`` → ``<col> REGEXP '<regex>'`` for
+    # SQLite. The REGEXP function is registered in connection.py at
+    # engine creation time (P1-015 ROOT FIX).
     out = re.sub(
-        r"inchikey\s*~\s*'\^\[A-Z\]\{14\}-\[A-Z\]\{10\}-\[A-Z\]\$'",
-        r"LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND SUBSTR(inchikey, 26, 1) = '-'",
-        out, flags=re.IGNORECASE,
-    )
-    # Generic fallback for all other ``<col> ~ '<regex>'`` patterns
-    # (disease_id format, pmid_list format, withdrawn-drug backfill, etc.).
-    out = re.sub(
-        r"(\w+(?:\s*\([^)]*\))?)\s*~\s*'[^']*'",
-        r"LENGTH(TRIM(\1)) > 0",
+        r"(\w+(?:\s*\([^)]*\))?)\s*~\s*('[^']*')",
+        r"\1 REGEXP \2",
         out, flags=re.IGNORECASE,
     )
     # 10. v35 ROOT FIX (issue 33): STRING_AGG(...) -> GROUP_CONCAT(...).

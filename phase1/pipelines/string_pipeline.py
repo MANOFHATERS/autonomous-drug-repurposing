@@ -1894,6 +1894,28 @@ class StringPipeline(BasePipeline):
         # UNIQUE(protein_a_id, protein_b_id) constraint. This method is
         # effectively a no-op for the DB constraint -- it is kept for
         # logging/diagnostic value but is NOT a correctness guarantee.
+        #
+        # P1-023 ROOT FIX (Team-2 — clarify "canonical" is LEXICOGRAPHIC,
+        #   not biological):
+        #   The previous comment said "canonical (a ≤ b) ordering" without
+        #   specifying that ``min``/``max`` on STRING IDs (e.g.
+        #   ``9606.ENSP00000269305``) uses LEXICOGRAPHIC string comparison,
+        #   NOT biological ordering (e.g. by Ensembl numeric suffix). A
+        #   future maintainer could misread "canonical" as "biologically
+        #   canonical" (lower ENSP number first) and introduce a
+        #   non-deterministic ordering. ROOT FIX: clarify in the comment
+        #   AND in the log message that the ordering is LEXICOGRAPHIC
+        #   (sufficient for dedup — the same pair in either order
+        #   collapses to the same canonical form — but NOT a biological
+        #   ordering). This is a documentation-only fix; no code change.
+        # LEXICOGRAPHIC canonical ordering (a ≤ b by STRING comparison):
+        #   * Sufficient for dedup: the same pair in either order
+        #     collapses to the same canonical form.
+        #   * NOT a biological ordering: e.g. ``9606.ENSP00000269305``
+        #     < ``9606.ENSP00000357607`` lexicographically, but the
+        #     Ensembl numeric suffixes (269305 vs 357607) are NOT in
+        #     ascending order. This is fine for dedup but do NOT assume
+        #     the canonical form has biological meaning.
         df = df.copy()
         original_protein1 = df["protein1"].copy()
         canonical_a = df[["protein1", "protein2"]].min(axis=1)
@@ -1906,7 +1928,9 @@ class StringPipeline(BasePipeline):
                 "canonical_ordering_protein_ids",
                 len(df),
                 len(df),
-                f"swapped {swap_count} STRING-ID pairs to canonical (a ≤ b) ordering",
+                f"swapped {swap_count} STRING-ID pairs to canonical LEXICOGRAPHIC "
+                f"(a ≤ b by string comparison, NOT biological) ordering — "
+                f"sufficient for dedup, NOT a biological ordering (P1-023)",
                 sample=df.loc[
                     df["protein1"] != original_protein1,
                     ["protein1", "protein2"],

@@ -29,6 +29,31 @@ the one that matches their codebase convention:
   (``is_open`` returns False for the probe, ``allow_request`` returns True).
 - ``state`` property -- returns the current state string.
 
+P1-028 ROOT FIX (Team-2 — half-open probe stuck-forever on caller crash):
+  The original ``allow_request()`` reserved the half-open probe slot by
+  setting ``_half_open_probe_in_flight=True`` and relied on the caller
+  to call ``record_success()`` or ``record_failure()`` to clear it. If
+  the caller CRASHED between ``allow_request()`` returning True and the
+  ``record_*()`` call (OOM kill, SIGKILL, segfault in a C extension
+  like RDKit), the flag stayed True forever — the breaker was stuck in
+  half-open and the protected service (ChEMBL API, PubChem API) was
+  silently disabled for the rest of the Airflow worker's lifetime.
+
+  ROOT FIX: track ``_half_open_probe_reserved_at`` (monotonic timestamp
+  when the probe was reserved). In ``allow_request()``, if a probe has
+  been in flight longer than ``probe_timeout`` seconds (default 300s =
+  5 min — long enough for any legitimate API call but short enough to
+  recover within a single Airflow task retry window), assume the
+  original probe crashed and release the slot. A new probe is allowed.
+  This bounds the stuck-half-open window to ``probe_timeout`` seconds
+  instead of infinity.
+
+  Additionally, a ``probe()`` context manager is provided for NEW
+  callers — it acquires the probe slot on enter and ALWAYS releases it
+  on exit (success, failure, or exception). Existing callers that use
+  the ``allow_request()`` / ``record_*()`` pair continue to work
+  unchanged (with the auto-recovery safety net).
+
 History
 -------
 Consolidated from five duplicate implementations across the codebase:
@@ -41,16 +66,27 @@ Consolidated from five duplicate implementations across the codebase:
 The canonical version merges all features: thread-safety via a lock,
 ``_half_open_probe_in_flight`` single-probe gate (v40 ROOT FIX / P1-A8),
 ``time.monotonic()`` for monotonic elapsed-time measurement, optional
-``name`` attribute for logging, and all three check APIs.
+``name`` attribute for logging, all three check APIs, AND the P1-028
+probe-timeout safety net + ``probe()`` context manager.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
 
 logger = logging.getLogger(__name__)
+
+
+# P1-028 default probe timeout: 5 minutes. Long enough for any
+# legitimate API call (ChEMBL, PubChem, UniProt, DisGeNET — even with
+# retries), short enough to recover within a single Airflow task retry
+# window (default 5 min retry delay). If a probe is stuck longer than
+# this, assume the caller process crashed (OOM, SIGKILL, segfault) and
+# release the slot so a new probe can fire.
+_DEFAULT_PROBE_TIMEOUT: float = 300.0
 
 
 class _CircuitBreaker:
@@ -78,6 +114,13 @@ class _CircuitBreaker:
     name : str or None
         Optional human-readable name included in log messages.
         Default: None.
+    probe_timeout : float
+        P1-028 ROOT FIX: maximum seconds a half-open probe slot may
+        stay reserved before it's assumed crashed and auto-released.
+        Bounds the stuck-half-open window when a caller crashes (OOM
+        kill, SIGKILL, segfault) between ``allow_request()`` returning
+        True and the ``record_*()`` call. Must be >= 1.0. Default: 300.0
+        (5 min — see ``_DEFAULT_PROBE_TIMEOUT`` rationale above).
     """
 
     def __init__(
@@ -86,6 +129,7 @@ class _CircuitBreaker:
         reset_timeout: float = 30.0,
         *,
         name: str | None = None,
+        probe_timeout: float = _DEFAULT_PROBE_TIMEOUT,
     ) -> None:
         if failure_threshold < 1:
             raise ValueError(
@@ -94,6 +138,10 @@ class _CircuitBreaker:
         if reset_timeout < 0:
             raise ValueError(
                 f"reset_timeout must be >= 0, got {reset_timeout}"
+            )
+        if probe_timeout < 1.0:
+            raise ValueError(
+                f"probe_timeout must be >= 1.0s, got {probe_timeout}"
             )
         self._failure_threshold: int = int(failure_threshold)
         self._reset_timeout: float = float(reset_timeout)
@@ -106,6 +154,15 @@ class _CircuitBreaker:
         # half_open state.  Subsequent calls are refused until the
         # probe completes (record_success or record_failure).
         self._half_open_probe_in_flight: bool = False
+        # P1-028 ROOT FIX: monotonic timestamp when the half-open probe
+        # slot was reserved. Used by ``allow_request()`` to detect
+        # crashed probes (caller died between ``allow_request()``
+        # returning True and the ``record_*()`` call). If
+        # ``time.monotonic() - _half_open_probe_reserved_at >
+        # probe_timeout``, the slot is auto-released so a new probe can
+        # fire. Initialized to 0.0 (no probe reserved).
+        self._half_open_probe_reserved_at: float = 0.0
+        self._probe_timeout: float = float(probe_timeout)
 
     # -- Convenience properties ----------------------------------------
 
@@ -199,6 +256,9 @@ class _CircuitBreaker:
             self._failure_count = 0
             self._state = "closed"
             self._half_open_probe_in_flight = False
+            # P1-028: clear the probe reservation timestamp so the next
+            # half-open probe starts fresh.
+            self._half_open_probe_reserved_at = 0.0
 
     def record_failure(self) -> None:
         """Record a failed operation -- may open the breaker.
@@ -231,6 +291,8 @@ class _CircuitBreaker:
                 # threshold-path re-open, leaving the breaker stuck).
                 self._state = "open"
                 self._half_open_probe_in_flight = False
+                # P1-028: clear the probe reservation timestamp.
+                self._half_open_probe_reserved_at = 0.0
                 label = self.name or "circuit_breaker"
                 logger.warning(
                     "[%s] Circuit breaker re-OPENED after failed half-open "
@@ -267,6 +329,22 @@ class _CircuitBreaker:
         In half_open state, exactly ONE probe request is allowed.
         Subsequent requests are refused until the probe completes
         (record_success -> closed, record_failure -> open).
+
+        P1-028 ROOT FIX (Team-2 — auto-recover from crashed probes):
+          If a previous ``allow_request()`` call reserved the half-open
+          probe slot but the caller CRASHED before calling
+          ``record_success()`` / ``record_failure()`` (OOM kill, SIGKILL,
+          segfault in a C extension like RDKit), the slot would stay
+          reserved forever — the breaker was stuck in half-open and the
+          protected service was silently disabled for the rest of the
+          Airflow worker's lifetime.
+          ROOT FIX: track ``_half_open_probe_reserved_at`` (monotonic
+          timestamp when the slot was reserved). If a new
+          ``allow_request()`` call sees the slot reserved for longer
+          than ``probe_timeout`` seconds, assume the original probe
+          crashed and release the slot — a new probe is allowed. This
+          bounds the stuck-half-open window to ``probe_timeout`` seconds
+          (default 300s = 5 min) instead of infinity.
         """
         with self._lock:
             current_state = self._state
@@ -275,6 +353,9 @@ class _CircuitBreaker:
                 if time.monotonic() - self._last_failure_time > self._reset_timeout:
                     self._state = "half_open"
                     self._half_open_probe_in_flight = False
+                    # P1-028: clear the reservation timestamp on the
+                    # open → half_open transition (no probe reserved yet).
+                    self._half_open_probe_reserved_at = 0.0
                     current_state = "half_open"
                 else:
                     return False
@@ -282,9 +363,74 @@ class _CircuitBreaker:
                 return True
             # half_open: allow exactly ONE probe.
             if self._half_open_probe_in_flight:
-                return False
+                # P1-028 ROOT FIX: check if the in-flight probe has
+                # been stuck longer than ``probe_timeout``. If so,
+                # assume the caller crashed (OOM, SIGKILL, segfault)
+                # and auto-release the slot so a new probe can fire.
+                # This bounds the stuck-half-open window to
+                # ``probe_timeout`` seconds instead of infinity.
+                reserved_for = time.monotonic() - self._half_open_probe_reserved_at
+                if reserved_for > self._probe_timeout:
+                    label = self.name or "circuit_breaker"
+                    logger.warning(
+                        "[%s] Half-open probe auto-released after %.1fs "
+                        "(probe_timeout=%.1fs) — assuming original caller "
+                        "crashed (OOM/SIGKILL/segfault). New probe allowed.",
+                        label,
+                        reserved_for,
+                        self._probe_timeout,
+                    )
+                    # Fall through to reserve a new probe slot below.
+                else:
+                    return False
+            # Reserve the probe slot for THIS caller.
             self._half_open_probe_in_flight = True
+            self._half_open_probe_reserved_at = time.monotonic()
             return True
+
+    @contextlib.contextmanager
+    def probe(self) -> "contextlib.AbstractContextManager[None]":
+        """Context manager API for half-open probes (P1-028 ROOT FIX).
+
+        Acquires the probe slot on enter (equivalent to
+        ``allow_request()`` returning True) and ALWAYS releases it on
+        exit — success, failure, or exception. Callers that use this
+        API do NOT need to call ``record_success()`` / ``record_failure()``
+        manually; the context manager handles both.
+
+        Usage::
+
+            with breaker.probe() as probe_acquired:
+                if not probe_acquired:
+                    # Breaker is open or a probe is already in flight.
+                    return None
+                # Make the protected API call here. If it raises,
+                # the context manager records a failure and re-raises.
+                result = protected_api_call()
+            # On normal exit, the context manager records success.
+
+        This API is RECOMMENDED for new callers — it eliminates the
+        ``allow_request()`` / ``record_*()`` pairing bug class entirely.
+        Existing callers that use the pair API continue to work
+        unchanged (with the P1-028 auto-recovery safety net).
+
+        Yields
+        ------
+        bool
+            True if the probe slot was acquired (caller should proceed),
+            False if the breaker is open or a probe is already in flight
+            (caller should skip / fall back).
+        """
+        acquired = self.allow_request()
+        try:
+            yield acquired
+        except Exception:
+            if acquired:
+                self.record_failure()
+            raise
+        else:
+            if acquired:
+                self.record_success()
 
     def is_open(self) -> bool:
         """Return True if the breaker is open and calls should be refused.

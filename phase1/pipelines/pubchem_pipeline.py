@@ -1455,10 +1455,36 @@ class PubChemPipeline(BasePipeline):
 
         # DQ-16: validate the raw_path file content -- every non-comment
         # line must be a valid InChIKey.
+        # P1-025 ROOT FIX (Team-2 — document the div-by-zero invariant):
+        #   The division ``len(invalid_in_raw) / len(requested_inchikeys)``
+        #   below is guarded from div-by-zero by the LIST-COMPREHENSION
+        #   invariant: if ``requested_inchikeys`` is EMPTY, the list
+        #   comprehension ``[ik for ik in requested_inchikeys if ...]``
+        #   yields an EMPTY list → ``invalid_in_raw`` is empty → the
+        #   ``if invalid_in_raw:`` guard is False → the division is
+        #   NEVER reached. So ``len(requested_inchikeys) > 0`` whenever
+        #   the division executes. This is a subtle invariant — a future
+        #   refactor that changes the list comprehension (e.g. to a
+        #   generator or a filter) could break it. ROOT FIX: document
+        #   the invariant here so future maintainers know the division
+        #   is safe BY CONSTRUCTION, not by an explicit length check.
+        #   This is a documentation-only fix; no code change.
+        # INVARIANT: ``len(requested_inchikeys) > 0`` whenever the
+        # division below executes, because:
+        #   1. ``invalid_in_raw`` is built from a list comprehension
+        #      over ``requested_inchikeys``.
+        #   2. If ``requested_inchikeys`` is empty, ``invalid_in_raw``
+        #      is also empty (list comprehension over empty = empty).
+        #   3. The ``if invalid_in_raw:`` guard then evaluates False,
+        #      so the division is NEVER reached.
+        # Therefore: div-by-zero is impossible. If a future refactor
+        # breaks this invariant, add an explicit
+        # ``if not requested_inchikeys: return`` guard BEFORE this block.
         invalid_in_raw = [
             ik for ik in requested_inchikeys if not INCHIKEY_RE.match(ik)
         ]
         if invalid_in_raw:
+            # Safe: see INVARIANT above — len(requested_inchikeys) > 0 here.
             invalid_pct = (len(invalid_in_raw) / len(requested_inchikeys)) * 100
             for ik in invalid_in_raw[:50]:
                 self.dead_letter_queue.append(

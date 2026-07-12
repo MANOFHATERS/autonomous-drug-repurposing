@@ -1544,16 +1544,33 @@ class DisGeNETPipeline(BasePipeline):
                         records_written += len(records)
 
                         # LOG-24: Pagination progress.
+                        # P1-026 ROOT FIX (Team-2 — fix misleading "?" in
+                        #   log when total_available == 0):
+                        #   The previous code used
+                        #   ``str(total_available) if total_available else "?"``
+                        #   which displayed "?" when ``total_available == 0``.
+                        #   But ``total_available == 0`` is a VALID value
+                        #   (the API returned 0 records available) — NOT
+                        #   "unknown". The "?" suggested uncertainty that
+                        #   doesn't exist, confusing operators who thought
+                        #   the total was missing/unmeasured. ROOT FIX:
+                        #   use ``str(total_available)`` unconditionally —
+                        #   ``0`` is a valid value, not unknown. The
+                        #   ``pct`` calculation already handles
+                        #   ``total_available == 0`` correctly (returns
+                        #   0.0 via the ``if total_available else 0.0``
+                        #   guard). This is a log-message-only fix; no
+                        #   data-path change.
                         pct = (
                             100.0 * records_written / total_available
                             if total_available
                             else 0.0
                         )
                         logger.info(
-                            "[disgenet] API pagination: page %d, fetched %d / %s "
+                            "[disgenet] API pagination: page %d, fetched %d / %d "
                             "records (%.1f%%)",
                             page_num, records_written,
-                            str(total_available) if total_available else "?",
+                            total_available,
                             pct,
                         )
 

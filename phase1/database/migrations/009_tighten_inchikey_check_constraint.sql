@@ -127,28 +127,35 @@ BEGIN
     RAISE NOTICE '  [OK] Added tightened chk_drugs_inchikey_format (POSIX regex)';
 EXCEPTION
     WHEN feature_not_supported OR syntax_error THEN
-        -- v90 ROOT FIX (BUG #3 — SQLite fallback was too weak):
-        --   The previous SQLite fallback used ``LENGTH(inchikey) = 27 OR
-        --   LIKE 'SYNTH%'`` — a weak length-only check that accepted any
-        --   27-char ASCII gibberish (e.g. AAAAAAAAAAAAAA-AAAAAAAAAA-A
-        --   has 27 chars but no hyphens at the right positions). Dev DBs
-        --   (SQLite, ORM-created) accepted gibberish InChIKeys that prod
-        --   PostgreSQL rejected. ROOT FIX: use the SAME portable strong
-        --   form as the ORM (models.py:762) — LENGTH=27 AND hyphen at
-        --   position 15 AND hyphen at position 26. This catches 27-char
-        --   gibberish (no hyphens at the right positions) while remaining
-        --   portable across dialects. Full uppercase-letter validation
-        --   is enforced by the Python validator (is_canonical_inchikey)
-        --   on both dialects.
+        -- P1-015 ROOT FIX (Team-2 — SQLite fallback now uses real REGEXP):
+        --   The previous SQLite fallback used
+        --   ``LENGTH(inchikey) = 27 AND SUBSTR(inchikey, 15, 1) = '-' AND
+        --   SUBSTR(inchikey, 26, 1) = '-'`` — a weak check that accepted
+        --   any 27-char string with hyphens at positions 15 and 26,
+        --   including digits (``11111111111111-2222222222-3``), lowercase
+        --   (``aaaaaaaaaaaaaa-bbbbbbbbbb-c``), and punctuation
+        --   (``!!!!!!!!!!!!!!-!!!!!!!!!!-!``). Dev DBs (SQLite) accepted
+        --   gibberish InChIKeys that prod PostgreSQL rejected — a
+        --   dev/prod asymmetry footgun.
+        --   ROOT FIX: ``database/connection.py`` now registers a SQLite
+        --   REGEXP function via ``create_function`` (see
+        --   ``_register_sqlite_regexp_function`` in
+        --   ``_attach_lifecycle_events``). The migration runner
+        --   (``run_migrations.py``) translates PostgreSQL's ``~``
+        --   operator to SQLite's ``REGEXP`` operator. This fallback
+        --   block is now ONLY reached when the migration is run on a
+        --   SQLite engine that does NOT have the REGEXP function
+        --   registered (e.g. a test that bypasses ``connection.py``).
+        --   In that case, we use the SAME REGEXP form — if the function
+        --   is not registered, the CHECK will raise on the first INSERT,
+        --   surfacing the missing registration immediately (BY DESIGN).
         ALTER TABLE drugs
             ADD CONSTRAINT chk_drugs_inchikey_format
             CHECK (
-                (LENGTH(inchikey) = 27
-                 AND SUBSTR(inchikey, 15, 1) = '-'
-                 AND SUBSTR(inchikey, 26, 1) = '-')
+                inchikey REGEXP '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'
                 OR inchikey LIKE 'SYNTH%'
             );
-        RAISE NOTICE '  [OK] Added fallback chk_drugs_inchikey_format (LENGTH=27 + hyphen-positions OR SYNTH%%) — strong portable form';
+        RAISE NOTICE '  [OK] Added fallback chk_drugs_inchikey_format (SQLite REGEXP — identical semantics to PostgreSQL ~)';
 END $$;
 
 COMMENT ON CONSTRAINT chk_drugs_inchikey_format ON drugs IS
