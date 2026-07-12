@@ -337,7 +337,15 @@ describe("FE-026: patentsview.ts pagination", () => {
   });
 
   function makePatentPage(count: number, startOffset: number) {
-    const patents = [];
+    const patents: Array<{
+      patent_number: string;
+      patent_title: string;
+      patent_abstract: string;
+      patent_date: string;
+      inventors: Array<{ inventor_name: string }>;
+      assignees: Array<{ assignee_organization: string }>;
+      cpc_current: Array<{ cpc_subsection_id: string }>;
+    }> = [];
     for (let i = 0; i < count; i++) {
       const num = String(startOffset + i + 1).padStart(8, "0");
       patents.push({
