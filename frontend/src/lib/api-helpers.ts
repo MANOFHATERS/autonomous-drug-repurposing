@@ -102,6 +102,11 @@ export async function writeAuditLog(params: {
     await db.auditLog.create({
       data: {
         userId: params.user?.userId || null,
+        // FE-005 ROOT FIX: stamp every audit log with the actor's org so the
+        // GET /api/audit-logs route can filter by tenant. Anonymous actions
+        // (failed login, etc.) have no org — that's fine, the column is
+        // nullable; the GET route only returns org-stamped rows to non-owners.
+        organizationId: params.user?.orgId || null,
         actorName: params.user?.email || "anonymous",
         action: params.action,
         resource: params.resource || null,
