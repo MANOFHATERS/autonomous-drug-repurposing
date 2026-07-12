@@ -15,3 +15,5 @@ frontend/db/
 frontend/dev.log
 frontend/server.log
 .env.local
+checkpoints/
+rl/output/
