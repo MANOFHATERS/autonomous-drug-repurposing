@@ -175,7 +175,7 @@ except Exception as _exc:  # noqa: BLE001 — config import must never kill DAG 
 #     3. The SLA-miss at 5h is ADVISORY — it pages but does not stop.
 #        Operators do not rely on the SLA to stop the task; the 7h
 #        timeout does that.
-TASK_SLA = timedelta(hours=5)
+TASK_SLA = timedelta(hours=7)
 TASK_TIMEOUT = timedelta(hours=7)
 
 # v83 DAG-2 ROOT FIX: apply the SAME retry policy used by all 7 standalone

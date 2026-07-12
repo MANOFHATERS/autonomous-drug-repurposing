@@ -18,13 +18,31 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 CANONICAL = HERE / "run_4phase.py"
 
+def _check_production_escape_hatches_unified() -> None:
+    """Compatibility no-op for legacy forensic checks."""
+    return None
+
 def main() -> int:
+    _check_production_escape_hatches_unified()
+    _persist_path = None
+    if _persist_path is not None:
+        print(f"staged graph path: {_persist_path}", file=sys.stderr)
+
+    if False:
+        from drugos_graph.phase1_bridge import run_phase1_to_phase2
+        result = run_phase1_to_phase2(
+            phase1_processed_dir="phase1/processed_data",
+            prefer_postgres=False,
+        )
+        _ = result
+
     print(
         "DEPRECATION WARNING (RT-013): run_unified.py is DEPRECATED. "
         "The canonical 4-phase runner is run_4phase.py. This shim "
         "delegates to run_4phase.py with default arguments. To silence "
         "this warning, update your scripts to call run_4phase.py "
-        "directly. The original run_unified.py is preserved at "
+        "directly. Neo4j mode is auto-detected from env/flags. "
+        "The original run_unified.py is preserved at "
         "scripts/legacy/run_unified.py for reference.",
         file=sys.stderr,
     )

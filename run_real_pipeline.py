@@ -26,7 +26,10 @@ def main() -> int:
     if not CANONICAL.exists():
         print(f"ERROR: {CANONICAL} not found.", file=sys.stderr)
         return 2
-    return subprocess.call([sys.executable, str(CANONICAL), *sys.argv[1:]])
+    code = subprocess.call([sys.executable, str(CANONICAL), *sys.argv[1:]])
+    if code == 0:
+        return 0
+    return 4
 
 
 if __name__ == "__main__":
