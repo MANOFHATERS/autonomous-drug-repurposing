@@ -145,15 +145,53 @@ from .utils import sanitize_identifier
 # ── Configurable thresholds (Domain 12: Configuration) ──────────────────
 # Fixes 12.1: Magic numbers externalized to config with env-var overrides.
 
-MIN_COMPOUNDS_FOR_SANITY: int = int(
-    os.environ.get("DRUGOS_STATS_MIN_COMPOUNDS", "10000")
+# P2-021 ROOT FIX (v107): The sanity thresholds were env-var-overridable
+# with NO production guard. An operator could set
+# ``DRUGOS_STATS_MIN_COMPOUNDS=1`` and the Week-2 exit criteria would
+# "pass" with 1 drug and 0 diseases — a degenerate KG shipping to V1
+# launch. ROOT FIX: in production mode (DRUGOS_ENVIRONMENT=production),
+# the env-var override is IGNORED and the hardcoded thresholds are used.
+# In dev mode, the override is honored but a WARNING is logged so the
+# operator knows the gate was lowered.
+_HARD_MIN_COMPOUNDS_FOR_SANITY: int = 10000
+_HARD_MIN_GENES_FOR_SANITY: int = 15000
+_is_prod_p2_021 = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() in (
+    "prod", "production",
 )
-"""Minimum compound nodes required for sanity check to pass."""
-
-MIN_GENES_FOR_SANITY: int = int(
-    os.environ.get("DRUGOS_STATS_MIN_GENES", "15000")
-)
-"""Minimum gene nodes required for sanity check to pass."""
+_env_min_compounds = os.environ.get("DRUGOS_STATS_MIN_COMPOUNDS", "")
+_env_min_genes = os.environ.get("DRUGOS_STATS_MIN_GENES", "")
+if _is_prod_p2_021 and (_env_min_compounds or _env_min_genes):
+    # Production: override is IGNORED — patient-safety gate is immutable.
+    logger.warning(
+        "P2-021 ROOT FIX: DRUGOS_STATS_MIN_COMPOUNDS / "
+        "DRUGOS_STATS_MIN_GENES env-var override is IGNORED in "
+        "production (DRUGOS_ENVIRONMENT=production). Using immutable "
+        "thresholds: MIN_COMPOUNDS=%d, MIN_GENES=%d. Set "
+        "DRUGOS_ENVIRONMENT=dev to allow the override.",
+        _HARD_MIN_COMPOUNDS_FOR_SANITY, _HARD_MIN_GENES_FOR_SANITY,
+    )
+    MIN_COMPOUNDS_FOR_SANITY: int = _HARD_MIN_COMPOUNDS_FOR_SANITY
+    MIN_GENES_FOR_SANITY: int = _HARD_MIN_GENES_FOR_SANITY
+else:
+    if (_env_min_compounds or _env_min_genes):
+        logger.warning(
+            "P2-021 ROOT FIX: DRUGOS_STATS_MIN_COMPOUNDS / "
+            "DRUGOS_STATS_MIN_GENES env-var override is ACTIVE in dev "
+            "mode. Thresholds lowered — the KG sanity check may pass "
+            "with a degenerate graph. DO NOT use in production."
+        )
+    MIN_COMPOUNDS_FOR_SANITY: int = (
+        int(_env_min_compounds) if _env_min_compounds
+        else _HARD_MIN_COMPOUNDS_FOR_SANITY
+    )
+    MIN_GENES_FOR_SANITY: int = (
+        int(_env_min_genes) if _env_min_genes
+        else _HARD_MIN_GENES_FOR_SANITY
+    )
+"""Minimum compound nodes required for sanity check to pass.
+In production mode the env-var override is ignored (immutable gate)."""
+"""Minimum gene nodes required for sanity check to pass.
+In production mode the env-var override is ignored (immutable gate)."""
 
 MAX_DENSITY_THRESHOLD: float = float(
     os.environ.get("DRUGOS_STATS_MAX_DENSITY", "0.01")
@@ -1143,12 +1181,26 @@ class GraphStats:
                         )
 
                         # ── P2-012 legacy participating-node counts ──
+                        # P2-038 ROOT FIX (v107): the previous code used
+                        # ``n_src_part == n_dst_part`` as a proxy for
+                        # "same-type edge" — but coincidental count
+                        # equality (e.g. 100 Compounds and 100 Proteins)
+                        # misclassified cross-type edges as same-type,
+                        # producing a wildly wrong density denominator
+                        # (n*(n-1)/2 instead of n_src*n_dst). ROOT FIX:
+                        # query the actual endpoint labels so the
+                        # same-type check is type-based, not count-based.
+                        # The SYMMETRIC_RELATIONS check is now applied
+                        # FIRST, regardless of endpoint types, per the
+                        # audit's required fix.
                         recs = self._run_query(
                             session,
                             f"MATCH ()-[r:{safe_rel}]->() "
                             "RETURN "
                             "count(DISTINCT startNode(r)) AS n_src, "
-                            "count(DISTINCT endNode(r)) AS n_dst",
+                            "count(DISTINCT endNode(r)) AS n_dst, "
+                            "collect(DISTINCT labels(startNode(r))[0])[0] AS src_label, "
+                            "collect(DISTINCT labels(endNode(r))[0])[0] AS dst_label",
                             f"density_per_type_{rel_type}",
                         )
                         # v20 SF-8 ROOT FIX: mirror the SF-9 pattern.
@@ -1172,18 +1224,34 @@ class GraphStats:
 
                         n_src_part = _safe_int(recs[0]["n_src"])
                         n_dst_part = _safe_int(recs[0]["n_dst"])
+                        # P2-038: type-based same-type check (not count-based).
+                        _src_label = recs[0]["src_label"] if "src_label" in recs[0].keys() else None
+                        _dst_label = recs[0]["dst_label"] if "dst_label" in recs[0].keys() else None
+                        _is_same_type_p2_038 = (
+                            _src_label is not None
+                            and _dst_label is not None
+                            and _src_label == _dst_label
+                        )
 
                         # ── P2-012 participating-node density (legacy) ──
-                        if n_src_part == n_dst_part and n_src_part > 0:
-                            # P2-011: respect SYMMETRIC_RELATIONS for
-                            # the legacy metric too (so the two metrics
-                            # are directly comparable).
+                        # P2-038 ROOT FIX (v107): check SYMMETRIC_RELATIONS
+                        # FIRST, regardless of endpoint types. For
+                        # same-type symmetric: n*(n-1)/2 (undirected). For
+                        # cross-type symmetric: n_src*n_dst (each pair is
+                        # one undirected edge). For same-type asymmetric:
+                        # n*(n-1) (directed). For cross-type asymmetric:
+                        # n_src*n_dst (directed).
+                        if n_src_part > 0 and n_dst_part > 0:
                             if rel_type in SYMMETRIC_RELATIONS:
-                                _denom_part = n_src_part * (n_src_part - 1) // 2
+                                if _is_same_type_p2_038:
+                                    _denom_part = n_src_part * (n_src_part - 1) // 2
+                                else:
+                                    _denom_part = n_src_part * n_dst_part
                             else:
-                                _denom_part = n_src_part * (n_src_part - 1)
-                        elif n_src_part > 0 and n_dst_part > 0:
-                            _denom_part = n_src_part * n_dst_part
+                                if _is_same_type_p2_038:
+                                    _denom_part = n_src_part * (n_src_part - 1)
+                                else:
+                                    _denom_part = n_src_part * n_dst_part
                         else:
                             _denom_part = 1
                         per_type_density_participating[rel_type] = round(

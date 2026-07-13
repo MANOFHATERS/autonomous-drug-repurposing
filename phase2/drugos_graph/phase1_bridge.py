@@ -6788,13 +6788,28 @@ def run_phase1_to_phase2(
     # (canonical API). Fall back to the legacy ``"_phase1_backend"``
     # dict key for backward compat with any caller that constructs a
     # plain dict (e.g. unit tests that mock read_phase1_outputs).
+    # P2-027 ROOT FIX (v107): the previous code called
+    # ``frames.pop("_phase1_backend", ...)`` unconditionally — but if
+    # ``frames`` is a dataclass WITHOUT a ``.backend`` attribute AND
+    # without a ``.pop`` method, the ``.pop()`` call raised
+    # ``AttributeError``. ROOT FIX: use ``isinstance(frames, dict)``
+    # check before calling ``.pop()``. For non-dict frames (dataclass,
+    # NamedTuple, etc.), use ``getattr`` with a default and NEVER call
+    # ``.pop()``.
     backend = getattr(frames, "backend", None)
     if not backend:
-        backend = frames.pop("_phase1_backend", _PHASE1_BACKEND_CSV)
+        if isinstance(frames, dict):
+            backend = frames.pop("_phase1_backend", _PHASE1_BACKEND_CSV)
+        else:
+            # Non-dict frames (dataclass, NamedTuple, etc.) — read the
+            # legacy key via getattr if it exists, otherwise default.
+            backend = getattr(frames, "_phase1_backend", _PHASE1_BACKEND_CSV)
     else:
         # Still pop the legacy key so downstream iteration over
         # frames.items() does not see a string value at that key.
-        frames.pop("_phase1_backend", None)
+        # Only dicts have .pop() — guard with isinstance.
+        if isinstance(frames, dict):
+            frames.pop("_phase1_backend", None)
     staged = stage_phase1_to_phase2(
         frames, run_id=run_id, phase1_processed_dir=phase1_processed_dir
     )

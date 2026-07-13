@@ -428,44 +428,170 @@ def _explore_subgraph_neo4j(
     def _query(driver):
         nodes: List[Dict[str, Any]] = []
         edges: List[Dict[str, Any]] = []
+        # P2-030 ROOT FIX (v107): the previous query used
+        # ``MATCH p=(d:Drug {name: $drug})-[*1..2]-(n) RETURN p LIMIT $limit``
+        # The ``[*1..2]`` variable-length path is UNBOUNDED in complexity —
+        # on a large KG, a 2-hop traversal from a high-degree drug (e.g.
+        # aspirin with 1000+ edges) can match MILLIONS of paths. The
+        # ``LIMIT $limit`` caps the RETURN but NOT the intermediate path
+        # expansion. A single API call can DoS the Neo4j instance.
+        # ROOT FIX: use a subquery with LIMIT INSIDE so the path
+        # expansion is bounded at each hop. This caps the work Neo4j
+        # does, preventing DoS while still returning a useful subgraph.
+        # P2-031 ROOT FIX (v107): the previous code deduplicated NODES
+        # by id but NOT EDGES. The same relationship (same source,
+        # target, type) appeared multiple times in the response,
+        # inflating the visual graph. ROOT FIX: deduplicate edges by
+        # (source, target, type) tuple.
         with driver.session() as session:
             if drug:
+                # P2-030 ROOT FIX (v107): bounded 2-hop traversal using
+                # subqueries with LIMIT inside each hop. The previous
+                # ``[*1..2]`` variable-length path was UNBOUNDED — on a
+                # large KG, a 2-hop traversal from a high-degree drug
+                # could match millions of paths, DoS-ing Neo4j.
                 q = """
-                MATCH p=(d:Compound {name: $drug})-[*1..2]-(n)
-                RETURN p LIMIT $limit
+                MATCH (d:Compound {name: $drug})
+                CALL {
+                    WITH d
+                    MATCH (d)-[r1]-(n1)
+                    RETURN n1, r1, d AS d1
+                    LIMIT $limit
+                }
+                WITH d, collect(DISTINCT [n1, r1, d1]) AS hop1
+                UNWIND hop1 AS h1
+                WITH h1[0] AS n1, h1[1] AS r1, h1[2] AS d1
+                CALL {
+                    WITH n1
+                    MATCH (n1)-[r2]-(n2)
+                    WHERE n2 <> d AND n2 <> n1
+                    RETURN n2, r2, n1 AS n1b
+                    LIMIT $limit
+                }
+                RETURN d, n1, r1, n2, r2
+                LIMIT $limit
                 """
                 result = session.run(q, drug=drug, limit=limit)
+                for record in result:
+                    d_node = record["d"]
+                    nodes.append({
+                        "id": d_node.id,
+                        "label": list(d_node.labels)[0] if d_node.labels else "Unknown",
+                        "labels": list(d_node.labels),
+                        "properties": dict(d_node),
+                    })
+                    n1 = record["n1"]
+                    if n1 is not None:
+                        nodes.append({
+                            "id": n1.id,
+                            "label": list(n1.labels)[0] if n1.labels else "Unknown",
+                            "labels": list(n1.labels),
+                            "properties": dict(n1),
+                        })
+                        r1 = record["r1"]
+                        if r1 is not None:
+                            edges.append({
+                                "source": r1.start_node.id,
+                                "target": r1.end_node.id,
+                                "type": r1.type,
+                            })
+                    n2 = record["n2"]
+                    if n2 is not None:
+                        nodes.append({
+                            "id": n2.id,
+                            "label": list(n2.labels)[0] if n2.labels else "Unknown",
+                            "labels": list(n2.labels),
+                            "properties": dict(n2),
+                        })
+                        r2 = record["r2"]
+                        if r2 is not None:
+                            edges.append({
+                                "source": r2.start_node.id,
+                                "target": r2.end_node.id,
+                                "type": r2.type,
+                            })
             elif disease:
+                # P2-030: same bounded traversal for disease queries.
                 q = """
-                MATCH p=(d:Disease {name: $disease})-[*1..2]-(n)
-                RETURN p LIMIT $limit
+                MATCH (d:Disease {name: $disease})
+                CALL {
+                    WITH d
+                    MATCH (d)-[r1]-(n1)
+                    RETURN n1, r1, d AS d1
+                    LIMIT $limit
+                }
+                WITH d, collect(DISTINCT [n1, r1, d1]) AS hop1
+                UNWIND hop1 AS h1
+                WITH h1[0] AS n1, h1[1] AS r1, h1[2] AS d1
+                CALL {
+                    WITH n1
+                    MATCH (n1)-[r2]-(n2)
+                    WHERE n2 <> d AND n2 <> n1
+                    RETURN n2, r2, n1 AS n1b
+                    LIMIT $limit
+                }
+                RETURN d, n1, r1, n2, r2
+                LIMIT $limit
                 """
                 result = session.run(q, disease=disease, limit=limit)
+                for record in result:
+                    d_node = record["d"]
+                    nodes.append({
+                        "id": d_node.id,
+                        "label": list(d_node.labels)[0] if d_node.labels else "Unknown",
+                        "labels": list(d_node.labels),
+                        "properties": dict(d_node),
+                    })
+                    n1 = record["n1"]
+                    if n1 is not None:
+                        nodes.append({
+                            "id": n1.id,
+                            "label": list(n1.labels)[0] if n1.labels else "Unknown",
+                            "labels": list(n1.labels),
+                            "properties": dict(n1),
+                        })
+                        r1 = record["r1"]
+                        if r1 is not None:
+                            edges.append({
+                                "source": r1.start_node.id,
+                                "target": r1.end_node.id,
+                                "type": r1.type,
+                            })
+                    n2 = record["n2"]
+                    if n2 is not None:
+                        nodes.append({
+                            "id": n2.id,
+                            "label": list(n2.labels)[0] if n2.labels else "Unknown",
+                            "labels": list(n2.labels),
+                            "properties": dict(n2),
+                        })
+                        r2 = record["r2"]
+                        if r2 is not None:
+                            edges.append({
+                                "source": r2.start_node.id,
+                                "target": r2.end_node.id,
+                                "type": r2.type,
+                            })
             else:
                 return None
-            for record in result:
-                path = record["p"]
-                for node in path.nodes:
-                    nodes.append({
-                        "id": node.id,
-                        "label": list(node.labels)[0] if node.labels else "Unknown",
-                        "labels": list(node.labels),
-                        "properties": dict(node),
-                    })
-                for rel in path.relationships:
-                    edges.append({
-                        "source": rel.start_node.id,
-                        "target": rel.end_node.id,
-                        "type": rel.type,
-                    })
-        # Deduplicate nodes/edges by id.
+        # Deduplicate nodes by id.
         seen_node_ids = set()
         unique_nodes = []
         for n in nodes:
             if n["id"] not in seen_node_ids:
                 seen_node_ids.add(n["id"])
                 unique_nodes.append(n)
-        return {"nodes": unique_nodes, "edges": edges, "backend": "neo4j"}
+        # P2-031 ROOT FIX (v107): deduplicate EDGES by (source, target, type).
+        # The previous code deduplicated nodes but NOT edges — the same
+        # relationship appeared multiple times, inflating the visual graph.
+        seen_edge_keys = set()
+        unique_edges = []
+        for e in edges:
+            _edge_key = (e["source"], e["target"], e["type"])
+            if _edge_key not in seen_edge_keys:
+                seen_edge_keys.add(_edge_key)
+                unique_edges.append(e)
+        return {"nodes": unique_nodes, "edges": unique_edges, "backend": "neo4j"}
 
     try:
         return _run_neo4j(_query)

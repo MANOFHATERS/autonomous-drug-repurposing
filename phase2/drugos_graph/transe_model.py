@@ -3481,6 +3481,33 @@ def train_transe(
                         f"{len(pos_scores) * _num_negatives}. The negative "
                         f"sampler may be broken. (v39 P2 #22 fix)"
                     )
+                # P2-033 ROOT FIX (v107): explicit full-shape assertion.
+                # The previous code only checked ``shape[0]`` (the first
+                # dimension). If ``pos_expanded`` is 1D (batch*num_neg,)
+                # but ``neg_scores`` is 2D (batch, num_neg), the
+                # ``shape[0]`` check passes (batch*num_neg == batch is
+                # False, so it would catch this — but if neg_scores were
+                # flattened to 1D elsewhere, the shapes could still
+                # mismatch in subtle ways). The issue's concern is that
+                # broadcasting may produce wrong results silently when
+                # shapes differ in rank. ROOT FIX: assert the FULL
+                # shapes are equal (not just shape[0]). This catches
+                # rank mismatches and dimension mismatches that
+                # broadcasting would silently paper over, producing
+                # wrong gradients.
+                if pos_expanded.shape != neg_scores.shape:
+                    raise RuntimeError(
+                        f"P2-033 ROOT FIX: TransE loss shape mismatch — "
+                        f"pos_expanded.shape {tuple(pos_expanded.shape)} "
+                        f"!= neg_scores.shape {tuple(neg_scores.shape)}. "
+                        f"Broadcasting would silently produce wrong "
+                        f"gradients (each pos compared against wrong "
+                        f"negatives). Expected both to be "
+                        f"(batch*num_neg,) = "
+                        f"({len(pos_scores) * _num_negatives},). "
+                        f"Check the negative sampler output shape and "
+                        f"the pos_scores.repeat_interleave call."
+                    )
                 if _model_higher_is_better:
                     # HGT-style: higher score = more plausible.
                     # Loss = max(0, neg - pos + margin).
