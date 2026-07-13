@@ -694,133 +694,150 @@ class GraphTransformerTrainer:
                 "labels) to be non-None, OR all three to be None (uses last val)."
             )
 
+        # P3-017 ROOT FIX (SCIENTIFIC — restore training mode after eval).
+        # The previous code called ``self.model.eval()`` and NEVER restored
+        # to train mode. If ``evaluate()`` was called mid-training (by an
+        # external thread or between epochs), the model stayed in eval mode
+        # (dropout off, BatchNorm in eval) until the next ``train_epoch()``
+        # call. This silently changed the regularization regime, causing
+        # the model to overfit. The save/restore pattern exists in
+        # ``evaluate_link_prediction`` and ``predict_drug_disease_scores``
+        # but was MISSING here. The fix wraps the eval body in try/finally.
+        _prior_training = self.model.training
         self.model.eval()
-        if exclude_edges is None:
-            exclude_edges = set(LABEL_LEAKING_EDGES)
+        try:
+            if exclude_edges is None:
+                exclude_edges = set(LABEL_LEAKING_EDGES)
 
-        # ROOT FIX (W-06): encode the graph ONCE for ALL pairs (matching
-        # evaluate_link_prediction's FORENSIC-AUDIT-I02 fix). The encoder
-        # processes the entire graph through the Graph Transformer layers,
-        # which is the expensive operation. Running it once per batch
-        # (via self.model.forward_logits which calls encode internally)
-        # wasted compute.
-        embeddings = self.model.encode(
-            self.node_features, self.edge_indices,
-            exclude_edges_override=set(exclude_edges),
-        )
-        drug_emb_all = embeddings["drug"]
-        disease_emb_all = embeddings["disease"]
-
-        n_samples = len(labels)
-        all_probs = []
-        total_loss = 0.0
-
-        for start in range(0, n_samples, batch_size):
-            end = min(start + batch_size, n_samples)
-            d_idx = drug_indices[start:end].to(self.device)
-            ds_idx = disease_indices[start:end].to(self.device)
-            batch_labels = labels[start:end].float().to(self.device)
-
-            # Extract embeddings for this batch directly from the
-            # pre-computed embeddings (NO redundant encode() call).
-            drug_emb_batch = drug_emb_all[d_idx]
-            disease_emb_batch = disease_emb_all[ds_idx]
-
-            # B2 fix: use forward_logits + BCEWithLogitsLoss for the loss
-            # (loss needs RAW logits, not temperature-scaled).
-            # V90 ROOT FIX (BUG #26, P1): use self._eval_criterion
-            # (NO pos_weight) instead of self.criterion (which has
-            # training pos_weight). The previous code used the training
-            # pos_weight for evaluation loss, making eval loss
-            # incomparable across different class balances and
-            # distorting the early-stopping signal.
-            logits = self.model.link_predictor.forward_logits(
-                drug_emb_batch, disease_emb_batch
-            ).squeeze(-1)
-            loss = self._eval_criterion(logits, batch_labels)
-            total_loss += loss.item()
-
-            # ROOT FIX (W-06): use link_predictor.forward with
-            # apply_temperature=True for probabilities. This matches
-            # evaluate_link_prediction's path EXACTLY, so the two
-            # evaluation methods produce IDENTICAL probability
-            # distributions, accuracy, and AUC. Previously trainer.evaluate
-            # used raw sigmoid (no temperature) which produced different
-            # accuracy than evaluate_link_prediction.
-            probs = self.model.link_predictor.forward(
-                drug_emb_batch, disease_emb_batch,
-                apply_temperature=True,
-            ).squeeze(-1)
-            all_probs.append(probs.cpu())
-
-        all_probs = torch.cat(all_probs).numpy()
-        # V30 ROOT FIX (8.4): labels may be on CUDA or be a torch.Tensor.
-        # The original ``labels.numpy()`` crashes if labels is on CUDA.
-        # Use ``labels.detach().cpu().numpy()`` for safety.
-        all_labels = labels.detach().cpu().numpy()
-
-        # Compute metrics
-        from sklearn.metrics import roc_auc_score, accuracy_score
-
-        pred_binary = (all_probs > 0.5).astype(int)
-        accuracy = float(accuracy_score(all_labels, pred_binary))
-
-        unique_labels = np.unique(all_labels)
-        # V90 ROOT FIX (BUG #20, P1): log CRITICAL warning if the eval
-        # set has only one class. The previous code silently set auc=0.5
-        # and continued training with a meaningless val AUC. The user
-        # thought the model was "barely better than random" when in
-        # fact the val set was degenerate. The fix logs a CRITICAL
-        # warning so the issue is visible in logs (and downstream
-        # consumers can detect it), but does NOT raise -- the trainer's
-        # fit() loop calls evaluate() every epoch, and raising would
-        # crash training on the first degenerate epoch (common on tiny
-        # demo graphs with small val sets). The AUC=0.5 fallback is
-        # retained but the CRITICAL log makes the degeneracy loud.
-        if len(unique_labels) < 2:
-            logger.critical(
-                f"V90 ROOT FIX (BUG #20): evaluation set has only ONE "
-                f"class (unique_labels={unique_labels.tolist()}). AUC "
-                f"is undefined for a single-class set -- returning 0.5 "
-                f"fallback. The previous code silently returned 0.5 "
-                f"with no warning, misleading the user into thinking "
-                f"the model was 'barely better than random' when in "
-                f"fact the eval set was degenerate. Fix the split so "
-                f"both classes are present (use drug_aware_split with "
-                f"stratify_positives=True, or increase the eval set "
-                f"size). Training continues because early stopping is "
-                f"based on val_loss (not AUC), but the reported AUC "
-                f"is MEANINGLESS for this eval set."
+            # ROOT FIX (W-06): encode the graph ONCE for ALL pairs (matching
+            # evaluate_link_prediction's FORENSIC-AUDIT-I02 fix). The encoder
+            # processes the entire graph through the Graph Transformer layers,
+            # which is the expensive operation. Running it once per batch
+            # (via self.model.forward_logits which calls encode internally)
+            # wasted compute.
+            embeddings = self.model.encode(
+                self.node_features, self.edge_indices,
+                exclude_edges_override=set(exclude_edges),
             )
-            auc = 0.5
-        else:
-            try:
-                auc = float(roc_auc_score(all_labels, all_probs))
-            except ValueError:
+            drug_emb_all = embeddings["drug"]
+            disease_emb_all = embeddings["disease"]
+
+            n_samples = len(labels)
+            all_probs = []
+            total_loss = 0.0
+
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                d_idx = drug_indices[start:end].to(self.device)
+                ds_idx = disease_indices[start:end].to(self.device)
+                batch_labels = labels[start:end].float().to(self.device)
+
+                # Extract embeddings for this batch directly from the
+                # pre-computed embeddings (NO redundant encode() call).
+                drug_emb_batch = drug_emb_all[d_idx]
+                disease_emb_batch = disease_emb_all[ds_idx]
+
+                # B2 fix: use forward_logits + BCEWithLogitsLoss for the loss
+                # (loss needs RAW logits, not temperature-scaled).
+                # V90 ROOT FIX (BUG #26, P1): use self._eval_criterion
+                # (NO pos_weight) instead of self.criterion (which has
+                # training pos_weight). The previous code used the training
+                # pos_weight for evaluation loss, making eval loss
+                # incomparable across different class balances and
+                # distorting the early-stopping signal.
+                logits = self.model.link_predictor.forward_logits(
+                    drug_emb_batch, disease_emb_batch
+                ).squeeze(-1)
+                loss = self._eval_criterion(logits, batch_labels)
+                total_loss += loss.item()
+
+                # ROOT FIX (W-06): use link_predictor.forward with
+                # apply_temperature=True for probabilities. This matches
+                # evaluate_link_prediction's path EXACTLY, so the two
+                # evaluation methods produce IDENTICAL probability
+                # distributions, accuracy, and AUC. Previously trainer.evaluate
+                # used raw sigmoid (no temperature) which produced different
+                # accuracy than evaluate_link_prediction.
+                probs = self.model.link_predictor.forward(
+                    drug_emb_batch, disease_emb_batch,
+                    apply_temperature=True,
+                ).squeeze(-1)
+                all_probs.append(probs.cpu())
+
+            all_probs = torch.cat(all_probs).numpy()
+            # V30 ROOT FIX (8.4): labels may be on CUDA or be a torch.Tensor.
+            # The original ``labels.numpy()`` crashes if labels is on CUDA.
+            # Use ``labels.detach().cpu().numpy()`` for safety.
+            all_labels = labels.detach().cpu().numpy()
+
+            # Compute metrics
+            from sklearn.metrics import roc_auc_score, accuracy_score
+
+            pred_binary = (all_probs > 0.5).astype(int)
+            accuracy = float(accuracy_score(all_labels, pred_binary))
+
+            unique_labels = np.unique(all_labels)
+            # V90 ROOT FIX (BUG #20, P1): log CRITICAL warning if the eval
+            # set has only one class. The previous code silently set auc=0.5
+            # and continued training with a meaningless val AUC. The user
+            # thought the model was "barely better than random" when in
+            # fact the val set was degenerate. The fix logs a CRITICAL
+            # warning so the issue is visible in logs (and downstream
+            # consumers can detect it), but does NOT raise -- the trainer's
+            # fit() loop calls evaluate() every epoch, and raising would
+            # crash training on the first degenerate epoch (common on tiny
+            # demo graphs with small val sets). The AUC=0.5 fallback is
+            # retained but the CRITICAL log makes the degeneracy loud.
+            if len(unique_labels) < 2:
+                logger.critical(
+                    f"V90 ROOT FIX (BUG #20): evaluation set has only ONE "
+                    f"class (unique_labels={unique_labels.tolist()}). AUC "
+                    f"is undefined for a single-class set -- returning 0.5 "
+                    f"fallback. The previous code silently returned 0.5 "
+                    f"with no warning, misleading the user into thinking "
+                    f"the model was 'barely better than random' when in "
+                    f"fact the eval set was degenerate. Fix the split so "
+                    f"both classes are present (use drug_aware_split with "
+                    f"stratify_positives=True, or increase the eval set "
+                    f"size). Training continues because early stopping is "
+                    f"based on val_loss (not AUC), but the reported AUC "
+                    f"is MEANINGLESS for this eval set."
+                )
                 auc = 0.5
+            else:
+                try:
+                    auc = float(roc_auc_score(all_labels, all_probs))
+                except ValueError:
+                    auc = 0.5
 
-        avg_loss = total_loss / max(1, (n_samples + batch_size - 1) // batch_size)
+            avg_loss = total_loss / max(1, (n_samples + batch_size - 1) // batch_size)
 
-        # V30 ROOT FIX (8.21): return probs and pred_binary so Phase 4
-        # doesn't need to re-run the model to get per-pair predictions.
-        # P3-019 ROOT FIX: return NUMPY ARRAYS (not Python lists) for
-        # probs / pred_binary / labels. The P3-033 fix converted these
-        # to lists for JSON serializability, but that prioritized
-        # serialization over computational efficiency. Downstream
-        # consumers that want to do vectorized ops (precision@K, ROC
-        # curves, np.argsort for ranking) had to convert BACK to numpy
-        # via ``np.array(metrics["probs"])`` — a wasteful round-trip.
-        # The fix returns the native numpy arrays (the natural output of
-        # sklearn / torch.cpu().numpy()). Callers that need JSON
-        # serialization use the new ``to_json_metrics()`` helper which
-        # performs the .tolist() conversion in ONE place. The scalar
-        # fields (loss, auc, accuracy) remain floats (already JSON-safe).
-        return {
-            "loss": avg_loss, "auc": auc, "accuracy": accuracy,
-            "probs": all_probs,
-            "pred_binary": pred_binary,
-            "labels": all_labels,
-        }
+            # V30 ROOT FIX (8.21): return probs and pred_binary so Phase 4
+            # doesn't need to re-run the model to get per-pair predictions.
+            # P3-019 ROOT FIX: return NUMPY ARRAYS (not Python lists) for
+            # probs / pred_binary / labels. The P3-033 fix converted these
+            # to lists for JSON serializability, but that prioritized
+            # serialization over computational efficiency. Downstream
+            # consumers that want to do vectorized ops (precision@K, ROC
+            # curves, np.argsort for ranking) had to convert BACK to numpy
+            # via ``np.array(metrics["probs"])`` — a wasteful round-trip.
+            # The fix returns the native numpy arrays (the natural output of
+            # sklearn / torch.cpu().numpy()). Callers that need JSON
+            # serialization use the new ``to_json_metrics()`` helper which
+            # performs the .tolist() conversion in ONE place. The scalar
+            # fields (loss, auc, accuracy) remain floats (already JSON-safe).
+            return {
+                "loss": avg_loss, "auc": auc, "accuracy": accuracy,
+                "probs": all_probs,
+                "pred_binary": pred_binary,
+                "labels": all_labels,
+            }
+        finally:
+            # P3-017 ROOT FIX: ALWAYS restore the prior training mode,
+            # even on exception. Without this, an exception during eval
+            # (e.g., CUDA OOM) would leave the model in eval mode,
+            # silently corrupting subsequent training batches.
+            self.model.train(_prior_training)
 
     @staticmethod
     def to_json_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -1825,23 +1842,183 @@ def retrain_on_validated(
     # kicks off a fresh GT training) will use the extended set.
     bundle["known_pairs"] = known_pairs
     bundle["validated_pairs_added"] = added
-    bundle["fine_tuned_at"] = _now_iso() if "datetime" not in dir() else None
+    # P3-008 ROOT FIX (CRITICAL — NameError fix). The previous code was:
+    #   bundle["fine_tuned_at"] = _now_iso() if "datetime" not in dir() else None
+    # This had TWO bugs:
+    #   1. ``_now_iso()`` was NEVER imported/defined -> NameError at runtime.
+    #   2. ``"datetime" not in dir()`` is a broken check: ``dir()`` returns
+    #      LOCAL names, and ``datetime`` was NOT imported, so the condition
+    #      was always True -> ``_now_iso()`` was always called -> always
+    #      crashed. The outer code had NO try/except, so the entire
+    #      ``retrain_on_validated`` function crashed with NameError when
+    #      validated pairs were added. The ``fine_tuned_at`` field was
+    #      NEVER set.
+    # The fix: import ``datetime`` at the top of this function (it's a
+    # local import to avoid adding a module-level dependency for a
+    # function that's rarely called), and use
+    # ``datetime.now(timezone.utc).isoformat()`` directly.
+    from datetime import datetime, timezone
+    bundle["fine_tuned_at"] = datetime.now(timezone.utc).isoformat()
 
     out_path = output_checkpoint_path or checkpoint_path
+
+    # P3-007 ROOT FIX (CRITICAL — implement ACTUAL fine-tuning, not a no-op).
+    # The previous code set ``fine_tune_epochs: 0`` and only updated
+    # ``known_pairs`` in the checkpoint bundle. The DOCX §10 data flywheel
+    # requires: "validated hypotheses feed back into the model. The model
+    # retrains on this new proprietary data." The previous code did NOT
+    # retrain — the data flywheel was non-functional.
+    #
+    # The fix: load ``graph_state.pt`` (written alongside the checkpoint
+    # by the bridge), add the validated pairs as new positive labels to
+    # the training set, call ``trainer.fit()`` for ``fine_tune_epochs``
+    # epochs with a low learning rate (to preserve learned features),
+    # and save the updated checkpoint. If ``graph_state.pt`` is missing
+    # (old checkpoint format), fall back to the known_pairs-only update
+    # with a clear WARNING.
+    graph_state_path = _Path(checkpoint_path).parent / "graph_state.pt"
+    val_auc_before = 0.0
+    val_auc_after = 0.0
+    actual_fine_tune_epochs = 0
+
+    if graph_state_path.exists():
+        try:
+            graph_state = _torch.load(
+                str(graph_state_path), map_location="cpu",
+                weights_only=False,  # graph_state contains dicts of tensors
+            )
+            node_features = graph_state["node_features"]
+            edge_indices = graph_state["edge_indices"]
+            node_maps = graph_state["node_maps"]
+            drug_map = node_maps.get("drug", {})
+            disease_map = node_maps.get("disease", {})
+
+            # Build training data: existing treats edges + validated pairs
+            treats_ei = edge_indices.get(("drug", "treats", "disease"))
+            pos_drugs: List[int] = []
+            pos_diseases: List[int] = []
+            if treats_ei is not None and treats_ei.numel() > 0:
+                pos_drugs.extend(treats_ei[0].tolist())
+                pos_diseases.extend(treats_ei[1].tolist())
+            # Add validated pairs as new positives
+            for drug, disease in validated_pairs:
+                d_idx = drug_map.get(drug)
+                ds_idx = disease_map.get(disease)
+                if d_idx is not None and ds_idx is not None:
+                    pos_drugs.append(d_idx)
+                    pos_diseases.append(ds_idx)
+
+            if pos_drugs and fine_tune_epochs > 0:
+                # Reconstruct model from saved config
+                from graph_transformer.models.graph_transformer import (
+                    DrugRepurposingGraphTransformer,
+                )
+                model_config = bundle.get("model_config", graph_state.get("model_config", {}))
+                node_features_dims = graph_state.get(
+                    "node_features_dims", graph_state.get("feature_dims", {})
+                )
+                model = DrugRepurposingGraphTransformer(
+                    node_features_dims=node_features_dims,
+                    embedding_dim=model_config.get("embedding_dim", 32),
+                    num_layers=model_config.get("num_layers", 3),
+                    num_heads=model_config.get("num_heads", 2),
+                    dropout=model_config.get("dropout", 0.2),
+                    attention_dropout=model_config.get("attention_dropout", 0.2),
+                    link_predictor_hidden_dims=model_config.get(
+                        "link_predictor_hidden_dims", [64, 32]
+                    ),
+                )
+                model.load_state_dict(
+                    bundle.get("model_state_dict", bundle.get("model", {}))
+                )
+
+                # Build trainer and fine-tune
+                from graph_transformer.training.trainer import GraphTransformerTrainer
+                trainer = GraphTransformerTrainer(
+                    model=model,
+                    node_features=node_features,
+                    edge_indices=edge_indices,
+                    device="cpu",
+                    learning_rate=learning_rate,
+                )
+                # Evaluate before fine-tuning
+                drug_idx_t = _torch.tensor(pos_drugs, dtype=_torch.long)
+                disease_idx_t = _torch.tensor(pos_diseases, dtype=_torch.long)
+                labels_t = _torch.ones(len(pos_drugs), dtype=_torch.float)
+                try:
+                    metrics_before = trainer.evaluate(
+                        drug_indices=drug_idx_t,
+                        disease_indices=disease_idx_t,
+                        labels=labels_t,
+                    )
+                    val_auc_before = metrics_before.get("auc", 0.0)
+                except Exception as exc:
+                    logger.warning("retrain_on_validated: eval-before failed: %s", exc)
+
+                # Fine-tune for a few epochs
+                trainer.fit(
+                    train_drug_idx=drug_idx_t,
+                    train_disease_idx=disease_idx_t,
+                    train_labels=labels_t,
+                    val_drug_idx=drug_idx_t,
+                    val_disease_idx=disease_idx_t,
+                    val_labels=labels_t,
+                    epochs=fine_tune_epochs,
+                    patience=fine_tune_epochs,  # no early stopping during fine-tune
+                )
+                actual_fine_tune_epochs = fine_tune_epochs
+
+                # Evaluate after fine-tuning
+                try:
+                    metrics_after = trainer.evaluate(
+                        drug_indices=drug_idx_t,
+                        disease_indices=disease_idx_t,
+                        labels=labels_t,
+                    )
+                    val_auc_after = metrics_after.get("auc", 0.0)
+                except Exception as exc:
+                    logger.warning("retrain_on_validated: eval-after failed: %s", exc)
+
+                # Save the fine-tuned model state back into the bundle
+                bundle["model_state_dict"] = model.state_dict()
+                logger.info(
+                    "retrain_on_validated: fine-tuned for %d epochs. "
+                    "val_auc: %.4f -> %.4f",
+                    fine_tune_epochs, val_auc_before, val_auc_after,
+                )
+            else:
+                logger.info(
+                    "retrain_on_validated: fine_tune_epochs=%d, skipping "
+                    "fine-tune (only updating known_pairs).",
+                    fine_tune_epochs,
+                )
+        except Exception as exc:
+            logger.error(
+                "retrain_on_validated: fine-tune failed (%s). Falling back "
+                "to known_pairs-only update. The next GT training run will "
+                "use the extended label set.",
+                exc, exc_info=True,
+            )
+    else:
+        logger.warning(
+            "retrain_on_validated: graph_state.pt not found at %s. Cannot "
+            "fine-tune — only updating known_pairs in the checkpoint bundle. "
+            "The next GT training run will use the extended label set.",
+            graph_state_path,
+        )
+
     _torch.save(bundle, out_path)
 
     logger.info(
         "retrain_on_validated: added %d validated pairs to known_pairs. "
-        "Updated checkpoint saved to %s. The next GT training run will "
-        "use the extended label set.",
-        added, out_path,
+        "Fine-tuned for %d epochs. Updated checkpoint saved to %s.",
+        added, actual_fine_tune_epochs, out_path,
     )
 
     return {
         "validated_pairs_added": added,
-        "fine_tune_epochs": 0,  # actual fine-tune requires graph_data; Airflow handles that
-        "val_auc_before": 0.0,
-        "val_auc_after": 0.0,
+        "fine_tune_epochs": actual_fine_tune_epochs,
+        "val_auc_before": val_auc_before,
+        "val_auc_after": val_auc_after,
         "output_checkpoint": out_path,
-        "note": "Known pairs updated in checkpoint. Next GT training run will fine-tune on the extended set.",
     }

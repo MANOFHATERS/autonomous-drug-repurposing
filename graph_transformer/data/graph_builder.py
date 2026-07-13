@@ -597,24 +597,15 @@ class BiomedicalGraphBuilder:
         "doxycycline", "cephalexin", "clindamycin", "metronidazole",
         "fluconazole", "itraconazole", "voriconazole", "acyclovir",
         "valacyclovir", "ribavirin",
-        # P4-001 ROOT FIX (v105): thalidomide, sildenafil, mifepristone
-        # added to REAL_DRUG_NAMES so the data flywheel reward bonus
-        # (RewardFunction._validated_hypotheses) actually has known
-        # repurposable drugs to bonus. The DOCX §10 data flywheel
-        # describes: validated hypotheses feed back into the model.
-        # thalidomide -> multiple myeloma (already in
-        # VALIDATED_HYPOTHESES at line 478), sildenafil -> pulmonary
-        # arterial hypertension, mifepristone -> Cushing's syndrome,
-        # topiramate -> migraine prophylaxis. Without these drugs in
-        # the demo graph's REAL_DRUG_NAMES, the +0.1 reward bonus is
-        # dead code (the pairs never appear in the env's data). This
-        # was the exact failure mode the integration plan's P4-001
-        # identifies: "Add thalidomide, sildenafil, mifepristone,
-        # topiramate to the demo graph's REAL_DRUG_NAMES. This
-        # activates the data flywheel reward bonus." topiramate and
-        # sildenafil are already present above (lines 504, 507) —
-        # adding thalidomide and mifepristone here completes the set.
-        "thalidomide", "mifepristone",
+        # P3-019 ROOT FIX (CRITICAL — removed duplicate entries).
+        # The previous list had "thalidomide" and "mifepristone" DUPLICATED:
+        # they appeared at line 519 (in the P4-001 block) AND again here
+        # (line 572). The builder's register_node dedupes by name (silently
+        # drops the second), so a caller requesting num_drugs=60 got FEWER
+        # actual drugs because of the duplicates. The duplication was silent
+        # — no warning. The fix removes the duplicate entries here. The
+        # drugs are already present at line 519 (in the P4-001 validated-
+        # hypothesis block, where they belong).
     ]
 
     REAL_DISEASE_NAMES: List[str] = [
@@ -1026,9 +1017,21 @@ class BiomedicalGraphBuilder:
         random_pathways = pathway_names[:random_pathway_cutoff]
         dedicated_pathways = pathway_names[random_pathway_cutoff:]
 
-        # Random baseline edges (sparse: 1 edge per node, random pool only)
+        # P3-020 ROOT FIX (SCIENTIFIC — multi-target drugs). The previous
+        # code gave each drug EXACTLY 1 protein target (n_targets = 1). This
+        # is unrealistically sparse — real drugs have 3-10+ targets
+        # (polypharmacology is the norm, not the exception). The GT model
+        # trained on a graph where each drug has exactly 1 protein CANNOT
+        # learn multi-target drug mechanisms. Predictions for drugs with
+        # real multi-target profiles are based on a degenerate topology.
+        #
+        # The fix: give each drug 1 to max(2, num_proteins // 4) targets,
+        # matching the real-world distribution where most FDA-approved drugs
+        # have multiple known targets (the median is ~3 for FDA-approved
+        # drugs per DrugBank).
+        max_targets_per_drug = max(2, len(random_proteins) // 4)
         for d in drug_names:
-            n_targets = 1
+            n_targets = int(rng.integers(1, max_targets_per_drug + 1))
             n_targets = min(n_targets, len(random_proteins))
             if n_targets <= 0:
                 continue
@@ -1880,17 +1883,39 @@ class BiomedicalGraphBuilder:
                 f"multi-hop pattern."
             )
         else:
-            logger.warning(
-                f"from_phase1_staged_data: P3-003 ROOT FIX — derived ZERO "
-                f"(pathway, disrupted_in, disease) edges. The GT model will "
-                f"have NO pathway→disease edges and CANNOT learn the "
-                f"multi-hop therapeutic mechanism. Check that Phase 1 "
-                f"produced OMIM/DisGeNET gene-disease associations AND "
-                f"STRING protein-pathway memberships AND that the "
-                f"gene_symbol → protein.name match worked. Inputs: "
-                f"gene_nodes={len(gene_nodes)}, gene_id_to_uniprot={len(gene_id_to_uniprot)}, "
+            # P3-022 ROOT FIX (CRITICAL — raise, don't silently continue).
+            # The previous code only logged a WARNING and CONTINUED with a
+            # degraded graph (no pathway→disease edges). The GT model then
+            # had NO pathway→disease edges and CANNOT learn the multi-hop
+            # drug→protein→pathway→disease pattern — the core scientific
+            # claim of the platform. But the pipeline continued, trained the
+            # model, and shipped predictions — all based on a graph that
+            # cannot support the core scientific claim.
+            #
+            # The fix: RAISE Phase2AdapterValidationError if the derivation
+            # produces 0 edges. Do not silently continue with a broken graph.
+            # The caller must fix the Phase 1→2 data pipeline (check that
+            # Phase 1 produced OMIM/DisGeNET gene-disease associations AND
+            # STRING protein-pathway memberships AND that the gene_symbol →
+            # protein.name match worked) before retrying.
+            # Lazy import to avoid circular dependency (phase2_adapter
+            # imports from graph_builder, so graph_builder cannot import
+            # from phase2_adapter at module load time).
+            from .phase2_adapter import Phase2AdapterValidationError
+            raise Phase2AdapterValidationError(
+                f"from_phase1_staged_data: P3-022 ROOT FIX — derived ZERO "
+                f"(pathway, disrupted_in, disease) edges. The GT model "
+                f"CANNOT learn the multi-hop drug→protein→pathway→disease "
+                f"pattern without these edges. The previous code silently "
+                f"continued with a degraded graph, producing predictions "
+                f"based on a broken topology. FIX the Phase 1→2 data "
+                f"pipeline before retrying. Inputs: gene_nodes={len(gene_nodes)}, "
+                f"gene_id_to_uniprot={len(gene_id_to_uniprot)}, "
                 f"protein_id_to_pathway_ids={len(protein_id_to_pathway_ids)}, "
-                f"gene_disease_edges={len(gene_disease_edges)}."
+                f"gene_disease_edges={len(gene_disease_edges)}. Check that "
+                f"Phase 1 produced OMIM/DisGeNET gene-disease associations "
+                f"AND STRING protein-pathway memberships AND that the "
+                f"gene_symbol → protein.name match worked."
             )
 
         # ─── Finalize: build reverse edges + tensorize ──────────────

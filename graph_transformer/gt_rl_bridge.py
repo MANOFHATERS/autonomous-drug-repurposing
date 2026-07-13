@@ -89,6 +89,7 @@ from .data.graph_builder import BiomedicalGraphBuilder
 from .data.biomedical_tables import (
     get_drug_safety_score,
     get_drug_patent_score,
+    get_drug_adme_score,
     compute_market_score,
     compute_rare_disease_flag,
     compute_unmet_need_score as _compute_unmet_need_score_table,
@@ -643,7 +644,7 @@ class GTRLBridge:
     # PHASE 3.3a -- Training data + drug-aware split (extracted for
     # resume_from_checkpoint re-evaluation -- V90 BUG #5 fix)
     # ------------------------------------------------------------------
-    def _compute_training_split(self) -> Dict[str, torch.Tensor]:
+    def _compute_training_split(self, neg_ratio: Optional[int] = None) -> Dict[str, torch.Tensor]:
         """Build training pairs + drug-aware train/val/test split.
 
         V90 ROOT FIX (BUG #5, P0): extracted from ``train_model`` so the
@@ -705,9 +706,24 @@ class GTRLBridge:
             pos_drug_idx = treats_edges[0]
             pos_disease_idx = treats_edges[1]
         else:
-            n_pos = min(num_drugs, num_diseases, 10)
-            pos_drug_idx = torch.arange(n_pos, dtype=torch.long)
-            pos_disease_idx = torch.arange(n_pos, dtype=torch.long)
+            # P3-028 ROOT FIX (CRITICAL — do NOT generate fake positives).
+            # The previous code silently generated synthetic positives
+            # (drug_0 -> disease_0, drug_1 -> disease_1, ...) when no
+            # treats edges existed. These are MOCK DATA — the pairs don't
+            # correspond to real drug-disease treatments. The GT model
+            # would train on fake positive labels and learn a meaningless
+            # pattern. The fix RAISES — the caller must provide a graph
+            # with real treats edges (from Phase 1 DrugBank/RepoDB data
+            # or the demo graph's curated KNOWN_POSITIVES).
+            raise RuntimeError(
+                "P3-028 ROOT FIX: no ('drug', 'treats', 'disease') edges "
+                "found in the graph. The GT model CANNOT train without "
+                "real positive drug-disease treatment pairs. The previous "
+                "code silently generated FAKE positives (drug_i -> disease_i) "
+                "which are scientifically meaningless. Provide a graph with "
+                "real treats edges (from Phase 1 DrugBank/RepoDB data or "
+                "the demo graph's curated KNOWN_POSITIVES)."
+            )
 
         n_pos = len(pos_drug_idx)
 
@@ -789,35 +805,82 @@ class GTRLBridge:
         # graph TOPOLOGY, not from feature alignment.
 
         attempts = 0
-        neg_ratio = 6
-        max_attempts = n_pos * neg_ratio * 50
-        # V90 ROOT FIX (BUG #43): parameterize neg_ratio instead of
-        # hardcoding 6. The previous magic number 6 had no documented
-        # justification. Standard practice is 1:1 to 1:10 depending on
-        # dataset characteristics. We use 6 as the default (preserving
-        # the previous behavior) but document WHY: a 6:1 neg:pos ratio
-        # gives the model enough negative examples to learn the
-        # decision boundary without overwhelming the positive signal.
-        # On a small demo graph (~5 positives), this produces ~30
-        # negatives, which is enough for the model to learn the
-        # "high-alignment -> positive, low-alignment -> negative" pattern.
-        # In production with 1000+ positives, the same 6:1 ratio gives
-        # 6000+ negatives, which is plenty for the model to learn.
-        NEG_RATIO = 6  # V90 BUG #43: documented (was magic number)
-        neg_ratio = NEG_RATIO
-        # V90 ROOT FIX (BUG #44): parameterize the max_attempts multiplier
-        # instead of hardcoding 50. The previous magic number 50 had no
-        # documented justification. We use 50 as the default (preserving
-        # the previous behavior) but document WHY: on a dense graph, many
-        # candidate (drug, disease) pairs are either (a) already positive
-        # (in pos_set) or (b) have above-median alignment (filtered out
-        # by the A1/A2 clean-negative filter). The 50x multiplier gives
-        # enough attempts to find enough valid negatives even when 90%+
-        # of candidates are rejected. On a sparse graph, fewer attempts
-        # are needed, but the extra budget is harmless (the loop exits
-        # early once enough negatives are found).
-        MAX_ATTEMPTS_MULTIPLIER = 50  # V90 BUG #44: documented (was magic)
+        # P3-026 ROOT FIX (SCIENTIFIC — parameterize neg_ratio). The previous
+        # code hardcoded NEG_RATIO = 6 and neg_ratio = NEG_RATIO, ignoring
+        # the neg_ratio parameter. The comment claimed "parameterize
+        # neg_ratio instead of hardcoding 6" but the code just renamed a
+        # magic number to a constant — NOT parameterization.
+        # The fix: use the neg_ratio PARAMETER if provided, else default
+        # to 6 (preserving previous behavior). The caller can now scale
+        # neg_ratio with the actual class imbalance (e.g., for a highly
+        # imbalanced graph with 1:1000 pos:neg ratio, use neg_ratio=20
+        # to under-sample negatives; for a balanced graph, use neg_ratio=1).
+        if neg_ratio is None:
+            neg_ratio = 6  # default (preserves previous behavior)
+        MAX_ATTEMPTS_MULTIPLIER = 50
         max_attempts = n_pos * neg_ratio * MAX_ATTEMPTS_MULTIPLIER
+
+        # P3-010 ROOT FIX (SCIENTIFIC — multi-hop reachability check for
+        # negative sampling). The previous code generated negatives via
+        # uniform random + corrupt-one-side, with NO check for whether a
+        # generated "negative" pair is actually reachable via multi-hop
+        # paths (drug→protein→pathway→disease). This creates FALSE
+        # NEGATIVES — pairs labeled as negative that are biologically
+        # plausible positives (the drug and disease share a pathway).
+        # The model is punished for correctly scoring them high.
+        #
+        # The fix: build a (num_drugs, num_diseases) reachability matrix
+        # via multi-hop BFS. A pair is "reachable" if there's a path
+        # drug→protein→pathway→disease (3-hop) or drug→protein→pathway
+        # (2-hop to pathway, which connects to disease). Exclude reachable
+        # pairs from the negative pool. This ensures negatives are TRULY
+        # negative — the drug and disease have NO biological connection
+        # in the graph.
+        reachable_pairs: set = set()
+        try:
+            # Build drug->protein adjacency
+            drug_to_proteins: Dict[int, set] = {}
+            for et_key in [("drug", "inhibits", "protein"),
+                           ("drug", "activates", "protein"),
+                           ("drug", "binds", "protein"),
+                           ("drug", "modulates", "protein")]:
+                ei = self.edge_indices.get(et_key)
+                if ei is not None and ei.numel() > 0:
+                    for d_idx, p_idx in zip(ei[0].tolist(), ei[1].tolist()):
+                        drug_to_proteins.setdefault(d_idx, set()).add(p_idx)
+            # Build protein->pathway adjacency
+            protein_to_pathways: Dict[int, set] = {}
+            pw_ei = self.edge_indices.get(("protein", "part_of", "pathway"))
+            if pw_ei is not None and pw_ei.numel() > 0:
+                for p_idx, pw_idx in zip(pw_ei[0].tolist(), pw_ei[1].tolist()):
+                    protein_to_pathways.setdefault(p_idx, set()).add(pw_idx)
+            # Build pathway->disease adjacency
+            pathway_to_diseases: Dict[int, set] = {}
+            pd_ei = self.edge_indices.get(("pathway", "disrupted_in", "disease"))
+            if pd_ei is not None and pd_ei.numel() > 0:
+                for pw_idx, ds_idx in zip(pd_ei[0].tolist(), pd_ei[1].tolist()):
+                    pathway_to_diseases.setdefault(pw_idx, set()).add(ds_idx)
+            # Compute reachable (drug, disease) pairs via 3-hop BFS
+            for d_idx, proteins in drug_to_proteins.items():
+                for p_idx in proteins:
+                    for pw_idx in protein_to_pathways.get(p_idx, set()):
+                        for ds_idx in pathway_to_diseases.get(pw_idx, set()):
+                            reachable_pairs.add((d_idx, ds_idx))
+            if reachable_pairs:
+                logger.info(
+                    f"P3-010 ROOT FIX: built reachability matrix with "
+                    f"{len(reachable_pairs)} reachable (drug, disease) pairs "
+                    f"via 3-hop BFS (drug→protein→pathway→disease). "
+                    f"These pairs are EXCLUDED from the negative pool to "
+                    f"prevent false-negative label noise."
+                )
+        except Exception as exc:
+            logger.warning(
+                "P3-010 ROOT FIX: reachability matrix build failed (%s). "
+                "Negative sampling will proceed WITHOUT the reachability "
+                "filter (may include false negatives).", exc,
+            )
+
         # P3-S04 ROOT FIX (SCIENTIFIC): the previous code used UNIFORM
         # RANDOM negative sampling -- pick a random drug and a random
         # disease independently, check only that the pair is not in
@@ -898,6 +961,14 @@ class GTRLBridge:
                 d_idx = int(pos_drug_idx_list[pos_i])
                 ds_idx = int(neg_rng.integers(0, num_diseases))
             if (d_idx, ds_idx) in pos_set:
+                continue
+            # P3-010 ROOT FIX: skip reachable pairs (false negatives).
+            # A reachable pair has a multi-hop biological connection
+            # (drug→protein→pathway→disease), so it's a plausible
+            # positive, NOT a true negative. Including it as a negative
+            # creates label noise — the model is punished for correctly
+            # scoring it high via message passing.
+            if (d_idx, ds_idx) in reachable_pairs:
                 continue
             # Optional: also skip if the corrupted pair matches another
             # positive (rare but possible). The pos_set check above
@@ -2053,22 +2124,48 @@ class GTRLBridge:
             # table lookup remains -- it already has its own SHA-256
             # fallback inside get_drug_patent_score for drugs not in the
             # Orange Book.
-            patent_per_drug[d_idx] = float(
-                get_drug_patent_score(drug_name, fallback_seed=self.seed)
-            )
+            # P3-006 ROOT FIX: get_drug_patent_score now returns None for
+            # drugs not in the curated FDA Orange Book table (instead of
+            # fabricating a hash-based mock score). The caller decides how
+            # to handle the missing data. Here we use a neutral 0.5 with a
+            # WARNING log — the data gap is EXPLICIT, not hidden behind a
+            # deterministic hash. In production, the caller loads real FDA
+            # Orange Book data from Phase 1.
+            patent_score = get_drug_patent_score(drug_name, fallback_seed=self.seed)
+            if patent_score is None:
+                logger.warning(
+                    f"P3-006: drug '{drug_name}' not in curated FDA Orange "
+                    f"Book patent table. Using neutral 0.5 (data gap is "
+                    f"EXPLICIT — not a fabricated hash-based score). Load "
+                    f"real patent data from Phase 1 for production."
+                )
+                patent_score = 0.5
+            patent_per_drug[d_idx] = float(patent_score)
 
-        # --- ADME score: deterministic per drug (SHA-256 of drug name) ---
+        # --- ADME score (P3-027 ROOT FIX: curated DrugBank ADMET table) ---
+        # P3-027 ROOT FIX (CRITICAL — do NOT use hash-based random ADME).
+        # The previous code computed adme_score via deterministic SHA-256
+        # hash of the drug name: ``drug_rng = np.random.default_rng(drug_seed);
+        # adme = drug_rng.beta(5, 2)``. This is MOCK DATA — a deterministic
+        # random value, NOT a real ADME profile.
+        #
+        # The fix: use the curated DRUG_ADME_PROFILES table (sourced from
+        # DrugBank ADMET predictions and clinical bioavailability data).
+        # Return None for drugs not in the table. The caller handles None
+        # by using a neutral 0.5 with a WARNING — the data gap is EXPLICIT.
+        # In production, this is loaded from Phase 1 (DrugBank ADMET fields).
         adme_per_drug: Dict[int, float] = {}
         for drug_name, d_idx in drug_map.items():
-            # P3-014 ROOT FIX: removed the dead name_hash / drug_seed lines
-            # that were immediately overwritten by _deterministic_name_seed.
-            # The deterministic SHA-256 seed is the ONLY seed computation
-            # now -- no double work, no dead intermediate values.
-            drug_seed = _deterministic_name_seed(self.seed, drug_name, 43)
-            drug_rng = np.random.default_rng(drug_seed)
-            # beta(5, 2): mean ~0.63, reflecting that FDA-approved drugs
-            # mostly passed bioavailability screens.
-            adme_per_drug[d_idx] = float(np.clip(drug_rng.beta(5, 2), 0.0, 1.0))
+            adme_score = get_drug_adme_score(drug_name, fallback_seed=self.seed)
+            if adme_score is None:
+                logger.warning(
+                    f"P3-027: drug '{drug_name}' not in curated DrugBank "
+                    f"ADMET table. Using neutral 0.5 (data gap is EXPLICIT "
+                    f"— not a fabricated hash-based score). Load real ADMET "
+                    f"data from Phase 1 for production."
+                )
+                adme_score = 0.5
+            adme_per_drug[d_idx] = float(adme_score)
 
         # --- Efficacy score: drug's clinical validation ---
         # V30 ROOT FIX (9.14): the original code used the count of
@@ -2220,15 +2317,26 @@ class GTRLBridge:
         # for ALL drugs. ibuprofen (GI bleed risk) got the same safety as
         # levothyroxine (very clean profile). Scientifically meaningless.
         #
-        # ROOT FIX (v89): use curated FDA FAERS safety profiles per drug name.
-        # Each drug has a real safety score based on adverse event report data.
-        # Drugs not in the table get a deterministic hash-based fallback (stable
-        # per drug, NOT per pair).
+        # ROOT FIX (v89 + P3-006): use curated FDA FAERS safety profiles per
+        # drug name. Each drug has a real safety score based on adverse event
+        # report data. Drugs not in the table get None (P3-006 fix: no more
+        # hash-based mock scores). The caller handles None by using a neutral
+        # 0.5 with a WARNING — the data gap is EXPLICIT.
         # In production, this table is loaded from the Phase 1 knowledge graph
         # (ChEMBL/DrugBank adverse event data).
-        df["safety_score"] = df["drug"].map(
-            lambda d: float(get_drug_safety_score(d, fallback_seed=self.seed))
-        )
+        def _safety_for_drug(d: str) -> float:
+            score = get_drug_safety_score(d, fallback_seed=self.seed)
+            if score is None:
+                logger.warning(
+                    f"P3-006: drug '{d}' not in curated FDA FAERS safety "
+                    f"table. Using neutral 0.5 (data gap is EXPLICIT — not "
+                    f"a fabricated hash-based score). Load real FAERS data "
+                    f"from Phase 1 for production."
+                )
+                return 0.5
+            return float(score)
+
+        df["safety_score"] = df["drug"].map(_safety_for_drug)
         logger.info(
             f"v89 ROOT FIX: safety_score computed from curated FDA FAERS table "
             f"({df['safety_score'].nunique()} unique values, "
@@ -2489,43 +2597,44 @@ class GTRLBridge:
         df["patent_score"] = df["drug"].map(lambda d: _drug_level_feature(d, "patent_score"))
         df["adme_score"] = df["drug"].map(lambda d: _drug_level_feature(d, "adme_score"))
 
-        # --- Efficacy score (v89 ROOT FIX: PAIR-LEVEL not drug-level) ---
-        # ROOT CAUSE (v88): efficacy_score was a DRUG-LEVEL property computed
-        # from target count (drug->protein edges). Drugs with 3+ targets got
-        # base≈0.95. This is SCIENTIFICALLY WRONG -- efficacy is a (drug, disease)
-        # property. A drug can be efficacious for disease A and useless for
-        # disease B. ibuprofen is efficacious for pain but NOT for COPD.
-        # The v88 code gave ibuprofen efficacy=0.94 for ALL diseases including
-        # COPD, Parkinson's, and MS -- pairs it has never been tested for.
-        #
-        # ROOT FIX (v89): compute efficacy as a (drug, disease) PAIR property:
+        # --- Efficacy score (P3-009 ROOT FIX: INDEPENDENT signal) ---
+        # P3-009 ROOT FIX (CRITICAL — SCIENTIFIC). The v89 code computed
+        # efficacy_score as a DETERMINISTIC LINEAR COMBINATION of two other
+        # RL features:
         #   efficacy = 0.5 * gnn_score + 0.3 * pathway_score + 0.2 * drug_validation
-        # where:
-        #   - gnn_score: the GT model's disease-specific prediction (IS pair-specific)
-        #   - pathway_score: multi-hop biological evidence (IS pair-specific)
-        #   - drug_validation: drug-level clinical validation (target diversity)
-        #     -- this component is drug-level but weighted at only 0.2
-        # This makes efficacy DISEASE-SPECIFIC: ibuprofen->pain gets high
-        # efficacy (gnn + pathway both high), ibuprofen->COPD gets low efficacy
-        # (gnn + pathway both low).
-        _drug_validation = {
-            d_idx: feat.get("efficacy_score", 0.5)
-            for d_idx, feat in drug_level_features.items()
-        }
-        def _efficacy_for_pair(row) -> float:
-            d_idx = drug_map.get(row["drug"], -1)
-            gnn = float(row.get("gnn_score", 0.0))
-            pw = float(row.get("pathway_score", 0.0))
-            dv = _drug_validation.get(d_idx, 0.5)
-            return float(np.clip(0.5 * gnn + 0.3 * pw + 0.2 * dv, 0.0, 1.0))
-
-        df["efficacy_score"] = df.apply(_efficacy_for_pair, axis=1)
+        # This is NOT an independent signal — it's perfectly collinear with
+        # gnn_score and pathway_score. The RL reward function weights
+        # efficacy_score as an INDEPENDENT signal, but it double-counts the
+        # gnn_score signal (once as gnn_score, once via efficacy_score =
+        # 0.5*gnn_score + ...). This inflates the gnn_score weight beyond
+        # what's configured, corrupting the RL agent's learned policy.
+        #
+        # The fix: use the DRUG-LEVEL efficacy_score (already computed by
+        # _compute_drug_level_features from TARGET DIVERSITY — the count of
+        # drug->protein edges). This is an INDEPENDENT signal:
+        #   - It does NOT depend on gnn_score (the GT model's prediction).
+        #   - It does NOT depend on pathway_score (multi-hop path count).
+        #   - It measures the drug's clinical validation breadth (how many
+        #     distinct protein targets it has, which correlates with how
+        #     many mechanisms of action have been explored clinically).
+        #
+        # This IS a drug-level property (not pair-level). A pair-level
+        # efficacy signal would require clinical trial outcomes data
+        # (Phase 2/3 trial results for this specific drug-disease pair),
+        # which is a Phase 1 future enhancement. Until then, drug-level
+        # target diversity is the best INDEPENDENT efficacy proxy available.
+        # It does NOT create collinearity with gnn_score or pathway_score.
+        df["efficacy_score"] = df["drug"].map(
+            lambda d: _drug_level_feature(d, "efficacy_score")
+        )
         logger.info(
-            f"v89 ROOT FIX: efficacy_score computed as PAIR-LEVEL property "
-            f"(0.5*gnn + 0.3*pathway + 0.2*drug_validation). "
+            f"P3-009 ROOT FIX: efficacy_score uses DRUG-LEVEL target "
+            f"diversity (INDEPENDENT of gnn_score and pathway_score). "
+            f"Removed the collinear linear combination "
+            f"(0.5*gnn + 0.3*pathway + 0.2*dv) that double-counted the "
+            f"gnn_score signal in the RL reward. "
             f"{df['efficacy_score'].nunique()} unique values, "
-            f"range [{df['efficacy_score'].min():.3f}, {df['efficacy_score'].max():.3f}]. "
-            f"Was drug-level constant in v88 (scientifically wrong)."
+            f"range [{df['efficacy_score'].min():.3f}, {df['efficacy_score'].max():.3f}]."
         )
 
         # --- Rare disease flag (v89 ROOT FIX: curated WHO/Orphanet prevalence) ---
@@ -2772,6 +2881,12 @@ class GTRLBridge:
         num_drugs: int = 50,
         num_diseases: int = 30,
         gt_epochs: int = 500,
+        # P3-025 ROOT FIX: parameterize gt_patience. The previous code
+        # hardcoded patience=40 in the train_model call, ignoring the
+        # patience parameter passed to train_model. A caller passing
+        # patience=100 silently got patience=40. The fix exposes
+        # gt_patience at the pipeline level so callers can control it.
+        gt_patience: int = 40,
         rl_timesteps: int = 50000,
         rl_top_n: int = 30,
         # ROOT FIX (E15): parameterize model config instead of hardcoding
@@ -3095,7 +3210,7 @@ class GTRLBridge:
         # phase1_staged_data) forces fresh training.
         gt_results = self.train_model(
             epochs=gt_epochs,
-            patience=40,
+            patience=gt_patience,  # P3-025 ROOT FIX: use the parameter, not hardcoded 40
             resume_from_checkpoint=(graph_data is None and phase1_staged_data is None),
         )
 

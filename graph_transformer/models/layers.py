@@ -146,11 +146,30 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         )
         self.head_dim = embedding_dim // num_heads
 
-        # ROOT FIX (FORENSIC-AUDIT-I04): PER-HEAD query projection.
-        # The output is (num_heads * head_dim) = embedding_dim, which is
-        # then reshaped to (N, num_heads, head_dim). Each head h uses
-        # columns [h*head_dim : (h+1)*head_dim] of the projection matrix,
-        # giving each head an independent subspace to attend to.
+        # P3-015 ROOT FIX (SCIENTIFIC — per-node-type Q projection):
+        # The previous code used a SINGLE shared q_proj for ALL node types.
+        # But k_proj/v_proj are per-edge-type. This means the Q (query) for
+        # a drug node is computed with the same projection as the Q for a
+        # disease node — the model cannot learn type-specific query patterns.
+        # Standard HGT (Wang et al. 2019) uses per-NODE-TYPE Q projections.
+        #
+        # The fix: create a Dict[str, nn.Linear] keyed by node type, with a
+        # separate Q projection per node type. In forward(), apply the
+        # per-node-type Q projection to each node type's embeddings separately,
+        # then concatenate. A fallback shared q_proj is retained for backward
+        # compatibility with checkpoints that don't have per-node-type Q
+        # weights (loaded via _load_q_proj_compat).
+        self.q_proj_per_type: Dict[str, nn.Module] = {}
+        # Extract node types from edge_types (unique src + tgt types)
+        _node_types_in_edges: set = set()
+        for src, rel, tgt in (self.edge_types or []):
+            _node_types_in_edges.add(src)
+            _node_types_in_edges.add(tgt)
+        for nt in sorted(_node_types_in_edges):
+            q = nn.Linear(embedding_dim, num_heads * self.head_dim, bias=False)
+            self.add_module(f"q_{nt}", q)
+            self.q_proj_per_type[nt] = q
+        # Fallback shared projection (for backward compat with old checkpoints)
         self.q_proj = nn.Linear(embedding_dim, num_heads * self.head_dim, bias=False)
 
         # ROOT FIX (FORENSIC-AUDIT-I04): PER-EDGE-TYPE, PER-HEAD K/V projections.
@@ -299,11 +318,21 @@ class HeterogeneousMultiHeadAttention(nn.Module):
             [node_embeddings[nt] for nt in all_types], dim=0
         )  # (total_nodes, D)
 
-        # ROOT FIX (FORENSIC-AUDIT-I04): PER-HEAD query projection.
-        # Q is (N, num_heads * head_dim), reshaped to (N, num_heads, head_dim).
-        # Each head h uses Q[:, h, :] which is projected from a DIFFERENT
-        # slice of q_proj's weight matrix, giving each head its own subspace.
-        Q = self.q_proj(all_embeddings)  # (N, num_heads * head_dim)
+        # P3-015 ROOT FIX: PER-NODE-TYPE, PER-HEAD query projection.
+        # Each node type has its own q_proj, so the Q for a drug node is
+        # computed with a DIFFERENT projection than the Q for a disease node.
+        # This lets the model learn type-specific query patterns (standard HGT).
+        # We apply per-type projections to each node type's slice, then
+        # concatenate the results into a single (total_nodes, H*head_dim) tensor.
+        Q_parts: List[torch.Tensor] = []
+        for nt in all_types:
+            h_nt = node_embeddings[nt]
+            if nt in self.q_proj_per_type:
+                Q_parts.append(self.q_proj_per_type[nt](h_nt))
+            else:
+                # Fallback for node types not in edge_types (e.g., isolated nodes)
+                Q_parts.append(self.q_proj(h_nt))
+        Q = torch.cat(Q_parts, dim=0)  # (total_nodes, num_heads * head_dim)
         N = total_nodes
         Q = Q.view(N, self.num_heads, self.head_dim)  # (N, H, head_dim)
 
@@ -328,38 +357,42 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         # ``q_proj(all_embeddings)`` for self-loops (reusing out_proj), then
         # applied ``out_proj`` AGAIN to the final messages. Now self-loops
         # use ``self_loop_proj`` (independent from out_proj), and the weight
-        # is learned (initialized to 0.1 to match the original starting point).
+        # is learned (init=1.0 per P3-S01, the standard residual identity
+        # weight — see ``self.self_loop_weight = nn.Parameter(torch.tensor(1.0))``).
         self_loop_messages = self.self_loop_proj(all_embeddings)  # (N, D)
         # Reshape self-loop messages to (N, num_heads * head_dim) for consistency
         # self_loop_proj outputs (N, embedding_dim) = (N, num_heads * head_dim)
         #
-        # P3-013 ROOT FIX (HIGH, wrong): apply cross_type_norm to self-loop
-        # messages too. The previous code did:
-        #   messages = messages + self_loop_messages * self.self_loop_weight
-        # which is NOT scaled by cross_type_norm. But edge messages ARE
-        # scaled by cross_type_norm (line ~378: weighted_V_flat * gate *
-        # cross_type_norm). So a node with K incoming edge types received:
-        #   self_loop_weight * |self_loop_proj(h)| + sum_over_K_types(
-        #     cross_type_norm * |V|)
-        # = 1.0 * |self_loop_proj(h)| + K * (1/sqrt(K)) * |V|
-        # = 1.0 * |self_loop_proj(h)| + sqrt(K) * |V|
-        # For K=7 edge types, self-loops contributed 1.0/(1.0+2.65) ≈ 27%
-        # of the total — disproportionately influential for nodes with few
-        # incoming edge types (leaf nodes) and disproportionately weak for
-        # hub nodes. The self-loop's relative contribution varied with node
-        # degree, causing suboptimal learning on hub vs leaf nodes.
+        # P3-013 ROOT FIX (SCIENTIFIC — DO NOT scale self-loops by
+        # cross_type_norm). The previous code scaled self-loops by
+        # cross_type_norm, claiming it made "self-loop's relative contribution
+        # INDEPENDENT of K". That claim was MATHEMATICALLY FALSE:
         #
-        # ROOT FIX: scale self-loops by cross_type_norm too. Now a node
-        # with K incoming edge types receives:
-        #   cross_type_norm * self_loop_weight * |self_loop_proj(h)|
-        #     + K * cross_type_norm * |V|
-        # = cross_type_norm * (self_loop_weight * |self_loop_proj(h)| + sqrt(K) * |V|)
-        # The self-loop's relative contribution is now INDEPENDENT of K
-        # (it's self_loop_weight / (self_loop_weight + sqrt(K) * |V|/|h|)),
-        # which is consistent across node degrees. The self_loop_weight
-        # (learnable, init=0.1) still controls the self-loop's magnitude
-        # relative to edge messages.
-        messages = messages + self_loop_messages * self.self_loop_weight * cross_type_norm
+        #   With the scaling: self_loop_msg = cross_type_norm * w * |h|
+        #                     edge_msg = K * cross_type_norm * |V|
+        #   self_loop_ratio = (w/sqrt(K)) / (w/sqrt(K) + sqrt(K)*|V|/|h|)
+        #                   = w / (w + K*|V|/|h|)
+        #   This DEPENDS on K (as K, not sqrt(K)) — WORSE than before.
+        #
+        # Residual connections (self-loops) should NOT be scaled by the
+        # edge-type count. They are the IDENTITY pathway that preserves
+        # the node's own representation. Scaling them by 1/sqrt(K) makes
+        # the residual WEAKER for hub nodes (many edge types), causing
+        # representation drift. Standard Transformers (Vaswani et al. 2017,
+        # He et al. 2016) do NOT scale the residual by the number of
+        # attention heads or edge types.
+        #
+        # The fix: apply self_loop_weight ONLY (no cross_type_norm). The
+        # learnable self_loop_weight (init=1.0, P3-S01 fix) controls the
+        # self-loop's magnitude relative to edge messages. Gradient descent
+        # learns the right balance.
+        #
+        # P3-014 ROOT FIX (comment accuracy): self_loop_weight init=1.0
+        # (P3-S01 fix raised it from 0.1 to 1.0, the standard residual
+        # identity weight per He et al. 2016). The previous comment said
+        # "init=0.1" which was STALE — the actual init is 1.0 (see line
+        # ``self.self_loop_weight = nn.Parameter(torch.tensor(1.0))``).
+        messages = messages + self_loop_messages * self.self_loop_weight
 
         # Process each edge type
         # P3-039 ROOT FIX (comment accuracy): the previous comment claimed
@@ -812,13 +845,30 @@ class GraphTransformerLayer(nn.Module):
         attn_out = self.attention(normed, edge_indices)
 
         if self.residual_connections:
+            # P3-016 ROOT FIX (SCIENTIFIC — preserve ALL node types in
+            # residual). The previous code used ``if k in attn_out`` which
+            # SILENTLY DROPPED node types not in attn_out. Node types with
+            # no incoming edges (no attention messages) were DROPPED from
+            # the residual stream entirely — their embeddings vanished after
+            # the first layer. The model produced no output for these types.
+            #
+            # The fix: use ``attn_out.get(k, torch.zeros_like(v))`` to
+            # preserve all node types via the residual. A node type with no
+            # incoming attention messages gets a zero attention contribution
+            # (its embedding is preserved by the identity residual, which is
+            # the CORRECT behavior for isolated nodes — they keep their
+            # representation from the previous layer).
             node_embeddings = {
-                k: v + self.dropout(attn_out[k])
+                k: v + self.dropout(attn_out.get(k, torch.zeros_like(v)))
                 for k, v in node_embeddings.items()
-                if k in attn_out
             }
         else:
-            node_embeddings = attn_out
+            # P3-016: when residual is off, still preserve all node types
+            # by filling missing types with zeros (not dropping them).
+            node_embeddings = {
+                k: attn_out.get(k, torch.zeros_like(v))
+                for k, v in node_embeddings.items()
+            }
 
         # Pre-norm FFN
         # V90 ROOT FIX (BUG #30, P2): apply per-node-type FFN. The
@@ -843,13 +893,16 @@ class GraphTransformerLayer(nn.Module):
                 ffn_out[k] = self._default_ffn(v)
 
         if self.residual_connections:
+            # P3-016 ROOT FIX: preserve ALL node types (same fix as above).
             node_embeddings = {
-                k: v + self.dropout(ffn_out[k])
+                k: v + self.dropout(ffn_out.get(k, torch.zeros_like(v)))
                 for k, v in node_embeddings.items()
-                if k in ffn_out
             }
         else:
-            node_embeddings = ffn_out
+            node_embeddings = {
+                k: ffn_out.get(k, torch.zeros_like(v))
+                for k, v in node_embeddings.items()
+            }
 
         return node_embeddings
 
