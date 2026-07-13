@@ -530,27 +530,80 @@ def check_neo4j_readiness(pg_session) -> dict:
             #   a warning) instead of crashing.
             _meta_name: Optional[str] = None
             try:
-                _bind = pg_session.bind
+                # v107 ROOT FIX (ISSUE-P1-034 — schema introspection
+                #   inconsistent when session.bind is None):
+                #   The previous code ONLY resolved ``_meta_name`` when
+                #   ``pg_session.bind is not None``. In SQLAlchemy 2.x,
+                #   ``session.bind`` is frequently None (unbound sessions,
+                #   sessions created via ``sessionmaker(bind=None)`` and
+                #   later bound via ``session.connection()``). When
+                #   ``_bind`` was None, ``_meta_name`` stayed None, and
+                #   the fallback branches called ``_sa_table(t, schema=None)``
+                #   which SQLAlchemy interprets as "use the default schema"
+                #   — this works on SQLite (single-schema) but FAILS on
+                #   PostgreSQL with a non-default ``search_path``,
+                #   causing ``check_neo4j_readiness`` to return
+                #   ``ready=False`` even on a fully-populated DB.
+                #
+                # ROOT FIX: try THREE sources of the engine in order:
+                #   1. ``pg_session.bind`` (legacy SQLAlchemy 1.x)
+                #   2. ``pg_session.get_bind()`` (SQLAlchemy 1.4+ — returns
+                #      the bind for the current mapper context; works for
+                #      unbound sessions that have been associated with an
+                #      engine via ``session.configure(bind=engine)`` or
+                #      via ``session.connection()``)
+                #   3. ``database.connection.get_engine()`` (the platform's
+                #      global engine — the same one the session pool uses)
+                # Once we have ANY engine, use ``inspect(engine).default_schema_name``
+                # consistently. This eliminates the SQLite-vs-PostgreSQL
+                # asymmetry that the audit flagged.
+                from sqlalchemy import (
+                    MetaData,
+                    Table,
+                    inspect as _sa_inspect,
+                )
+                _bind = None
+                # Source 1: session.bind (SQLAlchemy 1.x legacy)
+                try:
+                    _bind = pg_session.bind
+                except (AttributeError, TypeError):
+                    _bind = None
+                # Source 2: session.get_bind() (SQLAlchemy 1.4+)
+                if _bind is None:
+                    try:
+                        _bind = pg_session.get_bind()
+                    except (AttributeError, TypeError, LookupError, Exception):
+                        # get_bind() raises LookupError if no mapper is in
+                        # context (e.g. raw SQL execution). Swallow and try
+                        # the next source.
+                        _bind = None
+                # Source 3: global engine from database.connection
+                if _bind is None:
+                    try:
+                        from database.connection import get_engine as _get_engine
+                        _bind = _get_engine()
+                    except Exception:
+                        _bind = None
+                # Now resolve default_schema_name from whichever bind we found.
                 if _bind is not None:
-                    from sqlalchemy import (
-                        MetaData,
-                        Table,
-                        inspect as _sa_inspect,
-                    )
-                    _meta_name = _sa_inspect(_bind).default_schema_name
-                    # P1-002 ROOT FIX (v100 forensic): the previous code
-                    # computed _meta (default_schema_name) but NEVER used
-                    # it -- it always created an UNQUALIFIED _sa_table(t),
-                    # which fails on PostgreSQL when the table is in a
-                    # non-default schema or search_path is misconfigured.
-                    # This caused check_neo4j_readiness to return ready=False
-                    # even on a fully-populated DB, blocking the master DAG's
-                    # _trigger_phase2. ROOT FIX: introspect the actual Table
-                    # object from the SQLAlchemy metadata via reflect() with
-                    # the resolved schema name, so the rendered SQL carries
-                    # the schema qualification (e.g. "public.drugs" not just
-                    # "drugs"). Fall back to the unqualified TableClause
-                    # only if reflection fails (SQLite, no bind, etc.).
+                    try:
+                        _meta_name = _sa_inspect(_bind).default_schema_name
+                    except Exception:
+                        _meta_name = None
+                # P1-002 ROOT FIX (v100 forensic): the previous code
+                # computed _meta (default_schema_name) but NEVER used
+                # it -- it always created an UNQUALIFIED _sa_table(t),
+                # which fails on PostgreSQL when the table is in a
+                # non-default schema or search_path is misconfigured.
+                # This caused check_neo4j_readiness to return ready=False
+                # even on a fully-populated DB, blocking the master DAG's
+                # _trigger_phase2. ROOT FIX: introspect the actual Table
+                # object from the SQLAlchemy metadata via reflect() with
+                # the resolved schema name, so the rendered SQL carries
+                # the schema qualification (e.g. "public.drugs" not just
+                # "drugs"). Fall back to the unqualified TableClause
+                # only if reflection fails (SQLite, no bind, etc.).
+                if _bind is not None:
                     try:
                         _md = MetaData(schema=_meta_name)
                         _table_obj = Table(
@@ -567,6 +620,32 @@ def check_neo4j_readiness(pg_session) -> dict:
                             )
                         else:
                             _table_obj = _sa_table(t)
+                else:
+                    # v107 P1-034: no engine available — use unqualified
+                    # TableClause. This works on SQLite (single-schema)
+                    # but will fail on PostgreSQL with non-default
+                    # search_path. Log a WARNING so operators know the
+                    # schema could not be resolved.
+                    if t == sorted(ALL_TABLES)[0]:  # log once per call
+                        logger.warning(
+                            "check_neo4j_readiness: could not resolve a "
+                            "database engine from pg_session (bind=%r, "
+                            "get_bind=%r, global engine=%r). Using "
+                            "unqualified table references — this works on "
+                            "SQLite but may fail on PostgreSQL with a "
+                            "non-default search_path. Ensure the session "
+                            "is bound to an engine before calling "
+                            "check_neo4j_readiness. (v107 P1-034)",
+                            getattr(pg_session, 'bind', None),
+                            'available' if hasattr(pg_session, 'get_bind') else 'missing',
+                            'available' if _bind is not None else 'missing',
+                        )
+                    if _meta_name:
+                        _table_obj = _sa_table(
+                            t, schema=_meta_name,
+                        )
+                    else:
+                        _table_obj = _sa_table(t)
             except Exception:
                 # P1-002 ROOT FIX: use _meta_name (schema name) in _sa_table()
                 # call with schema= parameter for the fallback case too.

@@ -722,48 +722,70 @@ def embedded_pubchem_enrichment() -> pd.DataFrame:
 
     Schema matches ``_PHASE1_EXPECTED_COLUMNS['pubchem_enrichment']`` in
     phase1_bridge.py: requires ``inchikey``, ``canonical_smiles``.
+
+    v107 ROOT FIX (ISSUE-P1-036 — missing ``drug_source`` column):
+    The v83 P1-8 contract added ``drug_source`` as the 9th column on the
+    API-path CSV writer (``_v50_downloaders.py:742-747``) so downstream
+    consumers (phase1_bridge.pubchem_enrichment reader) know which drug
+    source each row came from. But this embedded fallback was NEVER
+    updated — it returned only 8 columns, so when the fallback fired,
+    the bridge saw a missing ``drug_source`` column and either crashed
+    (KeyError) or silently treated every row as ``drug_source=None``,
+    losing the provenance signal the v83 fix was supposed to provide.
+    ROOT FIX: add ``drug_source="embedded_sample"`` to every row so
+    the fallback schema matches the API-path schema exactly.
     """
     return pd.DataFrame([
         {"inchikey": "BSYNRYMUTXBXSQ-UHFFFAOYSA-N", "pubchem_cid": 2244,
          "canonical_smiles": "CC(=O)OC1=CC=CC=C1C(=O)O",
          "xlogp": 1.19, "tpsa": 63.6, "h_bond_donor_count": 1,
-         "h_bond_acceptor_count": 4, "rotatable_bond_count": 2},
+         "h_bond_acceptor_count": 4, "rotatable_bond_count": 2,
+         "drug_source": "embedded_sample"},
         {"inchikey": "RZVAJINKPMORJF-UHFFFAOYSA-N", "pubchem_cid": 1983,
          "canonical_smiles": "CC1=CC=C(O)C=C1O",
          "xlogp": 0.46, "tpsa": 49.33, "h_bond_donor_count": 2,
-         "h_bond_acceptor_count": 2, "rotatable_bond_count": 0},
+         "h_bond_acceptor_count": 2, "rotatable_bond_count": 0,
+         "drug_source": "embedded_sample"},
         {"inchikey": "HEFNNWSXXWATIW-UHFFFAOYSA-N", "pubchem_cid": 3672,
          "canonical_smiles": "CC(C)CC1=CC=C(C=C1)CC(C(=O)O)C",
          "xlogp": 3.97, "tpsa": 37.3, "h_bond_donor_count": 1,
-         "h_bond_acceptor_count": 2, "rotatable_bond_count": 4},
+         "h_bond_acceptor_count": 2, "rotatable_bond_count": 4,
+         "drug_source": "embedded_sample"},
         {"inchikey": "RYYVLZVUVIJVGH-UHFFFAOYSA-N", "pubchem_cid": 2519,
          "canonical_smiles": "CN1C=NC2=C1C(=O)N(C(=O)N2C)C",
          "xlogp": -0.07, "tpsa": 58.44, "h_bond_donor_count": 0,
-         "h_bond_acceptor_count": 6, "rotatable_bond_count": 0},
+         "h_bond_acceptor_count": 6, "rotatable_bond_count": 0,
+         "drug_source": "embedded_sample"},
         {"inchikey": "AAOVKBJEBZCEQK-UHFFFAOYSA-N", "pubchem_cid": 3016,
          "canonical_smiles": "ClC1=CC2=C(C=C1)C(=NCC(=O)N2C3=CC=CC=C3)C",
          "xlogp": 2.82, "tpsa": 32.67, "h_bond_donor_count": 0,
-         "h_bond_acceptor_count": 2, "rotatable_bond_count": 1},
+         "h_bond_acceptor_count": 2, "rotatable_bond_count": 1,
+         "drug_source": "embedded_sample"},
         {"inchikey": "PJVWKTKQMONHTF-UHFFFAOYSA-N", "pubchem_cid": 6691,
          "canonical_smiles": "CC(=O)CC(C1=CC=CC=C1)C2=C(C3=CC=CC=C3OC2=O)O",
          "xlogp": 2.70, "tpsa": 46.61, "h_bond_donor_count": 1,
-         "h_bond_acceptor_count": 3, "rotatable_bond_count": 2},
+         "h_bond_acceptor_count": 3, "rotatable_bond_count": 2,
+         "drug_source": "embedded_sample"},
         {"inchikey": "XZWYZXLIPXDOLR-UHFFFAOYSA-N", "pubchem_cid": 4091,
          "canonical_smiles": "CN(C)C(=N)N=C(N)N",
          "xlogp": -1.43, "tpsa": 76.07, "h_bond_donor_count": 2,
-         "h_bond_acceptor_count": 4, "rotatable_bond_count": 2},
+         "h_bond_acceptor_count": 4, "rotatable_bond_count": 2,
+         "drug_source": "embedded_sample"},
         {"inchikey": "XUKUURHRXDUEBC-UHFFFAOYSA-N", "pubchem_cid": 60823,
          "canonical_smiles": "CC(C)C1=C(C=CC=C1C)C2=CC=CC=C2C(=O)NC3CC4=C(C=C(C=C4CC3)F)C(=O)O",
          "xlogp": 4.19, "tpsa": 111.78, "h_bond_donor_count": 3,
-         "h_bond_acceptor_count": 7, "rotatable_bond_count": 8},
+         "h_bond_acceptor_count": 7, "rotatable_bond_count": 8,
+         "drug_source": "embedded_sample"},
         {"inchikey": "BNRQQXFRAQNPGX-UHFFFAOYSA-N", "pubchem_cid": 44093,
          "canonical_smiles": "CC(C)C1CC2C(SC1)C(=O)NC2C(=O)O",
          "xlogp": 0.65, "tpsa": 86.91, "h_bond_donor_count": 2,
-         "h_bond_acceptor_count": 4, "rotatable_bond_count": 2},
+         "h_bond_acceptor_count": 4, "rotatable_bond_count": 2,
+         "drug_source": "embedded_sample"},
         {"inchikey": "RJXRWZVZAQXBEZ-UHFFFAOYSA-N", "pubchem_cid": 5362119,
          "canonical_smiles": "CCCCC(C)C1C(=O)N2CCCC2C(=O)N1CC(C(=O)O)N",
          "xlogp": -1.21, "tpsa": 132.85, "h_bond_donor_count": 3,
-         "h_bond_acceptor_count": 8, "rotatable_bond_count": 9},
+         "h_bond_acceptor_count": 8, "rotatable_bond_count": 9,
+         "drug_source": "embedded_sample"},
     ])
 
 
@@ -817,11 +839,34 @@ def write_all_samples(processed_dir) -> dict:
     # two concurrent write_all_samples() calls from doing double-work.
     # Even without the lock, the atomic-rename pattern below guarantees
     # no reader ever sees a partially-written file.
+    # v107 ROOT FIX (ISSUE-P1-037 — filelock fallback was NOT serializing
+    #   concurrent writers):
+    #   The previous code fell back to ``_atomic_write_csv`` WITHOUT any
+    #   cross-process lock when ``filelock`` was not installed. Two
+    #   concurrent ``write_all_samples`` calls (e.g. from ``pipelines all``
+    #   and a parallel Airflow task) both did the full work and the
+    #   final file was whichever ``os.replace`` ran LAST — a double-write
+    #   that wasted CPU/IO and could produce a file with fewer rows than
+    #   expected if one process's DataFrame was stale. ROOT FIX: use
+    #   ``fcntl.flock`` (POSIX advisory lock) as a fallback when
+    #   ``filelock`` is not installed. On Windows (no ``fcntl``), fall
+    #   back to atomic-rename-only with a WARNING. This makes the lock
+    #   behavior consistent across POSIX systems regardless of whether
+    #   ``filelock`` is installed.
     try:
         from filelock import FileLock, Timeout as FileLockTimeout
         _has_filelock = True
     except ImportError:
         _has_filelock = False
+
+    # v107 P1-037: POSIX fcntl.flock fallback when filelock is not installed.
+    _has_fcntl = False
+    try:
+        import fcntl as _fcntl_module  # noqa: F401
+        _has_fcntl = True
+    except ImportError:
+        # Windows — no fcntl. Will fall back to atomic-rename-only.
+        _has_fcntl = False
 
     for key, (func, filename) in datasets.items():
         df = func()
@@ -841,7 +886,46 @@ def write_all_samples(processed_dir) -> dict:
                     "Could not acquire lock for %s -- another process is "
                     "writing it. Skipping.", path,
                 )
+        elif _has_fcntl:
+            # v107 P1-037: POSIX fcntl.flock fallback. Use a dedicated
+            # .lock sidecar file (NOT the data file itself — flock on
+            # the data file would conflict with readers). Acquire an
+            # exclusive lock, write, release. If another process holds
+            # the lock, flock blocks (no timeout — POSIX flock has no
+            # built-in timeout). This is acceptable because
+            # write_all_samples is a fast operation (10 mock rows).
+            import fcntl as _fcntl
+            lock_path = path.with_suffix(path.suffix + ".lock")
+            lock_fd = None
+            try:
+                lock_fd = open(lock_path, "w")
+                _fcntl.flock(lock_fd.fileno(), _fcntl.LOCK_EX)
+                _atomic_write_csv(df, path, filename)
+            except OSError as flock_exc:
+                logger.warning(
+                    "Could not acquire fcntl lock for %s: %s. "
+                    "Falling back to unlocked atomic write (v107 P1-037).",
+                    path, flock_exc,
+                )
+                _atomic_write_csv(df, path, filename)
+            finally:
+                if lock_fd is not None:
+                    try:
+                        _fcntl.flock(lock_fd.fileno(), _fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                    lock_fd.close()
         else:
+            # v107 P1-037: Windows (no fcntl) and no filelock installed.
+            # Fall back to atomic-rename-only. Log a WARNING so operators
+            # know concurrent writers are not serialized.
+            if key == "chembl_drugs":  # log once per call
+                logger.warning(
+                    "Neither filelock nor fcntl is available — concurrent "
+                    "write_all_samples() calls are NOT serialized (v107 "
+                    "P1-037). Install `filelock` (pip install filelock) "
+                    "or run on POSIX for proper cross-process locking."
+                )
             _atomic_write_csv(df, path, filename)
         written[key] = path
     return written

@@ -181,49 +181,51 @@ logger = logging.getLogger(__name__)
 import sqlite3 as _sqlite3_module
 from decimal import Decimal as _Decimal_type
 
-# P1-035 ROOT FIX (remove the _DECIMAL_ADAPTER_REGISTERED flag anti-pattern):
-#   The previous code guarded ``register_adapter`` with a module-level
-#   ``_DECIMAL_ADAPTER_REGISTERED: bool = False`` flag. On
-#   ``importlib.reload(database.connection)`` the flag reset to ``False``
-#   and ``register_adapter`` was called again. On Python < 3.12 this
-#   raises ``TypeError`` (re-registering the same type+callable is
-#   forbidden); the previous code swallowed this in a broad ``except
-#   Exception`` and logged a MISLEADING warning ("Failed to register
-#   SQLite Decimal adapter") when the adapter was actually already
-#   registered. On Python 3.12+ ``register_adapter`` IS idempotent so the
-#   flag is pure dead-weight.
+# v107 ROOT FIX (ISSUE-P1-031 — process-wide sqlite3 Decimal adapter
+# mutates EVERY sqlite3 connection in the process):
+#   The previous code called ``sqlite3.register_adapter(Decimal, float)``
+#   at import time. This is PROCESS-WIDE: it affects EVERY
+#   ``sqlite3.connect()`` in the process — including Airflow's metadata
+#   DB, third-party libraries, and test fixtures. The comment at lines
+#   165-179 documented this as a "deliberate, documented trade-off" but
+#   the trade-off is dangerous: any library that depends on sqlite3
+#   raising on ``Decimal`` (e.g. a financial library) silently gets
+#   ``float`` instead. In a shared Airflow process, the Decimal→float
+#   coercion loses precision on every Numeric column — molecular weight
+#   180.063388 becomes 180.06338800000002, and Tanimoto similarity
+#   calculations that depend on exact decimal precision produce slightly
+#   wrong results (silent scientific drift).
 #
-#   ROOT FIX: call ``register_adapter`` UNCONDITIONALLY (Python 3.12+
-#   semantics). For Python < 3.12 compatibility, narrow the except to
-#   ``TypeError`` ONLY (the actual re-registration error) and treat it as
-#   a DEBUG no-op (the adapter is already registered — exactly what we
-#   want). Other exceptions (e.g. ``sqlite3.NotSupportedError``) still
-#   log a WARNING so real driver failures surface. The
-#   ``_DECIMAL_ADAPTER_REGISTERED`` flag is GONE — no module state, no
-#   reload footgun, no misleading warning.
-try:
-    _sqlite3_module.register_adapter(_Decimal_type, float)
-    logger.debug(
-        "SQLite Decimal→float adapter registered process-wide "
-        "(P1-029 documented side effect, P1-035 unconditional register). "
-        "Numeric columns on SQLite store float64; PostgreSQL preserves "
-        "Decimal precision. Tests MUST use pytest.approx for numeric "
-        "assertions. See module docstring for the full rationale."
-    )
-except TypeError:
-    # Python < 3.12: register_adapter raises TypeError if the same
-    # type+callable is already registered (e.g. after importlib.reload).
-    # The adapter is already installed — exactly the state we want.
-    logger.debug(
-        "SQLite Decimal→float adapter already registered "
-        "(Python < 3.12 idempotency) — no action needed."
-    )
-except Exception as _adapter_exc:  # noqa: BLE001 — never fatal
-    logger.warning(
-        "Failed to register SQLite Decimal adapter (P1C-021): %s. "
-        "Per-row coercion in loaders.py remains as fallback.",
-        _adapter_exc,
-    )
+# ROOT FIX: REMOVE the process-wide ``register_adapter`` call entirely.
+# Replace it with a SQLAlchemy ``before_cursor_execute`` event listener
+# that converts Decimal values to float in the parameters, scoped to
+# the ORM-managed SQLite engine ONLY. Other sqlite3 connections in the
+# process (Airflow metadata DB, third-party libs) are unaffected. The
+# listener is registered in ``_configure_engine_events`` (see below)
+# only when the engine URL is sqlite.
+#
+# This means:
+#   - PostgreSQL connections preserve Decimal precision (unchanged).
+#   - SQLite ORM connections coerce Decimal→float (scoped).
+#   - Non-ORM sqlite3 connections in the same process are NOT mutated.
+#
+# Tests MUST still use ``pytest.approx`` for numeric assertions on
+# SQLite (the coercion still happens for ORM connections) — but the
+# process-wide side effect is gone.
+# ---------------------------------------------------------------------------
+# v107: removed the register_adapter call block. The import of
+# ``_sqlite3_module`` and ``_Decimal_type`` is retained for backward
+# compatibility (other code may reference them), but the adapter is
+# NOT registered here. See ``_configure_engine_events`` for the scoped
+# replacement.
+logger.debug(
+    "SQLite Decimal→float adapter NOT registered process-wide "
+    "(v107 ISSUE-P1-031 ROOT FIX). Decimal coercion is now scoped to "
+    "ORM-managed SQLite engines via a before_cursor_execute event "
+    "listener in _configure_engine_events. Other sqlite3 connections "
+    "in the process (Airflow metadata DB, third-party libs) are "
+    "unaffected."
+)
 
 # ---------------------------------------------------------------------------
 # DATABASE_URL — re-exported from config.settings for testability.
@@ -758,6 +760,111 @@ def _configure_engine_events(engine: Engine) -> None:
                 # ``deterministic`` — fall back to the 3-arg form.
                 dbapi_connection.create_function("REGEXP", 2, _sqlite_regexp)
             logger.debug("SQLite REGEXP function registered (P1-015)")
+
+        # v107 ROOT FIX (ISSUE-P1-031 — scoped Decimal→float coercion for
+        # SQLite ORM connections, replacing the process-wide
+        # ``sqlite3.register_adapter(Decimal, float)`` call):
+        #   The previous code registered a PROCESS-WIDE adapter at module
+        #   import time, mutating EVERY sqlite3 connection in the process
+        #   (Airflow metadata DB, third-party libs, test fixtures). This
+        #   listener is scoped to THIS SQLAlchemy engine only — other
+        #   sqlite3 connections in the same process are unaffected.
+        #
+        # Mechanism: SQLAlchemy 2.0's ``do_execute`` dialect event fires
+        # RIGHT BEFORE ``cursor.execute()`` is called. We intercept it,
+        # coerce any ``Decimal`` values in the parameters to ``float``,
+        # then call ``cursor.execute()`` ourselves and return ``True``
+        # (handled) so the default ``do_execute`` is skipped. This is
+        # the most reliable interception point in SQLAlchemy 2.0 — the
+        # ``before_cursor_execute`` return-value contract is unreliable
+        # in 2.0 (the return value is often ignored for single-executes).
+        # SQLite stores the coerced float as REAL (float64); PostgreSQL
+        # preserves Decimal precision (no listener registered for non-
+        # sqlite engines).
+        def _coerce_decimal(value: Any) -> Any:
+            if isinstance(value, _Decimal_type):
+                return float(value)
+            return value
+
+        def _coerce_params(params: Any) -> Any:
+            """Return a coerced copy of *params* with Decimal→float."""
+            if isinstance(params, dict):
+                return {k: _coerce_decimal(v) for k, v in params.items()}
+            if isinstance(params, tuple):
+                return tuple(_coerce_decimal(v) for v in params)
+            if isinstance(params, list):
+                # executemany batch — list of dicts/tuples
+                return [
+                    {k: _coerce_decimal(v) for k, v in row.items()}
+                    if isinstance(row, dict)
+                    else type(row)(_coerce_decimal(v) for v in row)
+                    for row in params
+                ]
+            return params
+
+        def _params_has_decimal(params: Any) -> bool:
+            """Quick check whether *params* contains any Decimal value."""
+            if params is None:
+                return False
+            if isinstance(params, dict):
+                return any(isinstance(v, _Decimal_type) for v in params.values())
+            if isinstance(params, (tuple, list)):
+                # Could be a flat list (single execute) or list-of-rows (executemany)
+                if params and isinstance(params[0], (dict, tuple, list)):
+                    # executemany
+                    return any(
+                        isinstance(v, _Decimal_type)
+                        for row in params
+                        for v in (row.values() if isinstance(row, dict) else row)
+                    )
+                # flat
+                return any(isinstance(v, _Decimal_type) for v in params)
+            return False
+
+        @event.listens_for(engine, "do_execute")
+        def _coerce_decimal_do_execute(
+            cursor: Any, statement: str, parameters: Any, context: Any,
+        ) -> bool:
+            """Intercept single-execute calls; coerce Decimal→float."""
+            if not _params_has_decimal(parameters):
+                return False  # let the default do_execute handle it
+            try:
+                coerced = _coerce_params(parameters)
+                cursor.execute(statement, coerced)
+                return True  # handled — skip default do_execute
+            except Exception as coerce_exc:  # noqa: BLE001 — never crash
+                logger.warning(
+                    "Decimal→float coercion failed for SQLite single "
+                    "execute (v107 P1-031): %s. Statement: %s",
+                    coerce_exc, statement[:120],
+                )
+                return False
+
+        @event.listens_for(engine, "do_executemany")
+        def _coerce_decimal_do_executemany(
+            cursor: Any, statement: str, parameters: Any, context: Any,
+        ) -> bool:
+            """Intercept batch-executemany calls; coerce Decimal→float."""
+            if not _params_has_decimal(parameters):
+                return False
+            try:
+                coerced = _coerce_params(parameters)
+                cursor.executemany(statement, coerced)
+                return True
+            except Exception as coerce_exc:  # noqa: BLE001 — never crash
+                logger.warning(
+                    "Decimal→float coercion failed for SQLite executemany "
+                    "(v107 P1-031): %s. Statement: %s",
+                    coerce_exc, statement[:120],
+                )
+                return False
+
+        @event.listens_for(engine, "do_execute_no_params")
+        def _coerce_decimal_do_execute_no_params(
+            cursor: Any, statement: str, context: Any,
+        ) -> bool:
+            """No parameters to coerce — always defer to default."""
+            return False
 
     # --- Connection lifecycle logging ---
     if _DEBUG_EVENTS or not is_sqlite:

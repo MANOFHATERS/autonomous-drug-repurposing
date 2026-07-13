@@ -1208,7 +1208,46 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
 
     @validates("gene_symbol")
     def _validate_gene_symbol(self, key: str, value: Optional[str]) -> Optional[str]:
-        return _validate_gene_symbol(value)
+        # v107 ROOT FIX (ISSUE-P1-026 — GDA vs Protein gene-symbol regex
+        # inconsistency): the previous code delegated to the module-level
+        # ``_validate_gene_symbol`` which uses the LOOSE
+        # ``_GENE_SYMBOL_RE`` (``^[A-Za-z][A-Za-z0-9\-]{0,49}$`` — accepts
+        # Title-Case mouse/rat/yeast symbols like ``Tp53``, ``Brca1``).
+        # Meanwhile the GDA validator (line ~1942) uses the STRICT
+        # ``_HUMAN_GENE_SYMBOL_RE`` (``^[A-Z][A-Z0-9\-]{0,49}$`` — ALL CAPS).
+        # This cross-table inconsistency created a SILENT data-loss path:
+        # a non-human protein (e.g. from a misconfigured UniProt query
+        # without the ``organism_id:9606`` filter) passed the Protein
+        # validator with ``gene_symbol='Tp53'``, but the corresponding
+        # GDA row was REJECTED by the GDA validator — the KG ended up
+        # with a Protein node and NO GDA edges, silently breaking the
+        # drug→protein→gene→disease multi-hop pattern for that protein.
+        #
+        # ROOT FIX: align the Protein validator with the GDA validator
+        # by using ``_HUMAN_GENE_SYMBOL_RE``. This is consistent with:
+        #   1. The system's human-only design — UniProt pipeline queries
+        #      ``organism_id:9606`` (line ~219 of uniprot_pipeline.py
+        #      already imports ``CANONICAL_HGNC_GENE_SYMBOL_REGEX`` which
+        #      is uppercase-only), DrugBank applies ``filter_organism_humans``,
+        #      and STRING validates the ``9606.`` ENSP prefix.
+        #   2. The v89 ROOT FIX (BUG #25) that made the GDA validator
+        #      strict — closing the v21/v89 gap that the audit found.
+        # Non-human proteins now raise ValueError at the ORM layer with
+        # a clear message — they are quarantined to the dead-letter queue
+        # instead of silently dropping their GDA edges later.
+        if value is None:
+            return value
+        value = value.strip()
+        if _HUMAN_GENE_SYMBOL_RE.match(value):
+            return value
+        raise ValueError(
+            f"Invalid HUMAN gene symbol for Protein: '{value}'. "
+            "This platform is human-only (UniProt organism_id:9606, "
+            "DrugBank filter_organism_humans, STRING 9606 prefix). "
+            "Protein gene symbols must be ALL CAPS (e.g. BRCA1, FGFR3, TP53) "
+            "to match the GDA validator (cross-table consistency, "
+            "ISSUE-P1-026). Non-human symbols (Tp53, Brca1) are rejected."
+        )
 
     @validates("sequence")
     def _validate_sequence(self, key: str, value: Optional[str]) -> Optional[str]:

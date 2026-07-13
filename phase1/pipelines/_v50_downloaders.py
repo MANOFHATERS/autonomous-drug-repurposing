@@ -172,8 +172,20 @@ def _stream_to_file(
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
 
-    # Resume support: check if tmp exists, send Range header
-    existing_bytes = tmp.stat().st_size if tmp.exists() else 0
+    # Resume support: check if tmp exists, send Range header.
+    # v107 ROOT FIX (ISSUE-P1-030 — TOCTOU race): the previous code used
+    # ``tmp.stat().st_size if tmp.exists() else 0`` which is a classic
+    # time-of-check/time-of-use race. Between ``tmp.exists()`` returning
+    # True and ``tmp.stat()`` being called, another process (e.g. a
+    # parallel Airflow worker, a cleanup cron, or a disk-pressure eviction)
+    # could delete the partial file. ``tmp.stat()`` would then raise
+    # ``FileNotFoundError``, crashing the download with a confusing error
+    # instead of starting fresh. ROOT FIX: use EAFP (``try / except
+    # FileNotFoundError``) — a single atomic syscall, no race window.
+    try:
+        existing_bytes = tmp.stat().st_size
+    except FileNotFoundError:
+        existing_bytes = 0
     # v64 ROOT FIX (P1-006): always send a User-Agent header. PubChem/NCBI
     # FTP-mirror and many biomedical APIs return HTTP 403 when the
     # User-Agent is missing. The previous code only set the Range header,
@@ -339,17 +351,30 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
         if molecules_path.stat().st_size == 0:
             logger.warning("ChEMBL: API unreachable -- falling back to embedded samples")
             from pipelines._embedded_samples import embedded_chembl_molecules, embedded_chembl_activities
-            # v85/v90 ROOT FIX (BUG #2/50): was .to_json() which writes JSONL
-            # to a .csv file -- downstream pd.read_csv() parses it as garbage.
-            # Now uses .to_csv() so format matches extension and downstream
-            # CSV reader works correctly. Also fixes extension from .jsonl
-            # to .csv to match the actual content.
-            embedded_chembl_molecules().to_csv(molecules_path.with_suffix(".csv"), index=False)
-            embedded_chembl_activities().to_csv(activities_path.with_suffix(".csv"), index=False)
-            molecules_path.unlink(missing_ok=True)
-            activities_path.unlink(missing_ok=True)
-            result["molecules"] = molecules_path.with_suffix(".csv")
-            result["activities"] = activities_path.with_suffix(".csv")
+            # v107 ROOT FIX (ISSUE-P1-028 — silent CSV/JSONL contract switch):
+            # The previous v85/v90 fix changed the fallback to write .csv
+            # and unlink the .jsonl — but the docstring above AND the
+            # downstream chembl_pipeline.clean() reader BOTH expect JSONL.
+            # Switching extensions silently broke the format/extension
+            # contract: downstream pd.read_json(lines=True) would crash
+            # (FileNotFoundError on the .jsonl) or, worse, a stale .jsonl
+            # from a previous run would be silently read as if it were
+            # the fallback output. ROOT FIX: write JSONL to the SAME
+            # .jsonl path the contract specifies. Each DataFrame row is
+            # serialized with json.dumps() + "\n", matching the format
+            # the API path produces (line 332: f_mol.write(json.dumps(...)+"\n")).
+            # No extension switch, no unlink, no contract drift.
+            import json as _json
+            emb_mol_df = embedded_chembl_molecules()
+            emb_act_df = embedded_chembl_activities()
+            with open(molecules_path, "w") as f_mol:
+                for record in emb_mol_df.to_dict(orient="records"):
+                    f_mol.write(_json.dumps(record, default=str) + "\n")
+            with open(activities_path, "w") as f_act:
+                for record in emb_act_df.to_dict(orient="records"):
+                    f_act.write(_json.dumps(record, default=str) + "\n")
+            result["molecules"] = molecules_path
+            result["activities"] = activities_path
         else:
             result["molecules"] = molecules_path
             result["activities"] = activities_path
