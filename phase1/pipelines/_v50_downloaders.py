@@ -42,6 +42,21 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+# P1-052 ROOT FIX (v107): helper to sanitize URLs for logging.
+# Strips query parameters that may contain API keys (e.g. api_key=...).
+def _sanitize_url_for_log(url: str) -> str:
+    """Sanitize a URL for logging — redact query params that may contain secrets."""
+    if not isinstance(url, str):
+        return repr(url)
+    # Truncate very long URLs (next_uri can be long)
+    if len(url) > 200:
+        url = url[:200] + "...[truncated]"
+    # Redact api_key, key, token query params
+    import re
+    url = re.sub(r"([?&](?:api_key|key|token|apikey)=)[^&]+", r"\1[REDACTED]", url, flags=re.IGNORECASE)
+    return url
+
+
 # ─── Constants ──────────────────────────────────────────────────────────
 
 CHEMBL_API_BASE = "https://www.ebi.ac.uk/chembl/api/data"
@@ -414,11 +429,37 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
                         continue
                     resp.raise_for_status()
                     break
-                except Exception as exc:
+                except (requests.exceptions.RequestException, ValueError) as exc:
+                    # P1-052 ROOT FIX (v107): narrowed from broad
+                    # ``except Exception``. The previous code caught ALL
+                    # exceptions including programming bugs (AttributeError,
+                    # NameError, TypeError) — masking real bugs as transient
+                    # network errors. A malformed ``next_uri`` (e.g. contains
+                    # a null byte) raised ``requests.exceptions.InvalidURL``
+                    # which was caught, retried 5 times, then re-raised —
+                    # the pagination was stuck on the malformed URI and the
+                    # operator saw a generic exception instead of "malformed
+                    # next_uri". ROOT FIX: catch ONLY RequestException
+                    # (network/HTTP errors) and ValueError (JSON decode
+                    # errors, InvalidURL). Programming bugs propagate
+                    # immediately. Log the URL (sanitized) so the operator
+                    # can report malformed URIs to ChEMBL.
                     if attempt == CHEMBL_MAX_RETRIES - 1:
+                        logger.error(
+                            "ChEMBL pagination failed after %d attempts. "
+                            "URL was: %s. If this is a next_uri, it may be "
+                            "malformed — report to ChEMBL. Error: %s",
+                            CHEMBL_MAX_RETRIES,
+                            _sanitize_url_for_log(url),
+                            exc,
+                        )
                         raise
                     wait = CHEMBL_BACKOFF_BASE ** attempt
-                    logger.warning("ChEMBL attempt %d failed: %s -- retry in %.1fs", attempt + 1, exc, wait)
+                    logger.warning(
+                        "ChEMBL attempt %d failed: %s -- retry in %.1fs. "
+                        "URL: %s",
+                        attempt + 1, exc, wait, _sanitize_url_for_log(url),
+                    )
                     time.sleep(wait)
             data = resp.json()
             molecules = data.get("molecules", [])

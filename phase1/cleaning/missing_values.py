@@ -3129,8 +3129,24 @@ def validate_gda_scores(
             non_numeric_mask.loc[non_null_score] = ~str_scores.str.match(
                 _NUMERIC_SCORE_REGEX, na=False
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except (AttributeError, TypeError, ValueError) as exc:
+            # P1-053 ROOT FIX (v107): narrowed from broad ``except Exception``.
+            # The previous code silently swallowed ALL exceptions including
+            # programming bugs (NameError, KeyError). A non-numeric score
+            # detection failure left the score unclipped — the GDA row
+            # was loaded with score=1.5, the DB CHECK
+            # ``chk_gda_normalized_score_range`` rejected it, but if
+            # ``normalized_score`` was not set (because this block
+            # crashed silently), the CHECK did not fire. The KG had a GDA
+            # edge with score=1.5 — the GNN's confidence-weighted loss
+            # was mis-calibrated. ROOT FIX: narrow to (AttributeError,
+            # TypeError, ValueError) — the only exceptions pandas raises
+            # on dtype/str operations. Programming bugs propagate.
+            logger.debug(
+                "validate_gda_scores: non-numeric score detection failed "
+                "(%s: %s); proceeding with to_numeric coercion",
+                type(exc).__name__, exc,
+            )
         non_numeric_count = int(non_numeric_mask.sum())
         if non_numeric_count > 0:
             logger.warning(
@@ -3512,8 +3528,17 @@ def validate_gda_scores(
                     invalid_values,
                 )
                 _increment_metric("invalid_association_types", invalid_count)
-        except Exception:  # noqa: BLE001
-            pass
+        except (AttributeError, TypeError, ValueError) as exc:
+            # P1-053 ROOT FIX (v107): narrowed from broad
+            # ``except Exception``. Association-type validation is
+            # warn-only — but the previous silent ``pass`` swallowed
+            # programming bugs (KeyError on a missing column). ROOT
+            # FIX: narrow to (AttributeError, TypeError, ValueError).
+            logger.debug(
+                "validate_gda_scores: association_type validation "
+                "failed (%s: %s)",
+                type(exc).__name__, exc,
+            )
 
     # COMP-5: source-specific validation.
     if source == "disgenet" and "score" in out.columns:
@@ -3551,8 +3576,18 @@ def validate_gda_scores(
                     clipped_at_max_count,
                     score_max,
                 )
-        except Exception:  # noqa: BLE001
-            pass
+        except (AttributeError, TypeError, ValueError, KeyError) as exc:
+            # P1-053 ROOT FIX (v107): narrowed from broad
+            # ``except Exception``. The previous silent ``pass`` swallowed
+            # programming bugs. A KeyError on a missing column meant the
+            # source-specific validation was skipped silently. ROOT FIX:
+            # narrow to (AttributeError, TypeError, ValueError, KeyError)
+            # and log at DEBUG so operators can detect issues.
+            logger.debug(
+                "validate_gda_scores: DisGeNET source-specific validation "
+                "failed (%s: %s)",
+                type(exc).__name__, exc,
+            )
 
     # DQ-4: optional dedup.
     if dedup:
