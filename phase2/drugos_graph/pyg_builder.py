@@ -850,6 +850,49 @@ class PyGBuilder(GraphBuilderProtocol):
                     # ``num_nodes × feat_dim`` tensor alloc per node type
                     # on the random-init path), wasting memory for no
                     # safety benefit. Assign directly.
+                    #
+                    # P2-011 ROOT FIX (v107 forensic): the audit found that
+                    # this branch silently falls back to ``xavier_uniform_``
+                    # (RANDOM initialization) when no ``node_features`` and
+                    # no ``feature_provider`` is given. If the chemberta
+                    # encoder fails (3-model fallback chain), the GNN trains
+                    # on random Xavier features — scientifically meaningless
+                    # predictions, but the only signal is an MLflow tag
+                    # ``CHEMBERTA_DISABLED=true`` that operators rarely
+                    # monitor. In production (``DRUGOS_ENVIRONMENT=production``)
+                    # this is a patient-safety failure: the model trains on
+                    # noise and produces wrong drug repurposing predictions.
+                    # ROOT FIX: in production mode, RAISE instead of falling
+                    # back to Xavier. Dev/CI mode still allows the fallback
+                    # (for smoke tests that do not need real features) but
+                    # logs a prominent WARNING. This mirrors the P2-013 /
+                    # P2-006 production-refusal pattern.
+                    _p2_011_env = os.environ.get(
+                        "DRUGOS_ENVIRONMENT", "production"
+                    ).lower()
+                    _p2_011_is_prod = _p2_011_env in ("prod", "production")
+                    if _p2_011_is_prod:
+                        raise RuntimeError(
+                            f"P2-011 ROOT FIX: PyGBuilder cannot fall back to "
+                            f"random Xavier features for node_type='{node_type}' "
+                            f"({num_nodes} nodes) in DRUGOS_ENVIRONMENT=production. "
+                            f"The Graph Transformer would train on noise — "
+                            f"predictions are scientifically meaningless and "
+                            f"compromise patient safety. Provide either "
+                            f"``node_features`` (pre-computed ChemBERTa/ESM2 "
+                            f"embeddings) OR a ``feature_provider`` callable. "
+                            f"For dev/CI smoke tests, set "
+                            f"DRUGOS_ENVIRONMENT=dev to re-enable the Xavier "
+                            f"fallback (with a WARNING). (P2-011 root fix, v107)"
+                        )
+                    self.logger.warning(
+                        f"  {node_type}: {num_nodes:,} nodes, "
+                        f"WARNING — falling back to RANDOM Xavier features "
+                        f"(DRUGOS_ENVIRONMENT=%s). This is for dev/CI only. "
+                        f"In production this branch RAISES (P2-011 root fix). "
+                        f"Provide node_features or feature_provider to silence.",
+                        _p2_011_env,
+                    )
                     weight = torch.empty(num_nodes, feat_dim)
                     torch.nn.init.xavier_uniform_(weight)
                     # v84 FORENSIC ROOT FIX (BUG #10 — NaN / dead nodes
@@ -883,21 +926,64 @@ class PyGBuilder(GraphBuilderProtocol):
                             f"  {node_type}: {_n_zero_rows} all-zero rows "
                             f"after Xavier init (rare but possible for "
                             f"small feat_dim={feat_dim}). Re-initializing "
-                            f"with epsilon vectors to prevent dead nodes. "
-                            f"(v84 BUG #10 root fix)"
+                            f"with per-node seeded epsilon vectors to prevent "
+                            f"dead nodes. (v84 BUG #10 root fix, P2-012 v107 "
+                            f"forensic root fix)"
                         )
-                        # Replace zero rows with a small deterministic
-                        # epsilon vector (1e-4 in every dimension). This
-                        # is non-zero so normalize_entity_embeddings
-                        # produces a valid unit vector, and small enough
-                        # that the model can still learn from gradient
-                        # signal. We use epsilon instead of re-sampling
-                        # Xavier because re-sampling could theoretically
-                        # produce another zero row (same low probability).
-                        _eps_vec = torch.full(
-                            (feat_dim,), 1e-4, dtype=weight.dtype,
-                        )
-                        weight[_zero_row_mask] = _eps_vec
+                        # P2-012 ROOT FIX (v107 forensic): the previous code
+                        # replaced ALL zero rows with the SAME constant vector
+                        # ``torch.full((feat_dim,), 1e-4, ...)``. Multiple
+                        # nodes could receive the IDENTICAL epsilon vector,
+                        # making them indistinguishable to the model — their
+                        # embeddings would be identical, and the GNN would
+                        # treat them as the same node. Predictions for both
+                        # drugs would be identical, silently corrupting the
+                        # repurposing ranker.
+                        # ROOT FIX: generate a per-node epsilon vector using
+                        # a deterministic seed derived from (node_type,
+                        # row_index). The vector is small (1e-4 magnitude
+                        # baseline) plus a per-node deterministic perturbation
+                        # drawn from a seeded RNG. This guarantees:
+                        #   1. Non-zero (normalize_entity_embeddings produces
+                        #      a valid unit vector — fixes the original BUG #10).
+                        #   2. Per-node distinct (two all-zero drugs now get
+                        #      DIFFERENT epsilon vectors — fixes P2-012).
+                        #   3. Deterministic across runs (same node_type +
+                        #      row_index always produces the same vector —
+                        #      satisfies FDA 21 CFR Part 11 reproducibility).
+                        # We use a fixed master seed (0xBADBEEF + row_index)
+                        # so the perturbation is reproducible regardless of
+                        # the global torch RNG state.
+                        _zero_row_indices = _zero_row_mask.nonzero(
+                            as_tuple=False
+                        ).flatten()
+                        _eps_baseline = 1e-4
+                        for _row_idx in _zero_row_indices:
+                            # P2-012: use hashlib (deterministic across
+                            # processes) — do NOT use Python's built-in
+                            # hash() which is randomized via PYTHONHASHSEED
+                            # and would make the epsilon vector non-
+                            # reproducible across runs (FDA 21 CFR Part 11
+                            # violation). The seed is SHA-256 of (node_type,
+                            # row_index), truncated to 32 bits.
+                            _seed_bytes_p2_012 = hashlib.sha256(
+                                f"{node_type}|{int(_row_idx)}".encode("utf-8")
+                            ).digest()
+                            _seed_p2_012 = int.from_bytes(
+                                _seed_bytes_p2_012[:4], "big"
+                            ) & 0x7FFFFFFF
+                            _gen_p2_012 = torch.Generator(device=weight.device)
+                            _gen_p2_012.manual_seed(_seed_p2_012)
+                            # Per-node perturbation in [-0.5e-4, +0.5e-4] added
+                            # to the 1e-4 baseline. Net magnitude stays ~1e-4
+                            # (small enough to learn from gradient signal, but
+                            # every node's vector is now unique).
+                            _perturb = (
+                                torch.rand(feat_dim, generator=_gen_p2_012,
+                                           device=weight.device, dtype=weight.dtype)
+                                - 0.5
+                            ) * 1e-4
+                            weight[_row_idx] = _eps_baseline + _perturb
                     # v100 ROOT FIX (BUG P2-034 — PyG / Aliasing):
                     # ``weight`` is a tensor that may be referenced
                     # elsewhere (e.g. by the caller, or by the
@@ -1755,11 +1841,21 @@ class PyGBuilder(GraphBuilderProtocol):
             # inflating AUC by 0.1-0.3 (Hu et al. 2020). When
             # node_disjoint=True, delegate to node_disjoint_split which
             # partitions NODES (not edges) so no node appears in more
-            # than one split. TransE callers use node_disjoint=False
-            # (default) — TransE scores triples in isolation and benefits
-            # from seeing every triple at training time. The production
-            # pipeline should pass node_disjoint=True for all HGT/Graph
-            # Transformer training (Phase 3 per the DOCX).
+            # than one split. TransE callers MUST explicitly pass
+            # node_disjoint=False (with a comment explaining why) — the
+            # default is True (GNN-safe) per the P2-006 ROOT FIX above.
+            # P2-018 ROOT FIX (v107 forensic): the previous comment at
+            # this site said "TransE callers use node_disjoint=False
+            # (default)" — that was a CONTRADICTION. The actual default
+            # IS True (line 1632: ``node_disjoint: bool = True``). The
+            # misleading comment led TransE callers to believe they did
+            # not need to pass anything, when in fact they MUST pass
+            # node_disjoint=False explicitly or they silently get the
+            # node-disjoint split (which drops ~20% of triples —
+            # val+test partition edges — and may cause the V1 launch
+            # AUC criterion to fail for the wrong reason: insufficient
+            # training data, not model quality). The comment is now
+            # aligned with the code.
             if node_disjoint:
                 return self.node_disjoint_split(
                     data, target_edge_type=target_edge_type,

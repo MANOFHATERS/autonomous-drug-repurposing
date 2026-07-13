@@ -5852,6 +5852,52 @@ def step11_train_transe(
                     drug_year_lookup[str(_did)] = int(_year)
                     break
 
+    # P2-019 ROOT FIX (v107 forensic): the audit found that if
+    # ``drug_records`` doesn't carry ``approval_year`` (e.g. ChEMBL-only
+    # path, or DrugBank records without parsed approval year),
+    # ``approval_years`` is empty. ``temporal_split_pairs`` then falls
+    # back to random split (if dev mode) or raises (if production). In
+    # dev mode, the TransE model trains on a random split — temporal
+    # leakage. The V1 launch AUC is evaluated on a random split. Future
+    # drug approvals appear in train. AUC is inflated.
+    # ROOT FIX: in production mode (DRUGOS_ENVIRONMENT=production), RAISE
+    # if approval_years is empty after this lookup. The operator must
+    # either (a) ensure Phase 1 populates approval_year on every
+    # drug_record, or (b) explicitly set DRUGOS_ENVIRONMENT=dev to
+    # acknowledge the random-split fallback for smoke tests. This
+    # mirrors the P2-013 / P2-006 / P2-011 production-refusal pattern.
+    _p2_019_env = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
+    _p2_019_is_prod = _p2_019_env in ("prod", "production")
+    if _p2_019_is_prod and not drug_year_lookup:
+        # Local import — DrugOSDataError lives in .exceptions.
+        from .exceptions import DrugOSDataError as _P2_019_DrugOSDataError
+        raise _P2_019_DrugOSDataError(
+            "P2-019 ROOT FIX: step11_train_transe cannot build "
+            "approval_years from drug_records — no drug_record has an "
+            "approval_year field. temporal_split_pairs would fall back "
+            "to a random split, causing temporal leakage (future drug "
+            "approvals in train, inflated V1 launch AUC). Ensure Phase 1 "
+            "populates approval_year on every drug_record (DrugBank "
+            "approval_year field, or ChEMBL max_phase==4 fallback). For "
+            "dev/CI smoke tests, set DRUGOS_ENVIRONMENT=dev to "
+            "acknowledge the random-split fallback. (P2-019 root fix, v107)",
+            context={
+                "function": "step11_train_transe",
+                "error": "missing_approval_year",
+                "n_drug_records": len(drug_records) if drug_records else 0,
+                "production_mode": _p2_019_is_prod,
+            },
+        )
+    if not drug_year_lookup and not _p2_019_is_prod:
+        logger.warning(
+            "P2-019 ROOT FIX: step11_train_transe has no approval_year "
+            "data (DRUGOS_ENVIRONMENT=%s). In dev mode, "
+            "temporal_split_pairs will fall back to a random split — "
+            "this is for smoke tests only. The V1 launch AUC must NOT "
+            "be evaluated on this split. (P2-019 root fix, v107)",
+            _p2_019_env,
+        )
+
     # Collect (drug_id, disease_id) -> year for treats triples.
     approval_years: Dict[Tuple[str, str], int] = {}
     treats_triple_indices: List[int] = []

@@ -4729,10 +4729,25 @@ def update_validated_edges(
 
     for drug, disease in validated_pairs:
         try:
-            # Check if the edge already exists (idempotency).
+            # P2-007 ROOT FIX (v107 forensic): the previous code used the
+            # phantom label "Drug" for both has_edge_fn and add_edge_fn.
+            # Phase 2's canonical Neo4j label for drugs is "Compound" (per
+            # the kg_builder.py module docstring line 14, NODE_PROPERTY_WHITELIST
+            # at config.py:385, CORE_NODE_TYPES, and DRKG_NODE_TYPE_TO_NEO4J_LABEL).
+            # The "Drug" label does not match ANY constraint, index, or
+            # whitelist. Data-flywheel edges (validated_treats) were written
+            # to phantom "Drug" nodes that did not match any existing
+            # Compound node — the KG ended up with TWO separate drug node
+            # types: "Compound" (real) and "Drug" (phantom). Queries against
+            # Compound did not find validated_treats edges. The data flywheel
+            # was structurally broken.
+            # ROOT FIX: use the canonical "Compound" label for BOTH has_edge_fn
+            # and add_edge_fn. Also fix _source_phase=1 → _source_phase=2
+            # (this is Phase 2 writeback from the data flywheel, NOT a Phase 1
+            # lineage marker — using 1 here corrupted the lineage audit trail).
             if has_edge_fn is not None:
                 try:
-                    if has_edge_fn("Drug", "validated_treats", "Disease",
+                    if has_edge_fn("Compound", "validated_treats", "Disease",
                                    src_id=drug, dst_id=disease):
                         edges_already_present += 1
                         continue
@@ -4741,13 +4756,13 @@ def update_validated_edges(
 
             if add_edge_fn is not None:
                 add_edge_fn(
-                    src_label="Drug", src_id=drug,
+                    src_label="Compound", src_id=drug,
                     dst_label="Disease", dst_id=disease,
                     rel_type="validated_treats",
                     properties={
                         "source": "data_flywheel",
                         "validated_at": _now_iso(),
-                        "_source_phase": 1,  # lineage marker
+                        "_source_phase": 2,  # P2-007: Phase 2 writeback, not Phase 1
                     },
                 )
                 edges_added += 1

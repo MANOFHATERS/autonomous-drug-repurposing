@@ -1530,7 +1530,20 @@ def temporal_split_pairs(
         # demo to the team lead a lie. ROOT FIX: mirror the
         # DRUGOS_ALLOW_NO_SAMPLER production-refusal pattern -- in
         # production, the escape hatch is IGNORED and we raise regardless.
-        _env_mode_ts = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
+        # P2-013 ROOT FIX (v107 forensic): the previous default was "dev".
+        # config.py:4635 defaults DRUGOS_ENVIRONMENT to "production"; this
+        # local "dev" default created a CONTRADICTION. A production deploy
+        # that forgot to set DRUGOS_ENVIRONMENT=production got the dev
+        # behavior, and the DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1 escape
+        # hatch silently kicked in — producing a RANDOM split (temporal
+        # leakage: future drug approvals in train, inflated V1 launch AUC).
+        # Aligning this default with config.py closes the hole unconditionally:
+        # even if the operator sets DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1,
+        # the production-mode refusal (lines 1535-1546) still fires and
+        # raises DrugOSDataError. The ONLY way to get a random split now is
+        # to explicitly set DRUGOS_ENVIRONMENT=dev AND set the escape hatch —
+        # both must be intentional, neither happens by accident.
+        _env_mode_ts = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
         _is_production_ts = _env_mode_ts in ("prod", "production")
         if _is_production_ts and _allow_random_fallback:
             logger.critical(

@@ -352,6 +352,52 @@ class NegativeSampler:
         # (false negatives) polluted training and leaked test signal.
         # Fix: accept an optional held_out_pairs set (val ∪ test) and
         # include it in the rejection filter.
+        #
+        # P2-006 ROOT FIX (v107 forensic): the audit found that
+        # ``held_out_pairs`` defaults to ``None`` and the rejection set
+        # silently falls back to train positives only. Val/test positives
+        # are NOT excluded from negative sampling → false negatives that
+        # corrupt evaluation. AUC is deflated; the V1 launch criterion
+        # (>0.85 AUC) may fail or pass for the wrong reasons; the RL
+        # ranker trains on corrupted negatives.
+        # ROOT FIX: in production mode (DRUGOS_ENVIRONMENT=production),
+        # REFUSE to construct a NegativeSampler without held_out_pairs —
+        # this is a hard patient-safety failure. In dev mode, log a
+        # prominent WARNING so the operator knows the evaluation is
+        # compromised. We do NOT remove the default ``None`` because
+        # doing so breaks 14+ existing legitimate callers (notebooks,
+        # smoke tests, the KG embedding trainer that does not split
+        # val/test). Instead, we enforce it at runtime: production
+        # raises, dev warns. This mirrors the P2-013 fix pattern.
+        if held_out_pairs is None:
+            _p2_006_env = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
+            _p2_006_is_prod = _p2_006_env in ("prod", "production")
+            if _p2_006_is_prod:
+                raise DrugOSDataError(
+                    "P2-006 ROOT FIX: NegativeSampler constructed without "
+                    "held_out_pairs in DRUGOS_ENVIRONMENT=production. Val/test "
+                    "positives would NOT be excluded from negative sampling → "
+                    "false negatives that corrupt evaluation. The V1 launch "
+                    "criterion (>0.85 AUC) is evaluated on a corrupted set. "
+                    "Pass held_out_pairs=val_pairs ∪ test_pairs explicitly. "
+                    "(P2-006 root fix, v107)",
+                    context={
+                        "function": "NegativeSampler.__init__",
+                        "error": "missing_held_out_pairs",
+                        "n_positive_pairs": len(self.positive_pairs),
+                        "production_mode": _p2_006_is_prod,
+                    },
+                )
+            logger.warning(
+                "P2-006 ROOT FIX: NegativeSampler constructed without "
+                "held_out_pairs in DRUGOS_ENVIRONMENT=%s. Val/test "
+                "positives will NOT be excluded from negative sampling → "
+                "false negatives that corrupt evaluation. The V1 launch "
+                "AUC may be deflated or inflated for the wrong reasons. "
+                "Pass held_out_pairs=val_pairs ∪ test_pairs to silence "
+                "this warning. (P2-006 root fix, v107)",
+                _p2_006_env,
+            )
         self.held_out_pairs: Set[Tuple[str, str]] = (
             self._validate_positive_pairs(held_out_pairs)
             if held_out_pairs
