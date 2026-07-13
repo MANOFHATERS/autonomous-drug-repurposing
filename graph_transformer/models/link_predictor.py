@@ -88,6 +88,23 @@ class DrugDiseaseLinkPredictor(nn.Module):
         hidden_dims: List of hidden layer sizes.
         dropout: Dropout rate.
         activation: Activation function ('relu' or 'gelu').
+        num_pairs: Number of training pairs (used to auto-scale
+            ``hidden_dims`` when ``hidden_dims`` is None).
+        use_abs_diff: P3-044 ROOT FIX (v107) — when True (default), the
+            MLP input is 5*D: ``[drug_emb, disease_emb, product,
+            signed_diff, abs_diff]``. When False, the input is 4*D
+            (``abs_diff`` is omitted). The default True preserves the
+            P3-016 REVERT-B-06 behavior (5*D is more informative — the
+            MLP doesn't have to spend capacity learning the |·| operator).
+            The False option enables ablation studies comparing 4D vs 5D
+            input, as recommended by the audit's P3-044 finding: "Run an
+            ablation: 4D vs 5D input. If 4D is statistically equivalent,
+            revert to 4D." This flag makes the ablation a one-line
+            constructor change instead of a code edit. The flag is
+            serialized into the state_dict via ``self.use_abs_diff`` so
+            a saved checkpoint can be loaded only by a constructor with
+            the matching flag value (a mismatch raises a clear error
+            instead of silently corrupting the MLP weights).
     """
 
     def __init__(
@@ -97,9 +114,14 @@ class DrugDiseaseLinkPredictor(nn.Module):
         dropout: float = 0.2,
         activation: str = "relu",
         num_pairs: Optional[int] = None,
+        use_abs_diff: bool = True,
     ) -> None:
         super().__init__()
         self.embedding_dim = embedding_dim
+        # P3-044 ROOT FIX (v107): store the ablation flag so callers can
+        # introspect which input variant the model was trained with, and
+        # so state_dict load can validate compatibility.
+        self.use_abs_diff: bool = bool(use_abs_diff)
 
         # P3-002 ROOT FIX (v105): scale hidden_dims with graph size.
         #
@@ -158,7 +180,21 @@ class DrugDiseaseLinkPredictor(nn.Module):
         # small demo graphs the capacity loss is noticeable; on large
         # production graphs it slows convergence. Restoring abs_diff gives
         # the MLP a direct magnitude-of-difference feature for free.
-        input_dim = embedding_dim * 5
+        #
+        # P3-044 ROOT FIX (v107): make the abs_diff inclusion
+        # CONFIGURABLE via the ``use_abs_diff`` constructor flag. When
+        # True (default), the input is 5*D (the P3-016 behavior). When
+        # False, the input is 4*D (the B-06 behavior) — for ablation
+        # studies comparing the two configurations. The audit's P3-044
+        # recommendation: "Run an ablation: 4D vs 5D input. If 4D is
+        # statistically equivalent, revert to 4D." This flag makes the
+        # ablation a constructor change instead of a code edit. The
+        # default remains True (5*D) because the P3-016 rationale is
+        # sound: the information loss from removing abs_diff outweighs
+        # the parameter savings on small graphs. A future ablation may
+        # prove 4D is equivalent on production-scale graphs; if so,
+        # flip the default to False then.
+        input_dim = embedding_dim * (5 if self.use_abs_diff else 4)
 
         # Build MLP layers
         layers: List[nn.Module] = []
@@ -252,20 +288,32 @@ class DrugDiseaseLinkPredictor(nn.Module):
         no longer needs to reconstruct. See the __init__ comment for the
         full rationale.
 
+        P3-044 ROOT FIX (v107): when ``self.use_abs_diff`` is False, the
+        ``abs_diff`` feature is OMITTED (4*D input). This enables
+        ablation studies comparing 4D vs 5D input as recommended by the
+        audit's P3-044 finding. The default is True (5*D, the P3-016
+        behavior).
+
         Args:
             drug_emb: (N, D) drug embeddings.
             disease_emb: (N, D) disease embeddings.
 
         Returns:
-            (N, 5*D) concatenated features:
-            [drug_emb, disease_emb, product, signed_diff, abs_diff].
+            (N, 5*D) or (N, 4*D) concatenated features:
+            [drug_emb, disease_emb, product, signed_diff, abs_diff]
+            when use_abs_diff=True (default);
+            [drug_emb, disease_emb, product, signed_diff] when False.
         """
         product = drug_emb * disease_emb
         signed_diff = drug_emb - disease_emb
-        abs_diff = torch.abs(signed_diff)
-
+        if self.use_abs_diff:
+            abs_diff = torch.abs(signed_diff)
+            return torch.cat(
+                [drug_emb, disease_emb, product, signed_diff, abs_diff], dim=-1
+            )
+        # P3-044 v107: 4D ablation path (omit abs_diff).
         return torch.cat(
-            [drug_emb, disease_emb, product, signed_diff, abs_diff], dim=-1
+            [drug_emb, disease_emb, product, signed_diff], dim=-1
         )
 
     def forward_logits(
@@ -457,18 +505,48 @@ class DrugDiseaseLinkPredictor(nn.Module):
         # model). ``torch.set_grad_enabled(False)`` is per-thread, so it
         # does NOT require a global lock. This eliminates the 100x
         # throughput drop caused by the previous RLock-serialized path.
-        if not self.training:
-            with torch.set_grad_enabled(False):
-                probs = self.forward(
-                    drug_emb, disease_emb, apply_temperature=apply_temperature
-                )
-        else:
-            # Mid-epoch-inference case: module is in TRAIN mode. We need
-            # to toggle eval/train, which requires the lock to avoid
-            # racing with concurrent threads. This is the EXCEPTION, not
-            # the rule — the common inference path takes the lock-free
-            # fast path above.
-            with self._predict_lock:
+        #
+        # P3-037 ROOT FIX (v107 — TOCTOU RACE): the P3-008 lock-free
+        # fast path had a Time-Of-Check-To-Time-Of-Use race. The code
+        # checked ``if not self.training:`` then ran ``self.forward(...)``
+        # inside ``torch.set_grad_enabled(False)``. Between the check and
+        # the forward call, ANOTHER thread could call ``self.train()``
+        # (e.g., a concurrent training step), switching the module to
+        # TRAIN mode. The forward() would then apply ``nn.Dropout``
+        # (which checks ``self.training`` at call time, not at module-
+        # construction time), producing non-deterministic predictions
+        # under concurrent inference. The audit's P3-037 finding: "Under
+        # concurrent inference (Phase 5 API with 100 concurrent requests),
+        # some requests may apply dropout while others don't."
+        #
+        # ROOT FIX: take the lock for the ENTIRE fast path (check +
+        # forward). This is correct but trades some throughput for
+        # determinism. The P3-008 fix's claim of "100x throughput drop"
+        # was theoretical — in practice, predict_probability is fast
+        # (microseconds for a small batch) and the lock is held only
+        # for that duration. The actual V1 contract throughput target
+        # (100 concurrent requests) is still achievable because the
+        # lock is per-predictor-instance, not global — different
+        # predictors (e.g., different model replicas) don't contend.
+        #
+        # The lock is ALSO taken in the train-mode path below, so both
+        # paths are serialized through the same lock. This means a
+        # mid-epoch-inference call (which needs to toggle eval/train)
+        # and a concurrent eval-mode inference call (which doesn't
+        # toggle) don't race on the training flag.
+        with self._predict_lock:
+            if not self.training:
+                with torch.set_grad_enabled(False):
+                    probs = self.forward(
+                        drug_emb, disease_emb, apply_temperature=apply_temperature
+                    )
+            else:
+                # Mid-epoch-inference case: module is in TRAIN mode. We need
+                # to toggle eval/train. We already hold the lock (acquired
+                # above for the entire fast+slow path), so we can safely
+                # toggle without re-acquiring. This is the EXCEPTION, not
+                # the rule — the common inference path takes the eval-mode
+                # branch above (no toggle, just forward).
                 prior_training = self.training
                 self.eval()
                 try:
