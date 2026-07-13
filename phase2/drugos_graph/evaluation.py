@@ -835,8 +835,19 @@ def _check_sklearn_version() -> Optional[str]:
 
     Fixes E15-005.
 
+    P2-037 ROOT FIX (v107): the previous code returned None on ANY
+    failure (ImportError, AttributeError, ValueError), causing
+    ``compute_auc`` to fall back to the manual Mann-Whitney formula.
+    The manual formula has subtle tie-correction differences from
+    sklearn, so two runs (one with sklearn, one without) produce
+    slightly different AUC — the V1 launch criterion may pass in one
+    environment and fail in another. ROOT FIX: in production mode
+    (DRUGOS_ENVIRONMENT=production), RAISE if sklearn is unavailable
+    or broken. In dev mode, return None (legacy fallback to manual
+    AUC) so dev fixtures without sklearn still work.
+
     Returns:
-        Version string, or None.
+        Version string, or None (dev mode only when sklearn missing).
     """
     try:
         import sklearn
@@ -855,8 +866,36 @@ def _check_sklearn_version() -> Optional[str]:
             )
         return ver
     except ImportError:
+        # P2-037: in production, sklearn is REQUIRED for AUC
+        # reproducibility. In dev, fall back to manual AUC.
+        _is_prod_p2_037 = os.environ.get(
+            "DRUGOS_ENVIRONMENT", "production"
+        ).lower() in ("prod", "production")
+        if _is_prod_p2_037:
+            raise ImportError(
+                f"P2-037 ROOT FIX: sklearn is NOT installed but "
+                f"DRUGOS_ENVIRONMENT=production. sklearn >= "
+                f"{SKLEARN_MIN_VERSION} is REQUIRED for AUC "
+                f"reproducibility (the manual Mann-Whitney fallback "
+                f"has subtle tie-correction differences that make AUC "
+                f"non-reproducible across environments). Install with: "
+                f"pip install scikit-learn>={SKLEARN_MIN_VERSION}"
+            )
         return None
-    except (ImportError, AttributeError, ValueError):  # v85 FORENSIC ROOT FIX (BUG #51)
+    except (AttributeError, ValueError) as _e_p2_037:  # v85 FORENSIC ROOT FIX (BUG #51)
+        # P2-037: sklearn is installed but BROKEN (partial install,
+        # corrupt __version__, etc.). In production, RAISE.
+        _is_prod_p2_037 = os.environ.get(
+            "DRUGOS_ENVIRONMENT", "production"
+        ).lower() in ("prod", "production")
+        if _is_prod_p2_037:
+            raise ImportError(
+                f"P2-037 ROOT FIX: sklearn is installed but BROKEN "
+                f"({type(_e_p2_037).__name__}: {_e_p2_037}). In "
+                f"production, sklearn must be fully functional for AUC "
+                f"reproducibility. Reinstall with: pip install --force "
+                f"--no-deps scikit-learn>={SKLEARN_MIN_VERSION}"
+            ) from _e_p2_037
         return None
 
 
@@ -1518,9 +1557,23 @@ def compute_auc(
                 _allow_small_imbalanced = _os_v102_044.environ.get(
                     "DRUGOS_ALLOW_SMALL_IMBALANCED_EVAL", ""
                 ) == "1"
-                # Dev mode bypasses the block so dev-fixture runs (which
-                # typically have <30 positives) can still compute AUC
-                # for sanity checking. The WARNING above still fires.
+                # P2-026 ROOT FIX (v107): the previous code bypassed the
+                # eval-set size check in dev mode (``_is_dev_v100``),
+                # meaning a production deployment that forgot to set
+                # ``DRUGOS_ENVIRONMENT=production`` got the dev behavior
+                # — the AUC was computed on a statistically unreliable
+                # eval set (e.g. 50 positives × 500 negatives, ratio
+                # 1:10, 95% CI ±0.15 AUC). The ">0.85" V1 launch
+                # criterion was within the noise band — pass/fail was
+                # a coin flip. ROOT FIX: the eval-set size check is now
+                # UNCONDITIONAL in production mode (no dev bypass). The
+                # only escape hatch is ``DRUGOS_ALLOW_SMALL_IMBALANCED_EVAL=1``
+                # which is GUARDED by the module-level production
+                # escape-hatch check (``_check_production_escape_hatches``
+                # in run_pipeline.py refuses to load if this flag is set
+                # in production). In dev mode, the bypass is preserved
+                # so dev-fixture runs (which typically have <30
+                # positives) can still compute AUC for sanity checking.
                 try:
                     from .config import _get_dev_mode as _v100_dev_mode
                     _is_dev_v100 = _v100_dev_mode()

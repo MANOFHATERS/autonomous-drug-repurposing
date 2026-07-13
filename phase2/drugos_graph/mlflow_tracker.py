@@ -303,6 +303,21 @@ class MLflowTracker:
         # marked alive BEFORE the first interval elapses. This lets
         # ops dashboards see the run as "live" immediately after
         # start_run returns, without waiting up to 30s.
+        # P2-023 ROOT FIX (v107): after N consecutive heartbeat failures,
+        # mark the MLflow run as FAILED via a best-effort
+        # ``mlflow.end_run(status="FAILED")``. The previous code
+        # incremented ``heartbeat_failure_count`` forever — after 100
+        # failures the heartbeat was effectively dead but the MLflow UI
+        # still showed the run as "RUNNING" indefinitely. Operators
+        # could not distinguish a live run from a dead one. ROOT FIX:
+        # after 10 consecutive failures (configurable via
+        # ``DRUGOS_MLFLOW_HEARTBEAT_MAX_FAILURES``), attempt to end the
+        # run with status=FAILED so the MLflow UI reflects reality.
+        # The heartbeat thread then EXITS (no point continuing to
+        # retry if the server is unreachable).
+        _max_hb_failures_p2_023 = int(
+            os.environ.get("DRUGOS_MLFLOW_HEARTBEAT_MAX_FAILURES", "10")
+        )
         while not self._heartbeat_stop.is_set():
             try:
                 ts = time.time()
@@ -325,6 +340,15 @@ class MLflowTracker:
                     })
                 self.last_heartbeat_ts = ts
                 self.heartbeat_count += 1
+                # P2-023: reset failure counter on success.
+                if self.heartbeat_failure_count > 0:
+                    logger.info(
+                        "P2-023: heartbeat recovered after %d "
+                        "consecutive failures. Resuming normal "
+                        "heartbeat.",
+                        self.heartbeat_failure_count,
+                    )
+                    self.heartbeat_failure_count = 0
             except Exception as e:
                 # The heartbeat MUST NOT raise — it would kill the
                 # daemon thread and silently disable liveness tracking.
@@ -336,6 +360,45 @@ class MLflowTracker:
                     "process is alive. Check MLflow server health.",
                     self.heartbeat_failure_count, e,
                 )
+                # P2-023 ROOT FIX: after N consecutive failures, mark
+                # the run as FAILED and exit the heartbeat loop. The
+                # MLflow UI will then show the run as FAILED (not
+                # "RUNNING" forever), and operators can distinguish a
+                # dead run from a live one.
+                if self.heartbeat_failure_count >= _max_hb_failures_p2_023:
+                    logger.error(
+                        "P2-023 ROOT FIX: heartbeat failed %d "
+                        "consecutive times (threshold=%d). Marking "
+                        "the MLflow run as FAILED and stopping the "
+                        "heartbeat thread. The MLflow UI will now "
+                        "show this run as FAILED — investigate MLflow "
+                        "server health.",
+                        self.heartbeat_failure_count,
+                        _max_hb_failures_p2_023,
+                    )
+                    try:
+                        if self.mlflow and self.run:
+                            # Best-effort: set a tag indicating the
+                            # heartbeat died, then end the run as
+                            # FAILED. If this also fails, there's
+                            # nothing more we can do — the run will
+                            # stay RUNNING in the UI until the MLflow
+                            # server's own reaper cleans it up.
+                            self.mlflow.set_tag(
+                                "drugos.heartbeat_status",
+                                "FAILED_AFTER_MAX_RETRIES",
+                            )
+                            self.mlflow.end_run(status="FAILED")
+                    except Exception as _end_exc:
+                        logger.error(
+                            "P2-023: best-effort end_run(FAILED) also "
+                            "failed (%s: %s). The MLflow UI will keep "
+                            "showing this run as RUNNING until the "
+                            "server's own reaper cleans it up.",
+                            type(_end_exc).__name__, _end_exc,
+                        )
+                    # Exit the heartbeat loop — no point continuing.
+                    break
             # Wait for the interval OR until close() sets the stop
             # event — whichever comes first. This ensures close()
             # returns promptly without waiting up to 30s for the

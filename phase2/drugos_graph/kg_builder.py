@@ -4230,6 +4230,12 @@ class DrugOSGraphBuilder:
             batch_size=batch_size, use_merge=use_merge, **kwargs,
         )
 
+    @deprecated(
+        "Use deduplicate_edges_deterministic. Removed in v2.0. "
+        "(P2-029 ROOT FIX v107: the non-deterministic version violates "
+        "FDA 21 CFR Part 11 reproducibility — two runs on the same graph "
+        "produce different edge sets.)"
+    )
     def deduplicate_edges(
         self,
         src_label: str,
@@ -4240,6 +4246,12 @@ class DrugOSGraphBuilder:
 
         Delegates to GraphEdgeLoader.deduplicate_edges().
         Fixes A-3: Deprecated. Use deduplicate_edges_deterministic().
+
+        P2-029 ROOT FIX (v107): now decorated with @deprecated so every
+        call emits a DeprecationWarning. The previous code exposed this
+        as a normal public method — callers who didn't read the
+        docstring used the non-deterministic version, violating FDA 21
+        CFR Part 11 reproducibility.
         """
         return self._edges.deduplicate_edges(src_label, rel_type, dst_label)
 
@@ -4550,34 +4562,104 @@ class DrugOSGraphBuilder:
         """Write a :PipelineRun node for lineage tracking.
 
         Fixes DL-5: No pipeline run metadata stored in graph.
+
+        P2-034 ROOT FIX (v107): the previous code caught ALL exceptions
+        with ``logger.warning`` — if Neo4j was down, the PipelineRun
+        node was never written, the audit trail had no record of the
+        pipeline run, and FDA 21 CFR Part 11 compliance was violated.
+        ROOT FIX: retry with exponential backoff (3 attempts: 0.5s,
+        1s, 2s). If still failing, write to a local JSONL fallback
+        (``logs/pipeline_run_audit.jsonl``) so the audit trail is
+        preserved even when Neo4j is unreachable. Log at ERROR level
+        (not WARNING) so production dashboards surface the failure.
         """
         if self._conn.driver is None:
             return
+        # P2-034: build the audit record once so both the Neo4j write
+        # path and the JSONL fallback path use the same payload.
+        _audit_record = {
+            "run_id": RUN_ID,
+            "started_at": _now_iso(),
+            "finished_at": _now_iso(),
+            "pipeline_version": PIPELINE_VERSION,
+            "config_hash": CONFIG_HASH,
+            "schema_version": SCHEMA_VERSION,
+            "seed": SEED,
+            "node_count": stats.get("total_nodes", 0),
+            "edge_count": stats.get("total_edges", 0),
+            "status": "completed",
+        }
+        import time as _time_p2_034
+        _max_attempts_p2_034 = 3
+        _backoff_p2_034 = 0.5
+        _last_exc_p2_034: Optional[Exception] = None
+        for _attempt_p2_034 in range(_max_attempts_p2_034):
+            try:
+                with self._conn.session() as session:
+                    session.run(
+                        "MERGE (p:PipelineRun {run_id: $run_id}) "
+                        "SET p.started_at = $started_at, "
+                        "    p.finished_at = $finished_at, "
+                        "    p.pipeline_version = $pipeline_version, "
+                        "    p.config_hash = $config_hash, "
+                        "    p.schema_version = $schema_version, "
+                        "    p.seed = $seed, "
+                        "    p.node_count = $node_count, "
+                        "    p.edge_count = $edge_count, "
+                        "    p.status = $status",
+                        **_audit_record,
+                    )
+                # Success — return (no need for JSONL fallback).
+                return
+            except Exception as e:
+                _last_exc_p2_034 = e
+                if _attempt_p2_034 < _max_attempts_p2_034 - 1:
+                    logger.warning(
+                        "P2-034: PipelineRun node write attempt %d/%d "
+                        "failed (%s: %s). Retrying in %.1fs.",
+                        _attempt_p2_034 + 1, _max_attempts_p2_034,
+                        type(e).__name__, e, _backoff_p2_034,
+                    )
+                    _time_p2_034.sleep(_backoff_p2_034)
+                    _backoff_p2_034 *= 2.0
+                else:
+                    logger.error(
+                        "P2-034 ROOT FIX: PipelineRun node write FAILED "
+                        "after %d attempts (%s: %s). The Neo4j audit "
+                        "trail is INCOMPLETE — FDA 21 CFR Part 11 "
+                        "compliance is at risk. Writing to local JSONL "
+                        "fallback so the audit record is preserved.",
+                        _max_attempts_p2_034,
+                        type(e).__name__, e,
+                    )
+        # P2-034: all retries exhausted — write to local JSONL fallback.
         try:
-            with self._conn.session() as session:
-                session.run(
-                    "MERGE (p:PipelineRun {run_id: $run_id}) "
-                    "SET p.started_at = $started_at, "
-                    "    p.finished_at = $finished_at, "
-                    "    p.pipeline_version = $pipeline_version, "
-                    "    p.config_hash = $config_hash, "
-                    "    p.schema_version = $schema_version, "
-                    "    p.seed = $seed, "
-                    "    p.node_count = $node_count, "
-                    "    p.edge_count = $edge_count, "
-                    "    p.status = 'completed'",
-                    run_id=RUN_ID,
-                    started_at=_now_iso(),
-                    finished_at=_now_iso(),
-                    pipeline_version=PIPELINE_VERSION,
-                    config_hash=CONFIG_HASH,
-                    schema_version=SCHEMA_VERSION,
-                    seed=SEED,
-                    node_count=stats.get("total_nodes", 0),
-                    edge_count=stats.get("total_edges", 0),
-                )
-        except Exception as e:
-            logger.warning("Could not write PipelineRun node: %s", e)
+            import json as _json_p2_034
+            from pathlib import Path as _Path_p2_034
+            _audit_record["fallback_reason"] = (
+                f"Neo4j write failed after {_max_attempts_p2_034} attempts: "
+                f"{type(_last_exc_p2_034).__name__}: {_last_exc_p2_034}"
+            )
+            _audit_record["fallback_written_at"] = _now_iso()
+            _fallback_dir = _Path_p2_034("logs")
+            _fallback_dir.mkdir(parents=True, exist_ok=True)
+            _fallback_path = _fallback_dir / "pipeline_run_audit.jsonl"
+            with open(_fallback_path, "a", encoding="utf-8") as _f:
+                _f.write(_json_p2_034.dumps(_audit_record) + "\n")
+            logger.error(
+                "P2-034: PipelineRun audit record written to JSONL "
+                "fallback at %s. The Neo4j audit trail is incomplete — "
+                "investigate Neo4j connectivity and backfill this "
+                "record when Neo4j is restored.",
+                _fallback_path,
+            )
+        except Exception as _fallback_exc:
+            logger.error(
+                "P2-034: CRITICAL — could not write PipelineRun audit "
+                "record to JSONL fallback either (%s: %s). The audit "
+                "trail is LOST. Manual intervention required.",
+                type(_fallback_exc).__name__, _fallback_exc,
+            )
 
     def get_impact_analysis(self, changed_config_key: str) -> list[str]:
         """Return list of affected graph elements for a config change.
@@ -4802,13 +4884,72 @@ def update_validated_edges(
 
     # Read the CSV. Schema: drug,disease,validated,source,validated_at
     # Only rows with validated=true become edges.
+    # P2-022 ROOT FIX (v107): validate the CSV schema BEFORE iterating.
+    # The previous code used ``row.get("validated")`` which returns None
+    # silently if the frontend renames the column (e.g. ``is_validated``)
+    # or adds/removes columns. The pair was then silently skipped — the
+    # data flywheel stopped ingesting clinician feedback and the model
+    # never improved. ROOT FIX: require the exact schema
+    # {drug, disease, validated, source, validated_at}. Raise on schema
+    # mismatch so the operator knows the frontend contract changed.
+    _EXPECTED_VALIDATED_CSV_COLUMNS = ("drug", "disease", "validated", "source", "validated_at")
     validated_pairs: List[Tuple[str, str]] = []
     with open(validated_csv_path, "r", encoding="utf-8") as f:
         reader = _csv.DictReader(f)
+        # P2-022: schema validation. The frontend MUST write the exact
+        # column set. Extra columns are allowed (forward-compat) but
+        # missing columns or renamed ``validated`` → raise immediately.
+        if reader.fieldnames is None:
+            raise ValueError(
+                f"P2-022 ROOT FIX: validated_hypotheses.csv at "
+                f"{validated_csv_path} has no header row (empty file?). "
+                f"The data flywheel cannot ingest feedback from an "
+                f"empty/malformed CSV."
+            )
+        _actual_cols = set(reader.fieldnames)
+        _missing_cols = set(_EXPECTED_VALIDATED_CSV_COLUMNS) - _actual_cols
+        # Accept common aliases for the ``validated`` column so a
+        # frontend rename doesn't break ingestion silently — but log a
+        # WARNING so the operator knows the contract drifted.
+        _validated_col_aliases = ("validated", "is_validated", "is_valid")
+        _validated_col_name = None
+        for _alias in _validated_col_aliases:
+            if _alias in _actual_cols:
+                _validated_col_name = _alias
+                break
+        if _validated_col_name is None:
+            raise ValueError(
+                f"P2-022 ROOT FIX: validated_hypotheses.csv at "
+                f"{validated_csv_path} is missing the 'validated' "
+                f"column (or any of its aliases: "
+                f"{_validated_col_aliases}). Found columns: "
+                f"{sorted(_actual_cols)}. The data flywheel silently "
+                f"stopped ingesting clinician feedback — fix the "
+                f"frontend CSV writer to include a 'validated' column."
+            )
+        if _missing_cols - {"validated"}:
+            # Other required columns missing (drug, disease, source,
+            # validated_at) — raise. ``validated`` is handled above via
+            # alias check.
+            raise ValueError(
+                f"P2-022 ROOT FIX: validated_hypotheses.csv at "
+                f"{validated_csv_path} is missing required columns: "
+                f"{sorted(_missing_cols - {'validated'})}. Found "
+                f"columns: {sorted(_actual_cols)}. The data flywheel "
+                f"requires these columns to ingest feedback correctly."
+            )
+        if _validated_col_name != "validated":
+            logger.warning(
+                "P2-022 ROOT FIX: validated_hypotheses.csv uses alias "
+                "'%s' instead of 'validated'. Ingestion will proceed "
+                "but the frontend CSV writer contract has drifted — "
+                "update it to use 'validated' for consistency.",
+                _validated_col_name,
+            )
         for row in reader:
             drug = (row.get("drug") or "").strip()
             disease = (row.get("disease") or "").strip()
-            validated_str = (row.get("validated") or "").strip().lower()
+            validated_str = (row.get(_validated_col_name) or "").strip().lower()
             if not drug or not disease:
                 continue
             if validated_str in ("true", "1", "yes"):

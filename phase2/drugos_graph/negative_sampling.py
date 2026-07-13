@@ -1079,6 +1079,20 @@ class NegativeSampler:
         # skip the probability arrays entirely and use uniform
         # ``rng.choice`` (no ``p`` argument) — the pre-P2-007
         # behaviour.
+        #
+        # P2-036 ROOT FIX (v107): the previous code cached the
+        # probability arrays ONCE per instance via
+        # ``if not hasattr(self, _cache_key)``. If the underlying graph
+        # changed (new nodes added between sampler construction and
+        # sampling), the cached probabilities were STALE — new nodes
+        # had degree 0 but were not in the probability array, so they
+        # could never be sampled as negatives. The negative set was
+        # biased toward old nodes, and the model never learned to
+        # distinguish new nodes. ROOT FIX: invalidate the cache when
+        # ``self.all_drug_ids`` or ``self.all_disease_ids`` has changed
+        # since the cache was built. We store the cache key ALONGSIDE
+        # the entity-id lists that were used to build it, and rebuild
+        # if they no longer match.
         _use_uniform = not degree_weighted
         if _use_uniform:
             _drug_probs = None
@@ -1089,7 +1103,28 @@ class NegativeSampler:
             # arrays themselves are cheap to build — O(n_drugs +
             # n_diseases) — but caching avoids rebuilding per call.)
             _cache_key = "_p2_020_inverse_degree_probs"
-            if not hasattr(self, _cache_key):
+            # P2-036: also store the entity-id lists that were used to
+            # build the cache, so we can detect graph changes.
+            _cache_ids_key = "_p2_036_cache_entity_ids"
+            _cached_ids = getattr(self, _cache_ids_key, None)
+            _current_ids = (
+                tuple(self.all_drug_ids),
+                tuple(self.all_disease_ids),
+            )
+            _cache_valid_p2_036 = (
+                _cached_ids is not None
+                and _cached_ids[0] == _current_ids[0]
+                and _cached_ids[1] == _current_ids[1]
+            )
+            if not hasattr(self, _cache_key) or not _cache_valid_p2_036:
+                if not _cache_valid_p2_036 and _cached_ids is not None:
+                    logger.info(
+                        "P2-036 ROOT FIX: negative sampler graph "
+                        "changed (all_drug_ids or all_disease_ids "
+                        "differ from cached version). Rebuilding "
+                        "degree-weighted probability arrays so new "
+                        "nodes can be sampled as negatives."
+                    )
                 _drug_degrees = np.zeros(n_drugs, dtype=np.float64)
                 _disease_degrees = np.zeros(n_diseases, dtype=np.float64)
                 _drug_idx = {d: i for i, d in enumerate(self.all_drug_ids)}
@@ -1119,6 +1154,10 @@ class NegativeSampler:
                 _drug_probs = _drug_inv / _drug_inv.sum()
                 _disease_probs = _disease_inv / _disease_inv.sum()
                 setattr(self, _cache_key, (_drug_probs, _disease_probs))
+                # P2-036: store the entity-id lists that were used to
+                # build this cache, so future calls can detect graph
+                # changes and invalidate the cache.
+                setattr(self, _cache_ids_key, _current_ids)
                 logger.info(
                     "P2-020 root fix: built Bernoulli 1/(1+degree) "
                     "inverse-degree-weighted probabilities for "
