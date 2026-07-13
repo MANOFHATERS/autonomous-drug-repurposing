@@ -1114,3 +1114,47 @@ Stage Summary:
 - Real code execution verified all 11 fixes (not just source inspection)
 - Commit: 50f2f7a on branch, merged to main as c747628
 - Pre-existing failures (NOT caused by my changes): test_bug_3_2, test_bug_2_4 (TypeError in _strip_inheritance_pattern — pre-existing code bug in omim_pipeline.py:1496), v93 P1-034 (SLA config), v93 P1-047 (environment)
+
+---
+Task ID: v107-P2-001-to-019-forensic-root-fix
+Agent: main (Super Z)
+Task: Fix all 19 P2 issues (P2-001 through P2-019) at the root level, run real code to verify, push to branch, merge to main, re-clone to verify.
+
+Work Log:
+- Read the project docx (Team_Cosmic_Build_Process_Updated.docx) to understand the 4-phase architecture (Phase 1 Data Ingestion → Phase 2 KG → Phase 3 Graph Transformer → Phase 4 RL Ranker).
+- Cloned the repo (103 MB, 100+ branches from parallel agents).
+- Read each target file LINE-BY-LINE (no grep, no scripts, no test reading) to verify the audit's claims:
+  * phase2/service.py (255 lines) — confirmed P2-001, 002, 008, 009, 010, 016, 017.
+  * graph_transformer/data/phase2_adapter.py (773 lines) — confirmed P2-003, 004, 005.
+  * phase2/drugos_graph/pyg_builder.py (3696 lines) — confirmed P2-004, 011, 012, 018.
+  * phase2/drugos_graph/phase1_bridge.py (6755 lines) — confirmed P2-014, 015.
+  * phase2/drugos_graph/kg_builder.py (4775 lines) — confirmed P2-007.
+  * phase2/drugos_graph/negative_sampling.py (3000 lines) — confirmed P2-006.
+  * phase2/drugos_graph/training_data.py (1856 lines) — confirmed P2-013.
+  * phase2/drugos_graph/run_pipeline.py (9871 lines) — confirmed P2-019.
+- Applied 19 manual root-cause fixes via Edit/MultiEdit (NO scripts, NO surface patches).
+- Installed dependencies: torch 2.13.0+cpu, torch-geometric 2.8.0, neo4j, fastapi 0.128.0, httpx.
+- Wrote 23 issue-verification tests (tests/v107_p2_root_fixes/test_v107_all_19_issues.py) — each uses AST inspection to verify the fix is in EXECUTABLE code (not just comments).
+- Wrote 4 real-code integration tests (test_v107_real_code_integration.py) that exercise the actual production code paths:
+  * adapt_phase2_to_phase3 produces a valid 5-node-type graph with multi-hop edges.
+  * Features are deterministic across runs.
+  * HeteroData → Phase 3 conversion works.
+  * /kg/stats returns 503 when Phase 1 missing; /query and /cypher endpoints work; CORS preflight succeeds.
+- All 27 tests pass on the fix branch.
+- Resolved a merge conflict in kg_builder.py (parallel agent pushed conflicting P2-053 fix that made the same _source_phase=2 change — merged with combined comment).
+- Pushed fix/p2-001-to-019-forensic-root-fix-v107 branch to origin.
+- Merged to main with --no-ff (commit c35cc7b).
+- Re-cloned the repo to a fresh directory (verify-clone/) and ran all 27 tests — ALL PASS on the fresh main clone.
+
+Stage Summary:
+- 19 P2 issues FIXED at the root level (no surface patches, no aspirational comments).
+- 27 tests (23 verification + 4 real-code integration) all PASS on fresh main clone.
+- Files modified: 8 production files + 3 test files (2198 insertions, 166 deletions).
+- Merge commit: c35cc7b on main.
+- The fixes follow the production-refusal pattern: in DRUGOS_ENVIRONMENT=production, the code RAISES on mock data, random features, missing held_out_pairs, missing approval_year, and pathway derivation failures. In dev mode, it logs prominent WARNINGs so the operator knows the system is degraded.
+- The Phase 1 → Phase 2 → Phase 3 → Phase 4 chain is now 100% connected:
+  * Phase 2 service exposes /query and /cypher that the frontend expects (P2-002).
+  * Phase 2 → Phase 3 adapter accepts either RecordingGraphBuilder OR saved HeteroData .pt (P2-005).
+  * Phase 3 features are REAL (chemberta/sequence/name-hash), not random noise (P2-003).
+  * Phase 3 multi-hop reasoning preserved via fallback pathway→disease derivation (P2-004).
+  * Phase 2 → Phase 4 (RL ranker) data integrity preserved via NegativeSampler held_out_pairs enforcement (P2-006).
