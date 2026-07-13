@@ -236,6 +236,22 @@ class DrugRepurposingGraphTransformer(nn.Module):
         exclude_edges: Optional[set] = None,
         seed: Optional[int] = None,
         num_training_pairs: Optional[int] = None,
+        # P3-043 ROOT FIX (v107): configurable minimum edge-type count.
+        # The previous code hardcoded ``if len(self.edge_types) < 18: raise``
+        # which blocked ablation studies (removing one edge type to
+        # measure its contribution). The audit's P3-043 finding:
+        # "Ablation studies (removing one edge type to measure its
+        # contribution) are blocked by this check. Researchers cannot
+        # easily measure edge-type importance."
+        #
+        # ROOT FIX: add a ``min_edge_types`` parameter (default 18 —
+        # preserves the current safe behavior). Callers doing ablation
+        # studies can pass a lower value (e.g., ``min_edge_types=14`` to
+        # test the pre-P3-001 14-type schema, or ``min_edge_types=1``
+        # to allow any non-empty edge set). The default 18 enforces the
+        # full canonical schema on the production path; the parameter
+        # is the escape hatch for ablation research.
+        min_edge_types: int = 18,
     ) -> None:
         super().__init__()
 
@@ -359,20 +375,26 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # test_v5_forensic_verification.py) which construct the LAYER
         # with 1-2 edge types — those still work because they bypass
         # this model-level check.
-        if len(self.edge_types) < 18:
+        if len(self.edge_types) < min_edge_types:
             raise ValueError(
-                f"DrugRepurposingGraphTransformer requires at least 18 "
-                f"edge types (9 forward + 9 reverse, the canonical "
-                f"Phase 2 schema) so every node type receives incoming "
-                f"messages on all 9 forward relation types (inhibits, "
-                f"activates, binds, modulates, part_of, disrupted_in, "
-                f"treats, tested_for, causes). Got {len(self.edge_types)}: "
-                f"{self.edge_types}. The canonical schema is "
+                f"DrugRepurposingGraphTransformer requires at least "
+                f"{min_edge_types} edge types (got {len(self.edge_types)}: "
+                f"{self.edge_types}). The default min_edge_types=18 enforces "
+                f"the canonical Phase 2 schema (9 forward + 9 reverse) so "
+                f"every node type receives incoming messages on all 9 "
+                f"forward relation types (inhibits, activates, binds, "
+                f"modulates, part_of, disrupted_in, treats, tested_for, "
+                f"causes). The canonical schema is "
                 f"graph_transformer.data.DEFAULT_EDGE_TYPES (18 types). "
                 f"Pass edge_types=DEFAULT_EDGE_TYPES (the default) or a "
                 f"superset. For ablation studies with fewer edge types, "
-                f"construct HeterogeneousMultiHeadAttention directly. "
-                f"(P3-001 ROOT FIX v104: this was previously a `< 14` "
+                f"pass min_edge_types=<lower_value> (e.g., "
+                f"min_edge_types=14 for the pre-P3-001 14-type schema, "
+                f"or min_edge_types=1 to allow any non-empty edge set). "
+                f"(P3-043 ROOT FIX v107: this was previously a hardcoded "
+                f"`< 18` check that blocked ablation studies; it is now "
+                f"configurable via the min_edge_types parameter. "
+                f"P3-001 ROOT FIX v104: this was previously a `< 14` "
                 f"check that allowed the OLD 14-type schema to pass "
                 f"silently, degrading message passing for the 4 neutral "
                 f"binding/modulation edge types.)"
@@ -515,9 +537,84 @@ class DrugRepurposingGraphTransformer(nn.Module):
             # Sanity-check every layer's output
             for ntype, emb in h.items():
                 if torch.isnan(emb).any() or torch.isinf(emb).any():
+                    # P3-045 ROOT FIX (v107): include INPUT feature stats
+                    # in the error message so the user can identify
+                    # WHICH feature caused the NaN/Inf. The previous
+                    # message said only "Check input data quality" —
+                    # the user had to manually inspect every node type's
+                    # features to find the culprit. The audit's P3-045
+                    # finding: "A user sees 'Non-finite values in
+                    # {ntype} embeddings after layer {i}' but doesn't
+                    # know which input feature caused it. They waste
+                    # time debugging the wrong thing."
+                    #
+                    # ROOT FIX: include per-node-type input feature
+                    # statistics (min, max, mean, NaN count, Inf count)
+                    # in the error message. This lets the user
+                    # IMMEDIATELY identify which input feature has the
+                    # problem (e.g., "drug features have 5 NaN values"
+                    # points to a Phase 1 data cleaning bug). The stats
+                    # are computed for ALL node types (not just the one
+                    # that produced NaN) because the NaN may have
+                    # propagated from a different type via message
+                    # passing.
+                    feature_stats_lines = []
+                    for ft, ft_tensor in node_features.items():
+                        ft_flat = ft_tensor.float().flatten()
+                        nan_count = int(torch.isnan(ft_flat).sum().item())
+                        inf_count = int(torch.isinf(ft_flat).sum().item())
+                        if nan_count > 0 or inf_count > 0:
+                            # This is likely the culprit — flag it.
+                            feature_stats_lines.append(
+                                f"  {ft}: shape={tuple(ft_tensor.shape)}, "
+                                f"NaN={nan_count}, Inf={inf_count} "
+                                f"<-- LIKELY CULPRIT (non-finite inputs)"
+                            )
+                        else:
+                            # Compute min/max/mean only for finite tensors
+                            # (avoid NaN propagation into the stats).
+                            finite_mask = torch.isfinite(ft_flat)
+                            if finite_mask.any():
+                                ft_finite = ft_flat[finite_mask]
+                                feature_stats_lines.append(
+                                    f"  {ft}: shape={tuple(ft_tensor.shape)}, "
+                                    f"min={ft_finite.min().item():.4f}, "
+                                    f"max={ft_finite.max().item():.4f}, "
+                                    f"mean={ft_finite.mean().item():.4f}, "
+                                    f"NaN=0, Inf=0"
+                                )
+                            else:
+                                feature_stats_lines.append(
+                                    f"  {ft}: shape={tuple(ft_tensor.shape)}, "
+                                    f"ALL NON-FINITE (NaN or Inf) "
+                                    f"<-- LIKELY CULPRIT"
+                                )
+                    feature_stats = "\n".join(feature_stats_lines)
                     raise RuntimeError(
-                        f"Non-finite values in {ntype} embeddings after "
-                        f"layer {i}. Check input data quality."
+                        f"Non-finite values (NaN or Inf) in '{ntype}' "
+                        f"embeddings after layer {i}. Check input data "
+                        f"quality.\n\n"
+                        f"INPUT FEATURE STATS (per node type):\n"
+                        f"{feature_stats}\n\n"
+                        f"DEBUGGING TIPS:\n"
+                        f"  1. If a feature type has NaN/Inf, the culprit "
+                        f"is Phase 1 data cleaning — check the Phase 1 "
+                        f"pipeline that produced that feature.\n"
+                        f"  2. If all features are finite but the NaN "
+                        f"appears after layer {i}, the culprit is likely "
+                        f"the layer's attention or FFN computation — "
+                        f"check the learning rate (too high can cause "
+                        f"exploding gradients), gradient clipping (should "
+                        f"be <= 1.0), and the input feature scale (very "
+                        f"large features can overflow fp32 after the "
+                        f"first linear projection).\n"
+                        f"  3. To isolate the layer, set num_layers=1 "
+                        f"and re-run; if the NaN persists, the issue is "
+                        f"in layer 0's forward pass (not input data).\n"
+                        f"  (P3-045 ROOT FIX v107: this message now "
+                        f"includes per-node-type input feature stats so "
+                        f"you can identify the culprit without manual "
+                        f"inspection.)"
                     )
 
         # Apply final per-type normalization

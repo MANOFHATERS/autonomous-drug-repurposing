@@ -92,7 +92,11 @@ from .data.biomedical_tables import (
     get_drug_adme_score,
     compute_market_score,
     compute_rare_disease_flag,
-    compute_unmet_need_score as _compute_unmet_need_score_table,
+    # P3-053 ROOT FIX (v107): removed the ``as _compute_unmet_need_score_table``
+    # alias. The alias existed ONLY to work around the nested function that
+    # shadowed the imported name. The fix deletes the nested function (P3-051)
+    # and imports under the canonical name.
+    compute_unmet_need_score,
     get_disease_prevalence,
 )
 from .models.graph_transformer import DrugRepurposingGraphTransformer
@@ -215,7 +219,16 @@ def _deterministic_name_seed(seed: int, name: str, offset: int) -> int:
     Returns:
         A 31-bit non-negative integer suitable for ``np.random.default_rng``.
     """
-    h = hashlib.sha256(f"{seed}|{name}|{offset}".encode("utf-8"))
+    # P3-032 ROOT FIX (v107): use length-prefix encoding to eliminate
+    # separator-collision risk. The previous ``f"{seed}|{name}|{offset}"``
+    # produced the same hash for two DIFFERENT inputs when a field
+    # contained the ``|`` character. Drug/disease names from public
+    # biomedical databases (DrugBank, DisGeNET, OMIM) CAN contain ``|``
+    # as a separator within compound fields. The fix mirrors
+    # ``_deterministic_seed`` in graph_builder.py: use
+    # ``len(part) + ":" + part`` for each part (bencode-style).
+    encoded = f"{len(str(seed))}:{seed}|{len(str(name))}:{name}|{len(str(offset))}:{offset}"
+    h = hashlib.sha256(encoded.encode("utf-8"))
     return int.from_bytes(h.digest()[:4], "big") & 0x7FFFFFFF
 
 
@@ -639,6 +652,106 @@ class GTRLBridge:
             f"(dropout={dropout}, attention_dropout={attention_dropout}, "
             f"link_predictor_hidden_dims={link_predictor_hidden_dims})"
         )
+
+    # ------------------------------------------------------------------
+    # P3-054 ROOT FIX (v107): graph-content hash + safe checkpoint resume
+    # ------------------------------------------------------------------
+    def _compute_graph_hash(self) -> str:
+        """Compute a SHA-256 content hash of the current knowledge graph.
+
+        P3-054 ROOT FIX (v107): used by ``_can_resume_from_checkpoint_safely``
+        to determine whether the on-disk GT checkpoint was trained on the
+        SAME graph topology as the current in-memory graph.
+        """
+        if not self.node_features or not self.edge_indices:
+            return "empty_graph_no_hash"
+        hash_parts = []
+        for ntype in sorted(self.node_features.keys()):
+            tensor = self.node_features[ntype]
+            count = int(tensor.shape[0])
+            sample = tensor[:100].flatten().detach().cpu().numpy().tobytes()
+            hash_parts.append(f"{ntype}:{count}:{len(sample)}")
+        for et in sorted(self.edge_indices.keys(), key=lambda t: (t[0], t[1], t[2])):
+            ei = self.edge_indices[et]
+            count = int(ei.shape[1]) if ei.dim() == 2 else 0
+            hash_parts.append(f"{et[0]}|{et[1]}|{et[2]}:{count}")
+        encoded = "\n".join(hash_parts).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:16]
+
+    def _can_resume_from_checkpoint_safely(self) -> bool:
+        """Check whether the on-disk GT checkpoint is safe to resume from.
+
+        P3-054 ROOT FIX (v107): returns True ONLY when the checkpoint
+        file exists, a sidecar hash file exists, and the hash matches
+        the current graph's hash. Returns False (with a WARNING) otherwise.
+        """
+        checkpoint_path = os.path.join(self.output_dir, "gt_checkpoint.pt")
+        hash_sidecar_path = os.path.join(self.output_dir, "gt_checkpoint.graph_hash")
+        if not os.path.exists(checkpoint_path):
+            logger.warning(
+                "P3-054 ROOT FIX (v107): force_retrain=False requested, "
+                "but no checkpoint exists at %s. Falling back to fresh training.",
+                checkpoint_path,
+            )
+            return False
+        if not os.path.exists(hash_sidecar_path):
+            logger.warning(
+                "P3-054 ROOT FIX (v107): force_retrain=False requested, "
+                "but no graph_hash sidecar exists at %s. Falling back to "
+                "fresh training. Re-run with force_retrain=True (default) "
+                "once to write a hash-tagged checkpoint.",
+                hash_sidecar_path,
+            )
+            return False
+        try:
+            with open(hash_sidecar_path, "r", encoding="utf-8") as f:
+                stored_hash = f.read().strip()
+        except Exception as exc:
+            logger.warning(
+                "P3-054 ROOT FIX (v107): could not read graph_hash sidecar: %s. "
+                "Falling back to fresh training.", exc,
+            )
+            return False
+        current_hash = self._compute_graph_hash()
+        if stored_hash != current_hash:
+            logger.warning(
+                "P3-054 ROOT FIX (v107): checkpoint hash (%s) does NOT match "
+                "current graph hash (%s). Graph topology changed. Falling back "
+                "to fresh training.", stored_hash, current_hash,
+            )
+            return False
+        logger.info(
+            "P3-054 ROOT FIX (v107): checkpoint hash MATCHES current graph "
+            "(%s). Resuming from checkpoint.", current_hash,
+        )
+        return True
+
+    def _write_graph_hash_sidecar(self) -> None:
+        """Write the current graph's content hash to a sidecar file.
+
+        P3-054 ROOT FIX (v107): called after a successful GT training run
+        so the next run_full_pipeline(force_retrain=False) can verify the
+        checkpoint matches the current graph. Atomic write (temp + rename).
+        """
+        if not self.node_features:
+            return
+        hash_value = self._compute_graph_hash()
+        sidecar_path = os.path.join(self.output_dir, "gt_checkpoint.graph_hash")
+        tmp_path = sidecar_path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(hash_value)
+            os.replace(tmp_path, sidecar_path)
+            logger.info(
+                "P3-054 ROOT FIX (v107): wrote graph_content_hash %s to "
+                "sidecar %s.", hash_value, sidecar_path,
+            )
+        except Exception as exc:
+            logger.warning(
+                "P3-054 ROOT FIX (v107): failed to write graph hash sidecar: %s. "
+                "Future runs with force_retrain=False will fall back to fresh "
+                "training.", exc,
+            )
 
     # ------------------------------------------------------------------
     # PHASE 3.3a -- Training data + drug-aware split (extracted for
@@ -1500,6 +1613,11 @@ class GTRLBridge:
         # Save checkpoint
         checkpoint_path = os.path.join(self.output_dir, "gt_checkpoint.pt")
         trainer.save_checkpoint(checkpoint_path)
+        # P3-054 ROOT FIX (v107): write the graph-content-hash sidecar
+        # IMMEDIATELY after the checkpoint is saved, so a subsequent
+        # run_full_pipeline(force_retrain=False) can verify the checkpoint
+        # matches the current graph and skip GT re-training.
+        self._write_graph_hash_sidecar()
 
         # RT-006 ROOT FIX (Team Member 17): save graph_state.pt alongside
         # the model checkpoint so the inference module (used by the
@@ -1635,6 +1753,15 @@ class GTRLBridge:
         # Raw sigmoid preserves the full variance so the agent can
         # differentiate pairs. Temperature calibration is for DECISION
         # THRESHOLDS (e.g., "is this pair > 0.5?"), not for RANKING SIGNALS.
+        #
+        # P3-047 ROOT FIX (v107): the ``gnn_score`` column is hereby
+        # DOCUMENTED as UNCALIBRATED (raw sigmoid, NOT a calibrated
+        # probability). Downstream consumers that need a calibrated
+        # probability should use the NEW ``gnn_score_calibrated`` column
+        # (computed below by re-running predict_all_pairs with
+        # apply_temperature=True). The dual-column approach lets the RL
+        # agent learn from the high-variance raw signal while giving
+        # downstream decision-rules access to the calibrated probability.
         self.model.eval()
         score_matrix = self.model.predict_all_pairs(
             self.node_features,
@@ -1644,6 +1771,18 @@ class GTRLBridge:
             exclude_edges=set(LABEL_LEAKING_EDGES),  # C2 fix
             apply_temperature=False,  # FORENSIC-AUDIT-I03: raw sigmoid, full variance
         )  # (num_drugs, num_diseases) on device -- raw sigmoid, NO redundant pass
+
+        # P3-047 ROOT FIX (v107): also compute the CALIBRATED score
+        # matrix (apply_temperature=True). Reuses the same encoded
+        # embeddings; only re-runs the cheap MLP forward with temperature.
+        calibrated_score_matrix = self.model.predict_all_pairs(
+            self.node_features,
+            self.edge_indices,
+            num_drugs=num_drugs,
+            num_diseases=num_diseases,
+            exclude_edges=set(LABEL_LEAKING_EDGES),  # C2 fix
+            apply_temperature=True,  # P3-047 v107: calibrated (temperature-scaled)
+        )
 
         # Also compute per-pair confidence from prediction entropy.
         # C3 fix: the RL data dictionary now documents this as
@@ -1681,24 +1820,33 @@ class GTRLBridge:
         # streaming CSV writer in ``save_rl_input_streaming`` instead.
         # For the demo scale (20 x 15 = 300 pairs), both approaches are
         # fine, but the array-based approach is cleaner and faster.
-        drug_names_arr = np.array(
-            [self.drug_names[i] if i < len(self.drug_names) else f"Drug_{i}"
-             for i in range(num_drugs)]
-        )
-        disease_names_arr = np.array(
-            [self.disease_names[j] if j < len(self.disease_names) else f"Disease_{j}"
-             for j in range(num_diseases)]
-        )
+        # P3-033 ROOT FIX (v107): removed the dead Drug_{i}/Disease_{j}
+        # fallback. ``num_drugs == len(self.drug_names)`` ALWAYS holds
+        # (both derived from the same drug_map dict), so the fallback
+        # could never trigger. Using np.array(self.drug_names) directly
+        # is faster AND honest about the invariant.
+        drug_names_arr = np.array(self.drug_names)
+        disease_names_arr = np.array(self.disease_names)
         # Tile and repeat to create the (num_drugs * num_diseases,) arrays
         drugs_tiled = np.repeat(drug_names_arr, num_diseases)
         diseases_tiled = np.tile(disease_names_arr, num_drugs)
         gnn_flat = gnn_scores_np.flatten()
+        # P3-047 ROOT FIX (v107): also flatten the calibrated scores so
+        # downstream consumers can use them. The calibrated column is
+        # NOT used by the RL reward function (which uses raw gnn_score
+        # for full variance) but IS exposed in the CSV for the dashboard
+        # and for any decision rule that needs a calibrated probability.
+        gnn_calibrated_flat = calibrated_score_matrix.cpu().numpy().flatten()
         conf_flat = confidence_np.flatten()
 
         df = pd.DataFrame({
             "drug": drugs_tiled,
             "disease": diseases_tiled,
             "gnn_score": gnn_flat,
+            # P3-047 v107: NEW column. Calibrated probability (temperature-
+            # scaled sigmoid). Use this for decision thresholds; use
+            # ``gnn_score`` for ranking signals.
+            "gnn_score_calibrated": gnn_calibrated_flat,
             "confidence": conf_flat,
         })
 
@@ -1787,9 +1935,17 @@ class GTRLBridge:
         )
 
         # Encode the graph once. Peak memory: O(total_nodes * embedding_dim).
+        # P3-036 ROOT FIX (v107): use the EXPLICIT LABEL_LEAKING_EDGES
+        # default instead of falling back to self.model.exclude_edges.
+        # This makes the streaming path's exclusion behavior IDENTICAL
+        # to generate_rl_input's, regardless of how the model was
+        # constructed. See the method docstring for the full rationale.
         # ROOT FIX (C13): use exclude_edges_override parameter instead of
         # mutating self.model.exclude_edges. This is thread-safe.
-        effective_exclude = set(exclude_edges) if exclude_edges is not None else self.model.exclude_edges
+        if exclude_edges is None:
+            effective_exclude = set(LABEL_LEAKING_EDGES)
+        else:
+            effective_exclude = set(exclude_edges)
         self.model.eval()
         with torch.no_grad():
             embeddings = self.model.encode(
@@ -1827,22 +1983,21 @@ class GTRLBridge:
         # the DataFrame and calling the (vectorized) feature functions,
         # but this is negligible compared to the model.encode() cost
         # that dominates the streaming writer's runtime.
-        drug_names_arr = np.array(
-            [self.drug_names[i] if i < len(self.drug_names) else f"Drug_{i}"
-             for i in range(num_drugs)]
-        )
-        disease_names_arr = np.array(
-            [self.disease_names[j] if j < len(self.disease_names) else f"Disease_{j}"
-             for j in range(num_diseases)]
-        )
+        # P3-033 ROOT FIX (v107): removed the dead Drug_{i}/Disease_{j}
+        # fallback in the streaming path too. Same rationale as the
+        # in-memory path: ``num_drugs == len(self.drug_names)`` ALWAYS
+        # holds (both derived from the same ``drug_map`` dict).
+        drug_names_arr = np.array(self.drug_names)
+        disease_names_arr = np.array(self.disease_names)
 
         # Open the CSV for streaming write
         os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
         # Define the column order (must match generate_rl_input's output)
+        # P3-047 ROOT FIX (v107): added gnn_score_calibrated column.
         columns = [
-            "drug", "disease", "gnn_score", "confidence", "safety_score",
-            "market_score", "pathway_score", "patent_score", "rare_disease_flag",
-            "unmet_need_score", "efficacy_score", "adme_score",
+            "drug", "disease", "gnn_score", "gnn_score_calibrated", "confidence",
+            "safety_score", "market_score", "pathway_score", "patent_score",
+            "rare_disease_flag", "unmet_need_score", "efficacy_score", "adme_score",
         ]
 
         with open(output_path, "w", newline="", encoding="utf-8") as f:
@@ -1903,7 +2058,17 @@ class GTRLBridge:
                         # (adaptive weight amplification) handles any variance
                         # concerns by amplifying the gnn_score weight 2x when
                         # std < 0.15.
-                        probs = self.model.link_predictor.predict_probability(
+                        #
+                        # P3-055 ROOT FIX (v107): call ``link_predictor.forward``
+                        # directly instead of ``link_predictor.predict_probability``.
+                        # The streaming writer already put the model in eval mode
+                        # (via ``self.model.eval()`` above) and we're inside a
+                        # ``torch.no_grad()`` context, so the eval/train toggle
+                        # and lock logic in ``predict_probability`` is pure
+                        # overhead. Using ``forward`` directly avoids the per-batch
+                        # lock acquisition and the redundant
+                        # ``torch.set_grad_enabled(False)`` context manager.
+                        probs = self.model.link_predictor.forward(
                             d_flat, ds_flat, apply_temperature=False
                         )
                         batch_scores[:, ds_start:ds_end_idx] = probs.reshape(
@@ -1911,13 +2076,33 @@ class GTRLBridge:
                         )
 
                 scores_np = batch_scores.cpu().numpy()
+                # P3-047 ROOT FIX (v107): also compute calibrated scores
+                # for this batch (apply_temperature=True). Reuses the
+                # same drug/disease embeddings; only re-runs the cheap
+                # MLP forward with temperature scaling.
+                with torch.no_grad():
+                    batch_calibrated_scores = torch.zeros(len(batch_drugs), num_diseases)
+                    for ds_start in range(0, num_diseases, 2048):
+                        ds_end_idx = min(ds_start + 2048, num_diseases)
+                        ds_emb = disease_emb_all[ds_start:ds_end_idx]
+                        d_expanded = d_emb_batch.unsqueeze(1).expand(-1, ds_emb.shape[0], -1)
+                        ds_expanded = ds_emb.unsqueeze(0).expand(d_emb_batch.shape[0], -1, -1)
+                        d_flat = d_expanded.reshape(-1, d_emb_batch.shape[1])
+                        ds_flat = ds_expanded.reshape(-1, d_emb_batch.shape[1])
+                        cal_probs = self.model.link_predictor.forward(
+                            d_flat, ds_flat, apply_temperature=True
+                        )
+                        batch_calibrated_scores[:, ds_start:ds_end_idx] = cal_probs.reshape(
+                            len(batch_drugs), -1
+                        )
+                calibrated_scores_np = batch_calibrated_scores.cpu().numpy()
                 # ROOT FIX (D-02): build a per-batch DataFrame with just
-                # (drug, disease, gnn_score, confidence), then call
-                # _compute_supplementary_features to add ALL supplementary
-                # features using the SAME code path as the in-memory
-                # writer. This eliminates the 250 lines of duplicate
-                # feature-computation logic that had diverged from
-                # _compute_supplementary_features (D-02 audit finding).
+                # (drug, disease, gnn_score, gnn_score_calibrated, confidence),
+                # then call _compute_supplementary_features to add ALL
+                # supplementary features using the SAME code path as the
+                # in-memory writer. This eliminates the 250 lines of
+                # duplicate feature-computation logic that had diverged
+                # from _compute_supplementary_features (D-02 audit finding).
                 p = np.clip(scores_np, 1e-7, 1 - 1e-7)
                 entropy = -(p * np.log(p) + (1 - p) * np.log(1 - p))
                 # P3-008 ROOT FIX (HIGH, fp32 precision): clip confidence to
@@ -1942,11 +2127,13 @@ class GTRLBridge:
                 )
                 batch_diseases_tiled = np.tile(disease_names_arr, len(batch_drugs))
                 batch_gnn = scores_np.flatten()
+                batch_gnn_calibrated = calibrated_scores_np.flatten()
                 batch_conf = confidence_np.flatten()
                 batch_df = pd.DataFrame({
                     "drug": batch_drugs_tiled,
                     "disease": batch_diseases_tiled,
                     "gnn_score": batch_gnn,
+                    "gnn_score_calibrated": batch_gnn_calibrated,
                     "confidence": batch_conf,
                 })
 
@@ -1984,8 +2171,8 @@ class GTRLBridge:
                 # writing, so the CSV output is byte-identical to the
                 # previous version.
                 format_cols = [
-                    "gnn_score", "confidence", "safety_score", "market_score",
-                    "pathway_score", "patent_score", "rare_disease_flag",
+                    "gnn_score", "gnn_score_calibrated", "confidence", "safety_score",
+                    "market_score", "pathway_score", "patent_score", "rare_disease_flag",
                     "unmet_need_score", "efficacy_score", "adme_score",
                 ]
                 batch_df_out = batch_df.copy()
@@ -2210,22 +2397,62 @@ class GTRLBridge:
         idx_to_drug_name: Dict[int, str] = {idx: name for name, idx in drug_map.items()}
 
         efficacy_per_drug: Dict[int, float] = {}
+        # P3-050 ROOT FIX (v107): enrich the efficacy_score signal. The
+        # previous code computed base_e from target_count_per_drug ONLY.
+        # On the demo graph, each drug has 0-1 such edges, so base_e was
+        # 0.30 or 0.55 for almost every drug — near-constant. The fix
+        # combines target diversity with total connectivity and pathway
+        # reachability for continuous variance.
+        total_out_edges_per_drug: Dict[int, int] = {}
+        for (src_type, _rel, _tgt_type), ei in self.edge_indices.items():
+            if src_type != "drug" or ei is None or ei.numel() == 0:
+                continue
+            for d_idx in ei[0].tolist():
+                total_out_edges_per_drug[d_idx] = total_out_edges_per_drug.get(d_idx, 0) + 1
+        max_total_edges = max(total_out_edges_per_drug.values()) if total_out_edges_per_drug else 1
+
+        # Build pathway reachability: drug -> protein -> pathway (2-hop).
+        bnd_ei = self.edge_indices.get(("drug", "binds", "protein"))
+        mod_ei = self.edge_indices.get(("drug", "modulates", "protein"))
+        drug_to_proteins: Dict[int, List[int]] = {}
+        for ei in [inh_ei, act_ei, bnd_ei, mod_ei]:
+            if ei is None or ei.numel() == 0:
+                continue
+            for d_idx, p_idx in zip(ei[0].tolist(), ei[1].tolist()):
+                drug_to_proteins.setdefault(d_idx, []).append(p_idx)
+        pop_ei = self.edge_indices.get(("protein", "part_of", "pathway"))
+        protein_to_pathways: Dict[int, List[int]] = {}
+        if pop_ei is not None and pop_ei.numel() > 0:
+            for p_idx, pw_idx in zip(pop_ei[0].tolist(), pop_ei[1].tolist()):
+                protein_to_pathways.setdefault(p_idx, []).append(pw_idx)
+        pathway_reach_per_drug: Dict[int, int] = {}
+        for d_idx, proteins in drug_to_proteins.items():
+            reachable_pathways: set = set()
+            for p_idx in proteins:
+                reachable_pathways.update(protein_to_pathways.get(p_idx, []))
+            pathway_reach_per_drug[d_idx] = len(reachable_pathways)
+        max_pathway_reach = max(pathway_reach_per_drug.values()) if pathway_reach_per_drug else 1
+
         for d_idx in range(num_drugs):
             tc = target_count_per_drug.get(d_idx, 0)
-            # Target diversity: 0 targets -> 0.30 (low validation),
-            # 1 target -> 0.55, 2 targets -> 0.72, 3+ -> up to 0.95.
-            # This is INDEPENDENT of the "treats" label (no leakage).
+            te = total_out_edges_per_drug.get(d_idx, 0)
+            pr = pathway_reach_per_drug.get(d_idx, 0)
+            # P3-050 v107: target diversity component.
             if tc == 0:
-                base_e = 0.30
+                td_component = 0.30
             elif tc == 1:
-                base_e = 0.55
+                td_component = 0.55
             elif tc == 2:
-                base_e = 0.72
+                td_component = 0.72
             else:
-                base_e = 0.72 + 0.23 * min(1.0, (tc - 2) / max(max_targets - 2, 1))
+                td_component = 0.72 + 0.23 * min(1.0, (tc - 2) / max(max_targets - 2, 1))
+            # Total connectivity component.
+            tc_component = 0.30 + 0.65 * (float(te) / max(max_total_edges, 1))
+            # Pathway reach component.
+            pr_component = 0.30 + 0.65 * (float(pr) / max(max_pathway_reach, 1))
+            # P3-050 v107: weighted combination of the three signals.
+            base_e = 0.45 * td_component + 0.30 * tc_component + 0.25 * pr_component
             # Small per-drug noise (NOT per-pair noise) for differentiation.
-            # Seed is derived from the DRUG NAME (SHA-256) so the same drug
-            # always gets the same noise regardless of its node index.
             drug_name = idx_to_drug_name.get(d_idx, f"__unknown_drug_{d_idx}__")
             drug_seed = _deterministic_name_seed(self.seed, drug_name, 44)
             drug_rng = np.random.default_rng(drug_seed)
@@ -2670,12 +2897,21 @@ class GTRLBridge:
         # with actual treatment count from the graph (treatment gap component).
         # Rare diseases with few treatments get the HIGHEST unmet need.
         # Common diseases with many treatments get the LOWEST.
+        # P3-046 ROOT FIX (v107): migrate to compute_graph_degrees_array
+        # (vectorized numpy) instead of compute_graph_degrees (dict).
+        from .utils import compute_graph_degrees_array
         treats_ei = self.edge_indices.get(("drug", "treats", "disease"))
         if treats_ei is not None and treats_ei.numel() > 0:
-            treat_count_per_disease = compute_graph_degrees(
+            treat_counts_array = compute_graph_degrees_array(
                 {("drug", "treats", "disease"): treats_ei},
-                "disease", direction="in"
+                "disease", direction="in",
+                num_nodes=len(disease_map),
             )
+            treat_count_per_disease = {
+                int(idx): int(count)
+                for idx, count in enumerate(treat_counts_array)
+                if count > 0
+            }
         else:
             treat_count_per_disease = {}
 
@@ -2691,12 +2927,19 @@ class GTRLBridge:
         # LOWER unmet need (more biological research has been done).
         # This produces continuous variation even when tc=0 for all
         # diseases.
+        # P3-046 v107: same array-based migration as above.
         disrupted_ei = self.edge_indices.get(("pathway", "disrupted_in", "disease"))
         if disrupted_ei is not None and disrupted_ei.numel() > 0:
-            pathway_count_per_disease = compute_graph_degrees(
+            pathway_counts_array = compute_graph_degrees_array(
                 {("pathway", "disrupted_in", "disease"): disrupted_ei},
-                "disease", direction="in"
+                "disease", direction="in",
+                num_nodes=len(disease_map),
             )
+            pathway_count_per_disease = {
+                int(idx): int(count)
+                for idx, count in enumerate(pathway_counts_array)
+                if count > 0
+            }
         else:
             pathway_count_per_disease = {}
         max_pw = max(pathway_count_per_disease.values()) if pathway_count_per_disease else 1
@@ -2722,138 +2965,44 @@ class GTRLBridge:
         # lowest). This also satisfies the W-10 forensic test which
         # asserts ``compute_unmet_need_score`` appears in the source.
 
-        def compute_unmet_need_score(disease_name: str, n_treatments: int = 0) -> float:
-            """v91 FORENSIC ROOT FIX: renamed from _unmet_need_for_disease
-            to match the source-inspection contract enforced by
-            test_v4_s_f1_unmet_need_score_non_constant (which checks for
-            the literal string 'compute_unmet_need_score' in the source
-            of _compute_supplementary_features). The function itself is
-            unchanged -- it computes a scientifically meaningful unmet-
-            need score from treatment count + pathway connectivity.
-
-            v91: accepts optional n_treatments kwarg for compatibility with
-            callers that use the biomedical_tables.compute_unmet_need_score
-            signature (which this nested function shadows). When n_treatments
-            is explicitly provided (>0), delegates to the top-level imported
-            function; otherwise uses the graph-based computation.
-            """
-            if n_treatments > 0:
-                # Delegate to the imported biomedical_tables version
-                return _compute_unmet_need_score_table(disease_name, n_treatments)
-            ds_idx = disease_map.get(disease_name, -1)
-            tc = treat_count_per_disease.get(ds_idx, 0) if ds_idx >= 0 else 0
-            # v91 FORENSIC ROOT FIX: call _compute_unmet_need_score_table
-            # DIRECTLY (the imported biomedical_tables version) -- NOT the
-            # nested function. Calling compute_unmet_need_score(disease_name,
-            # n_treatments=tc) would RECURSE infinitely when tc=0 (the
-            # nested function calls itself with the same default args).
-            return float(_compute_unmet_need_score_table(disease_name, int(tc)))
-
-        # V92 ROOT FIX (BUG P3-012): REMOVED the duplicate assignment
-        # ``df["unmet_need_score"] = df["disease"].map(compute_unmet_need_score)``
-        # that previously ran here. The SAME column was overwritten ~63
-        # lines later by ``df["unmet_need_score"] = df["disease"].map(
-        # _unmet_need_for_disease)``, so the first assignment was pure
-        # wasted compute (N extra ``compute_unmet_need_score`` calls per
-        # row). The second (curated + pathway-aware) assignment is the
-        # one that survives, so we keep ONLY that one.
-        # v91 ROOT FIX: use the curated compute_unmet_need_score function
-        # from biomedical_tables.py (imported at module level, line 93).
-        # This uses REAL WHO/Orphanet prevalence data + treatment count,
-        # producing a scientifically meaningful unmet_need score. The
-        # previous code used a local inner function _unmet_need_for_disease
-        # that referenced undefined variables (unmet_scale, max_pathways)
-        # causing NameError. The curated function is the v89 ROOT FIX
-        # that the forensic tests expect (test_v4_s_f1 checks for
-        # "compute_unmet_need_score" in the source).
-        #
-        # P3-D04 / P3-D05 / P3-D06 / P3-C04 ROOT FIX (compound + dead code):
-        # The previous version of _unmet_need_for_disease had THREE bugs:
-        #   1. P3-D05: ``base = compute_unmet_need_score(disease_name, tc)``
-        #      was computed at the top of the function but NEVER READ --
-        #      dead assignment.
-        #   2. The try block at the next statement RETURNED immediately
-        #      (``return float(compute_unmet_need_score(disease_name,
-        #      n_treatments=int(tc)))``), so the pathway-connectivity
-        #      differentiation code (P3-D06: 7 lines) AFTER the try/except
-        #      block was UNREACHABLE.
-        #   3. P3-C04 (compound): on demo graphs most diseases have tc=0,
-        #      so unmet_need_score = _compute_unmet_need_score_table(
-        #      disease_name, 0). Diseases with the same prevalence (or
-        #      both absent from the table) got IDENTICAL scores. The
-        #      pathway differentiation (which would make them different)
-        #      was unreachable, so the RL agent saw a near-constant
-        #      unmet_need_score column -> could not learn a useful policy.
-        # The fix restructures the function so the pathway differentiation
-        # is ACTUALLY applied to the base score. The try/except now wraps
-        # ONLY the curated-table lookup (which can fail for unknown
-        # diseases); the pathway differentiation runs UNCONDITIONALLY
-        # afterward. This makes unmet_need_score a continuous feature
-        # with meaningful variance even when multiple diseases share the
-        # same treatment count.
+        # P3-051 / P3-053 ROOT FIX (v107): DELETED the nested
+        # ``compute_unmet_need_score`` function that shadowed the imported
+        # version. The ``_unmet_need_for_disease`` function below now calls
+        # the IMPORTED ``compute_unmet_need_score`` directly (no shadowing,
+        # no aliasing). The source-inspection test is replaced by a
+        # behavioral test in test_p3_029_to_055_v107_root_fixes.py.
         def _unmet_need_for_disease(disease_name: str) -> float:
             ds_idx = disease_map.get(disease_name, -1)
             tc = treat_count_per_disease.get(ds_idx, 0)
-            # P3-D05 fix: removed the dead ``base = compute_unmet_need_score(
-            # disease_name, tc)`` line that was never read.
-            # v91 ROOT FIX (test source-check + scientific correctness):
-            #   The previous code used an INLINE exp-decay formula
-            #   ``base = 0.95 * exp(-tc / unmet_scale) + 0.05``. Two problems:
-            #   1. tests/test_w04_w13_d01_d10_s01_s03_fixes.py::test_unmet_need_uses_curated_prevalence
-            #      and tests/test_e2e_integration.py:2162 REQUIRE the source
-            #      of _compute_supplementary_features to contain the string
-            #      "compute_unmet_need_score" -- i.e. the function must CALL
-            #      compute_unmet_need_score from biomedical_tables.py.
-            #   2. compute_unmet_need_score uses the CURATED WHO/Orphanet
-            #      prevalence table (rarity_component + treatment_gap), which
-            #      is scientifically correct. The inline formula ignored
-            #      disease rarity entirely.
-            #   ROOT FIX: call compute_unmet_need_score(disease_name, tc)
-            #   for the base score, then add the v89 S-F1 pathway-
-            #   connectivity differentiation on top. This satisfies the
-            #   source-check tests AND uses the curated prevalence table.
+            # P3-051/P3-053 v107: call the IMPORTED compute_unmet_need_score
+            # directly (no nested shadow, no alias).
             # V92 ROOT FIX (BUG P3-005, CRITICAL - dead S-F1 differentiation):
             # The previous structure had both the try and except branches
             # return early, so the pathway-connectivity differentiation
             # below (pw_diff = 0.03 * ...) was UNREACHABLE. On small demo
             # graphs where most diseases have tc=0, ALL diseases got the
-            # SAME compute_unmet_need_score(disease_name, 0) value. The
-            # "v89 ROOT FIX (CI S-F1)" claim was FALSE.
+            # SAME compute_unmet_need_score(disease_name, 0) value.
             #
             # ROOT FIX: restructure so the pathway-connectivity
             # differentiation is the SINGLE reachable code path. Compute
             # base via compute_unmet_need_score (with a defensive
             # fallback that does NOT early-return), then add the
-            # pathway-connectivity pw_diff and clip. This is the
-            # SCIENTIFICALLY correct behavior: the curated prevalence +
-            # treatment count provides the primary signal, and the
-            # pathway-connectivity provides a small secondary signal for
-            # continuous variation on demo graphs (where many diseases
-            # share the same treatment count of 0).
+            # pathway-connectivity pw_diff and clip.
             try:
                 base = float(compute_unmet_need_score(disease_name, n_treatments=int(tc)))
             except Exception:
                 # Defensive fallback ONLY for the base value - does NOT
                 # return early. We still apply the pathway-connectivity
-                # differentiation below so demo-graph diseases with
-                # identical treatment counts get distinct unmet_need
-                # scores. Guard against zero division (unmet_scale /
-                # pw_scale could be 0 in degenerate configs).
+                # differentiation below.
                 treat_component = 0.95 * float(np.exp(-tc / max(unmet_scale, 1e-9))) + 0.05
                 pw = pathway_count_per_disease.get(ds_idx, 0)
                 pw_component = 1.0 - 0.4 * (float(pw) / max(pw_scale, 1e-9))
                 base = 0.7 * treat_component + 0.3 * pw_component
-            # v89 ROOT FIX (CI S-F1 - unmet_need_score too few distinct
-            # values on demo graph): add a small pathway-connectivity
+            # v89 ROOT FIX (CI S-F1): add a small pathway-connectivity
             # differentiation. Diseases with the SAME treatment count but
             # DIFFERENT pathway connectivity get slightly different
             # unmet_need scores. The secondary signal is small (+/-0.015)
             # so it doesn't overwhelm the primary treatment-count signal.
-            # V92 ROOT FIX (BUG P3-005): this code is now REACHABLE -
-            # previously the try/except above returned early, making
-            # this block dead code. Now base is always set (either by
-            # the curated function or the defensive fallback), and we
-            # always apply the pw_diff secondary signal here.
             pw_count = pathway_count_per_disease.get(ds_idx, 0)
             pw_diff = 0.03 * (float(pw_count) / max(max_pw, 1)) - 0.015
             return float(np.clip(base + pw_diff, 0.0, 1.0))
@@ -2947,6 +3096,13 @@ class GTRLBridge:
         # recommended — for production scale this produces 100+ MB
         # CSVs and slows RL training).
         gt_top_k: int = 1000,
+        # P3-054 ROOT FIX (v107): allow resume from checkpoint on the
+        # production path when the graph has not changed. When False,
+        # the bridge attempts to resume from checkpoint EVEN ON THE
+        # PRODUCTION PATH, but ONLY if the checkpoint's graph_content_hash
+        # (stored in a sidecar file) matches the current graph's hash.
+        # Default True (safe — always re-train on production path).
+        force_retrain: bool = True,
     ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         """Run the COMPLETE end-to-end GT + RL pipeline.
 
@@ -3208,10 +3364,20 @@ class GTRLBridge:
         # AND ``phase1_staged_data`` are None -- i.e., the demo-graph
         # fallback path. Any production path (graph_data OR
         # phase1_staged_data) forces fresh training.
+        #
+        # P3-054 ROOT FIX (v107): the above rule is now gated by
+        # ``force_retrain``. When True (default — preserves safe behavior),
+        # production paths force fresh training. When False, the bridge
+        # attempts to resume EVEN on production paths, but ONLY if the
+        # checkpoint's graph_content_hash matches the current graph's hash.
+        if force_retrain:
+            _can_resume = (graph_data is None and phase1_staged_data is None)
+        else:
+            _can_resume = self._can_resume_from_checkpoint_safely()
         gt_results = self.train_model(
             epochs=gt_epochs,
             patience=gt_patience,  # P3-025 ROOT FIX: use the parameter, not hardcoded 40
-            resume_from_checkpoint=(graph_data is None and phase1_staged_data is None),
+            resume_from_checkpoint=_can_resume,
         )
 
         # Generate RL input
@@ -3317,12 +3483,52 @@ class GTRLBridge:
             # streaming threshold. At production scale (1M pairs), this
             # reduces the CSV from 100+ MB to ~200 KB.
             if _apply_top_k_filter:
-                _full_df = pd.read_csv(gt_output_path)
-                _full_df = _full_df.sort_values("gnn_score", ascending=False).head(gt_top_k).reset_index(drop=True)
-                _full_df.to_csv(gt_output_path, index=False)
+                # P3-031 ROOT FIX (v107): CHUNKED top-K filter to avoid
+                # OOM at production scale. The previous code did:
+                #     _full_df = pd.read_csv(gt_output_path)
+                #     _full_df = _full_df.sort_values("gnn_score", ascending=False).head(gt_top_k)
+                #     _full_df.to_csv(gt_output_path, index=False)
+                # This loaded the ENTIRE CSV into RAM. At production scale
+                # (1M+ pairs, 100+ MB CSV), this OOMed and crashed the
+                # pipeline after HOURS of training. The audit's P3-031
+                # finding: "The streaming path was designed to AVOID
+                # materializing the full DataFrame, but the top-K filter
+                # defeats this."
+                #
+                # ROOT FIX: stream the CSV in chunks via
+                # ``pd.read_csv(..., chunksize=...)``, maintain a min-heap
+                # of the top-K rows by gnn_score, and write ONLY the heap
+                # at the end. Peak RAM is bounded by ``chunksize + K``
+                # rows, NOT by the full CSV size.
+                import heapq
+
+                top_k_heap: List[Tuple[float, int, Dict[str, Any]]] = []
+                _tiebreak_counter = 0
+                _chunk_size = 10_000
+                _total_rows_seen = 0
+                with open(gt_output_path, "r", encoding="utf-8") as _hdr_f:
+                    _header_line = _hdr_f.readline().rstrip("\n")
+                _header_cols = _header_line.split(",")
+
+                for _chunk in pd.read_csv(gt_output_path, chunksize=_chunk_size):
+                    _total_rows_seen += len(_chunk)
+                    for _gnn_score, _row_tuple in zip(_chunk["gnn_score"].tolist(), _chunk.to_dict("records")):
+                        _tiebreak_counter += 1
+                        _heap_item = (float(_gnn_score), _tiebreak_counter, _row_tuple)
+                        if len(top_k_heap) < gt_top_k:
+                            heapq.heappush(top_k_heap, _heap_item)
+                        else:
+                            heapq.heappushpop(top_k_heap, _heap_item)
+
+                _top_k_rows = sorted(top_k_heap, key=lambda x: x[0], reverse=True)
+                _top_k_df = pd.DataFrame([r[2] for r in _top_k_rows], columns=_header_cols)
+                _top_k_df.to_csv(gt_output_path, index=False)
                 logger.info(
-                    f"P4-016: gt_predictions.csv filtered to top-{gt_top_k} "
-                    f"pairs by gnn_score (was {total_pairs:,}, now {len(_full_df):,})."
+                    f"P3-031 ROOT FIX (v107): gt_predictions.csv filtered "
+                    f"to top-{gt_top_k} pairs via CHUNKED read (heap-based, "
+                    f"peak RAM ~{_chunk_size + gt_top_k} rows, NOT "
+                    f"{_total_rows_seen:,}). Scanned {_total_rows_seen:,} "
+                    f"rows total; wrote {len(_top_k_df):,} top-K rows."
                 )
         else:
             rl_input_df = self.generate_rl_input()

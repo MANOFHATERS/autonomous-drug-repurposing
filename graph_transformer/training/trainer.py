@@ -1694,6 +1694,34 @@ class GraphTransformerTrainer:
                 f"model weights (best_epoch={self.best_epoch}) into the "
                 f"live model."
             )
+        else:
+            # P3-038 ROOT FIX (v107): log a WARNING when best_state_dict
+            # is None at load time. The previous code silently kept the
+            # last-epoch weights (loaded above as model_state_dict) with
+            # no indication to the user. The audit's P3-038 finding: "If
+            # best_state_dict is None (training crashed early), the live
+            # model has the LAST epoch weights, not the BEST. The user
+            # has no warning." A user who loads a checkpoint expecting
+            # the BEST validation model gets the LAST (possibly overfit)
+            # model — predictions are based on overfit weights, but the
+            # user has no way to know without inspecting the checkpoint
+            # fields manually. The WARNING makes this situation VISIBLE
+            # so the user can decide whether to re-train (recommended)
+            # or accept the last-epoch weights (e.g., for debugging).
+            logger.warning(
+                f"P3-038 ROOT FIX (v107): checkpoint at {path} has NO "
+                f"best_state_dict field. The live model now has the "
+                f"LAST-epoch weights (model_state_dict), NOT the BEST "
+                f"validation weights. This happens when training crashed "
+                f"early (before any validation improvement was recorded) "
+                f"or when the checkpoint was saved by an older trainer "
+                f"version that did not track best_state_dict. Predictions "
+                f"from this model may be based on OVERFIT weights. "
+                f"RECOMMENDATION: re-train the model from scratch to "
+                f"get the best-validation weights, OR explicitly verify "
+                f"the last-epoch weights are acceptable for your use "
+                f"case (e.g., debugging only)."
+            )
         # V90 ROOT FIX (BUG #33): restore best_epoch. The previous code
         # loaded every field EXCEPT best_epoch, leaving it at its __init__
         # default of 0. After reload, the user could not tell which epoch

@@ -65,6 +65,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -122,6 +123,13 @@ class PredictRequest(BaseModel):
 
 # Global model state -- loaded once at startup, reused across requests.
 _MODEL_STATE: Dict[str, Any] = {}
+# P3-042 ROOT FIX (v107): lock around _MODEL_STATE check-and-build.
+# The previous code checked ``if _MODEL_STATE: return _MODEL_STATE``
+# without a lock. Under concurrent load (V1 contract: 100 concurrent
+# requests), two requests could both see _MODEL_STATE as empty, both
+# load the checkpoint, both write to _MODEL_STATE. The lock serializes
+# the check-and-load so exactly ONE load happens.
+_MODEL_STATE_LOCK = threading.Lock()
 
 
 def _torch_load_safe(path: str) -> Dict[str, Any]:
@@ -151,27 +159,28 @@ def _load_or_build_model() -> Dict[str, Any]:
 
     P3-001 ROOT FIX: NO demo-model fallback. If no checkpoint is
     configured or the checkpoint cannot be loaded, return an error state.
-    The frontend route (gt-inference.ts) already returns ``source: "none"``
-    when no checkpoint exists — this service must do the SAME, not serve
-    fake predictions from a demo model.
+
+    P3-042 ROOT FIX (v107): the check-and-load is now serialized by
+    ``_MODEL_STATE_LOCK`` to prevent concurrent duplicate loads.
     """
-    if _MODEL_STATE:
-        return _MODEL_STATE
+    with _MODEL_STATE_LOCK:
+        if _MODEL_STATE:
+            return _MODEL_STATE
 
-    checkpoint_path = os.environ.get("GT_CHECKPOINT_PATH")
-    if not checkpoint_path or not Path(checkpoint_path).exists():
-        _MODEL_STATE.update({
-            "backend": "no_checkpoint",
-            "error": f"GT_CHECKPOINT_PATH not set or file not found: {checkpoint_path}",
-        })
-        return _MODEL_STATE
+        checkpoint_path = os.environ.get("GT_CHECKPOINT_PATH")
+        if not checkpoint_path or not Path(checkpoint_path).exists():
+            _MODEL_STATE.update({
+                "backend": "no_checkpoint",
+                "error": f"GT_CHECKPOINT_PATH not set or file not found: {checkpoint_path}",
+            })
+            return _MODEL_STATE
 
-    try:
-        return _load_checkpoint(checkpoint_path)
-    except Exception as exc:
-        logger.error("GT checkpoint load failed: %s", exc, exc_info=True)
-        _MODEL_STATE.update({"backend": "error", "error": str(exc)})
-        return _MODEL_STATE
+        try:
+            return _load_checkpoint(checkpoint_path)
+        except Exception as exc:
+            logger.error("GT checkpoint load failed: %s", exc, exc_info=True)
+            _MODEL_STATE.update({"backend": "error", "error": str(exc)})
+            return _MODEL_STATE
 
 
 def _load_checkpoint(checkpoint_path: str) -> Dict[str, Any]:
