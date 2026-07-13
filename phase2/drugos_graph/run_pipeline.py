@@ -4032,18 +4032,50 @@ def step7_additional_sources(
         # DRUGOS_STRICT_CLINICALTRIALS=1), surface as a critical_failure
         # flag so the V1 launch criteria hard-fails. Default behavior
         # (warn-and-continue) is preserved for backward compat.
+        #
+        # v107 ROOT FIX (ISSUE-P2-054): the previous strict-mode path
+        # only set ``results["clinicaltrials_critical_failure"] = True``
+        # but did NOT raise — the pipeline continued running, and the
+        # critical_failure flag was only checked at V1 launch
+        # verification (which may not run for dev iterations). This
+        # meant the KG was built with ZERO ``tested_for`` edges from
+        # ClinicalTrials, and the RL ranker's clinical-evidence tier
+        # was empty — drugs that failed Phase III were treated the
+        # same as drugs never tested. ROOT FIX: in production mode
+        # (DRUGOS_ENV=production OR DRUGOS_STRICT=1 OR
+        # DRUGOS_STRICT_CLINICALTRIALS=1), RAISE the exception after
+        # recording the flag, so the pipeline fails loudly at the
+        # point of failure rather than producing a silently-corrupt KG.
         _ct_strict = (
             os.environ.get("DRUGOS_STRICT", "") == "1"
             or os.environ.get("DRUGOS_STRICT_CLINICALTRIALS", "") == "1"
+            or os.environ.get("DRUGOS_ENV", "").lower() == "production"
         )
         if _ct_strict:
             logger.error(
-                "ClinicalTrials ingestion FAILED in strict mode — marking "
-                "critical_failure (will block V1 launch): %s", e
+                "ClinicalTrials ingestion FAILED in strict/production "
+                "mode — marking critical_failure (will block V1 launch) "
+                "and RAISING to abort the pipeline. The clinical "
+                "evidence dimension is patient-safety-critical: drugs "
+                "that failed Phase III must NOT be treated the same as "
+                "drugs never tested. Error: %s. v107 ISSUE-P2-054 root "
+                "fix.",
+                e,
             )
             results["clinicaltrials_critical_failure"] = True
+            results["clinicaltrials_error"] = str(e)
+            # v107: re-raise so the pipeline aborts. The
+            # critical_failure flag is also set so that if the
+            # exception is caught upstream, the V1 verifier still
+            # sees the failure.
+            raise
         else:
-            logger.warning("ClinicalTrials ingestion failed: %s", e)
+            logger.warning(
+                "ClinicalTrials ingestion failed (dev mode — "
+                "warn-and-continue). Set DRUGOS_STRICT=1 or "
+                "DRUGOS_ENV=production to abort on failure. Error: %s",
+                e,
+            )
         results["clinicaltrials_error"] = str(e)
 
     # ─── 7f: DisGeNET (BUG-SCI-03 FIX — missing project source) ───────────
@@ -5369,14 +5401,63 @@ def step9_build_pyg(
             ("train", train_data), ("val", val_data), ("test", test_data),
         ]:
             # Record chemberta lineage on split data too.
+            # v107 ROOT FIX (ISSUE-P2-049): the previous code did
+            # ``try: _sdata.__chemberta_features_used__ = ...; ... except
+            # Exception: pass`` — silently swallowing ALL errors. If the
+            # attribute couldn't be set (PyG version issue, HeteroData
+            # subclass that overrides __setattr__), the split files
+            # didn't have the lineage flag. Downstream V1 launch
+            # verification can't confirm whether the model used real
+            # molecular features (ChemBERTa) or random fallback features.
+            # ROOT FIX: log the exception at WARNING, AND write a
+            # companion ``.lineage.json`` file next to the split file so
+            # the lineage is preserved even if attribute-setting fails.
             try:
                 _sdata.__chemberta_features_used__ = bool(chemberta_used)
                 _sdata.__chemberta_failure_reason__ = chemberta_failure_reason
-            except Exception:
-                pass
+            except Exception as _attr_exc:
+                logger.warning(
+                    "Step 9: could not set __chemberta_features_used__ "
+                    "on %s split HeteroData (%s: %s). Writing companion "
+                    ".lineage.json file instead. v107 ISSUE-P2-049.",
+                    _sname, type(_attr_exc).__name__, _attr_exc,
+                )
             _split_path = pyg_builder.save_heterodata(
                 _sdata, filename=f"heterodata_split_{_sname}.pt",
             )
+            # v107 ISSUE-P2-049: ALWAYS write a companion .lineage.json
+            # file next to the split file. This is the authoritative
+            # lineage record — the HeteroData attribute is a convenience
+            # for in-process consumers, but the .lineage.json file
+            # survives PyG version upgrades, serialization roundtrips,
+            # and cross-process verification (the V1 launch verifier
+            # reads this file to confirm ChemBERTa features were used).
+            try:
+                _lineage_path = _split_path.with_suffix(
+                    _split_path.suffix + ".lineage.json"
+                )
+                import json as _json_v107
+                _lineage_payload = {
+                    "split": _sname,
+                    "chemberta_features_used": bool(chemberta_used),
+                    "chemberta_failure_reason": (
+                        chemberta_failure_reason or None
+                    ),
+                    "source_split_file": str(_split_path.name),
+                    "v107_issue_p2_049_fix": True,
+                }
+                _lineage_path.write_text(
+                    _json_v107.dumps(_lineage_payload, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception as _lineage_exc:
+                logger.error(
+                    "Step 9: FAILED to write companion .lineage.json "
+                    "for %s split (%s: %s). V1 launch verification "
+                    "cannot confirm ChemBERTa feature usage. v107 "
+                    "ISSUE-P2-049.",
+                    _sname, type(_lineage_exc).__name__, _lineage_exc,
+                )
             split_paths[_sname] = str(_split_path)
         logger.info(
             "Step 9: node_disjoint_split produced 3 GNN-safe split files "
@@ -8019,10 +8100,56 @@ def step11b_train_graph_transformer(
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             if scheduler is not None:
+                # v107 ROOT FIX (ISSUE-P2-045): the previous code did
+                # ``try: scheduler.step() except Exception: pass``, which
+                # swallowed ALL exceptions. ReduceLROnPlateau.step() raises
+                # ``ValueError`` if the metric is NaN (degenerate batch),
+                # and ``TypeError`` if the metric has the wrong type. Both
+                # of those are recoverable — we want to log them and skip
+                # the LR update for this step. But a ``RuntimeError``
+                # (e.g. CUDA error, scheduler not initialized) indicates a
+                # real bug that should surface, NOT be silently swallowed.
+                # Swallowing RuntimeErrors left the LR frozen at its
+                # initial value indefinitely — HGT training silently
+                # failed to converge, AUC was lower than expected, and
+                # the V1 launch criterion (>0.85 AUC) silently failed.
+                #
+                # ROOT FIX: catch ONLY TypeError/ValueError (the expected
+                # scheduler-specific exceptions). Log them at WARNING so
+                # operators see degenerate batches. For any other
+                # exception type, log at ERROR and RE-RAISE so the
+                # training loop fails loudly instead of running with a
+                # frozen LR. Also detect NaN metrics explicitly and log
+                # them at ERROR (a NaN metric is a model-health issue,
+                # not a scheduler issue).
                 try:
                     scheduler.step()
-                except Exception:
-                    pass
+                except (TypeError, ValueError) as _sched_exc:
+                    # Check if the cause is a NaN metric — that's a
+                    # model-health issue worth flagging at ERROR level.
+                    _msg = str(_sched_exc).lower()
+                    if "nan" in _msg or "not finite" in _msg:
+                        logger.error(
+                            "HGT scheduler.step() raised %s: %s — the "
+                            "validation metric is NaN. This indicates a "
+                            "degenerate batch or model divergence (grad "
+                            "explosion after clip). The LR update is "
+                            "SKIPPED for this step, but training "
+                            "continues. If this fires repeatedly, "
+                            "investigate gradient norms and batch "
+                            "composition. v107 ISSUE-P2-045.",
+                            type(_sched_exc).__name__, _sched_exc,
+                        )
+                    else:
+                        logger.warning(
+                            "HGT scheduler.step() raised %s: %s — "
+                            "skipping LR update for this step. v107 "
+                            "ISSUE-P2-045.",
+                            type(_sched_exc).__name__, _sched_exc,
+                        )
+                # NOTE: any other exception (RuntimeError, etc.) is NOT
+                # caught — it propagates up and aborts training, which
+                # is the correct behavior for unexpected failures.
             epoch_loss += loss.item()
 
         # Validation AUC (every 5 epochs OR the final epoch).
@@ -9686,16 +9813,78 @@ def run_full_pipeline(
         logger.debug("Failed to write audit entry: %s", e)
 
     # Write lineage manifest (GAP-LIN-01)
-    try:
-        from .config import write_lineage_manifest
-        input_checksums = results.get("step1", {}).get("input_checksums", {})
-        lineage_path = write_lineage_manifest(
-            PROCESSED_DIR / "lineage_manifest.json",
-            input_checksums=input_checksums,
+    # v107 ROOT FIX (ISSUE-P2-041): the lineage manifest IS the FDA 21
+    # CFR Part 11 audit trail — it records which inputs (file hashes,
+    # source versions, fetch timestamps) produced this KG build. Losing
+    # it means a regulator cannot verify which inputs produced the
+    # current KG, breaking the compliance chain. The previous code
+    # wrapped the write in ``except Exception: logger.debug(...)``,
+    # silently dropping the failure. Operators never saw the broken
+    # audit trail. ROOT FIX:
+    #   (1) Log at ERROR level (not debug) so it surfaces in production.
+    #   (2) Retry with exponential backoff (3 attempts: 0.5s, 1s, 2s).
+    #       Transient FS errors (NFS hiccup, disk full for 1s) recover.
+    #   (3) In production mode (DRUGOS_ENV=production OR DRUGOS_STRICT=1),
+    #       re-raise after retries exhausted so the pipeline fails loudly
+    #       instead of producing an unauditable KG. In dev mode, log the
+    #       error and continue (dev environments may not have a writable
+    #       audit directory).
+    import time as _time_v107
+    _LINEAGE_MAX_RETRIES = 3
+    _LINEAGE_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+    _lineage_written = False
+    _lineage_last_exc: Exception | None = None
+    for _lineage_attempt in range(_LINEAGE_MAX_RETRIES):
+        try:
+            from .config import write_lineage_manifest
+            input_checksums = results.get("step1", {}).get("input_checksums", {})
+            lineage_path = write_lineage_manifest(
+                PROCESSED_DIR / "lineage_manifest.json",
+                input_checksums=input_checksums,
+            )
+            logger.info("Lineage manifest saved to %s", lineage_path)
+            _lineage_written = True
+            break
+        except Exception as e:
+            _lineage_last_exc = e
+            if _lineage_attempt < _LINEAGE_MAX_RETRIES - 1:
+                logger.warning(
+                    "Lineage manifest write attempt %d/%d failed (%s: %s) — "
+                    "retrying in %.1fs. v107 ISSUE-P2-041.",
+                    _lineage_attempt + 1, _LINEAGE_MAX_RETRIES,
+                    type(e).__name__, e,
+                    _LINEAGE_BACKOFF_SECONDS[_lineage_attempt],
+                )
+                _time_v107.sleep(_LINEAGE_BACKOFF_SECONDS[_lineage_attempt])
+            else:
+                logger.error(
+                    "Lineage manifest write FAILED after %d attempts "
+                    "(last error: %s: %s). FDA 21 CFR Part 11 audit "
+                    "trail is INCOMPLETE — regulators cannot verify "
+                    "which inputs produced this KG build. v107 "
+                    "ISSUE-P2-041 ROOT FIX.",
+                    _LINEAGE_MAX_RETRIES,
+                    type(e).__name__, e,
+                )
+    if not _lineage_written:
+        _is_prod = (
+            os.environ.get("DRUGOS_ENV", "").lower() == "production"
+            or os.environ.get("DRUGOS_STRICT", "") == "1"
         )
-        logger.info("Lineage manifest saved to %s", lineage_path)
-    except Exception as e:
-        logger.debug("Failed to write lineage manifest: %s", e)
+        if _is_prod:
+            raise RuntimeError(
+                f"Lineage manifest write failed after "
+                f"{_LINEAGE_MAX_RETRIES} attempts — FDA 21 CFR Part 11 "
+                f"audit trail cannot be guaranteed in production mode. "
+                f"Last error: {_lineage_last_exc!r}. v107 ISSUE-P2-041."
+            ) from _lineage_last_exc
+        # Dev mode: record the failure in results so downstream
+        # verification can detect the missing audit trail.
+        results["lineage_manifest_failure"] = (
+            f"{type(_lineage_last_exc).__name__}: {_lineage_last_exc}"
+            if _lineage_last_exc
+            else "unknown"
+        )
 
     return results
 

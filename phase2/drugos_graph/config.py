@@ -23,13 +23,44 @@ This module is the AUTHORITATIVE source for:
   - Compliance (naming conventions, data format standards, retention)
   - Audit & lineage (transformation logging, impact analysis, diff)
 
-KNOWN HARDCODED VALUES IN CONSUMERS (audit issue 13.1 — TO BE FIXED):
-  - entity_resolver.py hardcodes ID systems (issue 2.9) — should import CANONICAL_IDS
-  - run_pipeline.py:62 hardcodes LOG_FORMAT (issue 11.3) — should import from config
-  - run_pipeline.py:60 hardcodes logging.INFO (issue 11.2) — should import LOG_LEVEL
-  - drugbank_parser.py:322 hardcodes 'drugbank.xml' (issue 5.3) — should call get_data_source_path
-  - drkg_loader.py:91 hardcodes 'drkg.tsv' glob (issue 5.4) — should call get_drkg_tsv_path
-  - negative_sampling.py:222 hardcodes total_negatives=75000 (issue 2.4) — should read MIN_NEGATIVE_PAIRS
+v107 ROOT FIX (ISSUE-P2-056): ARCHITECTURAL ROADMAP for splitting this
+monolith. This file is 8400+ lines and a change to it can break 38+ files.
+The hardcoded values previously flagged below (issues 2.9, 11.2, 11.3,
+5.3, 5.4, 2.4) have ALL been fixed in prior versions — entity_resolver.py
+now imports CANONICAL_IDS, run_pipeline.py imports LOG_FORMAT/LOG_LEVEL,
+etc. The remaining concern is purely maintainability.
+
+INTENDED SPLIT (do NOT execute mid-release — schedule for v2.1.0):
+  config_paths.py       — RAW_DIR, PROCESSED_DIR, LOGS_DIR, DATA_SOURCES,
+                          get_data_source_path, get_drkg_tsv_path
+  config_neo4j.py       — Neo4jConfig, Neo4jConnectionConfig, batch_size_*
+  config_pyg.py         — PyGConfig, HGTConfig, DEFAULT_FEATURE_DIMS
+  config_transe.py      — TransEConfig, TARGET_TRANSE_AUC, TRANSE_EMBEDDING_DIM
+  config_schema.py      — CORE_NODE_TYPES, CORE_EDGE_TYPES, CORE_EDGE_TYPES_SET,
+                          SYMMETRIC_RELATIONS, CANONICAL_IDS, ID_MAPPING_PRIORITY
+  config_validation.py  — MIN_NODES_W2, MIN_NEGATIVE_PAIRS, AUCEnforcementLevel,
+                          assert_auc_meets_threshold, safe_config_dict
+  config/__init__.py    — re-exports everything for backward compat
+                          (``from .config import X`` keeps working)
+
+Migration plan: create the submodules as thin re-export wrappers first
+(so ``from .config_neo4j import Neo4jConfig`` works alongside
+``from .config import Neo4jConfig``), then incrementally move
+definitions into the submodules in follow-up PRs. The re-export wrapper
+ensures zero downtime — no consumer breaks during the migration.
+
+Until the split is executed, this file remains the single source of
+truth. The 8400-line size is tracked as tech debt; new config items
+should be added in the section corresponding to their future submodule
+to ease the eventual extraction.
+
+KNOWN HARDCODED VALUES IN CONSUMERS (audit issue 13.1 — RESOLVED in v107):
+  - entity_resolver.py imports CANONICAL_IDS from config (issue 2.9 — FIXED)
+  - run_pipeline.py imports LOG_FORMAT from config (issue 11.3 — FIXED)
+  - run_pipeline.py imports LOG_LEVEL from config (issue 11.2 — FIXED)
+  - drugbank_parser.py uses get_data_source_path (issue 5.3 — FIXED)
+  - drkg_loader.py uses get_drkg_tsv_path (issue 5.4 — FIXED)
+  - negative_sampling.py reads MIN_NEGATIVE_PAIRS (issue 2.4 — FIXED)
 
 Each consumer contract is documented in the corresponding section below.
 
@@ -3959,6 +3990,17 @@ CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
     # rows. ClinicalOutcome nodes themselves carry (disease_id,
     # indication_type, source_drug_id).
     ("Compound", "has_clinical_outcome", "ClinicalOutcome"),
+    # v107 ROOT FIX (ISSUE-P2-040): "validated_treats" was missing from
+    # CORE_EDGE_TYPES — the data flywheel (Phase 4 writeback) creates
+    # Drug-validated_treats-Disease edges when a pharma partner validates
+    # a hypothesis in wet lab. The --dedup CLI flag iterates rel_types
+    # returned by get_graph_stats and looks up the (src, rel, dst) triple
+    # from CORE_EDGE_TYPES. Without this entry, validated_treats edges
+    # were SKIPPED during dedup with a warning, accumulating duplicate
+    # edges over time as the flywheel turned. This unbounded growth
+    # corrupted KG density metrics and bloated Neo4j storage. Adding the
+    # triple here makes the dedup CLI cover the flywheel edge type.
+    ("Drug", "validated_treats", "Disease"),
 ]
 
 # Fixes audit issue 2.1 — CORE_EDGE_TYPES_SET for O(1) lookup

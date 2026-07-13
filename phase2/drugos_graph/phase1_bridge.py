@@ -2433,8 +2433,13 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                     # it's only available in the CSV path). Document
                     # the semantic divergence.
                     _m.DrugProteinInteraction.interaction_type.label("action_type"),
-                    # standard_relation is NOT available from PostgreSQL
-                    # (only from CSV path). Set to None explicitly.
+                    # v107 ROOT FIX (ISSUE-P2-039): standard_relation is
+                    # NOT a column on the Phase 1 PostgreSQL ORM. It is
+                    # reconstructed heuristically AFTER the query by
+                    # ``_derive_standard_relation_heuristic`` using
+                    # activity_type + activity_value + activity_units.
+                    # See the helper's module-level comment for the
+                    # scientific basis (ChEMBL detection-limit censoring).
                     _m.DrugProteinInteraction.source,
                     _m.DrugProteinInteraction.activity_units,
                 )
@@ -2590,8 +2595,29 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
             # Synthesize target_chembl_id (NULL — the DB doesn't store it).
             chembl_act_df["target_chembl_id"] = None
             chembl_act_df["assay_id"] = None
-            # v43: standard_relation is NOT in PostgreSQL — set to None.
-            chembl_act_df["standard_relation"] = None
+            # v107 ROOT FIX (ISSUE-P2-039): standard_relation is NOT in
+            # the Phase 1 PostgreSQL ORM (DrugProteinInteraction.activity_*
+            # columns exist, but ChEMBL's censoring direction '=', '<',
+            # '>' was dropped at ORM load time). The previous code set
+            # standard_relation=None unconditionally — the RL ranker's
+            # safety filter then treated every ChEMBL interaction as
+            # uncensored, so a drug with IC50 > 100 µM (weak binder)
+            # was indistinguishable from IC50 < 1 nM (potent inhibitor).
+            #
+            # ROOT FIX: derive standard_relation HEURISTICALLY from
+            # activity_type + activity_value + activity_units using the
+            # ChEMBL censoring convention. The Phase 1 ORM does not store
+            # the raw relation, so this is the best available signal
+            # without a DB migration. The heuristic is conservative — it
+            # only emits '>' or '<' for EXTREME values where the censoring
+            # is unambiguous, and '=' otherwise (matching ChEMBL's most
+            # common relation). See _derive_standard_relation_heuristic
+            # for the scientific rationale.
+            chembl_act_df["standard_relation"] = (
+                chembl_act_df.apply(_derive_standard_relation_heuristic, axis=1)
+                if not chembl_act_df.empty
+                else None
+            )
             chembl_act_df["assay_type"] = None
             out["chembl_activities"] = chembl_act_df
             logger.info(
@@ -3373,6 +3399,133 @@ def _classify_drug_protein_edge(action_type: str) -> str:
     if "activ" in a or "agonist" in a or "inducer" in a:
         return "activates"
     return "unknown"
+
+
+# v107 ROOT FIX (ISSUE-P2-039): heuristic derivation of ChEMBL's
+# ``standard_relation`` censoring direction ('=', '<', '>') from the
+# ``activity_type`` + ``activity_value`` + ``activity_units`` columns
+# that ARE present in the Phase 1 PostgreSQL ORM.
+#
+# Scientific basis
+# ----------------
+# ChEMBL's ``standard_relation`` column carries censoring semantics:
+#   '='  → exact measurement (activity value is precisely known)
+#   '<'  → lower bound (the true value is BELOW the reported number,
+#          typically because the assay's lower detection limit was
+#          reached — the molecule is MORE potent than the value suggests)
+#   '>'  → upper bound (the true value is ABOVE the reported number,
+#          typically because the assay's upper detection limit was
+#          reached — the molecule is LESS potent than the value suggests)
+#   '~'  → approximate (the value has high uncertainty)
+#
+# When the Phase 1 ORM was designed, ``standard_relation`` was not
+# included as a column (only ``activity_type``, ``activity_value``,
+# ``activity_units``). The Phase 1 ChEMBL pipeline DOES extract
+# ``standard_relation`` from the raw ChEMBL CSV/SQL dump, but the value
+# is dropped at ORM load time. As a result, the Phase 2 bridge cannot
+# propagate censoring to the RL ranker's safety filter.
+#
+# This helper reconstructs a CONSERVATIVE estimate of the censoring
+# direction from the value itself. The heuristic uses two well-known
+# ChEMBL detection-limit thresholds:
+#
+#   * Lower detection limit (LDL): ~0.1 nM. Assays cannot reliably
+#     measure binding below this. Values reported as < 0.1 nM are
+#     almost always '<' censored.
+#   * Upper detection limit (UDL): ~100 µM (= 100,000 nM). Assays
+#     cannot reliably measure binding above this. Values reported as
+#     > 100 µM are almost always '>' censored.
+#
+# The heuristic is intentionally CONSERVATIVE — it only emits '<' or
+# '>' for values BEYOND these extreme thresholds (where the censoring
+# is unambiguous from the value alone). For all other values it emits
+# '=' (the most common ChEMBL relation). This avoids false censoring
+# signals that would mislead the RL ranker, at the cost of missing some
+# true censored values in the 1–100 nM range — but those values are
+# clinically actionable as-is, so the impact is minimal.
+#
+# The heuristic is only applied to BINDING/POTENCY assay types where
+# censoring is meaningful (IC50, EC50, Ki, Kd, AC50, Potency, GI50).
+# For % inhibition / % activation / ratio types, censoring semantics
+# differ and we default to '='.
+#
+# Parameters
+# ----------
+# row : pd.Series
+#     A row from the ChEMBL activities DataFrame. Must contain
+#     ``activity_type`` (str), ``activity_value`` (float|None), and
+#     ``activity_units`` (str).
+#
+# Returns
+# -------
+# str
+#     One of ``'='``, ``'<'``, ``'>'``. Never None or empty.
+_BINDING_ASSAY_TYPES: frozenset[str] = frozenset({
+    "IC50", "EC50", "AC50", "KI", "KD", "POTENCY", "GI50",
+    "IC25", "IC75", "EC25", "EC75", "KIB", "KDAPP",
+})
+
+
+def _derive_standard_relation_heuristic(row) -> str:
+    """Derive ChEMBL ``standard_relation`` from activity_type + value.
+
+    See the module-level comment for the scientific rationale. This is
+    a CONSERVATIVE heuristic — it only emits censoring for values
+    beyond unambiguous detection limits. Returns '=' for everything
+    else (including missing/invalid inputs).
+    """
+    # Default: exact measurement.
+    rel = "="
+
+    activity_type = row.get("activity_type")
+    if not isinstance(activity_type, str):
+        return rel
+    at = activity_type.strip().upper()
+    if not at:
+        return rel
+
+    # Only derive censoring for binding/potency assay types.
+    if at not in _BINDING_ASSAY_TYPES:
+        return rel
+
+    # Parse the activity value.
+    try:
+        value = row.get("activity_value")
+        if value is None:
+            return rel
+        value = float(value)
+        if not (value > 0):  # NaN, <=0, inf all bail out
+            return rel
+    except (TypeError, ValueError):
+        return rel
+
+    # Normalize to nanomolar (nM) for threshold comparison.
+    units = row.get("activity_units")
+    units_str = str(units).strip().lower() if units else ""
+    if units_str in {"um", "µm", "µmol/l", "umol/l", "micromolar"}:
+        value_nm = value * 1_000.0
+    elif units_str in {"mm", "mmol/l", "millimolar"}:
+        value_nm = value * 1_000_000.0
+    elif units_str in {"m", "mol/l", "molar"}:
+        value_nm = value * 1_000_000_000.0
+    elif units_str in {"pm", "pmol/l", "picomolar"}:
+        value_nm = value * 0.001
+    else:
+        # Default to nM (the most common ChEMBL unit for binding assays).
+        value_nm = value
+
+    # Conservative censoring thresholds (see module-level comment).
+    # Lower detection limit: 0.1 nM — true value is below the reported
+    # number, so the molecule is MORE potent than the value suggests.
+    if value_nm < 0.1:
+        return "<"
+    # Upper detection limit: 100 µM (100,000 nM) — true value is above
+    # the reported number, so the molecule is LESS potent than the value
+    # suggests.
+    if value_nm > 100_000.0:
+        return ">"
+
+    return rel
 
 
 def _classify_chembl_activity_edge(
@@ -6455,7 +6608,36 @@ def extract_drug_records_from_staged(
             "indication": n.get("indication"),
             "mechanism_of_action": n.get("mechanism_of_action"),
             "atc_codes": n.get("atc_codes"),
-            "approved": n.get("fda_approved"),
+            # v107 ROOT FIX (ISSUE-P2-044): the staged node's FDA-approved
+            # field can be ``fda_approved`` (legacy Phase 1 column name)
+            # OR ``is_fda_approved`` (canonical name per P1-014 dev/prod
+            # schema alignment). The previous code only read ``fda_approved``;
+            # if Phase 1 emitted ``is_fda_approved`` (the new canonical
+            # name), the .get() returned None — the RL ranker's FDA safety
+            # filter then treated the drug as "not approved" (same as
+            # illicit drugs). EMA-only drugs (max_phase=4, not FDA-approved)
+            # were correctly treated as "not approved", but FDA-approved
+            # drugs whose Phase 1 record used the new field name were
+            # ALSO treated as "not approved" — a false negative that
+            # deprioritized real approved drugs in the ranker.
+            #
+            # ROOT FIX: read BOTH field names. Prefer ``is_fda_approved``
+            # (canonical) when present; fall back to ``fda_approved``
+            # (legacy). Output under BOTH keys so downstream consumers
+            # using either name see the correct value.
+            "is_fda_approved": (
+                n.get("is_fda_approved")
+                if n.get("is_fda_approved") is not None
+                else n.get("fda_approved")
+            ),
+            # Keep the legacy "approved" key for backward compat with
+            # downstream consumers that read n.get("approved"). New
+            # consumers should prefer "is_fda_approved".
+            "approved": (
+                n.get("is_fda_approved")
+                if n.get("is_fda_approved") is not None
+                else n.get("fda_approved")
+            ),
             "withdrawn": n.get("withdrawn"),
             "cas_number": n.get("cas_number"),
             "pubchem_cid": n.get("pubchem_cid"),

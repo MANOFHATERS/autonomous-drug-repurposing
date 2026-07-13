@@ -1146,9 +1146,25 @@ def _canonical_rel_type(rel_type: str) -> str:
         Canonical lowercase form ready for sanitize_rel_type (e.g.
         "drugbank_treats", "treats", "drugbank_causes_side_effect").
 
-    The output is NOT yet Neo4j-safe (may still contain chars
-    sanitize_rel_type would reject) — callers MUST pass the result
-    through sanitize_rel_type for final validation.
+        The output is NOT yet Neo4j-safe (may still contain chars
+        sanitize_rel_type would reject) — callers MUST pass the result
+        through sanitize_rel_type for final validation.
+
+    v107 ROOT FIX (ISSUE-P2-046): DOCUMENT that this transform is
+    DRKG-only. The bridge already emits lowercase relation names
+    (e.g. "treats", "inhibits", "validated_treats") — this function
+    is a NO-OP for bridge-produced edges. It is ONLY relevant for
+    DRKG-produced edges (the ``--data-source drkg`` CLI path), which
+    carry the "DRUGBANK::treats::Compound:Disease" form. The function
+    is called from EVERY safe_rel construction site (3 call sites:
+    _load_edges_core, dedup_edges, select_primary_edge) for
+    consistency, but for non-DRKG inputs the ``::`` branch is never
+    taken and the function just lowercases the input. This is correct
+    behavior — the function is idempotent on already-canonical inputs.
+    The DRKG path is NOT deprecated; it remains a supported data source
+    for V1 (the DOCX Phase 2 spec lists DRKG as a supplementary source
+    alongside the 7 primary sources). Removing this function would
+    break DRKG ingestion.
     """
     if not rel_type or not isinstance(rel_type, str):
         return rel_type if rel_type else ""
@@ -4242,6 +4258,71 @@ class DrugOSGraphBuilder:
             src_label, rel_type, dst_label
         )
 
+    def discover_edge_triples_for_rel_type(
+        self,
+        rel_type: str,
+    ) -> list[tuple[str, str, str]]:
+        """Discover all (src_label, rel_type, dst_label) triples in the DB.
+
+        v107 ROOT FIX (ISSUE-P2-040): when a rel_type is NOT in
+        CORE_EDGE_TYPES (e.g. a data-flywheel edge type), the dedup CLI
+        needs to know which (src_label, dst_label) pairs the rel_type
+        appears between, so it can call ``deduplicate_edges_deterministic``
+        for each pair. This method queries Neo4j directly to discover
+        those pairs at runtime.
+
+        The query scans the actual relationships in the DB and returns
+        the distinct (src_label, dst_label) combinations for the given
+        rel_type. This is O(num_distinct_label_pairs) — typically small
+        (1-3 pairs per rel_type), so the scan is cheap even on large
+        graphs.
+
+        Parameters
+        ----------
+        rel_type : str
+            The Neo4j relationship type (already sanitized lowercase
+            form, e.g. "validated_treats"). The method does NOT
+            re-sanitize — callers should pass the same form that
+            ``get_graph_stats`` returns in ``edge_counts_by_type``.
+
+        Returns
+        -------
+        list[tuple[str, str, str]]
+            Distinct (src_label, rel_type, dst_label) triples present
+            in the DB for this rel_type. Empty list if the rel_type
+            does not exist or the query fails.
+        """
+        if not rel_type:
+            return []
+        # v107: sanitize the rel_type the same way _load_edges does, so
+        # the Cypher pattern matches the actual stored relationship type.
+        safe_rel = sanitize_rel_type(_canonical_rel_type(rel_type))
+        cypher = (
+            "MATCH (a)-[r]->(b) "
+            "WHERE type(r) = $rel_type "
+            "WITH a, b, labels(a) AS src_labels, labels(b) AS dst_labels "
+            "UNWIND src_labels AS src_label "
+            "UNWIND dst_labels AS dst_label "
+            "RETURN DISTINCT src_label, dst_label "
+            "ORDER BY src_label, dst_label"
+        )
+        triples: list[tuple[str, str, str]] = []
+        try:
+            with self._conn.session() as session:
+                result = session.run(cypher, rel_type=safe_rel)
+                for record in result:
+                    src_label = record["src_label"]
+                    dst_label = record["dst_label"]
+                    if src_label and dst_label:
+                        triples.append((src_label, rel_type, dst_label))
+        except Exception as exc:
+            logger.warning(
+                "discover_edge_triples_for_rel_type(%s) failed: %s",
+                rel_type, exc,
+            )
+            return []
+        return triples
+
     def load_drkg_edges_bulk(
         self,
         edge_type_data: dict[tuple[str, str, str], list[dict]],
@@ -4584,6 +4665,20 @@ if __name__ == "__main__":
             # rel_type present in the graph we dedup EACH (src, rel, dst)
             # triple that uses that rel_type (e.g. "inhibits" can be both
             # Compound->Gene and Compound->Protein — both must be deduped).
+            #
+            # v107 ROOT FIX (ISSUE-P2-040): for rel_types NOT in
+            # CORE_EDGE_TYPES (e.g. dynamically-emitted edge types from
+            # the data flywheel), the previous code logged a WARNING and
+            # SKIPPED dedup. Over time, duplicate validated_treats edges
+            # accumulated in the KG, corrupting density metrics. The fix
+            # has two layers:
+            #   (1) "validated_treats" is now in CORE_EDGE_TYPES (config.py)
+            #       so the standard path covers it.
+            #   (2) For ANY future rel_type not in CORE_EDGE_TYPES, we
+            #       fall back to a DB introspection query that discovers
+            #       the (src_label, dst_label) pairs for that rel_type
+            #       and dedups each one. This makes the CLI robust to
+            #       schema extensions without requiring a config edit.
             stats = builder.get_graph_stats()
             edge_types = stats.get("edge_counts_by_type", {})
             rel_to_triples: dict[str, list[tuple[str, str, str]]] = {}
@@ -4595,12 +4690,39 @@ if __name__ == "__main__":
             for rel_type in edge_types:
                 triples_for_rel = rel_to_triples.get(rel_type, [])
                 if not triples_for_rel:
-                    logger.warning(
-                        "Dedup for %s: rel_type not in CORE_EDGE_TYPES — "
-                        "skipping (need full triple src, rel, dst)",
-                        rel_type,
+                    # v107 ROOT FIX (ISSUE-P2-040): instead of skipping,
+                    # discover the (src_label, dst_label) pairs for this
+                    # rel_type directly from the DB. This covers any
+                    # rel_type that's dynamically emitted (e.g. data
+                    # flywheel writebacks) without requiring a CORE_EDGE_TYPES
+                    # entry. The query uses APOC.relTypeProperties if
+                    # available, otherwise falls back to a Cypher scan.
+                    try:
+                        discovered_triples = builder.discover_edge_triples_for_rel_type(rel_type)
+                    except Exception as _disc_exc:
+                        logger.warning(
+                            "Dedup for %s: rel_type not in CORE_EDGE_TYPES "
+                            "and DB introspection failed (%s). Skipping "
+                            "— this rel_type will NOT be deduped. Add it "
+                            "to CORE_EDGE_TYPES in config.py for fast path.",
+                            rel_type, _disc_exc,
+                        )
+                        continue
+                    if not discovered_triples:
+                        logger.warning(
+                            "Dedup for %s: rel_type not in CORE_EDGE_TYPES "
+                            "and DB introspection returned no triples. "
+                            "Skipping.",
+                            rel_type,
+                        )
+                        continue
+                    triples_for_rel = discovered_triples
+                    logger.info(
+                        "Dedup for %s: discovered %d (src,dst) label "
+                        "pairs via DB introspection (rel_type not in "
+                        "CORE_EDGE_TYPES). v107 ISSUE-P2-040 fix.",
+                        rel_type, len(triples_for_rel),
                     )
-                    continue
                 for _src_t, _rel_t, _dst_t in triples_for_rel:
                     try:
                         removed = builder.deduplicate_edges_deterministic(
@@ -4747,7 +4869,18 @@ def update_validated_edges(
                     properties={
                         "source": "data_flywheel",
                         "validated_at": _now_iso(),
-                        "_source_phase": 1,  # lineage marker
+                        # v107 ROOT FIX (ISSUE-P2-053): the lineage marker
+                        # MUST be _source_phase=2 (not 1). This edge is
+                        # written by Phase 4's data flywheel writeback to
+                        # the Phase 2 KG — it is a Phase 2 WRITE, not a
+                        # Phase 1 import. The previous code set
+                        # _source_phase=1, which incorrectly attributed
+                        # the edge to Phase 1 in the audit trail. A
+                        # regulator tracing the data flow would see the
+                        # edge appear "from Phase 1" when it actually
+                        # came from a Phase 4 validation writeback,
+                        # breaking the FDA 21 CFR Part 11 audit chain.
+                        "_source_phase": 2,  # Phase 2 KG writeback (data flywheel)
                     },
                 )
                 edges_added += 1

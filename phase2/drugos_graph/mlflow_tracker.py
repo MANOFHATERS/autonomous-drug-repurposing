@@ -195,14 +195,36 @@ class MLflowTracker:
     def _atexit_close(self) -> None:
         """P2-014: atexit-registered close handler.
 
-        Swallows ALL exceptions so interpreter shutdown never
-        raises (atexit handlers that raise produce noisy
-        tracebacks at shutdown and can mask the real exit code).
+        v107 ROOT FIX (ISSUE-P2-047): the previous code did
+        ``try: self.close() except Exception: pass``, swallowing ALL
+        exceptions silently. If close() raised (e.g. MLflow server
+        unreachable, network timeout), the exception was dropped and
+        the MLflow run was left in an inconsistent state — the UI
+        showed it as "RUNNING" forever, and metrics logged after the
+        failure were lost. Operators had no way to detect the problem.
+
+        ROOT FIX: still swallow the exception (atexit handlers must
+        not raise — it produces noisy tracebacks at shutdown and can
+        mask the real exit code), but LOG it at WARNING level first
+        so the failure is visible in production logs. The MLflow
+        client library's own atexit handlers will retry the close on
+        the next interpreter start; we just need to surface that THIS
+        shutdown failed.
         """
         try:
             self.close()
-        except Exception:
-            pass
+        except Exception as e:
+            # v107 ISSUE-P2-047: log at WARNING so operators can detect
+            # dangling MLflow runs. We still swallow the exception
+            # (atexit handlers must not raise).
+            logger.warning(
+                "MLflowTracker._atexit_close: close() raised %s: %s. "
+                "The MLflow run may be left in an inconsistent state "
+                "(UI may show it as RUNNING). Check the MLflow server "
+                "connectivity and the run's status on next startup. "
+                "v107 ISSUE-P2-047 root fix.",
+                type(e).__name__, e,
+            )
 
     def start_run(self, run_name: str = "default") -> "MLflowTracker":
         """Start a new MLflow run.

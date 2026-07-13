@@ -991,41 +991,39 @@ class PyGBuilder(GraphBuilderProtocol):
                         )
                         edge_index = _unique_edge_index
                     except Exception as _dedup_exc:
-                        # Fallback: if torch.unique fails for any reason
-                        # (e.g. dtype mismatch on an old PyTorch), fall
-                        # back to the Python loop. This is the original
-                        # behavior — we don't lose data, just performance.
-                        self.logger.warning(
-                            f"torch.unique edge dedup failed ({_dedup_exc}); "
-                            f"falling back to Python loop."
-                        )
-                        # v100 ROOT FIX (BUG P2-032 — PyG / Edge Dedup
-                        # Fallback Perf): the original fallback called
-                        # ``edge_index[0, _i].item()`` and
-                        # ``edge_index[1, _i].item()`` PER EDGE. Each
-                        # ``.item()`` is a CPU↔GPU sync, so on a GPU
-                        # tensor this is O(num_edges) syncs —
-                        # catastrophic for multi-million-edge graphs.
-                        # ROOT FIX: transfer the entire ``edge_index``
-                        # to CPU ONCE via ``.cpu().numpy()`` (a single
-                        # bulk copy), then iterate the resulting numpy
-                        # array in pure Python with NO per-iteration
-                        # sync. The fast path (``torch.unique`` above)
-                        # is unchanged; this only accelerates the
-                        # exception fallback.
-                        _ei_np = edge_index.cpu().numpy()
-                        _edges_set: set = set()
-                        _unique_indices: list = []
-                        for _i in range(_ei_np.shape[1]):
-                            _pair = (
-                                int(_ei_np[0, _i]),
-                                int(_ei_np[1, _i]),
-                            )
-                            if _pair not in _edges_set:
-                                _edges_set.add(_pair)
-                                _unique_indices.append(_i)
-                        if len(_unique_indices) < _orig_count:
-                            edge_index = edge_index[:, _unique_indices]
+                        # v107 ROOT FIX (ISSUE-P2-052): the previous code
+                        # had a Python-loop fallback that did
+                        # ``edge_index[0, _i].item()`` per edge — O(num_edges)
+                        # CPU↔GPU syncs, catastrophic on multi-million-edge
+                        # graphs. The v100 fix replaced .item() with a bulk
+                        # .cpu().numpy() transfer, but KEPT the fallback,
+                        # which was still slow on GPU and added complexity.
+                        #
+                        # ROOT FIX: ``torch.unique`` has been stable since
+                        # PyTorch 1.8 (released Jan 2021). If it fails on
+                        # the current PyTorch, that indicates either (a) a
+                        # genuinely broken PyTorch install, or (b) an
+                        # exotic edge case (e.g. edge_index with 0 columns
+                        # — already handled by the _orig_count == 0 guard
+                        # above). In both cases, we want to RAISE so the
+                        # operator investigates, rather than silently
+                        # falling back to a slow path that masks the real
+                        # issue. The slow fallback was correct but never
+                        # necessary in practice — keeping it gave a false
+                        # sense of robustness.
+                        raise RuntimeError(
+                            f"torch.unique edge dedup failed for "
+                            f"({src_type},{rel_name},{dst_type}) with "
+                            f"{_orig_count} edges: "
+                            f"{type(_dedup_exc).__name__}: {_dedup_exc}. "
+                            f"torch.unique has been stable since PyTorch "
+                            f"1.8 — this failure indicates a broken "
+                            f"PyTorch install or an exotic edge case "
+                            f"worth investigating. The slow Python-loop "
+                            f"fallback was removed in v107 (ISSUE-P2-052) "
+                            f"because it masked real issues and added "
+                            f"O(num_edges) CPU↔GPU syncs on GPU tensors."
+                        ) from _dedup_exc
                     _new_count = int(edge_index.size(1))
                     if _new_count < _orig_count:
                         self.logger.info(
