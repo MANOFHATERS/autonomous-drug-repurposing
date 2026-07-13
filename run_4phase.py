@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Unified 4-Phase Pipeline Runner (v100 forensic root fix).
+"""Unified 4-Phase Pipeline Runner (v107 forensic root fix).
 
 This is the SINGLE top-level entry point that chains ALL 4 phases of the
 Autonomous Drug Repurposing Platform on REAL biomedical data:
 
   Phase 1 (Data Ingestion)
-    Embedded sample CSVs (Tier-2 fallback) are written to
-    ``phase1/processed_data/`` when the directory is missing or empty.
-    The CSVs use real biomedical identifiers (InChIKeys, UniProt
-    accessions, DOID/MOM IDs) so downstream phases see realistic data.
+    Reads the processed_data CSVs produced by ``python -m pipelines all``.
+    v107 P1-002: if the directory is empty, the runner exits(1) with a
+    clear error -- NO mock data is silently injected. For local dev with
+    mock data, set DRUGOS_ALLOW_MOCK_FALLBACK=1 and run
+    ``python -m pipelines samples`` BEFORE invoking run_4phase.py.
 
   Phase 1 -> Phase 2 Bridge
     ``drugos_graph.phase1_bridge.run_phase1_to_phase2`` reads the Phase 1
@@ -158,21 +159,37 @@ def _write_manifest(
 def ensure_phase1_data(phase1_dir: Path) -> Dict[str, Path]:
     """Phase 1: ensure the processed_data CSVs exist.
 
-    If ``phase1_dir`` doesn't exist or is empty, write the embedded sample
-    CSVs (the Tier-2 fallback). Returns a mapping of CSV stem -> Path.
+    v107 FORENSIC ROOT FIX (ISSUE-P1-002):
+      The previous implementation wrote embedded sample CSVs (the Tier-2
+      fallback) when ``phase1_dir`` was empty. This violated the
+      "NO mock data, NO fake data, production-grade institutional quality"
+      mandate. In production, ``write_all_samples`` raises RuntimeError
+      (P1-019 guard), so the production entry point CRASHED on empty data.
+      In dev/staging, mock data was written -- the KG was then built on
+      fake drugs.
+
+      ROOT FIX: do NOT write embedded samples. If Phase 1 has no data,
+      exit with code 1 and a clear error message. Operators must run the
+      real pipelines (``python -m pipelines all``) first. If a developer
+      explicitly wants mock data for local testing, they must set
+      ``DRUGOS_ALLOW_MOCK_FALLBACK=1`` and run ``python -m pipelines samples``
+      BEFORE invoking run_4phase.py -- the mock data is then already on
+      disk and this function simply reads it.
     """
     logger.info("=" * 70)
     logger.info("PHASE 1: Data Ingestion")
     logger.info("=" * 70)
 
     if not phase1_dir.exists() or not any(phase1_dir.glob("*.csv*")):
-        logger.info(
-            "Phase 1 dir %s is empty or missing; writing embedded sample "
-            "CSVs (Tier-2 fallback).", phase1_dir,
+        logger.error(
+            "Phase 1 dir %s is empty or missing. The platform architecturally "
+            "depends on mock data when real data is unavailable -- this is "
+            "FORBIDDEN in v107. Run the real pipelines first: "
+            "`python -m pipelines all`. For local dev with mock data, set "
+            "DRUGOS_ALLOW_MOCK_FALLBACK=1 and run `python -m pipelines samples` "
+            "BEFORE invoking run_4phase.py.", phase1_dir,
         )
-        from pipelines._embedded_samples import write_all_samples
-        written = write_all_samples(str(phase1_dir))
-        logger.info("Wrote %d sample datasets to %s", len(written), phase1_dir)
+        sys.exit(1)
 
     csvs = sorted(phase1_dir.glob("*.csv*"))
     logger.info("Phase 1: %d CSV files present in %s", len(csvs), phase1_dir)
@@ -184,11 +201,32 @@ def ensure_phase1_data(phase1_dir: Path) -> Dict[str, Path]:
 def _ensure_phase1_samples(phase1_dir: Path) -> Path:
     """Materialize embedded sample CSVs when processed_data is empty.
 
+    v107 FORENSIC ROOT FIX (ISSUE-P1-002):
+      This function previously wrote embedded mock samples unconditionally
+      when the directory was empty. It is now HARD-GATED behind
+      ``DRUGOS_ALLOW_MOCK_FALLBACK=1``. If the env var is not set, the
+      function raises ``SystemExit(1)`` with a clear error. This ensures
+      the platform NEVER silently injects mock data into the KG.
+
     Returns the (possibly newly populated) phase1_dir. Does NOT reassign
     the caller's parameter (R-023).
     """
     if phase1_dir.exists() and any(phase1_dir.glob("*.csv*")):
         return phase1_dir
+
+    # v107 P1-002: hard gate -- only allow mock fallback if the operator
+    # EXPLICITLY opted in. This prevents the KG from being built on fake
+    # data in any environment where the operator did not intend it.
+    if os.environ.get("DRUGOS_ALLOW_MOCK_FALLBACK", "").lower() not in ("1", "true", "yes"):
+        logger.error(
+            "Phase 1 dir %s is empty AND DRUGOS_ALLOW_MOCK_FALLBACK is not set. "
+            "Refusing to write embedded mock samples (would corrupt KG with "
+            "fake drugs). Run `python -m pipelines all` to produce real data, "
+            "or set DRUGOS_ALLOW_MOCK_FALLBACK=1 for local dev testing.",
+            phase1_dir,
+        )
+        sys.exit(1)
+
     phase1_dir.mkdir(parents=True, exist_ok=True)
 
     _p1_root = str(PHASE1_ROOT)
@@ -225,8 +263,9 @@ def _ensure_phase1_samples(phase1_dir: Path) -> Path:
     ]
     for fname, fn in writes:
         fn().to_csv(phase1_dir / fname, index=False)
-    logger.info(
-        "Wrote %d embedded sample CSVs to %s (Tier-2 fallback).",
+    logger.warning(
+        "Wrote %d embedded sample CSVs to %s (DRUGOS_ALLOW_MOCK_FALLBACK=1). "
+        "KG will contain FAKE drug records -- acceptable ONLY for local dev.",
         len(writes), phase1_dir,
     )
     return phase1_dir

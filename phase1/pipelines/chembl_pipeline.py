@@ -118,6 +118,18 @@ import gzip
 import json
 import logging
 
+# v107 FORENSIC ROOT FIX (ISSUE-P1-008):
+#   The logger was previously defined at line 331 (AFTER the
+#   _extra_activity_types block at line ~278 which calls logger.warning()).
+#   If the env var CHEMBL_ACTIVITY_TYPES contained any value not in the ORM
+#   ActivityType enum (e.g. a typo like "ICT50"), the warning call raised
+#   NameError: name 'logger' is not defined -- crashing the ChEMBL pipeline
+#   at import time. The operator saw a confusing stack trace instead of
+#   the intended "P1-031: CHEMBL_ACTIVITY_TYPES contains invalid value".
+#   ROOT FIX: define the logger IMMEDIATELY after `import logging` so any
+#   module-level code that uses it has access.
+logger = logging.getLogger(__name__)
+
 # v16 SF-4: requests is needed for narrow exception handling in
 # _resolve_target_accessions. Previously a broad ``except Exception``
 # hid patient-safety-critical API contract changes as warnings.
@@ -328,7 +340,8 @@ from sqlalchemy.exc import (  # noqa: E402
     SQLAlchemyError,
 )
 
-logger = logging.getLogger(__name__)
+# v107 P1-008: logger is now defined at the top of the module (right after
+# `import logging`). The previous duplicate definition here is removed.
 
 
 # ---------------------------------------------------------------------------

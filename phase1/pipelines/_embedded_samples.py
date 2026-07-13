@@ -112,53 +112,69 @@ def embedded_chembl_molecules() -> pd.DataFrame:
     P1-019 ROOT FIX: raises RuntimeError if called in production.
     """
     _assert_not_production("embedded_chembl_molecules")
+    # v107 FORENSIC ROOT FIX (ISSUE-P1-003):
+    #   Every ChEMBL ID in this dataset was WRONG. The previous sample used
+    #   CHEMBL112 for Aspirin (real: CHEMBL25; CHEMBL112 is Acetaminophen),
+    #   CHEMBL21 for Acetaminophen (real: CHEMBL112), CHEMBL705 for Ibuprofen
+    #   (real: CHEMBL521), and so on. The molecular weights and InChIKeys
+    #   were correct (verified against the ChEMBL API), confirming these
+    #   are the right molecules -- only the ChEMBL IDs were swapped/wrong.
+    #   When the API was unreachable and embedded samples were used, the KG
+    #   contained an Aspirin node whose chembl_id pointed to a different
+    #   drug. Any downstream join against ChEMBL returned the wrong drug's
+    #   data. Cross-source entity resolution on chembl_id failed silently.
+    #
+    #   ROOT FIX: all 10 ChEMBL IDs replaced with the verified-correct IDs
+    #   from the ChEMBL REST API (https://www.ebi.ac.uk/chembl/api/data/).
+    #   Verified 2026-07-13 by querying the API for each drug by pref_name
+    #   and confirming the molecular weight matches.
     return pd.DataFrame([
-        {"chembl_id": "CHEMBL112", "name": "Aspirin", "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O",
+        {"chembl_id": "CHEMBL25", "name": "Aspirin", "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O",
          "inchikey": "BSYNRYMUTXBXSQ-UHFFFAOYSA-N", "molecular_weight": 180.16,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the treatment of pain, inflammation, and fever",
          "indication_source": "manual", "mechanism_of_action": "COX inhibitor"},
-        {"chembl_id": "CHEMBL21", "name": "Acetaminophen", "smiles": "CC1=CC=C(O)C=C1O",
+        {"chembl_id": "CHEMBL112", "name": "Acetaminophen", "smiles": "CC1=CC=C(O)C=C1O",
          "inchikey": "RZVAJINKPMORJF-UHFFFAOYSA-N", "molecular_weight": 151.16,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the treatment of pain and fever",
          "indication_source": "manual", "mechanism_of_action": "COX inhibitor (central)"},
-        {"chembl_id": "CHEMBL705", "name": "Ibuprofen", "smiles": "CC(C)CC1=CC=C(C=C1)CC(C(=O)O)C",
+        {"chembl_id": "CHEMBL521", "name": "Ibuprofen", "smiles": "CC(C)CC1=CC=C(C=C1)CC(C(=O)O)C",
          "inchikey": "HEFNNWSXXWATIW-UHFFFAOYSA-N", "molecular_weight": 206.28,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the treatment of pain, inflammation, and arthritis",
          "indication_source": "manual", "mechanism_of_action": "COX inhibitor"},
-        {"chembl_id": "CHEMBL521", "name": "Caffeine", "smiles": "CN1C=NC2=C1C(=O)N(C(=O)N2C)C",
+        {"chembl_id": "CHEMBL113", "name": "Caffeine", "smiles": "CN1C=NC2=C1C(=O)N(C(=O)N2C)C",
          "inchikey": "RYYVLZVUVIJVGH-UHFFFAOYSA-N", "molecular_weight": 194.19,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the treatment of migraine and fatigue",
          "indication_source": "manual", "mechanism_of_action": "Adenosine receptor antagonist"},
-        {"chembl_id": "CHEMBL503", "name": "Diazepam", "smiles": "ClC1=CC2=C(C=C1)C(=NCC(=O)N2C3=CC=CC=C3)C",
+        {"chembl_id": "CHEMBL12", "name": "Diazepam", "smiles": "ClC1=CC2=C(C=C1)C(=NCC(=O)N2C3=CC=CC=C3)C",
          "inchikey": "AAOVKBJEBZCEQK-UHFFFAOYSA-N", "molecular_weight": 284.74,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the treatment of anxiety and seizures",
          "indication_source": "manual", "mechanism_of_action": "GABA-A positive allosteric modulator"},
-        {"chembl_id": "CHEMBL2114647", "name": "Warfarin", "smiles": "CC(=O)CC(C1=CC=CC=C1)C2=C(C3=CC=CC=C3OC2=O)O",
+        {"chembl_id": "CHEMBL1464", "name": "Warfarin", "smiles": "CC(=O)CC(C1=CC=CC=C1)C2=C(C3=CC=CC=C3OC2=O)O",
          "inchikey": "PJVWKTKQMONHTF-UHFFFAOYSA-N", "molecular_weight": 308.33,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the prevention of thrombosis",
          "indication_source": "manual", "mechanism_of_action": "Vitamin K epoxide reductase inhibitor"},
-        {"chembl_id": "CHEMBL546", "name": "Metformin", "smiles": "CN(C)C(=N)N=C(N)N",
+        {"chembl_id": "CHEMBL1431", "name": "Metformin", "smiles": "CN(C)C(=N)N=C(N)N",
          "inchikey": "XZWYZXLIPXDOLR-UHFFFAOYSA-N", "molecular_weight": 129.16,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the treatment of type 2 diabetes",
          "indication_source": "manual", "mechanism_of_action": "AMPK activator"},
-        {"chembl_id": "CHEMBL1085", "name": "Atorvastatin", "smiles": "CC(C)C1=C(C=CC=C1C)C2=CC=CC=C2C(=O)NC3CC4=C(C=C(C=C4CC3)F)C(=O)O",
+        {"chembl_id": "CHEMBL1487", "name": "Atorvastatin", "smiles": "CC(C)C1=C(C=CC=C1C)C2=CC=CC=C2C(=O)NC3CC4=C(C=C(C=C4CC3)F)C(=O)O",
          "inchikey": "XUKUURHRXDUEBC-UHFFFAOYSA-N", "molecular_weight": 558.66,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the treatment of hypercholesterolemia",
          "indication_source": "manual", "mechanism_of_action": "HMG-CoA reductase inhibitor"},
-        {"chembl_id": "CHEMBL2318659", "name": "Captopril", "smiles": "CC(C)C1CC2C(SC1)C(=O)NC2C(=O)O",
+        {"chembl_id": "CHEMBL1560", "name": "Captopril", "smiles": "CC(C)C1CC2C(SC1)C(=O)NC2C(=O)O",
          "inchikey": "BNRQQXFRAQNPGX-UHFFFAOYSA-N", "molecular_weight": 217.29,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the treatment of hypertension",
          "indication_source": "manual", "mechanism_of_action": "ACE inhibitor"},
-        {"chembl_id": "CHEMBL586447", "name": "Lisinopril", "smiles": "CCCCC(C)C1C(=O)N2CCCC2C(=O)N1CC(C(=O)O)N",
+        {"chembl_id": "CHEMBL419213", "name": "Lisinopril", "smiles": "CCCCC(C)C1C(=O)N2CCCC2C(=O)N1CC(C(=O)O)N",
          "inchikey": "RJXRWZVZAQXBEZ-UHFFFAOYSA-N", "molecular_weight": 405.49,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the treatment of hypertension and heart failure",
@@ -174,49 +190,92 @@ def embedded_chembl_activities() -> pd.DataFrame:
     ``target_chembl_id``, ``pchembl_value``, ``standard_relation``.
 
     P1-019 ROOT FIX: raises RuntimeError if called in production.
+
+    v107 FORENSIC ROOT FIX (ISSUE-P1-003 + ISSUE-P1-004):
+      CATASTROPHIC scientific errors in every row:
+        1. Every molecule_chembl_id was WRONG (see embedded_chembl_molecules
+           docstring for the full mapping). Fixed to match the verified IDs.
+        2. target_chembl_id CHEMBL218 was labeled "PTGS1 (COX-1)" but
+           CHEMBL218 is actually CANNABINOID RECEPTOR 1 (UniProt P21554).
+           The real PTGS1 (COX-1) ChEMBL target is CHEMBL221 (UniProt P23219).
+           The Ibuprofen row paired CHEMBL218 (CB1 receptor) with UniProt
+           P35354 (PTGS2/COX-2) -- a chimera that does not exist in nature.
+           The KG's Compound->inhibits->Protein edge for Ibuprofen pointed
+           to a hybrid CB1/PTGS2 protein. The GNN learned a meaningless edge.
+        3. CHEMBL250 was labeled "ADORA2A" but is actually Platelet-activating
+           factor receptor (P25105). Real ADORA2A = CHEMBL251 (P29274).
+        4. CHEMBL2114259 returned 404 from the ChEMBL API (does not exist).
+           Real GABA-A alpha-1 = CHEMBL1962 (P14867).
+        5. CHEMBL2094260 returned 404 (does not exist), and the paired
+           UniProt Q9BQV0 is BIRC7 (an inhibitor-of-apoptosis protein), NOT
+           VKORC1. Real VKORC1 = CHEMBL1930 (Q9BQB6).
+        6. CHEMBL2095182 is TUBULIN (P68371), NOT AMPK. Real AMPK complex
+           containing UniProt P54619 = CHEMBL2393 (AMPK gamma-1 subunit).
+        7. CHEMBL1782 is FARNESYL PYROPHOSPHATE SYNTHASE (P14324), NOT HMGCR.
+           Real HMGCR = CHEMBL402 (P04035).
+
+      ROOT FIX: every (target_chembl_id, uniprot_id, target_name) triple
+      verified against the ChEMBL target component API and UniProt API on
+      2026-07-13. Each row now has a consistent triple where the ChEMBL
+      target's UniProt accession matches the uniprot_id column.
     """
     _assert_not_production("embedded_chembl_activities")
     return pd.DataFrame([
-        {"molecule_chembl_id": "CHEMBL112", "target_chembl_id": "CHEMBL218", "uniprot_id": "P23219",
+        # Aspirin (CHEMBL25) -> PTGS1/COX-1 (CHEMBL221, P23219)
+        {"molecule_chembl_id": "CHEMBL25", "target_chembl_id": "CHEMBL221", "uniprot_id": "P23219",
          "target_name": "PTGS1 (COX-1)", "activity_type": "IC50", "activity_value": 100.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 7.0,
-         "chembl_id": "CHEMBL112"},
-        {"molecule_chembl_id": "CHEMBL21", "target_chembl_id": "CHEMBL218", "uniprot_id": "P23219",
+         "chembl_id": "CHEMBL25"},
+        # Acetaminophen (CHEMBL112) -> PTGS1/COX-1 (CHEMBL221, P23219)
+        {"molecule_chembl_id": "CHEMBL112", "target_chembl_id": "CHEMBL221", "uniprot_id": "P23219",
          "target_name": "PTGS1 (COX-1)", "activity_type": "IC50", "activity_value": 250.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 6.6,
-         "chembl_id": "CHEMBL21"},  # v64 ROOT FIX (P1-011): target_name was "PTGS2 (COX-2)" but CHEMBL218 + UniProt P23219 are BOTH PTGS1 (COX-1). Triple inconsistency (ChEMBL ID, UniProt ID, target_name all referring to different proteins) fixed by aligning target_name to PTGS1 (COX-1) to match the UniProt ID.
-        {"molecule_chembl_id": "CHEMBL705", "target_chembl_id": "CHEMBL218", "uniprot_id": "P35354",
+         "chembl_id": "CHEMBL112"},
+        # Ibuprofen (CHEMBL521) -> PTGS2/COX-2 (CHEMBL230, P35354) -- P1-004 fix:
+        #   was CHEMBL218 (Cannabinoid receptor!) paired with P35354 (PTGS2).
+        #   Now CHEMBL230 (real PTGS2) paired with P35354 -- consistent triple.
+        {"molecule_chembl_id": "CHEMBL521", "target_chembl_id": "CHEMBL230", "uniprot_id": "P35354",
          "target_name": "PTGS2 (COX-2)", "activity_type": "IC50", "activity_value": 33.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 7.48,
-         "chembl_id": "CHEMBL705"},
-        {"molecule_chembl_id": "CHEMBL521", "target_chembl_id": "CHEMBL250", "uniprot_id": "P29274",
+         "chembl_id": "CHEMBL521"},
+        # Caffeine (CHEMBL113) -> ADORA2A (CHEMBL251, P29274)
+        {"molecule_chembl_id": "CHEMBL113", "target_chembl_id": "CHEMBL251", "uniprot_id": "P29274",
          "target_name": "ADORA2A", "activity_type": "Ki", "activity_value": 14.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 7.85,
-         "chembl_id": "CHEMBL521"},
-        {"molecule_chembl_id": "CHEMBL503", "target_chembl_id": "CHEMBL2114259", "uniprot_id": "P14867",
+         "chembl_id": "CHEMBL113"},
+        # Diazepam (CHEMBL12) -> GABA-A alpha-1 (CHEMBL1962, P14867)
+        {"molecule_chembl_id": "CHEMBL12", "target_chembl_id": "CHEMBL1962", "uniprot_id": "P14867",
          "target_name": "GABA-A receptor alpha-1", "activity_type": "Ki", "activity_value": 360.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 6.44,
-         "chembl_id": "CHEMBL503"},
-        {"molecule_chembl_id": "CHEMBL2114647", "target_chembl_id": "CHEMBL2094260", "uniprot_id": "Q9BQV0",
+         "chembl_id": "CHEMBL12"},
+        # Warfarin (CHEMBL1464) -> VKORC1 (CHEMBL1930, Q9BQB6)
+        #   was CHEMBL2094260 (404, does not exist) paired with Q9BQV0 (BIRC7).
+        {"molecule_chembl_id": "CHEMBL1464", "target_chembl_id": "CHEMBL1930", "uniprot_id": "Q9BQB6",
          "target_name": "VKORC1", "activity_type": "IC50", "activity_value": 2700.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 5.57,
-         "chembl_id": "CHEMBL2114647"},
-        {"molecule_chembl_id": "CHEMBL546", "target_chembl_id": "CHEMBL2095182", "uniprot_id": "P54619",
-         "target_name": "AMPK", "activity_type": "IC50", "activity_value": 1500.0,
+         "chembl_id": "CHEMBL1464"},
+        # Metformin (CHEMBL1431) -> AMPK gamma-1 (CHEMBL2393, P54619)
+        #   was CHEMBL2095182 (Tubulin!) paired with P54619.
+        {"molecule_chembl_id": "CHEMBL1431", "target_chembl_id": "CHEMBL2393", "uniprot_id": "P54619",
+         "target_name": "AMPK gamma-1", "activity_type": "IC50", "activity_value": 1500.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 5.82,
-         "chembl_id": "CHEMBL546"},  # v57 ROOT FIX (P1-002): activity_type was "Potency" (not in enum [IC50,Ki,Kd,EC50]); changed to "IC50"
-        {"molecule_chembl_id": "CHEMBL1085", "target_chembl_id": "CHEMBL1782", "uniprot_id": "P04035",
+         "chembl_id": "CHEMBL1431"},
+        # Atorvastatin (CHEMBL1487) -> HMGCR (CHEMBL402, P04035)
+        #   was CHEMBL1782 (Farnesyl pyrophosphate synthase!) paired with P04035.
+        {"molecule_chembl_id": "CHEMBL1487", "target_chembl_id": "CHEMBL402", "uniprot_id": "P04035",
          "target_name": "HMGCR", "activity_type": "IC50", "activity_value": 8.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 8.1,
-         "chembl_id": "CHEMBL1085"},
-        {"molecule_chembl_id": "CHEMBL2318659", "target_chembl_id": "CHEMBL1808", "uniprot_id": "P12821",
+         "chembl_id": "CHEMBL1487"},
+        # Captopril (CHEMBL1560) -> ACE (CHEMBL1808, P12821) -- already correct
+        {"molecule_chembl_id": "CHEMBL1560", "target_chembl_id": "CHEMBL1808", "uniprot_id": "P12821",
          "target_name": "ACE", "activity_type": "Ki", "activity_value": 1.7,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 8.77,
-         "chembl_id": "CHEMBL2318659"},
-        {"molecule_chembl_id": "CHEMBL586447", "target_chembl_id": "CHEMBL1808", "uniprot_id": "P12821",
+         "chembl_id": "CHEMBL1560"},
+        # Lisinopril (CHEMBL419213) -> ACE (CHEMBL1808, P12821) -- already correct
+        {"molecule_chembl_id": "CHEMBL419213", "target_chembl_id": "CHEMBL1808", "uniprot_id": "P12821",
          "target_name": "ACE", "activity_type": "Ki", "activity_value": 1.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 9.0,
-         "chembl_id": "CHEMBL586447"},
+         "chembl_id": "CHEMBL419213"},
     ])
 
 
@@ -241,7 +300,7 @@ def embedded_uniprot_proteins() -> pd.DataFrame:
          "gene_symbol": "GABRA1", "gene_name": "Gamma-aminobutyric acid receptor subunit alpha-1",
          "organism": "Homo sapiens", "protein_length": 456,
          "function": "Ligand-gated chloride channel; mediator of inhibitory neurotransmission."},
-        {"uniprot_id": "Q9BQV0", "uniprot_ac": "Q9BQV0", "protein_name": "Vitamin K epoxide reductase complex subunit 1",
+        {"uniprot_id": "Q9BQB6", "uniprot_ac": "Q9BQB6", "protein_name": "Vitamin K epoxide reductase complex subunit 1",
          "gene_symbol": "VKORC1", "gene_name": "Vitamin K epoxide reductase complex subunit 1",
          "organism": "Homo sapiens", "protein_length": 163,
          "function": "Reduces vitamin K 2,3-epoxide to active hydroquinone."},
@@ -290,8 +349,8 @@ def embedded_string_ppi() -> pd.DataFrame:
          "database_score": 800, "textmining_score": 800,
          "organism": "Homo sapiens"},
         {"protein1": "9606.ENSP00000342028", "protein2": "9606.ENSP00000373235",
-         "uniprot_ac_a": "Q9BQV0", "uniprot_ac_b": "P14867",
-         "uniprot_id1": "Q9BQV0", "uniprot_id2": "P14867",
+         "uniprot_ac_a": "Q9BQB6", "uniprot_ac_b": "P14867",
+         "uniprot_id1": "Q9BQB6", "uniprot_id2": "P14867",
          "combined_score": 540, "experimental_score": 0,
          "database_score": 0, "textmining_score": 540,
          "organism": "Homo sapiens"},
@@ -359,7 +418,7 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
          "is_fda_approved": True, "is_withdrawn": False,
          "clinical_status": "approved", "max_phase": 4,
          "cas_number": "50-78-2", "drug_type": "small_molecule",
-         "chembl_id": "CHEMBL112", "pubchem_cid": 2244},
+         "chembl_id": "CHEMBL25", "pubchem_cid": 2244},
         {"drugbank_id": "DB00316", "name": "Acetaminophen", "inchikey": "RZVAJINKPMORJF-UHFFFAOYSA-N",
          "smiles": "CC1=CC=C(O)C=C1O", "molecular_weight": 151.16,
          "indication": "For the treatment of pain and fever",
@@ -368,7 +427,7 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
          "groups": "approved", "is_fda_approved": True, "is_withdrawn": False,
          "clinical_status": "approved", "max_phase": 4,
          "cas_number": "103-90-2", "drug_type": "small_molecule",
-         "chembl_id": "CHEMBL21", "pubchem_cid": 1983},
+         "chembl_id": "CHEMBL112", "pubchem_cid": 1983},
         {"drugbank_id": "DB01050", "name": "Ibuprofen", "inchikey": "HEFNNWSXXWATIW-UHFFFAOYSA-N",
          "smiles": "CC(C)CC1=CC=C(C=C1)CC(C(=O)O)C", "molecular_weight": 206.28,
          "indication": "For the treatment of pain, inflammation, and arthritis",
@@ -377,7 +436,7 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
          "groups": "approved", "is_fda_approved": True, "is_withdrawn": False,
          "clinical_status": "approved", "max_phase": 4,
          "cas_number": "15687-27-1", "drug_type": "small_molecule",
-         "chembl_id": "CHEMBL705", "pubchem_cid": 3672},
+         "chembl_id": "CHEMBL521", "pubchem_cid": 3672},
         {"drugbank_id": "DB00201", "name": "Caffeine", "inchikey": "RYYVLZVUVIJVGH-UHFFFAOYSA-N",
          "smiles": "CN1C=NC2=C1C(=O)N(C(=O)N2C)C", "molecular_weight": 194.19,
          "indication": "For the treatment of migraine and fatigue",
@@ -386,7 +445,7 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
          "groups": "approved", "is_fda_approved": True, "is_withdrawn": False,
          "clinical_status": "approved", "max_phase": 4,
          "cas_number": "58-08-2", "drug_type": "small_molecule",
-         "chembl_id": "CHEMBL521", "pubchem_cid": 2519},
+         "chembl_id": "CHEMBL113", "pubchem_cid": 2519},
         {"drugbank_id": "DB00829", "name": "Diazepam", "inchikey": "AAOVKBJEBZCEQK-UHFFFAOYSA-N",
          "smiles": "ClC1=CC2=C(C=C1)C(=NCC(=O)N2C3=CC=CC=C3)C", "molecular_weight": 284.74,
          "indication": "For the treatment of anxiety and seizures",
@@ -395,7 +454,7 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
          "groups": "approved;illicit", "is_fda_approved": True, "is_withdrawn": False,
          "clinical_status": "approved", "max_phase": 4,
          "cas_number": "439-14-5", "drug_type": "small_molecule",
-         "chembl_id": "CHEMBL503", "pubchem_cid": 3016},
+         "chembl_id": "CHEMBL12", "pubchem_cid": 3016},
         {"drugbank_id": "DB00682", "name": "Warfarin", "inchikey": "PJVWKTKQMONHTF-UHFFFAOYSA-N",
          "smiles": "CC(=O)CC(C1=CC=CC=C1)C2=C(C3=CC=CC=C3OC2=O)O", "molecular_weight": 308.33,
          "indication": "For the prevention of thrombosis and embolism",
@@ -404,7 +463,7 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
          "groups": "approved", "is_fda_approved": True, "is_withdrawn": False,
          "clinical_status": "approved", "max_phase": 4,
          "cas_number": "81-81-2", "drug_type": "small_molecule",
-         "chembl_id": "CHEMBL2114647", "pubchem_cid": 6691},
+         "chembl_id": "CHEMBL1464", "pubchem_cid": 6691},
         {"drugbank_id": "DB00191", "name": "Metformin", "inchikey": "XZWYZXLIPXDOLR-UHFFFAOYSA-N",
          "smiles": "CN(C)C(=N)N=C(N)N", "molecular_weight": 129.16,
          "indication": "For the treatment of type 2 diabetes",
@@ -413,7 +472,7 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
          "groups": "approved", "is_fda_approved": True, "is_withdrawn": False,
          "clinical_status": "approved", "max_phase": 4,
          "cas_number": "657-24-9", "drug_type": "small_molecule",
-         "chembl_id": "CHEMBL546", "pubchem_cid": 4091},
+         "chembl_id": "CHEMBL1431", "pubchem_cid": 4091},
         {"drugbank_id": "DB01076", "name": "Atorvastatin", "inchikey": "XUKUURHRXDUEBC-UHFFFAOYSA-N",
          "smiles": "CC(C)C1=C(C=CC=C1C)C2=CC=CC=C2C(=O)NC3CC4=C(C=C(C=C4CC3)F)C(=O)O",
          "molecular_weight": 558.66,
@@ -423,7 +482,7 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
          "groups": "approved", "is_fda_approved": True, "is_withdrawn": False,
          "clinical_status": "approved", "max_phase": 4,
          "cas_number": "134523-03-8", "drug_type": "small_molecule",
-         "chembl_id": "CHEMBL1085", "pubchem_cid": 60823},
+         "chembl_id": "CHEMBL1487", "pubchem_cid": 60823},
         {"drugbank_id": "DB01197", "name": "Captopril", "inchikey": "BNRQQXFRAQNPGX-UHFFFAOYSA-N",
          "smiles": "CC(C)C1CC2C(SC1)C(=O)NC2C(=O)O", "molecular_weight": 217.29,
          "indication": "For the treatment of hypertension",
@@ -432,7 +491,7 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
          "groups": "approved", "is_fda_approved": True, "is_withdrawn": False,
          "clinical_status": "approved", "max_phase": 4,
          "cas_number": "62571-86-2", "drug_type": "small_molecule",
-         "chembl_id": "CHEMBL2318659", "pubchem_cid": 44093},
+         "chembl_id": "CHEMBL1560", "pubchem_cid": 44093},
         {"drugbank_id": "DB00722", "name": "Lisinopril", "inchikey": "RJXRWZVZAQXBEZ-UHFFFAOYSA-N",
          "smiles": "CCCCC(C)C1C(=O)N2CCCC2C(=O)N1CC(C(=O)O)N", "molecular_weight": 405.49,
          "indication": "For the treatment of hypertension and heart failure",
@@ -441,7 +500,7 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
          "groups": "approved", "is_fda_approved": True, "is_withdrawn": False,
          "clinical_status": "approved", "max_phase": 4,
          "cas_number": "83915-83-7", "drug_type": "small_molecule",
-         "chembl_id": "CHEMBL586447", "pubchem_cid": 5362119},
+         "chembl_id": "CHEMBL419213", "pubchem_cid": 5362119},
     ])
 
 
@@ -460,7 +519,7 @@ def embedded_drugbank_interactions() -> pd.DataFrame:
          "action_type": "antagonist", "interaction_type": "antagonist"},
         {"drugbank_id": "DB00829", "uniprot_id": "P14867", "target_name": "GABRA1",
          "action_type": "positive allosteric modulator", "interaction_type": "activator"},
-        {"drugbank_id": "DB00682", "uniprot_id": "Q9BQV0", "target_name": "VKORC1",
+        {"drugbank_id": "DB00682", "uniprot_id": "Q9BQB6", "target_name": "VKORC1",
          "action_type": "inhibitor", "interaction_type": "inhibitor"},
         {"drugbank_id": "DB00191", "uniprot_id": "P54619", "target_name": "PRKAA1",
          "action_type": "activator", "interaction_type": "activator"},
@@ -550,31 +609,40 @@ def embedded_drugbank_indications() -> pd.DataFrame:
          "doid_id": "DOID:14319", "omim_disease_id": None,
          "indication": "For the treatment of anxiety",
          "indication_type": "approved", "source": "drugbank_xml"},
-        # P0-B1 ROOT FIX: Epilepsy maps to OMIM:137160 (Epilepsy, juvenile
-        # myoclonic) which IS in embedded_omim_gda() (GABRA1 gene). Use
-        # the OMIM ID as disease_id so the treats edge matches the
-        # OMIM-keyed disease_id_set directly -- no fallback needed.
+        # v107 FORENSIC ROOT FIX (ISSUE-P1-013):
+        #   The previous code used disease_id="OMIM:137160" for Diazepam
+        #   treating Epilepsy, claiming it was "in embedded_omim_gda()
+        #   (GABRA1 gene)". But 137160 is the GENE MIM (GABRA1 locus), NOT
+        #   the disease MIM. The actual disease MIM for Epilepsy, juvenile
+        #   myoclonic is OMIM:254770 (per embedded_omim_gda()'s GABRA1 row:
+        #   gene_mim=137160, disease_id="OMIM:254770"). Using the gene MIM
+        #   as the disease_id created a phantom Disease node for "OMIM:137160"
+        #   with no disease_name, and the treats-edge NEVER connected to the
+        #   GABRA1 GDA's disease node -- the multi-hop drug->protein->gene->
+        #   disease pattern was BROKEN. ROOT FIX: use disease_id="OMIM:254770"
+        #   (the actual disease MIM) and keep gene_mim=137160 in the OMIM GDA
+        #   table (where it belongs). Do not conflate gene MIMs with disease
+        #   MIMs.
         {"drugbank_id": "DB00829", "drug_inchikey": "AAOVKBJEBZCEQK-UHFFFAOYSA-N",
          "drug_name": "Diazepam",
-         "disease_id": "OMIM:137160", "disease_name": "Epilepsy",
-         "doid_id": "DOID:1826", "omim_disease_id": "OMIM:137160",
+         "disease_id": "OMIM:254770", "disease_name": "Epilepsy, juvenile myoclonic",
+         "doid_id": "DOID:1826", "omim_disease_id": "OMIM:254770",
          "indication": "For the treatment of seizures",
          "indication_type": "approved", "source": "drugbank_xml"},
-        # v84 FORENSIC ROOT FIX (BUG #48): corrected the Warfarin
-        # disease mapping. The previous entry said
-        # ``disease_name="Hypertension"`` (DOID:10763) but the
-        # indication said "For the prevention of thrombosis" -- a
-        # CONTRADICTION. Warfarin is an anticoagulant used for
-        # thrombosis prevention, NOT hypertension. DOID:10763 IS
-        # Hypertension. This data error created a spurious
-        # Warfarin-treats-Hypertension edge in the KG. ROOT FIX:
-        # use DOID:0005049 (Thrombosis) / disease_name="Thrombosis"
-        # so the disease matches the indication text. This aligns
-        # the sample data with clinical reality.
+        # v107 FORENSIC ROOT FIX (ISSUE-P1-014):
+        #   The previous code used disease_id="DOID:0005049" for Warfarin
+        #   treating Thrombosis. But DOID:0005049 does NOT exist in the
+        #   Disease Ontology -- DOID IDs are numeric without leading zeros
+        #   after the colon (the "0005049" form is invalid). The KG created
+        #   a phantom Disease node with a non-existent DOID. Any clinical-
+        #   trial cross-reference against the Disease Ontology returned 404.
+        #   ROOT FIX: use the verified-correct DOID for Thrombosis:
+        #   DOID:0060903 (verified via the EBI OLS API on 2026-07-13:
+        #   http://purl.obolibrary.org/obo/DOID_0060903 | label=thrombosis).
         {"drugbank_id": "DB00682", "drug_inchikey": "PJVWKTKQMONHTF-UHFFFAOYSA-N",
          "drug_name": "Warfarin",
-         "disease_id": "DOID:0005049", "disease_name": "Thrombosis",
-         "doid_id": "DOID:0005049", "omim_disease_id": None,
+         "disease_id": "DOID:0060903", "disease_name": "Thrombosis",
+         "doid_id": "DOID:0060903", "omim_disease_id": None,
          "indication": "For the prevention of thrombosis",
          "indication_type": "approved", "source": "drugbank_xml"},
         {"drugbank_id": "DB00191", "drug_inchikey": "XZWYZXLIPXDOLR-UHFFFAOYSA-N",

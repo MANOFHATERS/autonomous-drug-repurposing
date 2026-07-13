@@ -528,105 +528,55 @@ class _RateLimiter:
             self._last_request = time.time()
 
 
-class _CircuitBreaker:
-    """Simple circuit breaker for external service calls (REL-6.11).
-
-    After ``failure_threshold`` consecutive failures, the breaker opens
-    and refuses further calls for ``reset_timeout`` seconds. After the
-    timeout, it enters ``half_open`` state: one call is allowed; if it
-    succeeds, the breaker closes; if it fails, the breaker re-opens.
-
-    v40 ROOT FIX (P1 #9): the previous ``is_open`` method transitioned
-    OPEN -> HALF_OPEN and immediately returned False (allowing the call).
-    But in HALF_OPEN state, EVERY subsequent ``is_open`` call also
-    returned False -- there was no "single probe" gate. Multiple
-    concurrent calls could flood through, defeating the purpose of the
-    half-open state. The fix: track a ``_half_open_probe_in_flight``
-    flag. When transitioning to HALF_OPEN, the FIRST call is allowed
-    (probe). Subsequent calls are REFUSED (return True = "open") until
-    the probe completes (record_success or record_failure resets the
-    flag).
-    """
-
-    def __init__(
-        self,
-        failure_threshold: int = 5,
-        reset_timeout: float = 3600.0,
-    ) -> None:
-        self._failure_threshold = max(1, int(failure_threshold))
-        self._reset_timeout = max(0.0, float(reset_timeout))
-        self._failure_count = 0
-        self._last_failure_time = 0.0
-        self._state = "closed"  # closed | open | half_open
-        self._lock = threading.Lock()
-        # v40 ROOT FIX (P1 #9): track whether the half-open probe is
-        # in flight. Only ONE call is allowed in half_open state.
-        self._half_open_probe_in_flight = False
-
-    def record_failure(self) -> None:
-        with self._lock:
-            self._failure_count += 1
-            self._last_failure_time = time.time()
-            if self._failure_count >= self._failure_threshold:
-                self._state = "open"
-            # v40: reset the probe flag -- the probe failed.
-            self._half_open_probe_in_flight = False
-
-    def record_success(self) -> None:
-        with self._lock:
-            self._failure_count = 0
-            self._state = "closed"
-            # v40: reset the probe flag -- the probe succeeded.
-            self._half_open_probe_in_flight = False
-
-    def is_open(self) -> bool:
-        """Return True if the breaker is open and calls should be refused.
-
-        v92 ROOT FIX (BUG P1-073): is_open() is now a PURE OBSERVATION
-        method -- it does NOT transition state or reserve probe slots.
-        Previously, is_open() mutated state (OPEN->half_open, set
-        _half_open_probe_in_flight=True), which meant monitoring/dashboard
-        code that called is_open() inadvertently broke subsequent
-        allow_request() calls. Callers who want to actually acquire a
-        probe slot MUST call try_acquire_probe() or allow_request().
-        """
-        with self._lock:
-            if self._state == "open":
-                return True
-            if self._state == "half_open":
-                # In half_open, "open" means "refuse additional calls" =
-                # a probe is already in flight.
-                return self._half_open_probe_in_flight
-            return False
-
-    def try_acquire_probe(self) -> bool:
-        """Try to acquire a probe slot in half_open state.
-
-        v92 ROOT FIX (BUG P1-073): This method performs the state mutation
-        that was previously done by is_open(). It transitions OPEN->half_open
-        when the reset timeout has elapsed and reserves a probe slot. Returns
-        True if the request should proceed, False if refused.
-
-        Callers who need to actually acquire a probe slot (i.e., code that
-        decides whether to make a network call) should use this method
-        instead of is_open().
-        """
-        with self._lock:
-            if self._state == "open":
-                if time.time() - self._last_failure_time > self._reset_timeout:
-                    self._state = "half_open"
-                    # Allow the first probe call.
-                    self._half_open_probe_in_flight = True
-                    return False  # allow this call (the probe)
-                return True
-            if self._state == "half_open":
-                # If a probe is already in flight, refuse.
-                if self._half_open_probe_in_flight:
-                    return True  # refuse -- wait for probe to complete
-                # No probe in flight -- allow this call as the new probe.
-                self._half_open_probe_in_flight = True
-                return False
-            return False
+# v107 FORENSIC ROOT FIX (ISSUE-P1-006 + ISSUE-P1-017 + ISSUE-P1-018):
+#   The previous code defined a LOCAL _CircuitBreaker class here (lines
+#   531-629) that DUPLICATED the canonical implementation in
+#   ``phase1/_circuit_breaker.py``. Despite the docstring at
+#   _circuit_breaker.py:33-50 claiming "Consolidated from five duplicate
+#   implementations", the duplicate here was ALIVE and missing every
+#   subsequent fix: no rolling failure window, no exponential backoff,
+#   no probe timeout, no P1-028 auto-recovery.
+#
+#   Compound bugs:
+#     P1-006: the local breaker tripped after 5 LIFETIME-consecutive
+#       failures (no time window). After tripping, it never auto-recovered
+#       because ``_download_with_retries`` called ``is_open()`` (now pure
+#       observation) but never called ``try_acquire_probe()`` to transition
+#       OPEN->HALF_OPEN. After 5 failures, ALL downloads silently failed
+#       with "Circuit breaker is open" until process restart.
+#     P1-017: ``is_open()`` was changed to pure observation (v92) but the
+#       download path still called ``is_open()`` instead of the state-
+#       transitioning ``allow_request()`` / ``try_acquire_probe()``. The
+#       breaker was stuck open forever within the process lifetime.
+#     P1-018: ``try_acquire_probe()`` had INVERTED semantics vs its name
+#       (docstring said "Returns True to proceed" but implementation
+#       returned False to allow). It was also never called anywhere.
+#
+#   ROOT FIX:
+#     1. DELETE the local _CircuitBreaker class entirely.
+#     2. Import the canonical _CircuitBreaker from ``_circuit_breaker.py``.
+#     3. In ``_download_with_retries``, replace ``is_open()`` with
+#        ``allow_request()`` (which has CORRECT semantics: True = proceed,
+#        False = refused, AND transitions OPEN->HALF_OPEN automatically).
+#     4. The canonical breaker has rolling failure window, exponential
+#        backoff, probe-timeout auto-recovery, and a ``probe()`` context
+#        manager for new callers.
+try:
+    from _circuit_breaker import _CircuitBreaker  # noqa: F401 — re-exported for legacy callers
+except ImportError:  # pragma: no cover — fallback for different import paths
+    import importlib.util as _ilu
+    import os as _os
+    _cb_path = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "_circuit_breaker.py")
+    if _os.path.exists(_cb_path):
+        _spec = _ilu.spec_from_file_location("_circuit_breaker", _cb_path)
+        _cb_mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_cb_mod)
+        _CircuitBreaker = _cb_mod._CircuitBreaker
+    else:  # pragma: no cover — should never happen in a correct install
+        raise ImportError(
+            "Cannot import _CircuitBreaker from _circuit_breaker.py. "
+            "The canonical circuit breaker module is required."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3586,8 +3536,24 @@ class BasePipeline(ABC):
 
         for attempt in range(1, max_retries + 1):
             try:
-                # Circuit breaker check (REL-6.11)
-                if self._circuit_breaker.is_open():
+                # v107 FORENSIC ROOT FIX (ISSUE-P1-017):
+                #   The previous code called ``self._circuit_breaker.is_open()``
+                #   which (per the v92 ROOT FIX) is now PURE OBSERVATION --
+                #   it does NOT transition state from OPEN -> HALF_OPEN.
+                #   After 5 failures, the breaker tripped and NEVER
+                #   recovered within the process lifetime (the transition
+                #   method ``try_acquire_probe()`` / ``allow_request()`` was
+                #   never called in the download path). All downloads
+                #   silently failed with "Circuit breaker is open" until
+                #   the Airflow worker process restarted.
+                #
+                #   ROOT FIX: use ``allow_request()`` from the canonical
+                #   ``_circuit_breaker.py``. This method (a) returns True
+                #   if the request should proceed / False if refused, AND
+                #   (b) transitions OPEN -> HALF_OPEN when the reset
+                #   timeout has elapsed, reserving the single-probe slot.
+                #   The breaker now auto-recovers after the timeout.
+                if not self._circuit_breaker.allow_request():
                     raise DownloadError(
                         f"Circuit breaker is open for {self.source_name}; "
                         f"failing fast. Try again later."
@@ -4497,8 +4463,23 @@ class BasePipeline(ABC):
             # their original Python object representation (int -> int,
             # float -> float, str -> str).
             _obj_series = series.astype(object)
+            # v107 FORENSIC ROOT FIX (ISSUE-P1-019):
+            #   The previous code used ``~_danger_mask.values`` (numpy array)
+            #   as the condition for ``Series.where()``. The ``.values``
+            #   attribute DISCARDS the index, so if the DataFrame's index
+            #   had been reset (e.g. after ``dropna``), the alignment
+            #   between ``_danger_mask.values`` and ``_obj_series`` was
+            #   incorrect -- dangerous cells were not escaped. A SMILES
+            #   string starting with ``=`` (rare but possible for peptide
+            #   SMILES) was not escaped, creating a CSV formula injection
+            #   vector. The safety claim was FALSE.
+            #
+            #   ROOT FIX: use ``~_danger_mask`` (WITHOUT ``.values``) so
+            #   pandas aligns by index. The boolean mask and the Series
+            #   now share the same index, guaranteeing correct cell-level
+            #   escaping even after index resets.
             _escaped = _obj_series.where(
-                ~_danger_mask.values,
+                ~_danger_mask,
                 _obj_series.map(
                     lambda x: f"'{x}" if isinstance(x, str) else x
                 ),
@@ -5273,8 +5254,23 @@ class BasePipeline(ABC):
         # ProgrammingError for schema drift) plus OS/import errors.
         # Programming bugs (AttributeError, NameError) propagate.
         except (OSError, ValueError, RuntimeError, ImportError, KeyError) as exc:
-            # Filter: if this is NOT a DB error, re-raise it so
-            # programming bugs are not silently masked.
+            # v107 FORENSIC ROOT FIX (ISSUE-P1-007):
+            #   The previous code had ``if _db_exc_types and not isinstance(exc, tuple(_db_exc_types)):
+            #   pass`` -- the ``pass`` body did NOTHING. The comment claimed
+            #   "otherwise re-raise" but there was no re-raise. ALL caught
+            #   exceptions fell back to local JSONL, including programming
+            #   bugs (NameError, AttributeError from typos). A typo in a
+            #   ``PipelineRun(source="chmembl")`` field name was silently
+            #   masked as "DB unavailable" -- the audit trail went to a
+            #   local file nobody read. Real bugs became invisible.
+            #
+            #   ROOT FIX: if the exception is NOT a DB error, RE-RAISE it
+            #   so programming bugs propagate instead of being silently
+            #   swallowed. Audit writes only fall back to JSONL for genuine
+            #   DB errors (OperationalError, IntegrityError, InterfaceError,
+            #   ProgrammingError) or the allowed non-DB types that genuinely
+            #   indicate "DB unavailable" (OSError for filesystem/IPC,
+            #   ImportError for missing SQLAlchemy driver).
             _db_exc_types = []
             if _SAIntegrityError is not None:
                 _db_exc_types.append(_SAIntegrityError)
@@ -5285,9 +5281,13 @@ class BasePipeline(ABC):
             if _SAProgrammingError is not None:
                 _db_exc_types.append(_SAProgrammingError)
             if _db_exc_types and not isinstance(exc, tuple(_db_exc_types)):
-                # Check if it's one of our allowed non-DB exceptions;
-                # otherwise re-raise (programming bug -- propagate).
-                pass  # allowed non-DB error, fall back to JSONL
+                # v107 P1-007: RE-RAISE non-DB exceptions so programming
+                # bugs (KeyError from a typo'd field name, RuntimeError
+                # from a contract violation, ValueError from bad data)
+                # propagate to the operator instead of being silently
+                # masked as "DB unavailable". The audit trail must be
+                # TRUSTWORTHY -- a silent fallback hides real bugs.
+                raise
             if (
                 _HAS_SQLALCHEMY
                 and _SAIntegrityError is not None

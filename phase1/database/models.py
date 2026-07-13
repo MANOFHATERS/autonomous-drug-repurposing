@@ -397,8 +397,33 @@ def _validate_uniprot_id(value: Optional[str]) -> Optional[str]:
     # v22: CHEMBL_TGT_ prefix is a Phase 2 synthetic ID for ChEMBL
     # targets without UniProt AC. Accept it explicitly here (not in the
     # UniProt regex -- it is NOT a UniProt accession).
+    # v107 FORENSIC ROOT FIX (ISSUE-P1-011):
+    #   The previous code ACCEPTED ``CHEMBL_TGT_*`` prefixed IDs as valid
+    #   UniProt accessions, storing them in ``proteins.uniprot_id``. But
+    #   ChEMBL target IDs and UniProt accessions are DIFFERENT identifier
+    #   systems. Conflating them meant a ``CHEMBL_TGT_12345`` value landed
+    #   in ``proteins.uniprot_id`` and was treated as a UniProt accession
+    #   by downstream joins. Cross-source protein resolution joins
+    #   ``proteins.uniprot_id`` against UniProt's canonical accession set
+    #   -- a ``CHEMBL_TGT_*`` value never matches a real UniProt accession,
+    #   producing orphan proteins and broken Gene->encodes->Protein edges.
+    #   The KG had phantom proteins.
+    #   ROOT FIX: REJECT ``CHEMBL_TGT_*`` here. ChEMBL target IDs must be
+    #   stored in a SEPARATE ``chembl_target_id`` column (which the schema
+    #   already supports via the ``chembl_activities`` table's
+    #   ``target_chembl_id`` column). The ``uniprot_id`` column must
+    #   contain ONLY real UniProt accessions (or NULL when the protein
+    #   has no known UniProt mapping -- in that case the loader should
+    #   skip the row or use a synthetic ID in a dedicated column).
     if base.upper().startswith("CHEMBL_TGT_"):
-        return value
+        raise ValueError(
+            f"Invalid UniProt accession: '{value}'. "
+            f"CHEMBL_TGT_* prefixed IDs are ChEMBL target IDs, NOT UniProt "
+            f"accessions. Store ChEMBL target IDs in the chembl_target_id "
+            f"column, not in uniprot_id. Conflating these identifier "
+            f"systems breaks cross-source protein resolution and creates "
+            f"phantom protein nodes in the KG."
+        )
     if _UNIPROT_RE.match(base):
         return value
     # v34 ROOT FIX (CRITICAL #3): previously accepted TEST-prefixed IDs
@@ -871,8 +896,27 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         #   schema changes. Same pattern applied to ``is_withdrawn``
         #   below (patient-safety signal -- an unknown withdrawal status
         #   must not silently become "not withdrawn").
+        # v107 FORENSIC ROOT FIX (ISSUE-P1-009):
+        #   The ORM CHECK was ``is_fda_approved IS NOT NULL AND
+        #   is_fda_approved IN (0, 1)`` -- rejecting NULL. But migration
+        #   013 alters the column to nullable and adds ``is_fda_approved
+        #   IS NULL OR is_fda_approved IN (TRUE, FALSE)`` -- allowing
+        #   NULL = "unknown FDA status" (the v93 patient-safety fix for
+        #   EMA-only drugs). Dev/test SQLite DBs (via
+        #   ``Base.metadata.create_all()``) rejected NULL inserts, while
+        #   prod DBs (migration-created) allowed them. The loader's
+        #   ``_pre_validate_drugs`` coerced None->False to satisfy the
+        #   dev DB constraint, silently reverting the v93 fix. EMA-only
+        #   drugs (max_phase=4, not FDA-approved) were stored as
+        #   ``is_fda_approved=False`` -- same as confirmed-not-approved
+        #   drugs. The RL ranker's FDA safety filter treated them
+        #   identically. Tests passed on dev, prod had the fix -- dev/prod
+        #   asymmetry.
+        #   ROOT FIX: align the ORM CHECK with migration 013 -- allow NULL
+        #   (unknown FDA status) OR (0, 1). Remove the ``IS NOT NULL``
+        #   predicate.
         CheckConstraint(
-            "is_fda_approved IS NOT NULL AND is_fda_approved IN (0, 1)",
+            "is_fda_approved IS NULL OR is_fda_approved IN (0, 1)",
             name="chk_drugs_is_fda_approved",
         ),
         # [DQ-04] Name minimum length
@@ -1012,7 +1056,21 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
 
     # [INT-05] Serialization helper
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary with proper type coercion."""
+        """Convert to dictionary with proper type coercion.
+
+        v107 FORENSIC ROOT FIX (ISSUE-P1-010):
+          The previous to_dict() omitted patient-safety-critical fields:
+          ``is_globally_approved`` (max_phase==4 = global approval signal),
+          ``groups`` (DrugBank groups string used to derive is_withdrawn),
+          ``indication`` (free-text indication), and ``indication_source``
+          (drugbank_xml / chembl_max_phase / rxnorm). If the frontend reads
+          to_dict() for drug listings, the safety filter UI cannot display
+          the global approval flag or the withdrawn-drug groups string. A
+          withdrawn killer drug (Vioxx, Baycol) was indistinguishable from
+          an active drug in the API response. ROOT FIX: add all four
+          missing fields so the API response carries the full safety
+          surface area.
+        """
         return {
             "id": self.id,
             "inchikey": self.inchikey,
@@ -1024,6 +1082,11 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             "molecular_weight": float(self.molecular_weight) if self.molecular_weight is not None else None,
             "smiles": self.smiles,
             "is_fda_approved": self.is_fda_approved,
+            # v107 P1-010: added missing patient-safety fields
+            "is_globally_approved": self.is_globally_approved,
+            "groups": self.groups,
+            "indication": self.indication,
+            "indication_source": self.indication_source,
             "max_phase": self.max_phase,
             "drug_type": self.drug_type,
             "mechanism_of_action": self.mechanism_of_action,

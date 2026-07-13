@@ -1045,7 +1045,14 @@ def _read_csv_robust(path: Path) -> pd.DataFrame:
 # Using the audit's literal column list would BREAK the bridge against the
 # real Phase 1 schema. The list below reflects the ACTUAL Phase 1 contract.
 _PHASE1_EXPECTED_COLUMNS: Dict[str, List[str]] = {
-    "drugs": ["drugbank_id", "name", "inchikey"],
+    # v107 FORENSIC ROOT FIX (ISSUE-P1-016): ``drugbank_id`` removed from
+    # REQUIRED and moved to _PHASE1_ANY_OF_COLUMNS (accept either
+    # ``drugbank_id`` OR ``chembl_id``). When DrugBank academic downloads
+    # are unavailable, the ChEMBL-only deployment must still pass the
+    # bridge's contract validation. The bridge read code uses ``inchikey``
+    # as the canonical Compound key and treats drugbank_id/chembl_id as
+    # source-specific aliases.
+    "drugs": ["name", "inchikey"],
     "interactions": ["drugbank_id", "uniprot_id", "action_type"],
     "omim_gda": ["gene_mim", "gene_symbol", "disease_id", "disease_name"],
     "chembl_drugs": ["chembl_id", "inchikey"],
@@ -1141,6 +1148,26 @@ _PHASE1_ANY_OF_COLUMNS: Dict[str, List[List[str]]] = {
     # must accept all three to match the read code's actual behavior.
     "uniprot_proteins": [
         ["uniprot_ac", "accession", "uniprot_id"],
+    ],
+    # v107 FORENSIC ROOT FIX (ISSUE-P1-016):
+    #   The bridge previously REQUIRED ``drugbank_id`` in the ``drugs``
+    #   source (_PHASE1_EXPECTED_COLUMNS["drugs"] = ["drugbank_id",
+    #   "name", "inchikey"]). But Phase 1's chembl_pipeline writes
+    #   ``drugs.csv`` (the alias for chembl source) which does NOT have
+    #   ``drugbank_id`` -- only ``chembl_id``. When DrugBank is
+    #   unavailable (academic license paused since May 2026 -- see
+    #   ISSUE-P1-005), the bridge's contract check FAILED on ChEMBL-only
+    #   deployments, raising DrugOSDataError and blocking the KG build.
+    #   This contradicted the docstring's claim that "ChEMBL-only
+    #   deployments now build a valid KG".
+    #   ROOT FIX: make ``drugbank_id`` OPTIONAL via ANY_OF -- accept
+    #   either ``drugbank_id`` OR ``chembl_id`` as the Compound
+    #   identifier. The bridge read code already handles both (it uses
+    #   inchikey as the canonical key and falls back to whatever ID is
+    #   present). Also removed ``drugbank_id`` from
+    #   _PHASE1_EXPECTED_COLUMNS["drugs"] (see above).
+    "drugs": [
+        ["drugbank_id", "chembl_id"],  # accept either as Compound identifier
     ],
 }
 
