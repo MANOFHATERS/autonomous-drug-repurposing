@@ -172,8 +172,16 @@ _shutdown_requested: bool = False
 # This is a hard guard — operators cannot bypass it without editing
 # source code. The escape hatches remain available for dev/test.
 def _check_production_escape_hatches() -> None:
-    """Refuse to load if escape hatches are set in production env."""
-    env = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
+    """Refuse to load if escape hatches are set in production env.
+
+    P2-035 ROOT FIX (v107): the default was "dev" — a production
+    deployment that forgot to set DRUGOS_ENVIRONMENT=production got
+    the dev behavior, and the escape hatches below were ALLOWED. This
+    let a worse-than-random model (TransE AUC=0.47) ship to V1 launch.
+    ROOT FIX: default to "production" so the escape hatches are
+    REFUSED unless the operator explicitly sets DRUGOS_ENVIRONMENT=dev.
+    """
+    env = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
     if env in ("prod", "production"):
         offenders: List[str] = []
         for flag in (
@@ -181,6 +189,10 @@ def _check_production_escape_hatches() -> None:
             "DRUGOS_ALLOW_PERMISSIVE_KG",
             "DRUGOS_ALLOW_PERMISSIVE_DPI",
             "DRUGOS_ALLOW_LAUNCH_FAIL",
+            # P2-026 ROOT FIX (v107): the eval-set size escape hatch
+            # must also be refused in production — it bypasses the
+            # AUC statistical-reliability gate.
+            "DRUGOS_ALLOW_SMALL_IMBALANCED_EVAL",
         ):
             if os.environ.get(flag, "") == "1":
                 offenders.append(flag)
@@ -212,8 +224,11 @@ _check_production_escape_hatches()
 # preserves the legacy lenient behavior (so dev/CI runners without
 # all data sources still work).
 def _is_production_mode() -> bool:
-    """Return True iff DRUGOS_ENVIRONMENT is set to prod/production."""
-    return os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() in ("prod", "production")
+    """Return True iff DRUGOS_ENVIRONMENT is set to prod/production.
+
+    P2-035 ROOT FIX (v107): default changed from "dev" to "production".
+    """
+    return os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() in ("prod", "production")
 
 
 def _step_exception_or_skip(step_name: str, exc: Exception, results: dict) -> None:
@@ -1151,7 +1166,8 @@ def _check_v1_launch_criteria(results: dict) -> dict:
         # to accept missing sources (since the toy fixture doesn't have
         # them). In production, no_critical_source_failure is strict.
         import os as _os
-        _dev_mode = _os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() not in ("prod", "production", "stage", "staging")
+        # P2-035 ROOT FIX (v107): default changed from "dev" to "production".
+        _dev_mode = _os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() not in ("prod", "production", "stage", "staging")
         _min_sources = int(_os.environ.get("DRUGOS_DEV_MIN_SOURCES", "2")) if _dev_mode else 7
         criteria["all_sources_loaded"] = sources_loaded >= _min_sources
         criteria["sources_loaded_count"] = sources_loaded
@@ -1299,7 +1315,8 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     # "67-node toy graph masquerading as a real KG" failure mode while
     # allowing the toy fixture to pass for smoke tests).
     import os as _os_v36
-    _dev_mode_v36 = _os_v36.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() not in (
+    # P2-035 ROOT FIX (v107): default changed from "dev" to "production".
+    _dev_mode_v36 = _os_v36.environ.get("DRUGOS_ENVIRONMENT", "production").lower() not in (
         "prod", "production", "stage", "staging",
     )
     try:
@@ -5089,6 +5106,31 @@ def step9_build_pyg(
     #   Layer 3: HF_TOKEN missing OR encode_smiles failed → was
     #            silent, now raises.
     strict_features = os.environ.get("DRUGOS_STRICT_FEATURES", "1") == "1"
+    # P2-020 ROOT FIX (v107): in production mode, FORCE strict_features=True
+    # regardless of DRUGOS_STRICT_FEATURES. The previous code allowed
+    # DRUGOS_STRICT_FEATURES=0 in production, which silently fell back to
+    # random Xavier features when ChemBERTa failed — corrupting the GNN's
+    # molecular structure learning (AUC reflected transductive memorisation,
+    # not molecular structure). The audit's patient-safety gate requires
+    # that in production, ChemBERTa failure ALWAYS raises (never falls back).
+    # The MLflow tag CHEMBERTA_DISABLED=true is insufficient — operators
+    # who don't monitor MLflow tags have no idea the model trained on
+    # random features. ROOT FIX: in production, ignore DRUGOS_STRICT_FEATURES=0
+    # and force strict_features=True.
+    _is_prod_p2_020 = os.environ.get(
+        "DRUGOS_ENVIRONMENT", "production"
+    ).lower() in ("prod", "production")
+    if _is_prod_p2_020 and not strict_features:
+        logger.error(
+            "P2-020 ROOT FIX: DRUGOS_STRICT_FEATURES=0 is set but "
+            "DRUGOS_ENVIRONMENT=production. Forcing strict_features=True "
+            "to prevent silent ChemBERTa fallback to random Xavier "
+            "features. ChemBERTa failure will RAISE "
+            "FeatureFailureError in production. Set "
+            "DRUGOS_ENVIRONMENT=dev to allow the random-Xavier fallback "
+            "(dev fixtures only)."
+        )
+        strict_features = True
     hf_token = (
         os.environ.get("HF_TOKEN")
         or os.environ.get("HUGGING_FACE_HUB_TOKEN")
@@ -5468,11 +5510,44 @@ def step9_build_pyg(
             split_paths.get("test", "?"),
         )
     except Exception as _split_exc:
-        logger.warning(
-            "Step 9: node_disjoint_split failed (%s) — step11/step11b "
-            "will fall back to inline split. (P2C-012)",
-            _split_exc, exc_info=True,
-        )
+        # P2-028 ROOT FIX (v107): the previous code logged a WARNING and
+        # continued — step11/step11b then fell back to an INLINE split
+        # (stratified-random triple split, NOT node-disjoint). The
+        # fallback has entity-level LEAKAGE (same drug in train and
+        # test), inflating AUC. The V1 launch criterion may pass for
+        # the wrong reason. ROOT FIX: in production mode, RAISE instead
+        # of warning — force the operator to investigate. In dev mode,
+        # preserve the legacy lenient behavior (so dev fixtures with
+        # tiny graphs that can't be node-disjoint-split still work).
+        _is_prod_p2_028 = os.environ.get(
+            "DRUGOS_ENVIRONMENT", "production"
+        ).lower() in ("prod", "production")
+        if _is_prod_p2_028:
+            logger.error(
+                "P2-028 ROOT FIX: node_disjoint_split FAILED in "
+                "production (%s). The fallback inline split has "
+                "entity-level leakage (same drug in train and test) "
+                "which inflates AUC — the V1 launch criterion may "
+                "pass for the wrong reason. RAISING to force "
+                "investigation. Set DRUGOS_ENVIRONMENT=dev to allow "
+                "the leaky fallback (dev fixtures only).",
+                _split_exc, exc_info=True,
+            )
+            raise RuntimeError(
+                f"P2-028 ROOT FIX: node_disjoint_split failed in "
+                f"production: {_split_exc}. The fallback inline split "
+                f"has entity-level leakage — refusing to continue. "
+                f"Set DRUGOS_ENVIRONMENT=dev to allow the leaky "
+                f"fallback (dev fixtures only)."
+            ) from _split_exc
+        else:
+            logger.warning(
+                "Step 9: node_disjoint_split failed (%s) — step11/step11b "
+                "will fall back to inline split. (P2C-012) NOTE: the "
+                "inline split has entity-level leakage — AUC may be "
+                "inflated. This is dev-mode only; production RAISES.",
+                _split_exc, exc_info=True,
+            )
 
     summary = pyg_builder.summarize_heterodata(data)
     summary = dict(summary) if isinstance(summary, dict) else summary
@@ -8146,7 +8221,7 @@ def step11b_train_graph_transformer(
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             if scheduler is not None:
-                # v107 ROOT FIX (ISSUE-P2-045): the previous code did
+                # v107 ROOT FIX (ISSUE-P2-045 / P2-032): the previous code did
                 # ``try: scheduler.step() except Exception: pass``, which
                 # swallowed ALL exceptions. ReduceLROnPlateau.step() raises
                 # ``ValueError`` if the metric is NaN (degenerate batch),
@@ -8160,14 +8235,14 @@ def step11b_train_graph_transformer(
                 # failed to converge, AUC was lower than expected, and
                 # the V1 launch criterion (>0.85 AUC) silently failed.
                 #
-                # ROOT FIX: catch ONLY TypeError/ValueError (the expected
-                # scheduler-specific exceptions). Log them at WARNING so
-                # operators see degenerate batches. For any other
-                # exception type, log at ERROR and RE-RAISE so the
-                # training loop fails loudly instead of running with a
-                # frozen LR. Also detect NaN metrics explicitly and log
-                # them at ERROR (a NaN metric is a model-health issue,
-                # not a scheduler issue).
+                # ROOT FIX (P2-032 + ISSUE-P2-045): catch ONLY
+                # TypeError/ValueError (the expected scheduler-specific
+                # exceptions). Log them at WARNING so operators see
+                # degenerate batches. For any other exception type, log
+                # at ERROR and RE-RAISE so the training loop fails loudly
+                # instead of running with a frozen LR. Also detect NaN
+                # metrics explicitly and log them at ERROR (a NaN metric
+                # is a model-health issue, not a scheduler issue).
                 try:
                     scheduler.step()
                 except (TypeError, ValueError) as _sched_exc:
@@ -8183,14 +8258,14 @@ def step11b_train_graph_transformer(
                             "SKIPPED for this step, but training "
                             "continues. If this fires repeatedly, "
                             "investigate gradient norms and batch "
-                            "composition. v107 ISSUE-P2-045.",
+                            "composition. v107 ISSUE-P2-045 / P2-032.",
                             type(_sched_exc).__name__, _sched_exc,
                         )
                     else:
                         logger.warning(
                             "HGT scheduler.step() raised %s: %s — "
                             "skipping LR update for this step. v107 "
-                            "ISSUE-P2-045.",
+                            "ISSUE-P2-045 / P2-032.",
                             type(_sched_exc).__name__, _sched_exc,
                         )
                 # NOTE: any other exception (RuntimeError, etc.) is NOT
@@ -8615,9 +8690,10 @@ def step11b_train_graph_transformer(
     # file so the launch criteria correctly report
     # model_saved_to_disk=False. In dev, we save WITH a marker so
     # operators can inspect the (admittedly garbage) model for debugging.
+    # P2-035 ROOT FIX (v107): default changed from "dev" to "production".
     _chemberta_disabled_in_prod = (
         chemberta_disabled
-        and os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() in ("prod", "production")
+        and os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() in ("prod", "production")
     )
     if _chemberta_disabled_in_prod:
         logger.error(
@@ -9708,7 +9784,10 @@ def run_full_pipeline(
         # (default), the escape hatch is allowed but logs a loud
         # warning. This makes the escape hatch dev-only by default,
         # closing the patient-safety hole.
-        _env_mode = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
+        # P2-035 ROOT FIX (v107): default changed from "dev" to "production".
+        # A production deployment that forgets to set DRUGOS_ENVIRONMENT
+        # now gets production behavior — the escape hatch is REFUSED.
+        _env_mode = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
         _is_production = (_env_mode in ("production", "prod"))
         _allow_launch_fail = (
             os.environ.get("DRUGOS_ALLOW_LAUNCH_FAIL", "") == "1"

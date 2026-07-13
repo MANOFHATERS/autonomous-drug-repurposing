@@ -1051,6 +1051,33 @@ class PyGBuilder(GraphBuilderProtocol):
                 # dedups at Neo4j load time, but the PyG path bypasses
                 # Neo4j entirely (in-memory recorder → PyG), so we dedup
                 # here as the last line of defense.
+                #
+                # P2-024 ROOT FIX (v107): the audit flagged that
+                # ``torch.unique(edge_index, dim=1)`` deduplicates
+                # (src, dst) pairs, which would collapse multi-relational
+                # edges (e.g. Compound-inhibits-Protein AND
+                # Compound-activates-Protein for the same pair). ROOT
+                # CLARIFICATION: in PyG HeteroData, each
+                # (src_type, rel_name, dst_type) tuple is a SEPARATE
+                # edge_index tensor. "inhibits" and "activates" have
+                # DIFFERENT rel_names, so they are in DIFFERENT
+                # edge_index tensors. The dedup below runs PER
+                # (src_type, rel_name, dst_type) tuple, so (src, dst)
+                # dedup HERE is equivalent to (src, dst, rel) dedup —
+                # the rel is implicit (all edges in this edge_index
+                # share the same rel_name). Multi-relational signal is
+                # PRESERVED across edge_index tensors.
+                #
+                # GUARD: if a future change merges multiple biological
+                # relations into one rel_name (e.g. "interacts_with"
+                # for both inhibits and activates), the dedup below
+                # would collapse them. To prevent this, we check
+                # whether an ``edge_type`` tensor is already set on
+                # this edge_index (set by upstream code that tracks
+                # per-edge relation IDs). If edge_type is present AND
+                # varies within this edge_index, we dedup on
+                # (src, dst, edge_type) triples instead of (src, dst)
+                # pairs. This makes the dedup multi-relational-safe.
                 # v37 ROOT FIX (Phase 2 Issue #38 — performance): replaced
                 # the Python ``set`` + ``for`` loop with a vectorised
                 # ``torch.unique`` call. On a 5M-edge DRKG the previous
@@ -1059,57 +1086,73 @@ class PyGBuilder(GraphBuilderProtocol):
                 # ~minutes. The vectorised path completes in <1 second.
                 if edge_index.size(1) > 0:
                     _orig_count = int(edge_index.size(1))
-                    # torch.unique with dim=1 deduplicates COLUMNS (each
-                    # column is an edge). With return_inverse=False,
-                    # torch.unique returns a SINGLE tensor (the unique
-                    # columns) -- the previous code unpacked it into two
-                    # values, raising ``ValueError: too many values to
-                    # unpack`` which the except branch silently caught
-                    # and fell back to the slow Python loop, making the
-                    # "vectorised" v37 path dead code.
-                    # FIX-P2-P2-4: unpack a single tensor. The inverse
-                    # mapping is not used downstream (we reassign
-                    # edge_index entirely), so we drop return_inverse
-                    # entirely.
-                    try:
-                        _unique_edge_index = torch.unique(
-                            edge_index, dim=1, sorted=False,
-                        )
-                        edge_index = _unique_edge_index
-                    except Exception as _dedup_exc:
-                        # v107 ROOT FIX (ISSUE-P2-052): the previous code
-                        # had a Python-loop fallback that did
-                        # ``edge_index[0, _i].item()`` per edge — O(num_edges)
-                        # CPU↔GPU syncs, catastrophic on multi-million-edge
-                        # graphs. The v100 fix replaced .item() with a bulk
-                        # .cpu().numpy() transfer, but KEPT the fallback,
-                        # which was still slow on GPU and added complexity.
-                        #
-                        # ROOT FIX: ``torch.unique`` has been stable since
-                        # PyTorch 1.8 (released Jan 2021). If it fails on
-                        # the current PyTorch, that indicates either (a) a
-                        # genuinely broken PyTorch install, or (b) an
-                        # exotic edge case (e.g. edge_index with 0 columns
-                        # — already handled by the _orig_count == 0 guard
-                        # above). In both cases, we want to RAISE so the
-                        # operator investigates, rather than silently
-                        # falling back to a slow path that masks the real
-                        # issue. The slow fallback was correct but never
-                        # necessary in practice — keeping it gave a false
-                        # sense of robustness.
-                        raise RuntimeError(
-                            f"torch.unique edge dedup failed for "
-                            f"({src_type},{rel_name},{dst_type}) with "
-                            f"{_orig_count} edges: "
-                            f"{type(_dedup_exc).__name__}: {_dedup_exc}. "
-                            f"torch.unique has been stable since PyTorch "
-                            f"1.8 — this failure indicates a broken "
-                            f"PyTorch install or an exotic edge case "
-                            f"worth investigating. The slow Python-loop "
-                            f"fallback was removed in v107 (ISSUE-P2-052) "
-                            f"because it masked real issues and added "
-                            f"O(num_edges) CPU↔GPU syncs on GPU tensors."
-                        ) from _dedup_exc
+                    # P2-024 ROOT FIX (v107): check if edge_type varies
+                    # within this edge_index. If so, dedup on
+                    # (src, dst, edge_type) triples to preserve
+                    # multi-relational signal. In PyG HeteroData, each
+                    # (src_type, rel_name, dst_type) tuple is a SEPARATE
+                    # edge_index tensor, so (src, dst) dedup is normally
+                    # equivalent to (src, dst, rel) dedup. But if a
+                    # future change merges multiple biological relations
+                    # into one rel_name, the edge_type tensor would
+                    # vary within one edge_index — this guard catches
+                    # that and dedups on the triple instead.
+                    _existing_edge_type = data[src_type, rel_name, dst_type].get("edge_type", None) \
+                        if hasattr(data[src_type, rel_name, dst_type], "get") else None
+                    _dedup_on_edge_type = (
+                        _existing_edge_type is not None
+                        and hasattr(_existing_edge_type, "unique")
+                        and _existing_edge_type.numel() == edge_index.size(1)
+                        and int(_existing_edge_type.unique().numel()) > 1
+                    )
+                    if _dedup_on_edge_type:
+                        # Multi-relational edge_index: dedup on
+                        # (src, dst, edge_type) triples. Stack the
+                        # edge_type as a third row so torch.unique
+                        # treats it as part of the identity.
+                        _ei_with_type = torch.cat([
+                            edge_index,
+                            _existing_edge_type.unsqueeze(0).to(edge_index.dtype),
+                        ], dim=0)
+                        try:
+                            _unique_ei = torch.unique(_ei_with_type, dim=1, sorted=False)
+                            edge_index = _unique_ei[:2, :]
+                        except Exception as _dedup_exc:
+                            raise RuntimeError(
+                                f"P2-024: multi-relational torch.unique edge "
+                                f"dedup failed for ({src_type},{rel_name},"
+                                f"{dst_type}) with {_orig_count} edges: "
+                                f"{type(_dedup_exc).__name__}: {_dedup_exc}. "
+                                f"torch.unique has been stable since PyTorch "
+                                f"1.8 — this failure indicates a broken "
+                                f"PyTorch install or an exotic edge case."
+                            ) from _dedup_exc
+                    else:
+                        # Single-relational edge_index: dedup on (src, dst).
+                        # torch.unique with dim=1 deduplicates COLUMNS.
+                        # v107 (ISSUE-P2-052): if torch.unique fails, RAISE
+                        # instead of falling back to a slow Python loop —
+                        # the fallback masked real issues and added
+                        # O(num_edges) CPU↔GPU syncs on GPU tensors.
+                        try:
+                            _unique_edge_index = torch.unique(
+                                edge_index, dim=1, sorted=False,
+                            )
+                            edge_index = _unique_edge_index
+                        except Exception as _dedup_exc:
+                            raise RuntimeError(
+                                f"torch.unique edge dedup failed for "
+                                f"({src_type},{rel_name},{dst_type}) with "
+                                f"{_orig_count} edges: "
+                                f"{type(_dedup_exc).__name__}: {_dedup_exc}. "
+                                f"torch.unique has been stable since PyTorch "
+                                f"1.8 — this failure indicates a broken "
+                                f"PyTorch install or an exotic edge case "
+                                f"worth investigating. The slow Python-loop "
+                                f"fallback was removed in v107 (ISSUE-P2-052) "
+                                f"because it masked real issues and added "
+                                f"O(num_edges) CPU↔GPU syncs on GPU tensors."
+                            ) from _dedup_exc
                     _new_count = int(edge_index.size(1))
                     if _new_count < _orig_count:
                         self.logger.info(
@@ -3405,8 +3448,40 @@ class PyGBuilder(GraphBuilderProtocol):
 
             # FIX(issue-54): SHA-256 integrity verification on load.
             # Check companion .meta.json first.
+            # P2-025 ROOT FIX (v107): the previous code SKIPPED the hash
+            # check when ``.meta.json`` was MISSING — an attacker who
+            # deletes the ``.meta.json`` can substitute a malicious
+            # ``.pt`` file (wrong node features, wrong edges) and the
+            # loader accepts it without verification. ROOT FIX: in
+            # production mode (DRUGOS_ENVIRONMENT=production), REQUIRE
+            # ``.meta.json`` to exist — raise SecurityError if missing.
+            # In dev mode, log a WARNING and proceed (so dev fixtures
+            # without .meta.json still load).
             meta_path = path.with_suffix(path.suffix + ".meta.json")
-            if meta_path.exists():
+            if not meta_path.exists():
+                _is_prod_p2_025 = os.environ.get(
+                    "DRUGOS_ENVIRONMENT", "production"
+                ).lower() in ("prod", "production")
+                if _is_prod_p2_025:
+                    raise SecurityError(
+                        f"P2-025 ROOT FIX: companion .meta.json is MISSING "
+                        f"for {path}. In production mode, the SHA-256 "
+                        f"integrity check is MANDATORY — a missing "
+                        f".meta.json means the file's authenticity cannot "
+                        f"be verified (supply-chain attack vector). "
+                        f"Either restore the .meta.json file or set "
+                        f"DRUGOS_ENVIRONMENT=dev to allow loading without "
+                        f"verification (dev fixtures only)."
+                    )
+                else:
+                    self.logger.warning(
+                        "P2-025 ROOT FIX: companion .meta.json is MISSING "
+                        "for %s — SKIPPING SHA-256 integrity check (dev "
+                        "mode). The file's authenticity cannot be "
+                        "verified. Do NOT use in production.",
+                        path,
+                    )
+            else:
                 meta = json.loads(meta_path.read_text())
                 stored_hash = meta.get("sha256")
                 if stored_hash:
