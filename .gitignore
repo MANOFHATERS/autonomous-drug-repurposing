@@ -19,3 +19,4 @@ frontend/server.log
 checkpoints/
 output_v100/
 rl/output/
+.venv/

@@ -528,7 +528,7 @@ class _RateLimiter:
             self._last_request = time.time()
 
 
-# v107 FORENSIC ROOT FIX (ISSUE-P1-006 + ISSUE-P1-017 + ISSUE-P1-018):
+# v107 FORENSIC ROOT FIX (ISSUE-P1-006 + ISSUE-P1-017 + ISSUE-P1-018 + ISSUE-P1-033):
 #   The previous code defined a LOCAL _CircuitBreaker class here (lines
 #   531-629) that DUPLICATED the canonical implementation in
 #   ``phase1/_circuit_breaker.py``. Despite the docstring at
@@ -551,13 +551,20 @@ class _RateLimiter:
 #     P1-018: ``try_acquire_probe()`` had INVERTED semantics vs its name
 #       (docstring said "Returns True to proceed" but implementation
 #       returned False to allow). It was also never called anywhere.
+#     P1-033: ``try_acquire_probe()`` was dead code (never called from
+#       _download_with_retries). The v107 fix on the fix branch called
+#       it, but the canonical _CircuitBreaker in _circuit_breaker.py
+#       already provides ``allow_request()`` with CORRECT semantics
+#       (True = proceed, False = refused) AND transitions OPEN->HALF_OPEN
+#       automatically. The canonical breaker is the single source of
+#       truth — use ``allow_request()`` there, not the local duplicate.
 #
 #   ROOT FIX:
 #     1. DELETE the local _CircuitBreaker class entirely.
 #     2. Import the canonical _CircuitBreaker from ``_circuit_breaker.py``.
-#     3. In ``_download_with_retries``, replace ``is_open()`` with
-#        ``allow_request()`` (which has CORRECT semantics: True = proceed,
-#        False = refused, AND transitions OPEN->HALF_OPEN automatically).
+#     3. In ``_download_with_retries``, use ``allow_request()`` (which has
+#        CORRECT semantics: True = proceed, False = refused, AND
+#        transitions OPEN->HALF_OPEN automatically).
 #     4. The canonical breaker has rolling failure window, exponential
 #        backoff, probe-timeout auto-recovery, and a ``probe()`` context
 #        manager for new callers.
@@ -830,6 +837,11 @@ class BasePipeline(ABC):
         self._transformation_log: list[dict[str, Any]] = []
         self.dead_letter_queue: list[dict[str, Any]] = []
         self.entity_resolution_applied: bool = False
+        # v107 P1-039: PII detection result (populated by _detect_pii in
+        # run() / run_download_and_clean_only()). Initialized to [] so
+        # code that reads it before clean() runs sees an empty list, not
+        # AttributeError.
+        self._pii_detected: list[str] = []
 
         # Kept for backward compatibility (ARCH-1.16): populated by run()
         # and used by some existing tests / callers as a run context dict.
@@ -1368,6 +1380,37 @@ class BasePipeline(ABC):
 
             # Sanitize CSV output (SEC-9.14) and persist (ARCH-1.3)
             clean_df = self._sanitize_csv_output(clean_df)
+            # v107 ROOT FIX (ISSUE-P1-039 — _detect_pii was dead code):
+            #   The audit found ``_detect_pii`` was defined but NEVER
+            #   called from any pipeline. The platform claimed
+            #   GDPR/HIPAA compliance in docstrings but the PII detection
+            #   was inert. A drug-name field that accidentally contained
+            #   a patient email (e.g. from a misconfigured DrugBank XML)
+            #   was never flagged. ROOT FIX: call ``_detect_pii`` after
+            #   sanitization (before persistence) and log a WARNING for
+            #   each column where PII is detected. We do NOT dead-letter
+            #   rows (that would be a larger schema change) but we
+            #   surface the signal so operators can investigate. The
+            #   warning is also recorded in the run-log metadata below
+            #   via the ``pii_detected`` field.
+            try:
+                pii_columns = self._detect_pii(clean_df)
+                if pii_columns:
+                    logger.warning(
+                        "[%s] PII detected in cleaned data (SEC-9.15): %s. "
+                        "Investigate the upstream source — drug/protein/disease "
+                        "data should NEVER contain PII. (v107 P1-039)",
+                        self.source_name, pii_columns,
+                    )
+                    self._pii_detected = pii_columns  # stash for run-log
+                else:
+                    self._pii_detected = []
+            except Exception as pii_exc:  # noqa: BLE001 — never crash clean
+                logger.debug(
+                    "[%s] PII detection failed (non-fatal): %s",
+                    self.source_name, pii_exc,
+                )
+                self._pii_detected = []
             cleaned_path = self._persist_cleaned_data(clean_df)
             logger.info(
                 "[%s] Cleaned data persisted to: %s",
@@ -1710,6 +1753,27 @@ class BasePipeline(ABC):
 
             # Persist cleaned data (ARCH-1.3) -- side effect, not return value
             clean_df = self._sanitize_csv_output(clean_df)
+            # v107 ROOT FIX (ISSUE-P1-039 — _detect_pii was dead code):
+            # call _detect_pii after sanitization, before persistence.
+            # Same rationale as the run() call site (see comment there).
+            try:
+                pii_columns = self._detect_pii(clean_df)
+                if pii_columns:
+                    logger.warning(
+                        "[%s] PII detected in cleaned data (SEC-9.15): %s. "
+                        "Investigate the upstream source — drug/protein/disease "
+                        "data should NEVER contain PII. (v107 P1-039)",
+                        self.source_name, pii_columns,
+                    )
+                    self._pii_detected = pii_columns
+                else:
+                    self._pii_detected = []
+            except Exception as pii_exc:  # noqa: BLE001 — never crash clean
+                logger.debug(
+                    "[%s] PII detection failed (non-fatal): %s",
+                    self.source_name, pii_exc,
+                )
+                self._pii_detected = []
             cleaned_path = self._persist_cleaned_data(clean_df)
             logger.info(
                 "[%s] Cleaned data persisted to: %s",
@@ -1955,7 +2019,18 @@ class BasePipeline(ABC):
                         "schema_version": SCHEMA_VERSION,
                     },
                 )
-            except Exception as audit_exc:
+            # v107 ROOT FIX (ISSUE-P1-027 — run_load_only audit-log handler
+            #   was broader than run() / run_download_and_clean_only()):
+            #   The previous code used ``except Exception as audit_exc:`` here
+            #   — DIFFERENT from the narrowed ``(OSError, ValueError,
+            #   TypeError)`` tuple used in ``run()`` (line ~1616) and
+            #   ``run_download_and_clean_only()`` (line ~1823). A programming
+            #   bug in ``_write_run_log`` (e.g. AttributeError from a typo)
+            #   was silently masked in ``run_load_only`` but propagated in
+            #   ``run()`` — tests that exercised ``run_load_only`` could
+            #   pass while ``run()`` failed, hiding the bug. ROOT FIX:
+            #   align all three run methods on the SAME narrowed tuple.
+            except (OSError, ValueError, TypeError) as audit_exc:
                 logger.error(
                     "[%s] Audit log write failed: %s",
                     self.source_name,
@@ -1965,9 +2040,19 @@ class BasePipeline(ABC):
             # so HTTP sessions, file handles, and any subclass-specific
             # resources are released even when an exception propagates.
             # Mirrors the same fix in ``run_download_and_clean_only`` above.
+            # v107 ROOT FIX (ISSUE-P1-025 — run_load_only teardown handler
+            #   was broader than run() / run_download_and_clean_only()):
+            #   The previous code used ``except Exception as teardown_exc:``
+            #   here — DIFFERENT from the narrowed ``(OSError, RuntimeError,
+            #   ValueError)`` tuple used in ``run()`` and
+            #   ``run_download_and_clean_only()``. A typo in ``teardown()``
+            #   (e.g. AttributeError) was silently masked as a warning,
+            #   leaking HTTP sessions, file handles, and DB sessions. ROOT
+            #   FIX: align with the narrowed tuple used in the other two
+            #   run methods so programming bugs propagate.
             try:
                 self.teardown()
-            except Exception as teardown_exc:
+            except (OSError, RuntimeError, ValueError) as teardown_exc:
                 logger.warning(
                     "[%s] teardown() failed during run_load_only finally block: %s",
                     self.source_name,
@@ -2278,6 +2363,106 @@ class BasePipeline(ABC):
                 dtypes[col] = "str"
         return dtypes
 
+    # v107 ROOT FIX (ISSUE-P1-024 + ISSUE-P1-035 — pattern-consistency
+    # check was documented in comments but NEVER implemented):
+    #   The comments at lines ~360-385 promised a
+    #   ``_verify_pattern_consistency()`` method "called lazily from
+    #   validate_output" that would assert the schema-declared InChIKey
+    #   and UniProt patterns compile to the same match-set as the
+    #   ``INCHIKEY_PATTERN`` and ``UNIPROT_ID_PATTERN`` constants. The
+    #   audit found this method was NEVER defined — a textbook case of
+    #   "comment says fixed, code says broken". The constants could
+    #   diverge from the schema silently.
+    #
+    # ROOT FIX: implement ``_verify_pattern_consistency()`` and call it
+    # lazily from ``validate_output()``. The check is memoised per
+    # ``(file_key, schema_version)`` so it runs at most once per
+    # pipeline instance + schema — no per-row overhead.
+    _PATTERN_CONSISTENCY_CACHE: dict[tuple[str, str], list[str]] = {}
+
+    @classmethod
+    def _verify_pattern_consistency(cls, file_key: str, schema: dict) -> list[str]:
+        """Verify schema-declared patterns match the canonical constants.
+
+        Returns a list of warning messages (empty if all consistent).
+        Memoised per ``(file_key, schema_version)`` to avoid re-running
+        the check on every ``validate_output()`` call.
+        """
+        schema_version = str(schema.get("version", "unknown"))
+        cache_key = (file_key, schema_version)
+        if cache_key in cls._PATTERN_CONSISTENCY_CACHE:
+            return cls._PATTERN_CONSISTENCY_CACHE[cache_key]
+
+        warnings_list: list[str] = []
+        properties = (
+            schema.get("properties", {}).get(file_key, {}).get("properties", {})
+        )
+        # InChIKey consistency check (ISSUE-P1-024)
+        for col_name, col_spec in properties.items():
+            declared = col_spec.get("pattern")
+            if not declared:
+                continue
+            col_lower = col_name.lower()
+            if "inchikey" in col_lower:
+                try:
+                    declared_re = re.compile(declared)
+                except re.error as exc:
+                    warnings_list.append(
+                        f"Schema pattern for '{col_name}' is not a valid "
+                        f"regex: {exc}"
+                    )
+                    continue
+                # Test a known-good InChIKey against both patterns
+                test_inchikey = "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
+                if bool(INCHIKEY_PATTERN.match(test_inchikey)) != bool(declared_re.match(test_inchikey)):
+                    warnings_list.append(
+                        f"Schema pattern for '{col_name}' ({declared!r}) "
+                        f"does not match INCHIKEY_PATTERN constant "
+                        f"({INCHIKEY_PATTERN.pattern!r}) — test InChIKey "
+                        f"'{test_inchikey}' diverges. The schema and "
+                        f"constant may silently diverge (ISSUE-P1-024)."
+                    )
+                # Test a known-bad InChIKey
+                bad_inchikey = "INVALID-INCHIKEY"
+                if bool(INCHIKEY_PATTERN.match(bad_inchikey)) != bool(declared_re.match(bad_inchikey)):
+                    warnings_list.append(
+                        f"Schema pattern for '{col_name}' ({declared!r}) "
+                        f"does not match INCHIKEY_PATTERN constant "
+                        f"({INCHIKEY_PATTERN.pattern!r}) — bad InChIKey "
+                        f"'{bad_inchikey}' diverges. (ISSUE-P1-024)."
+                    )
+            elif "uniprot" in col_lower:
+                try:
+                    declared_re = re.compile(declared)
+                except re.error as exc:
+                    warnings_list.append(
+                        f"Schema pattern for '{col_name}' is not a valid "
+                        f"regex: {exc}"
+                    )
+                    continue
+                # Test known-good UniProt IDs (6-char and 10-char forms)
+                for test_uniprot in ("P12345", "A0A0K3AVT9"):
+                    if bool(UNIPROT_ID_PATTERN.match(test_uniprot)) != bool(declared_re.match(test_uniprot)):
+                        warnings_list.append(
+                            f"Schema pattern for '{col_name}' ({declared!r}) "
+                            f"does not match UNIPROT_ID_PATTERN constant "
+                            f"({UNIPROT_ID_PATTERN.pattern!r}) — test "
+                            f"UniProt ID '{test_uniprot}' diverges "
+                            f"(ISSUE-P1-035)."
+                        )
+                # Test a known-bad UniProt ID
+                bad_uniprot = "INVALID1"
+                if bool(UNIPROT_ID_PATTERN.match(bad_uniprot)) != bool(declared_re.match(bad_uniprot)):
+                    warnings_list.append(
+                        f"Schema pattern for '{col_name}' ({declared!r}) "
+                        f"does not match UNIPROT_ID_PATTERN constant "
+                        f"({UNIPROT_ID_PATTERN.pattern!r}) — bad UniProt "
+                        f"ID '{bad_uniprot}' diverges (ISSUE-P1-035)."
+                    )
+
+        cls._PATTERN_CONSISTENCY_CACHE[cache_key] = warnings_list
+        return warnings_list
+
     def validate_output(self, df: pd.DataFrame) -> tuple[bool, list[str]]:
         """Validate cleaned DataFrame against ``schema/v1.json`` (SCI-3.12).
 
@@ -2320,6 +2505,23 @@ class BasePipeline(ABC):
         if not file_schema:
             # No schema for this file -- validation is a no-op
             return True, []
+
+        # v107 ROOT FIX (ISSUE-P1-024 + ISSUE-P1-035): lazily verify that
+        # the schema-declared patterns for InChIKey / UniProt columns match
+        # the canonical ``INCHIKEY_PATTERN`` / ``UNIPROT_ID_PATTERN``
+        # constants. The check is memoised per (file_key, schema_version)
+        # so it runs at most once per pipeline instance + schema. Any
+        # divergence is logged as a WARNING — the validation does NOT
+        # fail (the schema is the source of truth for the actual pattern
+        # check below), but the divergence is surfaced for maintainers.
+        try:
+            consistency_warnings = self._verify_pattern_consistency(file_key, schema)
+            for w in consistency_warnings:
+                logger.warning("Pattern consistency: %s", w)
+        except Exception as cons_exc:  # noqa: BLE001 — never crash validation
+            logger.debug(
+                "Pattern consistency check failed (non-fatal): %s", cons_exc
+            )
 
         properties = file_schema.get("properties", {})
         required = file_schema.get("required", [])
@@ -3624,7 +3826,7 @@ class BasePipeline(ABC):
 
         for attempt in range(1, max_retries + 1):
             try:
-                # v107 FORENSIC ROOT FIX (ISSUE-P1-017):
+                # v107 FORENSIC ROOT FIX (ISSUE-P1-017 + ISSUE-P1-033):
                 #   The previous code called ``self._circuit_breaker.is_open()``
                 #   which (per the v92 ROOT FIX) is now PURE OBSERVATION --
                 #   it does NOT transition state from OPEN -> HALF_OPEN.
@@ -3641,6 +3843,10 @@ class BasePipeline(ABC):
                 #   (b) transitions OPEN -> HALF_OPEN when the reset
                 #   timeout has elapsed, reserving the single-probe slot.
                 #   The breaker now auto-recovers after the timeout.
+                #   (ISSUE-P1-033's ``try_acquire_probe()`` fix on the
+                #   local duplicate class is superseded by this canonical
+                #   ``allow_request()`` call — the local class was deleted
+                #   in the P1-006/P1-017/P1-018 fix above.)
                 if not self._circuit_breaker.allow_request():
                     raise DownloadError(
                         f"Circuit breaker is open for {self.source_name}; "
@@ -4286,7 +4492,45 @@ class BasePipeline(ABC):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as meta_exc:
+            # v107 ROOT FIX (ISSUE-P1-029 — corrupt meta silently disables
+            #   the resume precondition):
+            #   The previous code returned ``{}`` (empty dict) when the meta
+            #   file was corrupt (e.g. truncated JSON from a previous crashed
+            #   download). This SILENTLY disabled the If-Match /
+            #   If-Unmodified-Since precondition. The download then
+            #   proceeded WITHOUT the precondition, potentially appending
+            #   bytes from a NEW version of the file to the OLD partial
+            #   bytes — producing a chimeric file that fails integrity
+            #   validation (or worse, passes if the bytes happen to align).
+            #
+            # ROOT FIX: when the meta file is corrupt, DELETE both the
+            # corrupt meta AND the partial download. The next download
+            # starts fresh from byte 0 with no stale partial to append to.
+            # This is the patient-safe behaviour — we lose the resume
+            # optimization but eliminate the chimeric-file footgun.
+            logger.warning(
+                "[%s] Resume metadata for %s is corrupt (%s). Deleting "
+                "the partial download and stale meta file to start fresh "
+                "(v107 P1-029 — no chimeric files).",
+                self.source_name, dest.name, meta_exc,
+            )
+            # Delete the corrupt meta file
+            try:
+                meta_path.unlink()
+            except (OSError, FileNotFoundError):
+                pass
+            # Delete the partial download (the actual data file)
+            try:
+                dest.unlink()
+            except (OSError, FileNotFoundError):
+                pass
+            # Also delete the .tmp sidecar if it exists
+            tmp_path = dest.with_suffix(dest.suffix + ".tmp")
+            try:
+                tmp_path.unlink()
+            except (OSError, FileNotFoundError):
+                pass
             return {}
         headers: dict[str, str] = {}
         if "etag" in meta:
@@ -4575,8 +4819,23 @@ class BasePipeline(ABC):
             # escape ONLY the dangerous cells. Non-dangerous cells keep
             # their original Python object representation (int -> int,
             # float -> float, str -> str).
+            # v107 ROOT FIX (ISSUE-P1-040 — ``.values`` caused index
+            #   misalignment in the ``where()`` call):
+            #   The previous code passed ``~_danger_mask.values`` (a numpy
+            #   array) to ``Series.where()``, which disabled pandas' index
+            #   alignment. The ``_obj_series.map(...)`` replacement could
+            #   return a Series with a DIFFERENT index if any cell was NaN
+            #   (map() drops NaN by default in some pandas versions). The
+            #   ``where()`` then misaligned: the dangerous cell at position
+            #   i could be replaced with the escaped value from position j,
+            #   leaving the dangerous cell UNescaped and corrupting a
+            #   non-dangerous cell. CSV injection prevention was incomplete.
+            # ROOT FIX: pass ``~_danger_mask`` (a Series) directly, WITHOUT
+            # ``.values``. Pandas then aligns by index — the mask and the
+            # replacement Series share the same index as ``_obj_series``,
+            # so each cell is escaped iff its own mask bit is set.
             _obj_series = series.astype(object)
-            # v107 FORENSIC ROOT FIX (ISSUE-P1-019):
+            # v107 FORENSIC ROOT FIX (ISSUE-P1-019 + ISSUE-P1-040):
             #   The previous code used ``~_danger_mask.values`` (numpy array)
             #   as the condition for ``Series.where()``. The ``.values``
             #   attribute DISCARDS the index, so if the DataFrame's index
@@ -4587,12 +4846,17 @@ class BasePipeline(ABC):
             #   SMILES) was not escaped, creating a CSV formula injection
             #   vector. The safety claim was FALSE.
             #
-            #   ROOT FIX: use ``~_danger_mask`` (WITHOUT ``.values``) so
-            #   pandas aligns by index. The boolean mask and the Series
-            #   now share the same index, guaranteeing correct cell-level
-            #   escaping even after index resets.
+            #   ROOT FIX (ISSUE-P1-040): use ``~_danger_mask`` (WITHOUT
+            #   ``.values``) so pandas aligns by index. The boolean mask
+            #   and the Series now share the same index, guaranteeing
+            #   correct cell-level escaping even after index resets.
+            #   v107 defensive hardening: explicitly reindex the mask to
+            #   _obj_series.index with fill_value=False as a guarantee
+            #   against future pandas behavior changes (e.g. if astype()
+            #   ever resets the index in a future pandas release).
+            _aligned_mask = _danger_mask.reindex(_obj_series.index, fill_value=False)
             _escaped = _obj_series.where(
-                ~_danger_mask,
+                ~_aligned_mask,
                 _obj_series.map(
                     lambda x: f"'{x}" if isinstance(x, str) else x
                 ),

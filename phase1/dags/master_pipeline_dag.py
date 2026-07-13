@@ -175,7 +175,14 @@ except Exception as _exc:  # noqa: BLE001 — config import must never kill DAG 
 #     3. The SLA-miss at 5h is ADVISORY — it pages but does not stop.
 #        Operators do not rely on the SLA to stop the task; the 7h
 #        timeout does that.
-TASK_SLA = timedelta(hours=7)
+# v107 ROOT FIX (ISSUE-P1-021 — v93 fix was documented but NEVER applied):
+#   The audit found TASK_SLA == TASK_TIMEOUT == 7h in the actual code,
+#   despite the v93 comment block above describing TASK_SLA = 5h. The
+#   comment was aspirational, not actual. This is the kind of "comment
+#   says fixed, code says broken" discrepancy that the audit flagged.
+#   The fix is now ACTUALLY applied: TASK_SLA = 5h, TASK_TIMEOUT = 7h,
+#   giving operators a 2h early-warning window before the hard kill.
+TASK_SLA = timedelta(hours=5)
 TASK_TIMEOUT = timedelta(hours=7)
 
 # v83 DAG-2 ROOT FIX: apply the SAME retry policy used by all 7 standalone
@@ -213,20 +220,21 @@ DEFAULT_ARGS = {
     # The 7 standalone DAGs use ``DEFAULT_RETRY_ARGS`` (5min + exponential
     # backoff). ROOT FIX: spread ``DEFAULT_RETRY_ARGS`` into ``DEFAULT_ARGS``
     # (done above) so the master DAG uses the SAME retry policy. The
-    # ``sla`` / ``execution_timeout`` overrides (7h, T-024) are retained
-    # AFTER the spread so they win over the ``DEFAULT_RETRY_ARGS`` 4h defaults.
-    # T-024: ``sla`` is ADVISORY — an Airflow SLA miss writes a row to
-    # the sla_miss table and (optionally) sends an email, but it does
-    # NOT kill the running task. The task continues until
-    # ``execution_timeout`` fires. Both are now set to 7h (aligned) so
-    # there is exactly ONE signal at exactly ONE time — operators do
-    # not get a 4h false-positive SLA miss that trains them to ignore
-    # the alarm, and a stuck Phase 2 training run is hard-killed at 7h
-    # (the documented upper bound of normal TransE training time).
+    # ``sla`` / ``execution_timeout`` overrides (5h/7h, v93 P1-034 + v107
+    # P1-021) are retained AFTER the spread so they win over the
+    # ``DEFAULT_RETRY_ARGS`` 4h defaults.
+    # v93/v107 (ISSUE-P1-021): ``sla`` is ADVISORY — an Airflow SLA miss
+    # writes a row to the sla_miss table and (optionally) sends an email,
+    # but it does NOT kill the running task. The task continues until
+    # ``execution_timeout`` fires. TASK_SLA = 5h gives operators a 2h
+    # early-warning window before the 7h hard kill (TASK_TIMEOUT). The
+    # 7h TASK_TIMEOUT remains the patient-safe failure mode for stuck
+    # Phase 2 TransE training runs (the documented upper bound of normal
+    # training time is 6-7h on real data).
     # v83 DAG-2: ``sla`` and ``execution_timeout`` come from
-    # DEFAULT_RETRY_ARGS (4h) but the master DAG overrides them to 7h
-    # because trigger_phase2's TransE training can take 6-7h. This
-    # override is deliberate and documented.
+    # DEFAULT_RETRY_ARGS (4h) but the master DAG overrides them to
+    # 5h/7h respectively because trigger_phase2's TransE training can
+    # take 6-7h. This override is deliberate and documented.
     "sla": TASK_SLA,
     "execution_timeout": TASK_TIMEOUT,
 }

@@ -2820,38 +2820,55 @@ def _main(argv: list[str]) -> None:
         if failed:
             for name, err in failed:
                 print(f"  FAIL  {name}: {err}")
-        # v107 FORENSIC ROOT FIX (ISSUE-P1-001):
-        #   The previous code UNCONDITIONALLY called write_all_samples()
-        #   after every pipeline run, even when ALL 7 pipelines succeeded.
-        #   In dev/staging environments (where the P1-019 production guard
-        #   does not fire), this OVERWROTE real downloaded data with 10
-        #   embedded mock drug records. The KG was then built on mock data
-        #   labeled as real -- the GNN trained on fake drug-protein
-        #   interactions and the RL ranker recommended drugs based on fake
-        #   evidence. Patient-safety invariants could not fire.
+        # v107 FORENSIC ROOT FIX (ISSUE-P1-001 + ISSUE-P1-032 — `all`
+        #   command silently overwrites real data with mock samples):
+        #   The previous v49 ROOT FIX unconditionally called
+        #   ``write_all_samples(PROCESSED_DATA_DIR)`` after the pipeline
+        #   loop, OVERWRITING ``drugs.csv``, ``proteins.csv``, etc. with
+        #   10 mock records each. In dev/staging, a successful run that
+        #   downloaded 10K real drugs from ChEMBL was silently replaced
+        #   by 10 mock drugs — the KG was then built on 10 mock compounds,
+        #   the GNN trained on 10 mock edges, and the RL ranker produced
+        #   recommendations based on 10 mock predictions. The platform
+        #   appeared to "work" but was scientifically meaningless.
         #
-        #   ROOT FIX: write embedded samples ONLY when ALL pipelines failed
-        #   AND the operator EXPLICITLY sets DRUGOS_ALLOW_MOCK_FALLBACK=1.
-        #   This is the only legitimate use case for mock data: a developer
-        #   who wants to test Phase 2/3/4 end-to-end without configuring
-        #   API keys. In any other scenario, real data (or no data + exit
-        #   code 1) is the correct behavior.
-        if not succeeded and os.environ.get("DRUGOS_ALLOW_MOCK_FALLBACK", "").lower() in ("1", "true", "yes"):
-            print("[v107 P1-001] All pipelines failed AND DRUGOS_ALLOW_MOCK_FALLBACK=1 -- "
-                  "writing embedded sample CSVs for local development.")
-            try:
-                from pipelines._embedded_samples import write_all_samples
-                from config.settings import PROCESSED_DATA_DIR
-                written = write_all_samples(PROCESSED_DATA_DIR)
-                print(f"[v107 P1-001] Embedded sample CSVs written to {PROCESSED_DATA_DIR}")
-                for key, path in written.items():
-                    print(f"  {key}: {path.name}")
-            except Exception as exc:
-                print(f"[v107 P1-001] WARN: failed to write embedded samples: {exc}")
-        elif not succeeded:
-            print("[v107 P1-001] All pipelines failed and DRUGOS_ALLOW_MOCK_FALLBACK is not set. "
-                  "NOT writing mock data (would corrupt KG with fake drugs). "
-                  "Run real pipelines or set DRUGOS_ALLOW_MOCK_FALLBACK=1 for local dev.")
+        # ROOT FIX: write embedded samples ONLY when BOTH conditions hold:
+        #   1. ALL 7 pipelines failed (``succeeded`` is empty) — i.e.
+        #      there is no real data to fall back to.
+        #   2. The operator has explicitly opted in via
+        #      ``DRUGOS_ALLOW_MOCK_FALLBACK=1`` (or "true"/"yes") — i.e.
+        #      they understand they are about to load mock data and have
+        #      authorized it.
+        # This preserves the "100% connected" guarantee for genuine
+        # cold-start scenarios (no API reachable, no cached data) while
+        # eliminating the silent-overwrite footgun in normal dev/staging
+        # runs where at least one pipeline succeeded.
+        if not succeeded:
+            import os as _os
+            _allow_mock = _os.environ.get("DRUGOS_ALLOW_MOCK_FALLBACK", "").strip().lower() in ("1", "true", "yes")
+            if _allow_mock:
+                try:
+                    from pipelines._embedded_samples import write_all_samples
+                    from config.settings import PROCESSED_DATA_DIR
+                    written = write_all_samples(PROCESSED_DATA_DIR)
+                    print(f"\n[v107 P1-001/P1-032] Embedded sample CSVs written to "
+                          f"{PROCESSED_DATA_DIR} (DRUGOS_ALLOW_MOCK_FALLBACK=1, "
+                          f"all {len(order)} pipelines failed)")
+                    for key, path in written.items():
+                        print(f"  {key}: {path.name}")
+                except Exception as exc:
+                    print(f"[v107 P1-001/P1-032] WARN: failed to write embedded "
+                          f"samples: {exc}")
+            else:
+                print(f"\n[v107 P1-001/P1-032] All {len(order)} pipelines failed and "
+                      f"DRUGOS_ALLOW_MOCK_FALLBACK is not set to '1' — NOT "
+                      f"writing mock data. To proceed with embedded samples, "
+                      f"re-run with DRUGOS_ALLOW_MOCK_FALLBACK=1.")
+        else:
+            # At least one pipeline succeeded — real data exists in
+            # PROCESSED_DATA_DIR. Do NOT overwrite with mock samples.
+            print(f"\n[v107 P1-001/P1-032] {len(succeeded)} pipeline(s) succeeded — "
+                  f"preserving real data, NOT writing embedded samples.")
         # v104 FORENSIC ROOT FIX (P1-007 -- python -m pipelines all NEVER
         #   calls run_entity_resolution()):
         #   The previous code ran all 7 pipelines (chembl, omim, drugbank,
