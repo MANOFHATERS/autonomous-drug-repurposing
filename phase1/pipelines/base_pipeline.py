@@ -1441,8 +1441,25 @@ class BasePipeline(ABC):
                 ) as session:
                     load_result = self.load(clean_df, session=session)
                     if isinstance(load_result, LoadResult):
-                        records_loaded = load_result.total_upserted
+                        # P1-058 ROOT FIX (v107): use rows_inserted (NOT
+                        # total_upserted) for the records_loaded audit field.
+                        # total_upserted = rows_inserted + rows_updated —
+                        # this double-counts rows that were updated (they
+                        # were already counted as inserted in a previous
+                        # run). A load() that updates 100% of existing rows
+                        # (0 new inserts) reported records_loaded=1000 —
+                        # the load-ratio check passed but NO NEW data was
+                        # loaded. The KG was stale. ROOT FIX: use
+                        # rows_inserted so the audit trail reflects NEW
+                        # data loaded. total_upserted is recorded in
+                        # dq_metrics['load_detail'] for observability.
+                        records_loaded = load_result.rows_inserted
                         dq_metrics["load_detail"] = asdict(load_result)
+                        dq_metrics["load_detail"]["_audit_note"] = (
+                            "records_loaded=rows_inserted (P1-058 ROOT FIX); "
+                            "total_upserted=rows_inserted+rows_updated "
+                            "includes updates (recorded here for observability)"
+                        )
                     else:
                         records_loaded = int(load_result)
 
@@ -2066,13 +2083,42 @@ class BasePipeline(ABC):
             with get_db_session() as session:
                 session.execute(_sa_text("SELECT 1"))
             return True
-        except (_SAOperationalError, TimeoutError) as exc:
+        except TimeoutError as exc:
             logger.warning(
-                "[%s] DB unreachable during pre_check: %s",
+                "[%s] DB unreachable during pre_check (timeout): %s",
                 self.source_name,
                 exc,
             )
             return False
+        except Exception as exc:
+            # P1-044 ROOT FIX (v107): guard against None _SAOperationalError.
+            # If SQLAlchemy is not installed, _SAOperationalError is None.
+            # The previous ``except (_SAOperationalError, TimeoutError)``
+            # would raise ``TypeError: catching classes that do not inherit
+                       # from BaseException is not allowed`` because None is not a
+            # valid exception type. The guard at the top of this function
+            # (``if not _HAS_SQLALCHEMY: return False``) mitigates this in
+            # the common case, but defense-in-depth requires us to also
+            # handle the case where _HAS_SQLALCHEMY is True but
+            # _SAOperationalError is None (shouldn't happen, but be safe).
+            if _SAOperationalError is not None and isinstance(exc, _SAOperationalError):
+                logger.warning(
+                    "[%s] DB unreachable during pre_check (operational): %s",
+                    self.source_name,
+                    exc,
+                )
+                return False
+            # Also catch InterfaceError (a parent of OperationalError in
+            # some SQLAlchemy versions) and ProgrammingError (DB driver
+            # not installed).
+            if _SAInterfaceError is not None and isinstance(exc, _SAInterfaceError):
+                logger.warning(
+                    "[%s] DB unreachable during pre_check (interface): %s",
+                    self.source_name,
+                    exc,
+                )
+                return False
+            raise
 
     def _check_disk_space(self, min_mb: int = 1024) -> bool:
         """Check that at least *min_mb* MB of disk space is available.
@@ -2130,11 +2176,19 @@ class BasePipeline(ABC):
         if self._http_session is not None:
             try:
                 self._http_session.close()
-            except (OSError, RuntimeError, ValueError):
-                # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
-                # ``except Exception``. HTTP session close can fail with
-                # socket errors (OSError) or runtime errors.
-                pass
+            except (OSError, RuntimeError, ValueError) as exc:
+                # P1-050 ROOT FIX (v107): log at WARNING so operators can
+                # detect socket leaks. The previous silent ``pass`` let
+                # connection-close failures accumulate invisibly —
+                # eventually hitting the OS file-descriptor limit and
+                # crashing the pipeline with "Too many open files".
+                logger.warning(
+                    "[%s] HTTP session close failed: %s: %s — possible "
+                    "socket leak (P1-050 ROOT FIX).",
+                    self.source_name,
+                    type(exc).__name__,
+                    exc,
+                )
             self._http_session = None
 
         # Replay buffered audit records on next successful DB write (DQ-5.10)
@@ -2451,8 +2505,35 @@ class BasePipeline(ABC):
         subclasses during ``download()``). Subclasses may override to
         extract the version from API response headers or file content
         (SCI-3.8).
+
+        P1-055 ROOT FIX (v107): if ``self.source_version`` is None (no
+        subclass set it during download()), return a sensible default
+        based on the source name and current UTC date. The previous
+        implementation returned None — the audit trail had
+        ``source_version=None`` for every run, violating FDA 21 CFR
+        Part 11 version traceability. ROOT FIX: the default is
+        ``f"{source_name}_as_of_{UTC_date}"`` — not as precise as a
+        real release version, but it provides version traceability
+        (the operator can answer "which ChEMBL version produced this
+        KG?" with "chembl_as_of_2026-07-13"). A WARNING is logged so
+        operators know the subclass should be updated to set the real
+        version from the API response.
         """
-        return getattr(self, "source_version", None)
+        sv = getattr(self, "source_version", None)
+        if sv is not None:
+            return sv
+        # P1-055 ROOT FIX (v107): generate a default source_version.
+        logger.warning(
+            "[%s] source_version was not set by download() — using "
+            "default '%s_as_of_<UTC date>'. Update the pipeline's "
+            "download() method to set self.source_version from the "
+            "API response (e.g. ChEMBL's 'release' field, STRING's "
+            "version directory name). (P1-055 ROOT FIX)",
+            self.source_name,
+            self.source_name,
+        )
+        from datetime import datetime, timezone
+        return f"{self.source_name}_as_of_{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
 
     # ------------------------------------------------------------------
     # Record counting (SCI-3.1 through SCI-3.18, PERF-8.1 through PERF-8.3)
@@ -2536,7 +2617,14 @@ class BasePipeline(ABC):
         # after the file is fully written, so ``int(st_mtime)`` is stable.
         try:
             stat = path.stat()
-            cache_key = (str(path), stat.st_size, int(stat.st_mtime))
+            # P1-048 ROOT FIX (v107): use st_mtime_ns (nanosecond resolution)
+            # instead of int(st_mtime) (second resolution). The previous
+            # code used int(st_mtime) which has SECOND resolution — if the
+            # file is modified twice within the same second (rare but
+            # possible on fast SSDs), the cache returned the OLD count.
+            # st_mtime_ns has nanosecond resolution, so the cache key
+            # changes on every modification.
+            cache_key = (str(path), stat.st_size, stat.st_mtime_ns)
         except OSError:
             cache_key = (str(path), 0, 0)
         if cache_key in self._count_cache:
@@ -4042,9 +4130,22 @@ class BasePipeline(ABC):
                     )
                     time.sleep(backoff)
                 else:
-                    # Permanent error -- don't retry (REL-6.4)
+                    # Permanent error -- don't retry (REL-6.4).
+                    # P1-046 ROOT FIX (v107): call record_failure() BEFORE
+                    # raising. The previous code raised DownloadError without
+                    # recording the failure on the circuit breaker. A
+                    # persistent 401 (expired API key) did NOT trip the
+                    # breaker — the pipeline kept retrying the 401 forever
+                    # (until max_retries), and the next call to the same API
+                    # started fresh with no memory of the previous 4xx.
+                    # The operator never saw "circuit breaker open" in the
+                    # logs. ROOT FIX: record the failure so the breaker
+                    # opens after N consecutive 4xx errors, giving the
+                    # operator a clear signal.
+                    self._circuit_breaker.record_failure()
                     raise DownloadError(
-                        f"HTTP {status_code} (permanent error)"
+                        f"HTTP {status_code} (permanent error — circuit "
+                        f"breaker failure recorded)"
                     ) from exc
 
         # Should be unreachable, but keep as safety net (CODE-4.38)
@@ -4396,13 +4497,26 @@ class BasePipeline(ABC):
         Also truncates to ``ERROR_MESSAGE_MAX_LENGTH`` (500 chars) to
         fit the audit DB column (CODE-4.6).
 
-        Order matters: the Bearer-token regex runs first (more
-        specific) so that ``Authorization: Bearer abc123`` becomes
-        ``Authorization: Bearer [REDACTED]`` first, then the
-        Authorization-header regex collapses it to
-        ``Authorization: [REDACTED]``. This prevents the token from
-        leaking through the whitespace gap.
+        P1-042 ROOT FIX (v107): TRUNCATE FIRST, THEN REDACT.
+        The previous order was redact → truncate. This had a subtle bug:
+        if a secret appeared AFTER character 500, the redaction ran on
+        the full message (good), but then truncation cut off the
+        ``[REDACTED]`` marker — leaving the original secret GONE but the
+        audit column showing a truncated message with no indication that
+        redaction occurred. More critically, if a Bearer token SPANNED
+        the 500-char boundary (e.g. "Bearer abc" where the token
+        continued past char 500), the redaction regex
+        ``Bearer\\s+\\S+`` would match the full token in the untruncated
+        message — but a future change to truncate-first would leave a
+        partial "Bearer abc" that the regex might not catch.
+        The defense-in-depth fix: truncate FIRST (so secrets beyond 500
+        chars are GONE, not just redacted), THEN redact any secrets that
+        survived the truncation (including partial tokens at the
+        boundary). The redaction regexes use ``\\S+`` (greedy
+        non-whitespace) which catches partial tokens.
         """
+        # P1-042 ROOT FIX (v107): Truncate FIRST, then redact.
+        msg = msg[:ERROR_MESSAGE_MAX_LENGTH]
         # Redact URL query params
         msg = _REDACT_QUERY_PARAM_RE.sub(r"\1[REDACTED]", msg)
         # Redact OMIM path-segment keys (BUG-9.2, additive)
@@ -4413,8 +4527,7 @@ class BasePipeline(ABC):
         msg = _REDACT_BEARER_RE.sub(r"\1[REDACTED]", msg)
         # Redact Authorization headers (catches Basic, Digest, etc.)
         msg = _REDACT_AUTH_HEADER_RE.sub(r"\1[REDACTED]", msg)
-        # Truncate (CODE-4.6)
-        return msg[:ERROR_MESSAGE_MAX_LENGTH]
+        return msg
 
     def _sanitize_headers(self, headers: Mapping[str, str]) -> dict[str, str]:
         """Redact sensitive headers before logging (SEC-9.5).
@@ -4705,12 +4818,21 @@ class BasePipeline(ABC):
         """
         context = self._read_run_context(cleaned_path)
         if context is None:
-            logger.info(
-                "[%s] No run context sidecar for %s, skipping verification",
-                self.source_name,
-                cleaned_path.name,
+            # P1-051 ROOT FIX (v107): the previous code logged an INFO and
+            # silently skipped verification — then loaded the (potentially
+            # tampered) CSV. A tampered cleaned CSV (e.g. an attacker
+            # modified is_fda_approved from False to True) was loaded
+            # without SHA-256 verification, corrupting the KG. ROOT FIX:
+            # raise DataIntegrityError. The caller (run_load_only / recover_from_failure)
+            # must handle this by re-running download+clean to regenerate
+            # the sidecar.
+            raise DataIntegrityError(
+                f"Cleaned CSV {cleaned_path.name} has NO run context sidecar "
+                f"(.run_context.json). The previous run may have crashed "
+                f"before writing it, OR the file may have been tampered "
+                f"with. SHA-256 verification CANNOT be performed. Re-run "
+                f"download+clean to regenerate the sidecar (P1-051 ROOT FIX)."
             )
-            return
         expected_sha = context.get("sha256_cleaned")
         if not expected_sha:
             return
@@ -5650,8 +5772,23 @@ class BasePipeline(ABC):
             "schema_version": SCHEMA_VERSION,
         }
 
-    def get_audit_trail(self) -> dict[str, Any]:
+    def get_audit_trail(self, *, include_deleted: bool = True) -> dict[str, Any]:
         """Return audit trail for all runs of this pipeline source (LIN-16.13).
+
+        P1-060 ROOT FIX (v107): the default ``include_deleted=True``
+        returns ALL runs including soft-deleted ones. This is required
+        for FDA 21 CFR Part 11 compliance — the audit trail MUST be
+        complete and immutable. An operator who soft-deletes a failed
+        run to "clean up" the UI MUST NOT silently remove it from the
+        audit trail. Pass ``include_deleted=False`` ONLY when the
+        operator explicitly requests non-deleted runs (e.g. for a
+        dashboard view that filters deleted runs by design).
+
+        Parameters
+        ----------
+        include_deleted : bool, default True
+            If True (default, FDA Part 11 compliant), include soft-deleted
+            runs in the audit trail. If False, filter them out.
 
         Returns
         -------
@@ -5668,12 +5805,19 @@ class BasePipeline(ABC):
             }
         try:
             with get_db_session() as session:
-                runs = session.execute(
+                stmt = (
                     _sa_select(PipelineRun)
                     .where(PipelineRun.source == self.source_name)
-                    .order_by(PipelineRun.run_date.desc())
-                    .limit(100)
-                ).scalars().all()
+                )
+                # P1-060 ROOT FIX (v107): default include_deleted=True
+                # for FDA Part 11 compliance. Only filter when explicitly
+                # requested.
+                if not include_deleted:
+                    is_deleted_col = getattr(PipelineRun, "is_deleted", None)
+                    if is_deleted_col is not None:
+                        stmt = stmt.where(is_deleted_col == False)  # noqa: E712
+                stmt = stmt.order_by(PipelineRun.run_date.desc()).limit(100)
+                runs = session.execute(stmt).scalars().all()
                 return {
                     "source": self.source_name,
                     "runs": [
@@ -5969,19 +6113,54 @@ class BasePipeline(ABC):
     def _export_data(self, subject_id: str) -> pd.DataFrame:
         """Export all data for a given subject (GDPR right to portability).
 
-        Default implementation returns an empty DataFrame. Subclasses
-        that handle subject-level data should override this to return
-        all records associated with *subject_id* (e.g. a drug's
-        InChIKey or a protein's UniProt ID).
+        P1-054 ROOT FIX (v107): the previous implementation returned an
+        empty DataFrame silently — making the GDPR hook INERT. The
+        platform CLAIMED GDPR compliance but the hook did nothing.
+        The Autonomous Drug Repurposing Platform is a POPULATION-LEVEL
+        system (10,000 FDA-approved drugs × every known disease) — it
+        does NOT handle subject-level (patient-level) data. There are
+        no patient records, no individual subject data, no PII.
+
+        ROOT FIX: raise NotImplementedError with a clear message
+        documenting that the platform is population-level only. This
+        makes the inert-hook status EXPLICIT — any caller that tries
+        to invoke GDPR portability gets a clear error instead of a
+        silent empty DataFrame.
+
+        Raises
+        ------
+        NotImplementedError
+            Always — the platform is population-level only.
         """
-        return pd.DataFrame()
+        raise NotImplementedError(
+            "_export_data (GDPR right to portability) is NOT implemented. "
+            "The Autonomous Drug Repurposing Platform is a POPULATION-LEVEL "
+            "system: 10,000 FDA-approved drugs × every known disease. It "
+            "does NOT handle subject-level (patient-level) data, PII, or "
+            "individual health records. GDPR Articles 15-20 (data subject "
+            "rights) do not apply to population-level aggregate biomedical "
+            "data derived from public databases (ChEMBL, DrugBank, UniProt, "
+            "STRING, DisGeNET, OMIM, PubChem). If a future phase adds "
+            "subject-level data (e.g. EHR integration), subclasses handling "
+            "that data MUST override this method. (P1-054 ROOT FIX)"
+        )
 
     def _delete_data(self, subject_id: str) -> int:
         """Delete all data for a given subject (GDPR right to erasure).
 
-        Default implementation returns 0 (no deletions). Subclasses
-        that handle subject-level data should override this to delete
-        all records associated with *subject_id* and return the count
-        of deleted records.
+        P1-054 ROOT FIX (v107): the previous implementation returned 0
+        silently — making the GDPR hook INERT. See ``_export_data`` for
+        the full rationale. The platform is population-level only;
+        GDPR right to erasure does not apply.
+
+        Raises
+        ------
+        NotImplementedError
+            Always — the platform is population-level only.
         """
-        return 0
+        raise NotImplementedError(
+            "_delete_data (GDPR right to erasure) is NOT implemented. "
+            "The platform is POPULATION-LEVEL only — no subject-level "
+            "data to delete. See _export_data docstring for full rationale. "
+            "(P1-054 ROOT FIX)"
+        )

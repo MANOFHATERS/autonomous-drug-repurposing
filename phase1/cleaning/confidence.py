@@ -303,7 +303,109 @@ __all__ = [
     "DEFAULT_SOURCE_RELIABILITY_WEIGHT",
     "compute_source_weighted_confidence",
     "SOURCE_RELIABILITY_METHOD_VERSION",
+    "verify_confidence_tier_lockstep",
+    "CONFIDENCE_TIER_LABELS",
 ]
+
+# P1-041 ROOT FIX (v107): canonical label set derived from DEFAULT_CONFIDENCE_TIERS.
+# This is the SINGLE source of truth — all 4 sites (Python classifier, DB CHECK,
+# schema v1.json, migration 017) MUST agree with this set. The
+# verify_confidence_tier_lockstep() function below asserts this at runtime.
+CONFIDENCE_TIER_LABELS: tuple[str, ...] = tuple(
+    label for _, label in DEFAULT_CONFIDENCE_TIERS
+)
+
+
+def verify_confidence_tier_lockstep() -> None:
+    """P1-041 ROOT FIX: assert the 4 sites agree on confidence_tier labels.
+
+    The Piñero 2020 alignment uses 4 tiers: sub_weak, weak, strong, very_strong.
+    Four separate sites define this label set:
+
+    1. Python classifier (``DEFAULT_CONFIDENCE_TIERS`` in this module).
+    2. DB ORM CHECK constraint ``chk_gda_confidence_tier`` in models.py.
+    3. JSON schema validator (``pipelines/schema/v1.json``).
+    4. SQL migration 017 (``017_confidence_tier_add_very_strong.sql``).
+
+    If any of the 4 sites diverge, GDA rows are silently rejected at insert
+    (DB CHECK) or silently mis-classified (Python). The multi-source GDA score
+    becomes unreliable for downstream ML (Phase 3 GNN feature binning).
+
+    This function reads the DB ORM CheckConstraint text and the JSON schema
+    enum, and asserts they match ``CONFIDENCE_TIER_LABELS``. Migration files
+    are SQL (not importable Python) so they are verified by the CI test
+    ``test_confidence_tier_lockstep`` (which reads the SQL files as text and
+    asserts the label set is present).
+
+    Raises
+    ------
+    RuntimeError
+        If any site disagrees with the canonical label set.
+    """
+    expected = set(CONFIDENCE_TIER_LABELS)
+
+    # Site 2: DB ORM CheckConstraint (models.py)
+    try:
+        from database.models import GeneDiseaseAssociation
+        from sqlalchemy import CheckConstraint
+        from sqlalchemy import inspect as sa_inspect
+        constraints = sa_inspect(GeneDiseaseAssociation.__table__).constraints
+        chk = None
+        for c in constraints:
+            if isinstance(c, CheckConstraint) and c.name == "chk_gda_confidence_tier":
+                chk = c
+                break
+        if chk is None:
+            raise RuntimeError(
+                "P1-041 LOCKSTEP FAILED: chk_gda_confidence_tier CheckConstraint "
+                "not found on GeneDiseaseAssociation. The DB ORM is missing the "
+                "constraint that validates confidence_tier values."
+            )
+        # The SQL text is like "confidence_tier IS NULL OR confidence_tier IN
+        # ('sub_weak', 'weak', 'strong', 'very_strong')"
+        sql_text = str(chk.sqltext).lower()
+        for label in CONFIDENCE_TIER_LABELS:
+            if label not in sql_text:
+                raise RuntimeError(
+                    f"P1-041 LOCKSTEP FAILED: chk_gda_confidence_tier is missing "
+                    f"label '{label}'. SQL text: {sql_text}"
+                )
+    except ImportError:
+        # database.models not importable (e.g. SQLAlchemy missing) — skip
+        # this site. The CI test will catch it.
+        pass
+
+    # Site 3: JSON schema (pipelines/schema/v1.json)
+    try:
+        from pathlib import Path
+        import json as _json
+        schema_path = Path(__file__).resolve().parent.parent / "pipelines" / "schema" / "v1.json"
+        with open(schema_path, "r", encoding="utf-8") as f:
+            schema = _json.load(f)
+        # Check gene_disease_associations.csv confidence_tier enum
+        gda_schema = schema.get("properties", {}).get("gene_disease_associations.csv", {})
+        gda_ct = gda_schema.get("properties", {}).get("confidence_tier", {})
+        gda_enum = set(v for v in gda_ct.get("enum", []) if v is not None)
+        if gda_enum and gda_enum != expected:
+            raise RuntimeError(
+                f"P1-041 LOCKSTEP FAILED: schema v1.json "
+                f"gene_disease_associations.csv confidence_tier enum "
+                f"{sorted(gda_enum)} != canonical {sorted(expected)}"
+            )
+        # Check omim_gene_disease_associations.csv confidence_tier enum
+        omim_schema = schema.get("properties", {}).get("omim_gene_disease_associations.csv", {})
+        omim_ct = omim_schema.get("properties", {}).get("confidence_tier", {})
+        omim_enum = set(v for v in omim_ct.get("enum", []) if v is not None)
+        if omim_enum and omim_enum != expected:
+            raise RuntimeError(
+                f"P1-041 LOCKSTEP FAILED: schema v1.json "
+                f"omim_gene_disease_associations.csv confidence_tier enum "
+                f"{sorted(omim_enum)} != canonical {sorted(expected)}"
+            )
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"P1-041 LOCKSTEP FAILED: could not read schema v1.json: {exc}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------

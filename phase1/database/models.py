@@ -1999,10 +1999,22 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         # The application-level dedup in ``database/loaders.py::
         # bulk_upsert_gdas`` (v93 fix) ALSO drops duplicate NULL-gene
         # rows before insert as a defense-in-depth measure.
-        UniqueConstraint(
-            "gene_symbol", "disease_id", "source",
-            name="uq_gda_gene_disease_source",
-        ),
+        #
+        # P1-056 ROOT FIX (v107): REMOVED the duplicate standard
+        # ``UniqueConstraint("gene_symbol", "disease_id", "source")``.
+        # The previous code had BOTH a standard UniqueConstraint AND a
+        # functional nullsafe Index(unique=True). On PostgreSQL, BOTH
+        # were created — the second is a functional index that duplicates
+        # the first for non-NULL gene_symbol. On SQLite, the functional
+        # index may not render — the dedup relies on the application-
+        # level ``bulk_upsert_gdas``. The standard UniqueConstraint is
+        # REDUNDANT with the nullsafe functional index for non-NULL
+        # gene_symbols, and INSUFFICIENT for NULL gene_symbols (because
+        # NULLs are distinct in a standard UNIQUE constraint). ROOT FIX:
+        # keep ONLY the nullsafe functional index (which handles both
+        # NULL and non-NULL cases) and rely on the application-level
+        # dedup as defense-in-depth for SQLite dev/test where functional
+        # indexes may not render.
         # Functional UNIQUE index for NULL gene_symbol dedup (portable).
         # v93 ROOT FIX (P1-026): COALESCE(gene_symbol, '') normalizes
         # NULL -> '' so two NULL-gene rows with the same (disease_id,

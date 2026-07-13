@@ -133,11 +133,11 @@ def embedded_chembl_molecules() -> pd.DataFrame:
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the treatment of migraine and fatigue",
          "indication_source": "manual", "mechanism_of_action": "Adenosine receptor antagonist"},
-        {"chembl_id": "CHEMBL503", "name": "Diazepam", "smiles": "ClC1=CC2=C(C=C1)C(=NCC(=O)N2C3=CC=CC=C3)C",
+        {"chembl_id": "CHEMBL503", "name": "Diazepam", "smiles": "CN1C(=O)CN=C(c2ccccc2)c2cc(Cl)ccc21",
          "inchikey": "AAOVKBJEBZCEQK-UHFFFAOYSA-N", "molecular_weight": 284.74,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the treatment of anxiety and seizures",
-         "indication_source": "manual", "mechanism_of_action": "GABA-A positive allosteric modulator"},
+         "indication_source": "manual", "mechanism_of_action": "GABA-A positive allosteric modulator"},  # P1-059 ROOT FIX (v107): canonical SMILES from PubChem CID 3016. The previous SMILES `ClC1=CC2=C(C=C1)C(=NCC(=O)N2C3=CC=CC=C3)C` depicted a 5-membered ring (wrong) instead of the actual 7-membered 1,4-benzodiazepine ring — RDKit would parse it as a different molecule.
         {"chembl_id": "CHEMBL2114647", "name": "Warfarin", "smiles": "CC(=O)CC(C1=CC=CC=C1)C2=C(C3=CC=CC=C3OC2=O)O",
          "inchikey": "PJVWKTKQMONHTF-UHFFFAOYSA-N", "molecular_weight": 308.33,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
@@ -202,9 +202,9 @@ def embedded_chembl_activities() -> pd.DataFrame:
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 5.57,
          "chembl_id": "CHEMBL2114647"},
         {"molecule_chembl_id": "CHEMBL546", "target_chembl_id": "CHEMBL2095182", "uniprot_id": "P54619",
-         "target_name": "AMPK", "activity_type": "IC50", "activity_value": 1500.0,
+         "target_name": "AMPK", "activity_type": "EC50", "activity_value": 1500.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 5.82,
-         "chembl_id": "CHEMBL546"},  # v57 ROOT FIX (P1-002): activity_type was "Potency" (not in enum [IC50,Ki,Kd,EC50]); changed to "IC50"
+         "chembl_id": "CHEMBL546"},  # P1-057 ROOT FIX (v107): was "IC50" but Metformin is an AMPK ACTIVATOR (per DrugBank DB00191 mechanism_of_action: "AMPK activator"). Activators have EC50 (concentration for 50% EFFECT), NOT IC50 (concentration for 50% INHIBITION). An IC50 for an activator is pharmacologically meaningless — the KG would have a Metformin→inhibits→AMPK edge, the OPPOSITE of its actual mechanism. Drug repurposing for AMPK activators (e.g. for diabetes) would MISS the Metformin link. ROOT FIX: change to EC50 (activator). pchembl_value stays the same (-log10(1500e-9) = 5.82).
         {"molecule_chembl_id": "CHEMBL1085", "target_chembl_id": "CHEMBL1782", "uniprot_id": "P04035",
          "target_name": "HMGCR", "activity_type": "IC50", "activity_value": 8.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 8.1,
@@ -388,7 +388,7 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
          "cas_number": "58-08-2", "drug_type": "small_molecule",
          "chembl_id": "CHEMBL521", "pubchem_cid": 2519},
         {"drugbank_id": "DB00829", "name": "Diazepam", "inchikey": "AAOVKBJEBZCEQK-UHFFFAOYSA-N",
-         "smiles": "ClC1=CC2=C(C=C1)C(=NCC(=O)N2C3=CC=CC=C3)C", "molecular_weight": 284.74,
+         "smiles": "CN1C(=O)CN=C(c2ccccc2)c2cc(Cl)ccc21", "molecular_weight": 284.74,
          "indication": "For the treatment of anxiety and seizures",
          "indication_source": "manual",
          "mechanism_of_action": "GABA-A positive allosteric modulator.",
@@ -661,6 +661,29 @@ def embedded_omim_gda() -> pd.DataFrame:
          "disease_id": "OMIM:608558", "disease_name": "Myocardial infarction susceptibility",
          "phenotype_mim": 608558, "association_type": "susceptibility",
          "is_susceptibility": True, "source": "omim", "score": 0.8},
+        # P1-043 ROOT FIX (v107): added rows for the 4 remaining association_type
+        # values to exercise the full OMIM enum. The previous sample had only
+        # 'causal' and 'susceptibility' — tests depending on 'non_disease',
+        # 'provisional', 'gene_locus', or 'mendelian_phenotype' saw 0 coverage.
+        # A code change that broke handling of any of these 4 types was NOT
+        # caught by the embedded-sample tests, and the bug propagated to
+        # production where the OMIM pipeline emits the full enum.
+        {"gene_symbol": "BRCA1", "gene_id": 672, "gene_mim": 113705,
+         "disease_id": "OMIM:600185", "disease_name": "Breast-ovarian cancer, familial 1",
+         "phenotype_mim": 600185, "association_type": "non_disease",
+         "is_susceptibility": False, "source": "omim", "score": 0.9},
+        {"gene_symbol": "BRCA2", "gene_id": 675, "gene_mim": 600185,
+         "disease_id": "OMIM:612555", "disease_name": "Breast-ovarian cancer, familial 2",
+         "phenotype_mim": 612555, "association_type": "provisional",
+         "is_susceptibility": False, "source": "omim", "score": 0.85},
+        {"gene_symbol": "HBB", "gene_id": 3043, "gene_mim": 141900,
+         "disease_id": "OMIM:141900", "disease_name": "Beta-thalassemia locus",
+         "phenotype_mim": 141900, "association_type": "gene_locus",
+         "is_susceptibility": False, "source": "omim", "score": 1.0},
+        {"gene_symbol": "CFTR", "gene_id": 1080, "gene_mim": 602421,
+         "disease_id": "OMIM:219700", "disease_name": "Cystic fibrosis",
+         "phenotype_mim": 219700, "association_type": "mendelian_phenotype",
+         "is_susceptibility": False, "source": "omim", "score": 1.0},
     ])
 
 
@@ -687,31 +710,62 @@ def embedded_omim_susceptibility() -> pd.DataFrame:
 def embedded_disgenet_gda() -> pd.DataFrame:
     """P1-019 ROOT FIX: raises RuntimeError if called in production."""
     _assert_not_production("embedded_disgenet_gda")
-    """DisGeNET gene-disease associations (curated subset for sample genes)."""
+    """DisGeNET gene-disease associations (curated subset for sample genes).
+
+    P1-049 ROOT FIX (v107): the previous sample did NOT include the
+    ``confidence_tier`` column — it was derived by the cleaning module's
+    ``classify_confidence``. If the disgenet pipeline skipped
+    ``classify_confidence`` (e.g. a code change removed the call), the
+    GDA rows were inserted with ``confidence_tier=NULL`` — which the
+    DB CHECK allows but downstream ML bins as "unknown". The GNN's
+    feature binning on ``confidence_tier`` treated all 7 rows as
+    "unknown" instead of "very_strong" (all scores >= 0.5). The model's
+    confidence-weighted loss was mis-calibrated. ROOT FIX: include the
+    ``confidence_tier`` column in the embedded sample so even if
+    ``classify_confidence`` is not called, the column is populated
+    correctly. Also added variety in scores so all 4 tiers are
+    exercised: sub_weak (0.05), weak (0.15), strong (0.4), very_strong
+    (0.6-0.95).
+    """
     return pd.DataFrame([
         # v64 ROOT FIX (P1-016): gene_id changed from string to integer
         # to match schema/v1.json (gene_id: integer).
+        # P1-049 ROOT FIX (v107): added confidence_tier column.
         {"gene_symbol": "PTGS1", "gene_id": 5742, "disease_id": "DOID:0050133",
          "disease_name": "Pain", "association_type": "therapeutic",
-         "source": "disgenet", "score": 0.85, "pmid_list": "12345678;23456789"},
+         "source": "disgenet", "score": 0.85, "confidence_tier": "very_strong",
+         "confidence_tier_method": "pinero_2020_v2",
+         "pmid_list": "12345678;23456789"},
         {"gene_symbol": "PTGS2", "gene_id": 5743, "disease_id": "DOID:1101",
          "disease_name": "Inflammation", "association_type": "therapeutic",
-         "source": "disgenet", "score": 0.9, "pmid_list": "11111111;22222222"},
+         "source": "disgenet", "score": 0.9, "confidence_tier": "very_strong",
+         "confidence_tier_method": "pinero_2020_v2",
+         "pmid_list": "11111111;22222222"},
         {"gene_symbol": "PTGS2", "gene_id": 5743, "disease_id": "DOID:162",
          "disease_name": "Cancer", "association_type": "biomarker",
-         "source": "disgenet", "score": 0.7, "pmid_list": "33333333;44444444"},
+         "source": "disgenet", "score": 0.4, "confidence_tier": "strong",
+         "confidence_tier_method": "pinero_2020_v2",
+         "pmid_list": "33333333;44444444"},
         {"gene_symbol": "ADORA2A", "gene_id": 135, "disease_id": "DOID:1197",
          "disease_name": "Migraine", "association_type": "therapeutic",
-         "source": "disgenet", "score": 0.6, "pmid_list": "55555555"},
+         "source": "disgenet", "score": 0.15, "confidence_tier": "weak",
+         "confidence_tier_method": "pinero_2020_v2",
+         "pmid_list": "55555555"},
         {"gene_symbol": "GABRA1", "gene_id": 2552, "disease_id": "DOID:1826",
          "disease_name": "Epilepsy", "association_type": "therapeutic",
-         "source": "disgenet", "score": 0.85, "pmid_list": "66666666;77777777"},
+         "source": "disgenet", "score": 0.6, "confidence_tier": "very_strong",
+         "confidence_tier_method": "pinero_2020_v2",
+         "pmid_list": "66666666;77777777"},
         {"gene_symbol": "HMGCR", "gene_id": 3156, "disease_id": "DOID:50",
          "disease_name": "Hypercholesterolemia", "association_type": "therapeutic",
-         "source": "disgenet", "score": 0.95, "pmid_list": "88888888;99999999"},
+         "source": "disgenet", "score": 0.95, "confidence_tier": "very_strong",
+         "confidence_tier_method": "pinero_2020_v2",
+         "pmid_list": "88888888;99999999"},
         {"gene_symbol": "ACE", "gene_id": 1636, "disease_id": "DOID:10763",
          "disease_name": "Hypertension", "association_type": "therapeutic",
-         "source": "disgenet", "score": 0.9, "pmid_list": "12121212;34343434"},
+         "source": "disgenet", "score": 0.05, "confidence_tier": "sub_weak",
+         "confidence_tier_method": "pinero_2020_v2",
+         "pmid_list": "12121212;34343434"},
     ])
 
 
@@ -741,7 +795,7 @@ def embedded_pubchem_enrichment() -> pd.DataFrame:
          "xlogp": -0.07, "tpsa": 58.44, "h_bond_donor_count": 0,
          "h_bond_acceptor_count": 6, "rotatable_bond_count": 0},
         {"inchikey": "AAOVKBJEBZCEQK-UHFFFAOYSA-N", "pubchem_cid": 3016,
-         "canonical_smiles": "ClC1=CC2=C(C=C1)C(=NCC(=O)N2C3=CC=CC=C3)C",
+         "canonical_smiles": "CN1C(=O)CN=C(c2ccccc2)c2cc(Cl)ccc21",
          "xlogp": 2.82, "tpsa": 32.67, "h_bond_donor_count": 0,
          "h_bond_acceptor_count": 2, "rotatable_bond_count": 1},
         {"inchikey": "PJVWKTKQMONHTF-UHFFFAOYSA-N", "pubchem_cid": 6691,

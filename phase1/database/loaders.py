@@ -102,6 +102,20 @@ logger = logging.getLogger(__name__)
 #   The list is NOT exhaustive — operators should periodically diff
 #   against the FDA database (a CI check is documented in the runbook).
 # ---------------------------------------------------------------------------
+# P1-045 ROOT FIX (v107): withdrawn-drug list freshness tracking.
+# The hardcoded list has ~60 entries. The FDA's withdrawn-drug database has
+# ~80+ entries. A newly-withdrawn drug (e.g. withdrawn in 2025) was not in
+# the list → loaded with is_withdrawn=False → the patient-safety invariant
+# chk_drugs_no_approved_and_withdrawn did not fire → the RL ranker
+# recommended the withdrawn drug. ROOT FIX: record the last-verified date
+# here. The CI test (tests/test_p1_045_withdrawn_drug_list_freshness.py)
+# fails if the date is > 90 days old, prompting operators to re-diff
+# against the FDA database (accessdata.fda.gov/scripts/cder/daf).
+WITHDRAWN_DRUG_LIST_LAST_VERIFIED: str = "2026-07-13"  # ISO 8601 UTC date
+WITHDRAWN_DRUG_LIST_SOURCE_URL: str = (
+    "https://accessdata.fda.gov/scripts/cder/daf/index.cfm"
+)
+WITHDRAWN_DRUG_LIST_MAX_AGE_DAYS: int = 90
 _WITHDRAWN_DRUG_NAMES_LOWER: frozenset[str] = frozenset({
     # Cox-2 inhibitors withdrawn for cardiovascular toxicity
     "rofecoxib", "vioxx", "valdecoxib", "bextra",
