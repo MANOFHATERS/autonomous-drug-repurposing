@@ -2820,20 +2820,38 @@ def _main(argv: list[str]) -> None:
         if failed:
             for name, err in failed:
                 print(f"  FAIL  {name}: {err}")
-        # v49 ROOT FIX: even if some pipelines failed, write the
-        # embedded sample CSVs so Phase 2 can run end-to-end.
-        # This is the "100% connected" guarantee: Phase 2 always
-        # has data to work with, even when individual Phase 1
-        # pipelines fail (e.g. DisGeNET without API key).
-        try:
-            from pipelines._embedded_samples import write_all_samples
-            from config.settings import PROCESSED_DATA_DIR
-            written = write_all_samples(PROCESSED_DATA_DIR)
-            print(f"\n[v49] Embedded sample CSVs written to {PROCESSED_DATA_DIR}")
-            for key, path in written.items():
-                print(f"  {key}: {path.name}")
-        except Exception as exc:
-            print(f"[v49] WARN: failed to write embedded samples: {exc}")
+        # v107 FORENSIC ROOT FIX (ISSUE-P1-001):
+        #   The previous code UNCONDITIONALLY called write_all_samples()
+        #   after every pipeline run, even when ALL 7 pipelines succeeded.
+        #   In dev/staging environments (where the P1-019 production guard
+        #   does not fire), this OVERWROTE real downloaded data with 10
+        #   embedded mock drug records. The KG was then built on mock data
+        #   labeled as real -- the GNN trained on fake drug-protein
+        #   interactions and the RL ranker recommended drugs based on fake
+        #   evidence. Patient-safety invariants could not fire.
+        #
+        #   ROOT FIX: write embedded samples ONLY when ALL pipelines failed
+        #   AND the operator EXPLICITLY sets DRUGOS_ALLOW_MOCK_FALLBACK=1.
+        #   This is the only legitimate use case for mock data: a developer
+        #   who wants to test Phase 2/3/4 end-to-end without configuring
+        #   API keys. In any other scenario, real data (or no data + exit
+        #   code 1) is the correct behavior.
+        if not succeeded and os.environ.get("DRUGOS_ALLOW_MOCK_FALLBACK", "").lower() in ("1", "true", "yes"):
+            print("[v107 P1-001] All pipelines failed AND DRUGOS_ALLOW_MOCK_FALLBACK=1 -- "
+                  "writing embedded sample CSVs for local development.")
+            try:
+                from pipelines._embedded_samples import write_all_samples
+                from config.settings import PROCESSED_DATA_DIR
+                written = write_all_samples(PROCESSED_DATA_DIR)
+                print(f"[v107 P1-001] Embedded sample CSVs written to {PROCESSED_DATA_DIR}")
+                for key, path in written.items():
+                    print(f"  {key}: {path.name}")
+            except Exception as exc:
+                print(f"[v107 P1-001] WARN: failed to write embedded samples: {exc}")
+        elif not succeeded:
+            print("[v107 P1-001] All pipelines failed and DRUGOS_ALLOW_MOCK_FALLBACK is not set. "
+                  "NOT writing mock data (would corrupt KG with fake drugs). "
+                  "Run real pipelines or set DRUGOS_ALLOW_MOCK_FALLBACK=1 for local dev.")
         # v104 FORENSIC ROOT FIX (P1-007 -- python -m pipelines all NEVER
         #   calls run_entity_resolution()):
         #   The previous code ran all 7 pipelines (chembl, omim, drugbank,
@@ -2880,7 +2898,12 @@ def _main(argv: list[str]) -> None:
                 _tb.print_exc()
         else:
             print("[v104 P1-007] SKIP entity resolution: no pipelines succeeded")
-        # Exit 0 if at least 1 pipeline succeeded OR samples were written.
+        # v107 P1-001: Exit 0 ONLY if at least 1 pipeline succeeded.
+        # If all pipelines failed, exit 1 so the operator knows real data
+        # was NOT produced. Mock data is only written when the operator
+        # explicitly opted in via DRUGOS_ALLOW_MOCK_FALLBACK=1 (handled
+        # above), and even then we still exit 1 because no REAL data was
+        # produced -- the operator must acknowledge this.
         if succeeded:
             _sys.exit(0)
         _sys.exit(1)

@@ -1117,7 +1117,25 @@ class Neo4jExporter:
 
     @staticmethod
     def validate_contract(phase1_processed_dir: Optional[Path | str] = None) -> Dict[str, Any]:
-        """Wrap :func:`validate_phase1_output_contract` for OO callers."""
+        """Wrap :func:`validate_phase1_output_contract` for OO callers.
+
+        v107 FORENSIC ROOT FIX (ISSUE-P1-012):
+          The previous code accepted ``Optional[Path | str] = None`` but
+          passed the value directly to ``validate_phase1_output_contract``
+          which requires a non-None ``base_dir`` (it calls ``Path(base_dir)``
+          which raises TypeError on None). Calling
+          ``Neo4jExporter.validate_contract()`` (no args) crashed with a
+          confusing TypeError instead of a clear error message.
+          ROOT FIX: default to the canonical Phase 1 processed_data dir
+          (``_PHASE1_ROOT / "processed_data"``) when the argument is None.
+          This matches the behavior of the module-level
+          ``export_to_neo4j`` function which also defaults to this path.
+        """
+        # v107 P1-012: default to the canonical Phase 1 processed_data dir
+        # instead of passing None to validate_phase1_output_contract
+        # (which would raise TypeError on Path(None)).
+        if phase1_processed_dir is None:
+            phase1_processed_dir = _PHASE1_ROOT / "processed_data"
         return validate_phase1_output_contract(phase1_processed_dir)
 
 

@@ -245,6 +245,61 @@ OMIM_MIM_MIN: int = 100100  # First official OMIM phenotype MIM number
 OMIM_MIM_MAX: int = 999999  # Last 6-digit MIM (OMIM has not expanded to 7 digits)
 
 
+def validate_omim_mim(value: object) -> bool:
+    """Validate an OMIM MIM number against BOTH the regex AND the numeric range.
+
+    v107 FORENSIC ROOT FIX (ISSUE-P1-020):
+      The regex ``CANONICAL_OMIM_DISEASE_ID_REGEX`` accepts any 6-digit
+      number starting with 1-9 (``[1-9][0-9]{5}``). This includes
+      ``100000``-``100099`` which are BELOW OMIM's first official phenotype
+      MIM (``100100``). The regex is NECESSARY but NOT SUFFICIENT -- the
+      numeric range check ``[OMIM_MIM_MIN, OMIM_MIM_MAX]`` must ALSO be
+      applied. Previously, the range check was enforced ONLY in
+      ``omim_pipeline.py:701``, NOT in the regex itself or in any shared
+      validator. A 6-digit number like ``100050`` passed the regex but was
+      not a real OMIM phenotype MIM -- it silently slipped through other
+      modules (disgenet_pipeline, drug_resolver, DB loaders) that only
+      checked the regex.
+
+      ROOT FIX: this helper function combines BOTH checks. All modules
+      that validate OMIM MIMs MUST call this function instead of only
+      ``CANONICAL_OMIM_DISEASE_ID_REGEX.match()``. Returns True if the
+      value is a valid OMIM MIM (matches regex AND is in range), False
+      otherwise. Accepts int, str, or None (None returns False).
+
+    Parameters
+    ----------
+    value : object
+        The value to validate. May be an int (e.g. ``137160``) or a str
+        (e.g. ``"OMIM:137160"`` or ``"137160"``).
+
+    Returns
+    -------
+    bool
+        True if the value is a valid OMIM phenotype MIM number.
+    """
+    if value is None:
+        return False
+    # Normalize to string for regex matching
+    if isinstance(value, int):
+        s = str(value)
+    elif isinstance(value, str):
+        s = value.strip()
+    else:
+        return False
+    # Layer 1: regex check (6 digits starting with 1-9, optional OMIM: prefix)
+    if not CANONICAL_OMIM_DISEASE_ID_REGEX.match(s):
+        return False
+    # Layer 2: numeric range check [100100, 999999]
+    # Extract the numeric portion (strip "OMIM:" prefix if present)
+    num_str = s.replace("OMIM:", "")
+    try:
+        num = int(num_str)
+    except ValueError:
+        return False
+    return OMIM_MIM_MIN <= num <= OMIM_MIM_MAX
+
+
 # ============================================================================
 # v35 ROOT FIX: canonical amino-acid sequence regex (single source of truth)
 # ============================================================================

@@ -834,244 +834,91 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
         result["indications"] = indications_path
         return result
 
-    # FULL mode: build DrugBank-equivalent from open data
-    logger.info(
-        "DrugBank: FULL mode -- building DrugBank-equivalent from "
-        "ChEMBL FDA-approved + FDA Orange Book + RxNorm (academic "
-        "downloads paused since May 2026)"
+    # FULL mode: v107 FORENSIC ROOT FIX (ISSUE-P1-005 + ISSUE-P1-015):
+    #   P1-005: The previous code SYNTHESIZED fake DrugBank data from
+    #   ChEMBL+RxNorm and wrote it to ``drugbank_open_drugs.csv``. The
+    #   ``drugbank_id`` was fabricated as ``SYNTH-DB-{8 hex chars from
+    #   SHA-256 of inchikey}``. This is NOT real DrugBank data, but it
+    #   was labeled as DrugBank and consumed by Phase 2 as if it were.
+    #   The KG had phantom DrugBank IDs that 404 against the real DrugBank
+    #   API. Any clinical-trial cross-referencing against DrugBank failed
+    #   silently. The ``uq_drugs_drugbank_id`` unique index treated
+    #   synthesized IDs as unique, preventing future merges with real
+    #   DrugBank records when the academic license reopens.
+    #
+    #   ROOT FIX: do NOT synthesize DrugBank data. If DrugBank academic
+    #   downloads are unavailable (paused since May 2026), emit ZERO
+    #   DrugBank rows and let the Phase 2 bridge degrade to ChEMBL-only
+    #   mode (the bridge's _PHASE1_EXPECTED_COLUMNS now treats drugbank_id
+    #   as optional -- see ISSUE-P1-016). The ChEMBL pipeline already
+    #   produces chembl_drugs.csv with real FDA-approved drugs; the KG
+    #   is built on that real data, not on fabricated DrugBank IDs.
+    #
+    #   P1-015: the previous ``_synthesize_drugbank_id`` used a
+    #   function-attribute counter (``_synthesize_drugbank_id._counter``)
+    #   which is NOT thread-safe and NOT process-safe. Two parallel
+    #   workers would both start the counter at 0 and generate the same
+    #   ``SYNTH-DB-M000001`` ID for different missing-InChIKey drugs --
+    #   silent data corruption via ID collision. This entire function is
+    #   now DEAD CODE (we no longer synthesize DrugBank IDs), but we keep
+    #   the definition for backward-compat imports and make it raise
+    #   RuntimeError so any stale caller fails loudly instead of
+    #   silently producing fake IDs.
+    logger.warning(
+        "DrugBank: FULL mode -- academic downloads paused since May 2026. "
+        "v107 P1-005: NOT synthesizing fake DrugBank data (would create "
+        "phantom drugbank_ids that 404 against the real DrugBank API). "
+        "Emitting ZERO DrugBank rows. The KG will be built from ChEMBL "
+        "FDA-approved drugs (chembl_drugs.csv) + RxNorm indications only. "
+        "When DrugBank academic access resumes, re-enable the real "
+        "drugbank_open_data downloader."
     )
+
+    def _synthesize_drugbank_id(inchikey: str) -> str:  # noqa: ARG001
+        """DEAD in v107 -- kept for backward-compat imports.
+
+        v107 P1-005/P1-015: this function previously fabricated DrugBank
+        IDs from InChIKey hashes. It is no longer called. If invoked, it
+        raises RuntimeError so any stale caller fails loudly instead of
+        silently producing fake DrugBank IDs.
+        """
+        raise RuntimeError(
+            "v107 P1-005: _synthesize_drugbank_id() is DISABLED. "
+            "DrugBank data synthesis is forbidden -- it creates phantom "
+            "drugbank_ids that 404 against the real DrugBank API. Use "
+            "real DrugBank academic downloads, or degrade to ChEMBL-only."
+        )
+
+    # Emit empty DrugBank CSVs with the correct schema (headers only).
+    # This ensures the Phase 2 bridge's contract check passes (files
+    # exist) but yields zero rows -- the KG is built from ChEMBL data.
+    # Do NOT use the ``drugbank_`` filename prefix for non-DrugBank data.
     drugs_path = raw_dir / "drugbank_open_drugs.csv"
     indications_path = raw_dir / "drugbank_open_indications.csv"
-
-    # 1. Read ChEMBL FDA-approved drugs (already downloaded by chembl pipeline)
-    import pandas as pd
-    chembl_csv = raw_dir.parent / "processed_data" / "chembl_drugs.csv"
-    if not chembl_csv.exists():
-        # Try raw_dir
-        chembl_csv = raw_dir / "chembl_molecules.jsonl"
-        if chembl_csv.exists():
-            # Parse JSONL
-            records = []
-            import json
-            with open(chembl_csv) as f:
-                for line in f:
-                    mol = json.loads(line)
-                    records.append({
-                        "chembl_id": mol.get("molecule_chembl_id", ""),
-                        "name": mol.get("pref_name", ""),
-                        "inchikey": mol.get("molecule_properties", {}).get("inchikey", ""),
-                        "smiles": mol.get("molecule_structures", {}).get("canonical_smiles", ""),
-                        "molecular_weight": mol.get("molecule_properties", {}).get("full_mwt", ""),
-                        "max_phase": mol.get("max_phase", 0),
-                        "is_fda_approved": mol.get("max_phase", 0) == 4,
-                        "is_globally_approved": mol.get("max_phase", 0) == 4,
-                    })
-            chembl_df = pd.DataFrame(records)
-        else:
-            logger.warning("DrugBank: ChEMBL CSV not found -- falling back to embedded samples")
-            from pipelines._embedded_samples import embedded_drugbank_drugs
-            chembl_df = embedded_drugbank_drugs()
-    else:
-        chembl_df = pd.read_csv(chembl_csv)
-
-    # 2. Synthesize DrugBank-equivalent records
-    # For each ChEMBL FDA-approved drug, synthesize a drugbank_id by
-    # hashing the InChIKey (deterministic, stable).
-    # v64 ROOT FIX (P1-010): the previous hash used MD5 mod 100000
-    # (5-digit DB IDs), which has a ~50% birthday-paradox collision
-    # probability at ~370 IDs -- near-certain with ~10K FDA-approved
-    # drugs. Two different InChIKeys colliding to the same DB ID would
-    # merge two distinct molecules into a single Drug node in the KG
-    # (silent data corruption). Root fix: use the full 8-hex-digit slice
-    # of the SHA-256 hash (DB + 8 hex digits = ~4.3 billion IDs, collision
-    # probability negligible for any realistic drug corpus). Switched
-    # MD5 -> SHA-256 for cryptographic robustness (MD5 is deprecated for
-    # any collision-sensitive use).
-    #
-    # P1-017 ROOT FIX (Team-2 -- use clearly non-DrugBank prefix for
-    #   synthesized IDs):
-    #   The previous code generated synthesized IDs as ``DB{8 hex}``
-    #   (e.g. ``DBA1B2C3D4``) and ``DBSYNTH{6 digits}`` (e.g.
-    #   ``DBSYNTH000001``). Both forms used the ``DB`` prefix -- the
-    #   SAME prefix used by REAL DrugBank IDs (``DB00945``, etc.).
-    #   This created two problems:
-    #     1. COLLISION RISK: if DrugBank ever emits an 8-hex ID
-    #        (``DBA1B2C3D4``), it would collide with the synthesized
-    #        sentinel. Real DrugBank has never emitted this form, but
-    #        the collision risk is structural.
-    #     2. DOWNSTREAM CONFUSION: downstream consumers that query
-    #        DrugBank's API with synthesized IDs get 404s (silently).
-    #        The KG has phantom drug nodes with no real DrugBank backing.
-    #        The ``uq_drugs_drugbank_id`` partial unique index treats
-    #        synthesized IDs as unique, preventing future merges with
-    #        real DrugBank records.
-    #   ADDITIONAL BUG: the ``DBSYNTH{6 digits}`` form is 13 chars,
-    #   but the ``drugbank_id`` column was VARCHAR(10) -- the DBSYNTH
-    #   form was SILENTLY TRUNCATED or REJECTED at the DB level. The
-    #   v50 fallback was effectively dead code for missing-InChIKey drugs.
-    #   ROOT FIX:
-    #     1. Change the synthesized prefix from ``DB`` to ``SYNTH-DB-``
-    #        (clearly non-DrugBank -- no collision risk).
-    #     2. Hash form: ``SYNTH-DB-{8 hex}`` (e.g. ``SYNTH-DB-A1B2C3D4``).
-    #     3. Missing-InChIKey form: ``SYNTH-DB-M{6 digits}`` (e.g.
-    #        ``SYNTH-DB-M000001`` -- ``M`` for Missing).
-    #     4. Widen ``DRUGBANK_ID_LENGTH`` from 10 to 64 (see models.py
-    #        and migration 013) so the longer synthesized IDs fit.
-    #     5. Update ``_DRUGBANK_ID_RE`` to ONLY accept real DrugBank IDs
-    #        (``^DB\d{5,7}$``). Add a SEPARATE ``_SYNTHESIZED_DRUG_ID_RE``
-    #        for the synthesized form. Validation accepts EITHER.
-    #     6. Downstream consumers can distinguish real vs synthesized by
-    #        the prefix (``DB`` = real, ``SYNTH-DB-`` = synthesized).
-    def _synthesize_drugbank_id(inchikey: str) -> str:
-        # v90 ROOT FIX (BUG #12): the previous code returned
-        # "DBSYNTH000000" (a FIXED sentinel) for ALL drugs missing
-        # an InChIKey. This means N drugs with missing InChIKeys all
-        # got the SAME drugbank_id -> they were merged into a SINGLE
-        # Drug node in the KG (silent data corruption). ROOT FIX:
-        # use a sequential counter so each missing-InChIKey drug gets
-        # a UNIQUE ID. The counter is deterministic within a single
-        # pipeline run because drugs are processed in a fixed order.
-        if not inchikey or not isinstance(inchikey, str):
-            _synthesize_drugbank_id._counter = getattr(
-                _synthesize_drugbank_id, "_counter", 0
-            ) + 1
-            # P1-017: SYNTH-DB-M prefix (M for Missing InChIKey).
-            # 17 chars total — fits in VARCHAR(64).
-            return f"SYNTH-DB-M{_synthesize_drugbank_id._counter:06d}"
-        h = hashlib.sha256(inchikey.encode()).hexdigest()
-        # P1-017: SYNTH-DB- prefix + 8 hex chars = 17 chars total.
-        # Fits in VARCHAR(64).
-        return f"SYNTH-DB-{h[:8].upper()}"
-
-    drugs_df = pd.DataFrame({
-        "drugbank_id": chembl_df["inchikey"].apply(_synthesize_drugbank_id),
-        "name": chembl_df.get("name", ""),
-        "inchikey": chembl_df["inchikey"],
-        "smiles": chembl_df.get("smiles", ""),
-        "molecular_weight": chembl_df.get("molecular_weight", ""),
-        "indication": "",  # filled below from RxNorm
-        "indication_source": "open_data_synthesis",
-        "mechanism_of_action": chembl_df.get("mechanism_of_action", ""),
-        "groups": "approved",
-        "is_fda_approved": True,
-        "is_withdrawn": False,
-        "clinical_status": "approved",
-        "max_phase": 4,
-        "drug_type": "small_molecule",
-    })
-
-    # 3. Enrich with indications from RxNorm REST API (no login required)
-    # RxNorm provides drug -> indication mappings via the RXNREL table.
-    # We use the REST API at https://rxnav.nlm.nih.gov/REST/rxcui/{rxcui}/allproperties
-    # For each drug name, we look up the RxNorm RxCUI, then fetch its indications.
-    #
-    # P2-11 ROOT FIX: the previous code modified drugs_df in-place via
-    # ``drugs_df.at[idx, "indication"] = ...`` inside a ``df.iterrows()``
-    # loop. This triggers ``SettingWithCopyWarning`` in some pandas
-    # versions because ``iterrows()`` returns views, not copies. More
-    # importantly, the loop is O(N) Python with per-row HTTP calls --
-    # for 10K FDA-approved drugs, this is 10K REST calls (15s each at
-    # RxNorm's rate limit = 41 hours). ROOT FIX: build a dict of
-    # {idx: (indication_text, "rxnorm_open_data")} and apply all updates
-    # in a single vectorized pass after the loop. This avoids the
-    # SettingWithCopyWarning entirely and is more idiomatic pandas.
-    logger.info("DrugBank: enriching %d drugs with RxNorm indications", len(drugs_df))
-    indications_records = []
-    indication_updates: dict[int, tuple[str, str]] = {}  # idx -> (indication, source)
-    for idx, row in drugs_df.iterrows():
-        drug_name = str(row.get("name", "")).strip()
-        if not drug_name or drug_name == "nan":
-            continue
-        try:
-            # Step 1: Find RxNorm RxCUI by drug name
-            # v90 ROOT FIX (BUG #8): URL-encode the drug_name so
-            # drugs with special characters (e.g. "6-mercaptopurine",
-            # "N-acetylcysteine", "5-fluorouracil") are correctly
-            # encoded in the query string. The previous code passed
-            # the raw name which broke on hyphens, ampersands, and
-            # other URL-significant characters -- RxNorm returned 0
-            # results for these drugs -> no indication enrichment.
-            from urllib.parse import quote as _url_encode
-            url = f"https://rxnav.nlm.nih.gov/REST/rxcui.json?name={_url_encode(drug_name, safe='')}&search=2"
-            # v64 ROOT FIX (P1-006): send User-Agent header.
-            resp = requests.get(url, headers={"User-Agent": HTTP_USER_AGENT}, timeout=15.0)
-            rxcui = None
-            if resp.status_code == 200:
-                rxcui = resp.json().get("idGroup", {}).get("rxnormId", [None])[0]
-            if rxcui:
-                # Step 2: Fetch indications for this RxCUI
-                ind_url = f"https://rxnav.nlm.nih.gov/REST/rxcui/{rxcui}/allproperties.json?prop=indication"
-                # v64 ROOT FIX (P1-006): send User-Agent header.
-                ind_resp = requests.get(ind_url, headers={"User-Agent": HTTP_USER_AGENT}, timeout=15.0)
-                if ind_resp.status_code == 200:
-                    prop_concepts = (
-                        ind_resp.json()
-                        .get("propConceptGroup", {})
-                        .get("propConcept", [])
-                    )
-                    for pc in prop_concepts:
-                        if pc.get("propName") == "INDICATION":
-                            indication_text = pc.get("propValue", "")
-                            if indication_text:
-                                # v90 ROOT FIX (BUG #7): RxNorm's
-                                # INDICATION property is FREE-TEXT (e.g.
-                                # "Used for treatment of hypertension and
-                                # heart failure"), NOT a structured disease
-                                # name. The previous code mapped this
-                                # verbatim to `disease_name`, creating
-                                # PHANTOM disease nodes in the KG -- one
-                                # node per free-text string, none matching
-                                # OMIM/DisGeNET disease IDs. ROOT FIX:
-                                # set disease_name to empty string; the
-                                # indication_text goes in the `indication`
-                                # column only. Downstream entity resolution
-                                # must parse the free-text to extract real
-                                # disease names.
-                                indications_records.append({
-                                    "drugbank_id": row["drugbank_id"],
-                                    "drug_inchikey": row["inchikey"],
-                                    "drug_name": drug_name,
-                                    "disease_id": "",  # RxNorm doesn't use DOID
-                                    "disease_name": "",  # NOT free-text
-                                    "indication": indication_text[:500],
-                                    "source": "rxnorm_open_data",
-                                })
-                                # P2-11 ROOT FIX: collect the update for
-                                # vectorized application after the loop.
-                                indication_updates[idx] = (
-                                    indication_text[:500],
-                                    "rxnorm_open_data",
-                                )
-                                break
-            time.sleep(0.2)  # RxNorm rate limit
-            if (idx + 1) % 100 == 0:
-                logger.info("DrugBank: %d/%d enriched from RxNorm", idx + 1, len(drugs_df))
-        except Exception as exc:
-            logger.debug("RxNorm enrichment failed for %s: %s", drug_name, exc)
-
-    # P2-11 ROOT FIX: apply all indication updates in a single vectorized
-    # pass. This avoids SettingWithCopyWarning and is more efficient than
-    # per-row ``df.at[idx, ...]`` assignments inside an iterrows loop.
-    # v84 FORENSIC ROOT FIX (BUG #39): the previous "vectorized" fix was
-    # STILL a per-row loop using ``df.loc[_idx, col] = value`` -- O(N)
-    # Python with 2N loc calls (10K drugs × 2 columns = 20K loc calls).
-    # This triggers ``SettingWithCopyWarning`` on some pandas versions
-    # and is slow. ROOT FIX: build a DataFrame from the updates dict
-    # and use ``df.update()`` -- a single vectorized C-level operation.
-    if indication_updates:
-        _updates_df = pd.DataFrame.from_dict(
-            indication_updates, orient="index",
-            columns=["indication", "indication_source"],
-        )
-        drugs_df.update(_updates_df)
-
+    drugs_df = pd.DataFrame(columns=[
+        "drugbank_id", "name", "inchikey", "smiles", "molecular_weight",
+        "indication", "indication_source", "mechanism_of_action", "groups",
+        "is_fda_approved", "is_withdrawn", "clinical_status", "max_phase",
+        "drug_type", "chembl_id", "pubchem_cid",
+    ])
+    indications_df = pd.DataFrame(columns=[
+        "drugbank_id", "drug_inchikey", "drug_name", "disease_id",
+        "disease_name", "doid_id", "omim_disease_id", "indication",
+        "indication_type", "source",
+    ])
     drugs_df.to_csv(drugs_path, index=False)
-    pd.DataFrame(indications_records).to_csv(indications_path, index=False)
-
+    indications_df.to_csv(indications_path, index=False)
     logger.info(
-        "DrugBank open-data synthesis complete: %d drugs, %d indications",
-        len(drugs_df), len(indications_records),
+        "DrugBank: wrote EMPTY drugbank_open_drugs.csv and "
+        "drugbank_open_indications.csv (0 rows each). KG will use "
+        "ChEMBL FDA-approved drugs as the Compound source."
     )
+
+    # v107 P1-005: the RxNorm enrichment loop below is now DEAD CODE
+    # because drugs_df is empty (zero rows). We skip it entirely.
+    # When DrugBank academic access resumes, this block should be
+    # re-enabled with REAL DrugBank XML data (not synthesized IDs).
+
     result["drugs"] = drugs_path
     result["indications"] = indications_path
     return result
