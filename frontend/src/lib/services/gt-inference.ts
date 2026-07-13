@@ -135,6 +135,51 @@ function findLatestGtCheckpoint(): string | null {
 // ---------------------------------------------------------------------------
 
 /**
+ * P3-002 ROOT FIX: if GT_SERVICE_URL is set, proxy to the long-running
+ * FastAPI service (graph_transformer/service.py) via HTTP instead of
+ * spawning a subprocess per request. This is the high-concurrency path
+ * (V1 contract: 100 concurrent requests). The HTTP service returns the
+ * SAME response shape as the subprocess path, so callers see no
+ * difference.
+ *
+ * If GT_SERVICE_URL is NOT set, fall back to the subprocess path
+ * (scripts/gt_inference.py). This is the default for dev/CI.
+ */
+async function runHttpInference(
+  mode: "predict" | "top_k",
+  payload: { pairs?: DrugDiseasePair[]; top_k?: number }
+): Promise<{ predictions: GtPrediction[]; modelVersion?: string } | null> {
+  const serviceUrl = process.env.GT_SERVICE_URL;
+  if (!serviceUrl) return null; // fall back to subprocess
+
+  const endpoint = mode === "predict" ? "/predict" : "/top-k";
+  const url = serviceUrl.replace(/\/$/, "") + endpoint;
+
+  const resp = await fetch(url, {
+    method: mode === "predict" ? "POST" : "GET",
+    headers: { "Content-Type": "application/json" },
+    body: mode === "predict" ? JSON.stringify({ pairs: payload.pairs }) : undefined,
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`GT service ${url} returned ${resp.status}: ${text.slice(0, 500)}`);
+  }
+
+  const data = await resp.json();
+  // The HTTP service returns the SAME shape as the subprocess path
+  // (predictions, modelVersion, source, etc.) per the P3-002 fix.
+  const predictions: GtPrediction[] = (data.predictions || []).map(
+    (p: { drug: string; disease: string; score: number }) => ({
+      drug: p.drug,
+      disease: p.disease,
+      score: p.score,
+    })
+  );
+  return { predictions, modelVersion: data.modelVersion };
+}
+
+/**
  * Spawn `gt_inference.py` (a small Python helper) to run the actual
  * model inference. The helper loads the checkpoint, runs
  * `predict_drug_disease_scores` or `top_k_novel_predictions`, and
@@ -212,6 +257,27 @@ export async function predictPairs(pairs: DrugDiseasePair[]): Promise<GtInferenc
     };
   }
 
+  // P3-002 ROOT FIX: try HTTP service first (if GT_SERVICE_URL is set),
+  // then fall back to subprocess. The HTTP service is the high-concurrency
+  // path for production (V1 contract: 100 concurrent requests).
+  try {
+    const httpResult = await runHttpInference("predict", { pairs });
+    if (httpResult !== null) {
+      return {
+        predictions: httpResult.predictions,
+        source: "gt_checkpoint",
+        modelVersion: httpResult.modelVersion,
+        generatedAt: new Date().toISOString(),
+        count: httpResult.predictions.length,
+        checkpointPath: null,
+      };
+    }
+  } catch (e: unknown) {
+    // HTTP service is configured but failed — log and fall back to subprocess
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`[gt-inference] GT_SERVICE_URL call failed, falling back to subprocess: ${msg}`);
+  }
+
   const checkpointPath = findLatestGtCheckpoint();
   if (checkpointPath === null) {
     return {
@@ -255,6 +321,24 @@ export async function predictPairs(pairs: DrugDiseasePair[]): Promise<GtInferenc
  * trained GT model. "Novel" = not in the known_pairs list.
  */
 export async function topKNovel(topK: number = 50): Promise<GtInferenceResponse> {
+  // P3-002 ROOT FIX: try HTTP service first, then fall back to subprocess.
+  try {
+    const httpResult = await runHttpInference("top_k", { top_k: topK });
+    if (httpResult !== null) {
+      return {
+        predictions: httpResult.predictions,
+        source: "gt_checkpoint",
+        modelVersion: httpResult.modelVersion,
+        generatedAt: new Date().toISOString(),
+        count: httpResult.predictions.length,
+        checkpointPath: null,
+      };
+    }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`[gt-inference] GT_SERVICE_URL top_k call failed, falling back to subprocess: ${msg}`);
+  }
+
   const checkpointPath = findLatestGtCheckpoint();
   if (checkpointPath === null) {
     return {

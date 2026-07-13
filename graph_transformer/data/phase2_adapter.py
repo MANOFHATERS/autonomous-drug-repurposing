@@ -503,9 +503,22 @@ def adapt_phase2_to_phase3(
     #   Gene -> UniProt (by gene_symbol) -> Pathway (by participates_in)
     #   -> add (Pathway, disrupted_in, Disease)
     derived_pathway_disease: List[Tuple[str, str]] = []
-    gene_disease_edges = p2_edges.get(("Gene", "associated_with", "Disease"), [])
-    gene_disease_edges.extend(
-        p2_edges.get(("Gene", "susceptible_to", "Disease"), [])
+    # P3-023 ROOT FIX (CRITICAL — do NOT mutate the list returned by .get()).
+    # The previous code did:
+    #   gene_disease_edges = p2_edges.get(("Gene", "associated_with", "Disease"), [])
+    #   gene_disease_edges.extend(p2_edges.get(("Gene", "susceptible_to", "Disease"), []))
+    # This MUTATES the list returned by .get() — if the same list is
+    # referenced in p2_edges, it gets corrupted. The ("Gene", "associated_with",
+    # "Disease") list now contains the ("Gene", "susceptible_to", "Disease")
+    # edges appended. If p2_edges is reused (for a second call or for
+    # logging), the associated_with list now contains susceptible_to edges.
+    # Silent data corruption that affects downstream processing.
+    #
+    # The fix: use list() + list() to create a NEW list, leaving the
+    # original p2_edges lists unmutated.
+    gene_disease_edges = (
+        list(p2_edges.get(("Gene", "associated_with", "Disease"), []))
+        + list(p2_edges.get(("Gene", "susceptible_to", "Disease"), []))
     )
     for gene_id, disease_id in gene_disease_edges:
         uniprot_id = gene_id_to_uniprot.get(gene_id)
@@ -587,18 +600,39 @@ def adapt_phase2_to_phase3(
         gt_builder.register_node("drug", drug_name, feat)
 
     # Register proteins (Protein -> protein)
+    # P3-024 ROOT FIX (CRITICAL — register by uniprot_id, not name).
+    # The previous code registered proteins by ``protein["name"]`` (free-text
+    # UniProt recommended name like "Cellular tumor antigen p53"). If two
+    # proteins have the SAME name (e.g., two isoforms both named "Cytochrome
+    # P450 3A4"), they collapse to one node (the builder dedupes by name).
+    # The second protein's features and edges are silently dropped.
+    #
+    # The fix: register proteins by ``uniprot_id`` (unique), not by name.
+    # Use ``name`` only for display. This ensures every distinct UniProt
+    # entry gets its own node, even if multiple proteins share the same
+    # recommended name.
     for protein in p2_nodes.get("Protein", []):
-        protein_name = str(protein.get("name", protein["id"])).strip()
+        protein_id = str(protein["id"]).strip()
+        protein_name = str(protein.get("name", protein_id)).strip()
         if not protein_name:
-            protein_name = str(protein["id"]).strip()
-        p2_id_to_p3_name[protein["id"]] = protein_name
+            protein_name = protein_id
+        # Use the stable protein ID (uniprot accession) as the canonical
+        # node name so duplicate recommended names don't collapse distinct
+        # proteins into one node.
+        canonical_protein_name = protein_id
+        p2_id_to_p3_name[protein["id"]] = canonical_protein_name
         # V92 ROOT FIX (BUG P3-007): use SHA-256 _deterministic_seed
         # instead of non-reproducible hash(). See the drug-registration
         # block above for the full rationale.
         feat = np.random.default_rng(
-            _deterministic_seed(str(seed), "protein", protein_name)
+            _deterministic_seed(str(seed), "protein", canonical_protein_name)
         ).standard_normal(DEFAULT_FEATURE_DIMS["protein"]).astype(np.float32)
-        gt_builder.register_node("protein", protein_name, feat)
+        gt_builder.register_node("protein", canonical_protein_name, feat)
+        # Store the display name for downstream consumers (dashboard, etc.)
+        # under a separate attribute, not as the node name.
+        if not hasattr(gt_builder, "_protein_display_names"):
+            gt_builder._protein_display_names = {}
+        gt_builder._protein_display_names[canonical_protein_name] = protein_name
 
     # Register pathways (Pathway -> pathway)
     for pathway in p2_nodes.get("Pathway", []):
