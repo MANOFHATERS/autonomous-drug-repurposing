@@ -1609,6 +1609,27 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
         # v88 ROOT FIX (BUG #39 — InChIKey format validation): filter
         # to well-formed InChIKeys (^[A-Z]{14}-[A-Z]{10}-[A-Z]$) so NULL/
         # empty/malformed inchikeys don't violate the InChIKey mandate.
+        #
+        # P2-014 ROOT FIX (v107 forensic): the v84/v88 filter DROPPED all
+        # biotech drugs (insulin DB00071, Humira, Keytruda — ~30% of modern
+        # FDA approvals) because biotech drugs have NO InChIKey (they are
+        # proteins, antibodies, etc. — InChIKey is a small-molecule-only
+        # identifier). Their treats edges were dropped BEFORE the P2-027
+        # alias consolidation could merge them. The KG's drug coverage was
+        # structurally incomplete for the entire biotech drug class. The RL
+        # ranker could not recommend biotech drugs because they had no
+        # treats edges.
+        # ROOT FIX: relax the WHERE clause to ACCEPT rows with EITHER a
+        # valid InChIKey OR a non-empty DrugBank ID. Biotech drugs use
+        # DrugBank ID as the canonical identifier (per the Phase 1 bridge
+        # docstring line 16: "Canonical Compound ID = InChIKey for small
+        # molecules, DrugBank ID for biologics"). The downstream alias
+        # consolidation (P2-027) merges them into the correct Compound
+        # node via DrugBank ID crosswalk. We still validate the InChIKey
+        # format when it IS present (the regex filter is applied to the
+        # inchikey column AFTER the read, not in the WHERE clause, so
+        # malformed inchikeys are demoted to DrugBank ID rather than
+        # dropping the row entirely).
         drugs_with_indication = pd.read_sql(
             sa_text(
                 "SELECT inchikey, name, chembl_id, drugbank_id, "
@@ -1618,9 +1639,14 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
                 "WHERE indication IS NOT NULL "
                 "AND TRIM(indication) != '' "
                 "AND is_deleted = false "
-                "AND inchikey IS NOT NULL "
-                "AND TRIM(inchikey) != '' "
-                "AND inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'"
+                "AND ("
+                "  (inchikey IS NOT NULL AND TRIM(inchikey) != '' "
+                "   AND inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$') "
+                "  OR "
+                "  (drugbank_id IS NOT NULL AND TRIM(drugbank_id) != '')"
+                ") "
+                "-- P2-014: accept InChIKey OR DrugBank ID (biotech drugs"
+                "-- have no InChIKey but DO have a DrugBank ID)."
             ),
             conn,
         )
@@ -1633,13 +1659,43 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
             )
             _n_invalid_ik = int((~_valid_ik_mask).sum())
             if _n_invalid_ik > 0:
+                # P2-014: do NOT drop these rows. They are biotech drugs
+                # (no InChIKey). Demote to DrugBank ID as the canonical
+                # identifier. Log so operators can audit the count.
+                _n_with_drugbank = int(
+                    drugs_with_indication.loc[~_valid_ik_mask, "drugbank_id"]
+                    .apply(lambda x: bool(x) and str(x).strip() != "" and str(x) != "nan")
+                    .sum()
+                )
                 logger.warning(
-                    "phase1_bridge: dropping %d/%d indication rows with "
-                    "NULL/empty/malformed inchikey (v88 BUG #39). Sample: %s",
+                    "phase1_bridge: %d/%d indication rows have NULL/empty/"
+                    "malformed inchikey (v88 BUG #39 / P2-014 v107). %d of "
+                    "these have a DrugBank ID — keeping them as biotech "
+                    "drugs (DrugBank ID is the canonical ID for biologics "
+                    "per the bridge docstring). %d have NEITHER inchikey "
+                    "NOR drugbank_id — these will be dropped (cannot "
+                    "canonicalize). Sample invalid inchikeys: %s",
                     _n_invalid_ik, len(drugs_with_indication),
+                    _n_with_drugbank,
+                    _n_invalid_ik - _n_with_drugbank,
                     list(_ik[~_valid_ik_mask].head(5)),
                 )
-                drugs_with_indication = drugs_with_indication[_valid_ik_mask].reset_index(drop=True)
+                # Keep rows that EITHER have a valid inchikey OR a
+                # non-empty drugbank_id. Drop only rows with NEITHER.
+                _has_drugbank = drugs_with_indication["drugbank_id"].apply(
+                    lambda x: bool(x) and str(x).strip() != "" and str(x) != "nan"
+                )
+                _keep_mask = _valid_ik_mask | _has_drugbank
+                _n_dropped_p2_014 = int((~_keep_mask).sum())
+                if _n_dropped_p2_014 > 0:
+                    logger.error(
+                        "phase1_bridge: P2-014 dropping %d indication rows "
+                        "with NEITHER inchikey NOR drugbank_id — cannot "
+                        "canonicalize. These are likely data-quality issues "
+                        "in Phase 1. Investigate the DrugBank parser.",
+                        _n_dropped_p2_014,
+                    )
+                drugs_with_indication = drugs_with_indication[_keep_mask].reset_index(drop=True)
         if drugs_with_indication.empty:
             return None
 
@@ -6023,15 +6079,54 @@ def stage_phase1_to_phase2(
                         "derived."
                     )
             except Exception as _pathway_exc:
-                logger.warning(
+                # P2-015 ROOT FIX (v107 forensic): the previous code
+                # swallowed ALL exceptions here (including programming bugs
+                # like NameError, AttributeError from typos) and continued.
+                # Real data issues were invisible — the downstream
+                # phase2_adapter then saw 0 Pathway nodes and raised
+                # Phase2AdapterValidationError, masking the root cause
+                # (STRING pathway failure) with a different error.
+                # ROOT FIX: in production mode, RAISE for pathway derivation
+                # failures — this is a critical path (Pathway nodes are
+                # required for the GNN's multi-hop reasoning per P3-015).
+                # In dev mode, log + continue so smoke tests can proceed
+                # without STRING data. Narrow the exception type when
+                # possible (we still catch Exception because the STRING
+                # loader can raise diverse errors — IOError, ValueError,
+                # pandas.errors.ParserError, etc. — but we now log the
+                # full type + traceback so the root cause is visible).
+                _p2_015_env = os.environ.get(
+                    "DRUGOS_ENVIRONMENT", "production"
+                ).lower()
+                _p2_015_is_prod = _p2_015_env in ("prod", "production")
+                logger.error(
                     "Phase1 bridge: Pathway derivation from STRING failed "
-                    "(%s). Pathway nodes will be absent from the KG. DOCX "
-                    "5-node-type contract is violated.",
-                    _pathway_exc,
+                    "(%s: %s). Pathway nodes will be absent from the KG. "
+                    "DOCX 5-node-type contract is violated. The downstream "
+                    "phase2_adapter will raise Phase2AdapterValidationError "
+                    "if Pathway nodes are 0. Traceback logged for root-cause "
+                    "diagnosis. (P2-015 root fix, v107)",
+                    type(_pathway_exc).__name__, _pathway_exc,
+                    exc_info=True,
                 )
                 staged.warnings.append(
-                    f"Pathway derivation failed: {_pathway_exc}"
+                    f"Pathway derivation failed ({type(_pathway_exc).__name__}): "
+                    f"{_pathway_exc}"
                 )
+                if _p2_015_is_prod:
+                    raise RuntimeError(
+                        f"P2-015 ROOT FIX: Pathway derivation from STRING "
+                        f"failed in DRUGOS_ENVIRONMENT=production "
+                        f"({type(_pathway_exc).__name__}: {_pathway_exc}). "
+                        f"Pathway nodes are required for the GNN's multi-hop "
+                        f"reasoning (drug→protein→pathway→disease) per the "
+                        f"DOCX Phase 2 spec. Continuing would silently "
+                        f"produce a KG with 0 Pathway nodes, causing the "
+                        f"phase2_adapter to raise Phase2AdapterValidationError "
+                        f"later with a misleading error. Fix the STRING "
+                        f"loader or set DRUGOS_ENVIRONMENT=dev for smoke "
+                        f"tests. (P2-015 root fix, v107)"
+                    ) from _pathway_exc
 
     # ── DisGeNET: Gene→associated_with→Disease (with sub-source attribution) ──
     #
