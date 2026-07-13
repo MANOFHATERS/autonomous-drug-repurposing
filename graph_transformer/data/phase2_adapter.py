@@ -649,15 +649,34 @@ def adapt_phase2_to_phase3(
         ).astype(np.float32)
         gt_builder.register_node("clinical_outcome", outcome_name, feat)
 
-    total_registered = sum(len(m) for m in gt_builder._node_maps.values())
+    # v107 ROOT FIX (ISSUE-P2-043): use the public ``node_counts_by_type``
+    # method instead of reaching into ``gt_builder._node_maps`` (private).
+    # A refactor of BiomedicalGraphBuilder that renames ``_node_maps``
+    # would have silently broken the adapter. The public API is stable.
+    _node_counts = gt_builder.node_counts_by_type()
+    total_registered = sum(_node_counts.values())
     logger.info(
         f"adapt_phase2_to_phase3: registered {total_registered} nodes "
-        f"({', '.join(f'{k}={len(v)}' for k, v in gt_builder._node_maps.items())})"
+        f"({', '.join(f'{k}={v}' for k, v in _node_counts.items())})"
     )
 
     # ─── Step 7: Add edges (mapped + derived) ──────────────────────────
-    edges_added = 0
-    edges_dropped = 0
+    # v107 ROOT FIX (ISSUE-P2-042): separate ``edges_new`` from
+    # ``edges_already_present`` and ``edges_dropped``. The previous code
+    # incremented ``edges_added`` only when ``gt_builder.add_edge`` returned
+    # True (edge was NEW), and incremented ``edges_dropped`` when src/dst
+    # names were missing. But edges that ALREADY EXISTED (add_edge returns
+    # False because the (src, dst) pair was already in the set) were not
+    # counted anywhere — operators saw "added 5000, dropped 2000" when the
+    # real picture was "added 5000 new, 2000 already existed, 0 dropped".
+    # The KG appeared to have lost 2000 edges. The fix introduces three
+    # counters with clear semantics:
+    #   edges_new              — edges that did not exist before (added)
+    #   edges_already_present  — edges that existed (silent dedup, no loss)
+    #   edges_dropped          — edges with missing src/dst names (real loss)
+    edges_added = 0           # NEW edges (add_edge returned True)
+    edges_already_present = 0 # Edges that already existed (add_edge False)
+    edges_dropped = 0         # Edges with missing names (real loss)
     for (src_label, rel, dst_label), edge_list in p2_edges.items():
         p3_key = PHASE2_TO_PHASE3_EDGE.get((src_label, rel, dst_label))
         if p3_key is None:
@@ -674,9 +693,15 @@ def adapt_phase2_to_phase3(
                 p3_src_type, p3_rel, p3_dst_type, src_name, dst_name
             ):
                 edges_added += 1
+            else:
+                # add_edge returned False — the (src, dst) pair was
+                # already in _edge_sets (silent dedup). The edge IS
+                # in the graph; this is NOT a loss.
+                edges_already_present += 1
 
     # Add DERIVED (pathway, disrupted_in, disease) edges
     derived_added = 0
+    derived_already_present = 0
     for pathway_id, disease_id in derived_pathway_disease:
         pathway_name = p2_id_to_p3_name.get(pathway_id)
         disease_name = p2_id_to_p3_name.get(disease_id)
@@ -687,10 +712,15 @@ def adapt_phase2_to_phase3(
         ):
             derived_added += 1
             edges_added += 1
+        else:
+            derived_already_present += 1
+            edges_already_present += 1
 
     logger.info(
-        f"adapt_phase2_to_phase3: added {edges_added} edges "
-        f"({derived_added} derived pathway->disease), dropped {edges_dropped}."
+        f"adapt_phase2_to_phase3: added {edges_added} NEW edges "
+        f"({derived_added} derived pathway->disease), "
+        f"{edges_already_present} already present (deduped, no loss), "
+        f"{edges_dropped} dropped (missing names). v107 ISSUE-P2-042 fix."
     )
 
     # ─── Step 8: Build reverse edges + finalize ────────────────────────
@@ -701,7 +731,13 @@ def adapt_phase2_to_phase3(
     # from _edge_sets (forward-only), DISCARDING all 7 reverse edge
     # types. Use _build_reverse_edges_into_sets (writes into _edge_sets)
     # so reverse edges survive _sync_edge_lists() in finalize().
-    gt_builder._build_reverse_edges_into_sets(gt_builder._edge_sets)
+    #
+    # v107 ROOT FIX (ISSUE-P2-043): call the PUBLIC build_reverse_edges
+    # method instead of the private _build_reverse_edges_into_sets
+    # classmethod + private _edge_sets attribute. The public method
+    # wraps the classmethod and reads _edge_sets internally, so the
+    # adapter no longer depends on private attribute names.
+    gt_builder.build_reverse_edges()
     node_features, edge_indices, node_maps = gt_builder.finalize()
 
     # ─── Step 9: Extract known_pairs from (drug, treats, disease) edges ─

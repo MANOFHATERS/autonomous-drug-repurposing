@@ -320,6 +320,14 @@ class StatsReport(TypedDict, total=False):
 
     # Connectivity
     isolated_nodes: int  # -1 if query timed out (Fixes 4.7: no 'N/A')
+    # v107 ROOT FIX (ISSUE-P2-051): flag indicating whether
+    # isolated_nodes is a REAL measurement (True) or the -1 sentinel
+    # for unknown (False). Downstream threshold checks MUST consult
+    # this flag before comparing isolated_nodes to any threshold —
+    # otherwise -1 (unknown) is treated as "very few isolated nodes"
+    # (since -1 < any positive threshold), causing the check to PASS
+    # when it should FAIL.
+    isolated_nodes_known: bool
 
     # Density (Fixes 3.4, 13.6: naive renamed, per-type added)
     density_homogeneous_naive: float
@@ -989,13 +997,35 @@ class GraphStats:
                     stats["isolated_nodes"] = _safe_int(
                         records[0]["isolated"],
                     )
+                    # v107 ROOT FIX (ISSUE-P2-051): record whether the
+                    # isolated_nodes value is a REAL measurement or the
+                    # -1 sentinel. Downstream code that does
+                    # ``if stats["isolated_nodes"] > threshold:`` was
+                    # treating -1 as "very few isolated nodes" (since
+                    # -1 < any positive threshold), so the check PASSED
+                    # when it should have FAILED. The new
+                    # ``isolated_nodes_known`` flag lets downstream code
+                    # skip the comparison when the value is unknown.
+                    stats["isolated_nodes_known"] = True
                 else:
+                    # v107 ROOT FIX (ISSUE-P2-051): keep -1 sentinel for
+                    # backward compat (TypedDict declares isolated_nodes
+                    # as int, and tests assert == -1), BUT add the
+                    # ``isolated_nodes_known`` flag so downstream code
+                    # can detect the unknown state and skip the
+                    # comparison. A future major-version bump can change
+                    # -1 to None and make isolated_nodes Optional[int].
                     stats["isolated_nodes"] = -1
+                    stats["isolated_nodes_known"] = False
                     warnings.append(
                         "Isolated-nodes query failed or timed out. "
-                        "Value set to -1 (unknown). "
-                        "This is non-critical -- isolated nodes are "
-                        "cosmetic, not a data-quality issue."
+                        "Value set to -1 (unknown) and "
+                        "isolated_nodes_known=False. Downstream "
+                        "threshold checks MUST consult "
+                        "isolated_nodes_known before comparing. This "
+                        "is non-critical -- isolated nodes are "
+                        "cosmetic, not a data-quality issue. "
+                        "v107 ISSUE-P2-051 root fix."
                     )
 
                 # ── Naive homogeneous density (Fix 13.6: renamed) ──

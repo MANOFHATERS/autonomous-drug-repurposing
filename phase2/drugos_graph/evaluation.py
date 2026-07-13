@@ -651,6 +651,27 @@ def _detect_leakage(
     fall back to the original nested loop (rare in practice -- the
     default is what every caller uses).
 
+    v107 ROOT FIX (ISSUE-P2-055): handle EMPTY inputs explicitly. The
+    previous code's ``len(pos_scores) > 0 and len(neg_scores) > 0``
+    guard routed empty arrays to the nested-loop branch, which iterates
+    ``for ps in pos_scores:`` (a no-op for empty pos) and computes
+    ``np.isclose(neg_scores, ps, ...)`` for each ps. For empty pos the
+    loop never executes, so n_overlap stays 0 — but for empty neg with
+    non-empty pos, the loop runs but np.isclose returns an empty array
+    each time, so n_overlap stays 0 too. The crash the issue mentions
+    happens in the CALLER's dtype check: the line
+    ``_scores_for_atol = pos_scores if len(pos_scores) > 0 else neg_scores``
+    followed by ``_scores_for_atol.dtype`` — if BOTH pos and neg are
+    empty, ``_scores_for_atol`` is the empty neg_scores, whose dtype
+    may be the default float64 but whose len() is 0, so the
+    ``if len(_scores_for_atol) > 0`` branch is skipped and the code
+    falls through to the ``else: _p2_010_atol = 1e-6`` branch, which
+    is correct. BUT the subsequent ``np.all(np.isclose(pos_scores,
+    pos_scores[0], ...))`` accesses ``pos_scores[0]`` on an empty
+    array → IndexError. ROOT FIX: return early from _detect_leakage
+    with ``likely_same_array=False`` when either input is empty.
+    Leakage detection is meaningless without both populations.
+
     Args:
         pos_scores: Positive scores.
         neg_scores: Negative scores.
@@ -659,6 +680,16 @@ def _detect_leakage(
     Returns:
         Dict with overlap statistics.
     """
+    # v107 ISSUE-P2-055: handle empty inputs explicitly. If either
+    # array is empty, leakage detection is undefined — return
+    # likely_same_array=False so the caller's degenerate-score check
+    # is skipped (an empty set cannot be "the same array" as anything).
+    if len(pos_scores) == 0 or len(neg_scores) == 0:
+        return {
+            "n_identical_scores": 0,
+            "overlap_ratio": 0.0,
+            "likely_same_array": False,
+        }
     # H-10: O(N+M) path for the default tol (exact-equality check
     # after rounding to 12 decimal places).
     if tol == 1e-12 and len(pos_scores) > 0 and len(neg_scores) > 0:

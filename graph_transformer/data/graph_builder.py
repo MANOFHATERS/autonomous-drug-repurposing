@@ -410,6 +410,51 @@ class BiomedicalGraphBuilder:
 
         return node_features, edge_indices, dict(self._node_maps)
 
+    # ─── v107 ROOT FIX (ISSUE-P2-043): public read-only API ───────────
+    # The phase2_adapter was accessing private attributes
+    # (``_node_maps``, ``_edge_sets``) and a private classmethod
+    # (``_build_reverse_edges_into_sets``) directly. A refactor of this
+    # class (e.g. renaming ``_node_maps`` to ``_node_index``) would
+    # silently break the adapter. These public methods expose the same
+    # data through a stable API that we can guarantee across refactors.
+
+    def total_registered_nodes(self) -> int:
+        """Total number of nodes registered across all node types.
+
+        v107 ROOT FIX (ISSUE-P2-043): public accessor for the
+        ``sum(len(m) for m in self._node_maps.values())`` pattern that
+        the phase2_adapter was computing by reaching into the private
+        ``_node_maps`` dict. Use this method instead so the adapter
+        survives internal refactors of this builder.
+        """
+        return sum(len(m) for m in self._node_maps.values())
+
+    def node_counts_by_type(self) -> Dict[str, int]:
+        """Per-type node counts (e.g. ``{"drug": 100, "disease": 50}``).
+
+        v107 ROOT FIX (ISSUE-P2-043): public accessor that returns a
+        snapshot of the private ``_node_maps`` lengths. Returns a copy
+        so callers cannot mutate the internal state.
+        """
+        return {k: len(v) for k, v in self._node_maps.items()}
+
+    def build_reverse_edges(self) -> None:
+        """Build reverse edges into the in-memory ``_edge_sets``.
+
+        v107 ROOT FIX (ISSUE-P2-043): public method wrapping the
+        private ``_build_reverse_edges_into_sets`` classmethod. The
+        phase2_adapter was calling the private classmethod directly,
+        which coupled it to the internal edge-storage representation.
+        Use this method instead so the adapter survives refactors of
+        the reverse-edge build strategy (e.g. moving from set-based
+        to disk-backed storage in the DiskBackedGraphBuilder subclass).
+
+        Note: ``finalize()`` already calls this internally — callers
+        only need to invoke it directly if they want to inspect reverse
+        edges BEFORE finalization (e.g. for logging or debugging).
+        """
+        self._build_reverse_edges_into_sets(self._edge_sets)
+
     @classmethod
     def _build_reverse_edges_into_sets(
         cls,

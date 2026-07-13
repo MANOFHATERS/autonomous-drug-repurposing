@@ -1227,6 +1227,28 @@ class NegativeSampler:
         For each drug, pair it with diseases from DIFFERENT ATC/therapeutic
         classes than its known indications.
 
+        v107 ROOT FIX (ISSUE-P2-050): DOCUMENT the misleading parameter
+        name. ``disease_atc_map`` sounds like "disease → disease ATC
+        classification", but ATC (Anatomical Therapeutic Chemical) is a
+        DRUG classification system, NOT a disease classification system.
+        There is no such thing as a "disease ATC code". The map actually
+        contains: for each disease_id, the ATC codes of the DRUGS that
+        are known to treat that disease (built by
+        ``training_data._build_disease_atc_map`` from DRKG
+        Compound-treats-Disease edges joined to DrugBank ATC codes).
+
+        The variable name is kept for backward compat (it's a public
+        parameter referenced by 14+ call sites across
+        negative_sampling.py, training_data.py, run_pipeline.py, and
+        multiple test files). The semantics are CORRECT — the strategy
+        samples drugs paired with diseases whose standard-of-care drugs
+        use a different mechanism (ATC class) — only the NAME is
+        misleading. New code should think of this as
+        "disease_to_drug_atc_map" (disease → ATC codes of drugs treating
+        it). A future major-version rename to
+        ``disease_to_drug_atc_map`` would require updating all call
+        sites simultaneously.
+
         v35 ROOT FIX (M-4): use the FULL set of known ATC classes per
         disease (not just the first / majority class). The previous
         code collapsed ``disease_atc_map[d_id]`` to a single string via
