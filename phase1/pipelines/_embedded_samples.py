@@ -124,10 +124,20 @@ def embedded_chembl_molecules() -> pd.DataFrame:
     #   drug. Any downstream join against ChEMBL returned the wrong drug's
     #   data. Cross-source entity resolution on chembl_id failed silently.
     #
-    #   ROOT FIX: all 10 ChEMBL IDs replaced with the verified-correct IDs
-    #   from the ChEMBL REST API (https://www.ebi.ac.uk/chembl/api/data/).
-    #   Verified 2026-07-13 by querying the API for each drug by pref_name
-    #   and confirming the molecular weight matches.
+    #   v108 FORENSIC ROOT FIX (ISSUE-P1-003 continued):
+    #   v107 FIXED 8 of 10 ChEMBL IDs but LEFT TWO WRONG:
+    #     - Diazepam: v107 used CHEMBL503 (Dihydroergotamine — WRONG).
+    #       Verified ChEMBL ID for Diazepam is CHEMBL12.
+    #     - Warfarin: v107 used CHEMBL2114647 (does NOT exist in ChEMBL —
+    #       returns 404). Verified ChEMBL ID for Warfarin is CHEMBL1464.
+    #   The embedded_chembl_activities row for Warfarin ALREADY used
+    #   CHEMBL1464 as molecule_chembl_id (correct), but the molecules table
+    #   had CHEMBL2114647 — causing a cross-reference failure.
+    #
+    #   ROOT FIX (v108): all 10 ChEMBL IDs verified against the ChEMBL REST
+    #   API (https://www.ebi.ac.uk/chembl/api/data/) on 2026-07-14 by
+    #   querying for each drug by pref_name and confirming the molecular
+    #   weight and InChIKey match.
     return pd.DataFrame([
         {"chembl_id": "CHEMBL25", "name": "Aspirin", "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O",
          "inchikey": "BSYNRYMUTXBXSQ-UHFFFAOYSA-N", "molecular_weight": 180.16,
@@ -149,12 +159,24 @@ def embedded_chembl_molecules() -> pd.DataFrame:
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the treatment of migraine and fatigue",
          "indication_source": "manual", "mechanism_of_action": "Adenosine receptor antagonist"},
-        {"chembl_id": "CHEMBL503", "name": "Diazepam", "smiles": "CN1C(=O)CN=C(c2ccccc2)c2cc(Cl)ccc21",
+        # v108 FORENSIC ROOT FIX (ISSUE-P1-003): was CHEMBL503 (Dihydroergotamine,
+        # a completely different drug). Diazepam's verified ChEMBL ID is CHEMBL12.
+        # The mismatch caused the ChEMBL activity row (which correctly used CHEMBL12
+        # as molecule_chembl_id) to reference a non-existent molecule — the
+        # Compound→inhibits→Protein edge for Diazepam was orphaned.
+        {"chembl_id": "CHEMBL12", "name": "Diazepam", "smiles": "CN1C(=O)CN=C(c2ccccc2)c2cc(Cl)ccc21",
          "inchikey": "AAOVKBJEBZCEQK-UHFFFAOYSA-N", "molecular_weight": 284.74,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the treatment of anxiety and seizures",
          "indication_source": "manual", "mechanism_of_action": "GABA-A positive allosteric modulator"},  # P1-059 ROOT FIX (v107): canonical SMILES from PubChem CID 3016. The previous SMILES `ClC1=CC2=C(C=C1)C(=NCC(=O)N2C3=CC=CC=C3)C` depicted a 5-membered ring (wrong) instead of the actual 7-membered 1,4-benzodiazepine ring — RDKit would parse it as a different molecule.
-        {"chembl_id": "CHEMBL2114647", "name": "Warfarin", "smiles": "CC(=O)CC(C1=CC=CC=C1)C2=C(C3=CC=CC=C3OC2=O)O",
+        # v108 FORENSIC ROOT FIX (ISSUE-P1-003): was CHEMBL2114647 (does not exist
+        # in ChEMBL — returns 404 from the API). Warfarin's verified ChEMBL ID is
+        # CHEMBL1464. The embedded_chembl_activities row already correctly used
+        # CHEMBL1464 as molecule_chembl_id, but the molecules table had the wrong
+        # ID — causing a cross-reference failure between the compound table and
+        # the activity table. The DrugBank sample (embedded_drugbank_drugs) also
+        # correctly uses CHEMBL1464, confirming this is the right ID.
+        {"chembl_id": "CHEMBL1464", "name": "Warfarin", "smiles": "CC(=O)CC(C1=CC=CC=C1)C2=C(C3=CC=CC=C3OC2=O)O",
          "inchikey": "PJVWKTKQMONHTF-UHFFFAOYSA-N", "molecular_weight": 308.33,
          "max_phase": 4, "is_fda_approved": True, "is_globally_approved": True,
          "indication": "for the prevention of thrombosis",
@@ -209,15 +231,26 @@ def embedded_chembl_activities() -> pd.DataFrame:
         5. CHEMBL2094260 returned 404 (does not exist), and the paired
            UniProt Q9BQV0 is BIRC7 (an inhibitor-of-apoptosis protein), NOT
            VKORC1. Real VKORC1 = CHEMBL1930 (Q9BQB6).
-        6. CHEMBL2095182 is TUBULIN (P68371), NOT AMPK. Real AMPK complex
-           containing UniProt P54619 = CHEMBL2393 (AMPK gamma-1 subunit).
-        7. CHEMBL1782 is FARNESYL PYROPHOSPHATE SYNTHASE (P14324), NOT HMGCR.
-           Real HMGCR = CHEMBL402 (P04035).
 
-      ROOT FIX: every (target_chembl_id, uniprot_id, target_name) triple
-      verified against the ChEMBL target component API and UniProt API on
-      2026-07-13. Each row now has a consistent triple where the ChEMBL
-      target's UniProt accession matches the uniprot_id column.
+    v108 FORENSIC ROOT FIX (ISSUE-P1-004 continued):
+      v107 CLAIMED to fix items 6 and 7 below but the ACTUAL CODE still had
+      the WRONG values — the comments described the correct fix but the data
+      rows were never updated. Cross-verification of every (target_chembl_id,
+      uniprot_id) pair against the ChEMBL target component API (2026-07-14):
+        6. molecule_chembl_id CHEMBL546 is Ethinylestradiol, NOT Metformin.
+           Metformin = CHEMBL1431. target_chembl_id CHEMBL2095182 is TUBULIN
+           (P68371), NOT AMPK. Real AMPK alpha-1 = CHEMBL1957 (P54619).
+           v107 wrote the correct analysis but left the row as-is.
+        7. molecule_chembl_id CHEMBL1085 is Levonorgestrel, NOT Atorvastatin.
+           Atorvastatin = CHEMBL1487. target_chembl_id CHEMBL1782 is FPPS
+           (P14324), NOT HMGCR. Real HMGCR = CHEMBL402 (P04035).
+           v107 wrote the correct analysis but left the row as-is.
+
+      ROOT FIX (v108): all molecule_chembl_id values verified against the
+      ChEMBL molecules API. All target_chembl_id↔uniprot_id pairs verified
+      against the ChEMBL target component API on 2026-07-14. Every row now
+      has a consistent (molecule_chembl_id, target_chembl_id, uniprot_id)
+      triple where all three identifiers refer to the SAME biological entity.
     """
     _assert_not_production("embedded_chembl_activities")
     return pd.DataFrame([
@@ -250,15 +283,31 @@ def embedded_chembl_activities() -> pd.DataFrame:
          "chembl_id": "CHEMBL12"},
         # Warfarin (CHEMBL1464) -> VKORC1 (CHEMBL1930, Q9BQB6)
         #   was CHEMBL2094260 (404, does not exist) paired with Q9BQV0 (BIRC7).
+        # v108 FORENSIC ROOT FIX (ISSUE-P1-003): chembl_id was CHEMBL2114647 (does
+        # not exist in ChEMBL). Correct ChEMBL ID for Warfarin is CHEMBL1464.
         {"molecule_chembl_id": "CHEMBL1464", "target_chembl_id": "CHEMBL1930", "uniprot_id": "Q9BQB6",
          "target_name": "VKORC1", "activity_type": "IC50", "activity_value": 2700.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 5.57,
-         "chembl_id": "CHEMBL2114647"},
-        {"molecule_chembl_id": "CHEMBL546", "target_chembl_id": "CHEMBL2095182", "uniprot_id": "P54619",
-         "target_name": "AMPK", "activity_type": "EC50", "activity_value": 1500.0,
+         "chembl_id": "CHEMBL1464"},
+        # v108 FORENSIC ROOT FIX (ISSUE-P1-004):
+        #   v107 P1-057: correctly changed IC50→EC50 (Metformin is an AMPK activator).
+        #   BUT v107 LEFT molecule_chembl_id as CHEMBL546 (Ethinylestradiol — WRONG).
+        #   Metformin's verified ChEMBL ID is CHEMBL1431. The target_chembl_id
+        #   CHEMBL2095182 is TUBULIN (P68371), NOT AMPK. Real AMPK alpha-1 =
+        #   CHEMBL1957 (UniProt P54619). The KG had Metformin→activates→TUBULIN —
+        #   pharmacologically nonsensical. ROOT FIX: CHEMBL1431→CHEMBL1957(P54619).
+        {"molecule_chembl_id": "CHEMBL1431", "target_chembl_id": "CHEMBL1957", "uniprot_id": "P54619",
+         "target_name": "AMPK alpha-1", "activity_type": "EC50", "activity_value": 1500.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 5.82,
-         "chembl_id": "CHEMBL546"},  # P1-057 ROOT FIX (v107): was "IC50" but Metformin is an AMPK ACTIVATOR (per DrugBank DB00191 mechanism_of_action: "AMPK activator"). Activators have EC50 (concentration for 50% EFFECT), NOT IC50 (concentration for 50% INHIBITION). An IC50 for an activator is pharmacologically meaningless — the KG would have a Metformin→inhibits→AMPK edge, the OPPOSITE of its actual mechanism. Drug repurposing for AMPK activators (e.g. for diabetes) would MISS the Metformin link. ROOT FIX: change to EC50 (activator). pchembl_value stays the same (-log10(1500e-9) = 5.82).
-        {"molecule_chembl_id": "CHEMBL1085", "target_chembl_id": "CHEMBL1782", "uniprot_id": "P04035",
+         "chembl_id": "CHEMBL1431"},
+        # v108 FORENSIC ROOT FIX (ISSUE-P1-004):
+        #   molecule_chembl_id was CHEMBL1085 (Levonorgestrel — WRONG).
+        #   Atorvastatin's verified ChEMBL ID is CHEMBL1487. The target_chembl_id
+        #   CHEMBL1782 is Farnesyl pyrophosphate synthase (P14324), NOT HMGCR.
+        #   Real HMGCR = CHEMBL402 (UniProt P04035). The KG had Atorvastatin→
+        #   inhibits→FPPS instead of HMGCR — the wrong target entirely.
+        #   ROOT FIX: CHEMBL1487→CHEMBL402(P04035).
+        {"molecule_chembl_id": "CHEMBL1487", "target_chembl_id": "CHEMBL402", "uniprot_id": "P04035",
          "target_name": "HMGCR", "activity_type": "IC50", "activity_value": 8.0,
          "activity_units": "nM", "standard_relation": "=", "pchembl_value": 8.1,
          "chembl_id": "CHEMBL1487"},
@@ -442,6 +491,7 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
          "clinical_status": "approved", "max_phase": 4,
          "cas_number": "58-08-2", "drug_type": "small_molecule",
          "chembl_id": "CHEMBL113", "pubchem_cid": 2519},
+        # v108: chembl_id CHEMBL12 is correct (Diazepam). No change needed.
         {"drugbank_id": "DB00829", "name": "Diazepam", "inchikey": "AAOVKBJEBZCEQK-UHFFFAOYSA-N",
          "smiles": "CN1C(=O)CN=C(c2ccccc2)c2cc(Cl)ccc21", "molecular_weight": 284.74,
          "indication": "For the treatment of anxiety and seizures",
@@ -451,6 +501,7 @@ def embedded_drugbank_drugs() -> pd.DataFrame:
          "clinical_status": "approved", "max_phase": 4,
          "cas_number": "439-14-5", "drug_type": "small_molecule",
          "chembl_id": "CHEMBL12", "pubchem_cid": 3016},
+        # v108: chembl_id CHEMBL1464 is correct (Warfarin). No change needed.
         {"drugbank_id": "DB00682", "name": "Warfarin", "inchikey": "PJVWKTKQMONHTF-UHFFFAOYSA-N",
          "smiles": "CC(=O)CC(C1=CC=CC=C1)C2=C(C3=CC=CC=C3OC2=O)O", "molecular_weight": 308.33,
          "indication": "For the prevention of thrombosis and embolism",

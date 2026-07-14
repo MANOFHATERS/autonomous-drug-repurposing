@@ -529,8 +529,10 @@ class TestP1_057_MetforminEC50:
         os.environ["SAMPLES"] = "embedded"
         from pipelines._embedded_samples import embedded_chembl_activities
         df = embedded_chembl_activities()
-        metformin = df[df["molecule_chembl_id"] == "CHEMBL546"]
-        assert len(metformin) > 0, "Metformin (CHEMBL546) not in embedded activities"
+        # v108 FORENSIC ROOT FIX (ISSUE-P1-004): was CHEMBL546
+        # (Ethinylestradiol, NOT Metformin). Metformin = CHEMBL1431.
+        metformin = df[df["molecule_chembl_id"] == "CHEMBL1431"]
+        assert len(metformin) > 0, "Metformin (CHEMBL1431) not in embedded activities"
         activity_type = metformin.iloc[0]["activity_type"]
         assert activity_type == "EC50", (
             f"P1-057 ROOT FIX: Metformin activity_type is '{activity_type}', "
@@ -583,7 +585,9 @@ class TestP1_059_DiazepamSMILES:
         os.environ["SAMPLES"] = "embedded"
         from pipelines._embedded_samples import embedded_chembl_molecules
         df = embedded_chembl_molecules()
-        diazepam = df[df["chembl_id"] == "CHEMBL503"]
+        # v108 FORENSIC ROOT FIX (ISSUE-P1-003): was CHEMBL503
+        # (Dihydroergotamine). Diazepam = CHEMBL12.
+        diazepam = df[df["chembl_id"] == "CHEMBL12"]
         assert len(diazepam) > 0
         smiles = diazepam.iloc[0]["smiles"]
         assert smiles == self.EXPECTED_DIAZEPAM_SMILES, (
