@@ -141,6 +141,35 @@ detailed forensic trail.)
 # definition change.
 CONFIDENCE_TIER_METHOD_VERSION: str = "pinero_2020_v2"
 
+# P1-041 ROOT FIX (v108): runtime lockstep verification flag.
+# The verify_confidence_tier_lockstep() function existed but was ONLY
+# called from tests — never at runtime. The issue says "Add a runtime
+# consistency check that asserts the 4 sites agree." This flag ensures
+# the lockstep check runs EXACTLY ONCE on the first classify_confidence
+# call (memoized), catching any drift between the 4 sites (Python
+# classifier, DB CHECK, schema v1.json, migration 017) before any
+# classification happens. Subsequent calls skip the check (it's O(1)
+# and idempotent — if the sites agree once, they agree until the
+# process restarts).
+_LOCKSTEP_VERIFIED: bool = False
+
+
+def _ensure_lockstep_verified() -> None:
+    """P1-041 ROOT FIX (v108): run the lockstep check once at runtime.
+
+    Calls :func:`verify_confidence_tier_lockstep` on the first invocation
+    and memoizes the result. If the 4 sites disagree, raises RuntimeError
+    (fail-fast — do NOT silently classify with a divergent label set).
+    """
+    global _LOCKSTEP_VERIFIED
+    if _LOCKSTEP_VERIFIED:
+        return
+    # Run the lockstep check. If it fails, the RuntimeError propagates
+    # to the caller (the pipeline's clean() method), which aborts the
+    # run with a clear error message instead of silently mis-classifying.
+    verify_confidence_tier_lockstep()
+    _LOCKSTEP_VERIFIED = True
+
 
 def classify_confidence(
     score: Optional[float],
@@ -196,6 +225,13 @@ def classify_confidence(
     ``_score_direction`` lineage column (set by
     ``validate_gda_scores``) preserves the sign for downstream ranking.
     """
+    # P1-041 ROOT FIX (v108): run the runtime lockstep check ONCE on the
+    # first call. If the 4 sites (Python classifier, DB CHECK, schema
+    # v1.json, migration 017) disagree, raise RuntimeError BEFORE any
+    # classification happens — fail-fast instead of silently producing
+    # divergent tier labels that corrupt the KG.
+    _ensure_lockstep_verified()
+
     # Defensive invariant (SCI-12): the caller (validate_gda_scores) is
     # responsible for clipping and coercing before this function is
     # called.  If we ever see a None or NaN score here, the contract has
