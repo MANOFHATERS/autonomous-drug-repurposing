@@ -438,7 +438,37 @@ export async function getAuthenticatedUser(): Promise<AuthenticatedUser | null> 
   const access = store.get(ACCESS_COOKIE)?.value;
   if (access) {
     const user = verifyAccessToken(access);
-    if (user) return user;
+    if (user) {
+      // BE-062 ROOT FIX: Verify the user is STILL a member of the claimed
+      // org. If the user was removed from the org AFTER the token was
+      // issued, the token's orgId is stale. We reject the auth and force
+      // re-authentication. Without this check, a removed user retains
+      // access to the old org's data for up to the access token TTL
+      // (15 minutes), and the refresh token can issue new access tokens
+      // for the old org for up to 30 days.
+      if (user.orgId) {
+        const stillMember = await db.organizationMember.findUnique({
+          where: {
+            userId_organizationId: {
+              userId: user.userId,
+              organizationId: user.orgId,
+            },
+          },
+          select: { id: true },
+        });
+        if (!stillMember) {
+          // User is no longer a member of this org. Clear all auth cookies
+          // to force re-authentication (which will pick up their new org).
+          console.warn(
+            `[SECURITY] User ${user.userId} presented a valid access token ` +
+            `for org ${user.orgId} but is no longer a member. Forcing re-auth.`
+          );
+          await clearAuthCookies();
+          return null;
+        }
+      }
+      return user;
+    }
   }
   // Try refresh
   const refresh = store.get(REFRESH_COOKIE)?.value;
@@ -446,7 +476,31 @@ export async function getAuthenticatedUser(): Promise<AuthenticatedUser | null> 
     const refreshed = await consumeRefreshToken(refresh);
     if (refreshed) {
       await setAuthCookies(refreshed.access, refreshed.refresh);
-      return verifyAccessToken(refreshed.access);
+      const refreshedUser = verifyAccessToken(refreshed.access);
+      // BE-062: Also check org membership after refresh token rotation.
+      // The rotateRefreshToken function checks user.status but NOT org
+      // membership. A user removed from an org could still have a valid
+      // refresh token that issues new access tokens for the old org.
+      if (refreshedUser && refreshedUser.orgId) {
+        const stillMember = await db.organizationMember.findUnique({
+          where: {
+            userId_organizationId: {
+              userId: refreshedUser.userId,
+              organizationId: refreshedUser.orgId,
+            },
+          },
+          select: { id: true },
+        });
+        if (!stillMember) {
+          console.warn(
+            `[SECURITY] User ${refreshedUser.userId} rotated refresh token ` +
+            `for org ${refreshedUser.orgId} but is no longer a member. Forcing re-auth.`
+          );
+          await clearAuthCookies();
+          return null;
+        }
+      }
+      return refreshedUser;
     }
   }
   // FE-021 ROOT FIX: Both access and refresh tokens failed verification.
@@ -470,6 +524,19 @@ export async function getAuthenticatedUser(): Promise<AuthenticatedUser | null> 
 // API key auth (for the developer platform / programmatic access)
 // ---------------------------------------------------------------------------
 
+/**
+ * BE-076 ROOT FIX: The previous code did NOT check `user.status` before
+ * returning the authenticated user from an API key. A suspended user's
+ * API key continued to work indefinitely — they could still call the API
+ * programmatically even after an admin suspended their account. This
+ * bypasses the suspension mechanism for programmatic access.
+ *
+ * Root fix: After finding a valid (non-revoked) API key, we now check
+ * that the associated user's status is "active". If the user is
+ * suspended, pending_approval, or any non-active status, we return null
+ * (auth failure). The suspension is enforced for BOTH cookie sessions
+ * AND API keys.
+ */
 export async function authenticateApiKey(rawKey: string): Promise<AuthenticatedUser | null> {
   if (!rawKey || typeof rawKey !== "string") return null;
   // Keys are issued with format "drugos_<32 hex chars>". We hash the full key
@@ -481,6 +548,16 @@ export async function authenticateApiKey(rawKey: string): Promise<AuthenticatedU
     include: { user: true },
   });
   if (!key) return null;
+  // BE-076: Reject API keys for non-active users. A suspended account
+  // should not be able to access the API via ANY auth mechanism.
+  if (key.user.status !== "active") {
+    // Log the rejected attempt for security monitoring.
+    console.warn(
+      `[SECURITY] API key auth rejected for user ${key.user.id}: ` +
+      `status="${key.user.status}" (expected "active"). Key prefix: ${key.prefix}`
+    );
+    return null;
+  }
   await db.apiKey.update({ where: { id: key.id }, data: { lastUsedAt: new Date() } });
   return {
     userId: key.user.id,

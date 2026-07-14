@@ -64,10 +64,23 @@ export interface DatasetStatsResponse {
   note?: string;
 }
 
+// BE-074 ROOT FIX: The previous default path pointed to
+// `../phase2/data/checkpoints/step_01.json` — a Phase 2 artifact path.
+// But this service is the "Phase 1 handoff" — it reads the checkpoint
+// that Phase 1's Airflow ETL pipeline PRODUCES after entity resolution.
+// The Phase 2 path was a mistake: Phase 2 (knowledge graph construction)
+// READS from the Phase 1 checkpoint; it does not WRITE it.
+//
+// Root fix: Point to the Phase 1 checkpoint path. The Phase 1 pipeline
+// writes `step_01.json` to its own output directory after completing
+// entity resolution. Phase 2 then reads from this same file.
+//
+// NOTE: The path can be overridden via DATASET_CHECKPOINT_PATH env var
+// for deployments with non-standard directory layouts.
 const DEFAULT_CHECKPOINT_PATH = path.resolve(
   process.cwd(),
   "..",
-  "phase2",
+  "phase1",
   "data",
   "checkpoints",
   "step_01.json"

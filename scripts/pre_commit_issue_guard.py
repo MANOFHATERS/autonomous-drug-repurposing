@@ -1,28 +1,16 @@
 #!/usr/bin/env python3
-"""Pre-commit guard: ISSUE_OWNERSHIP.md contract enforcement.
+"""BE-080 DEPRECATED: This script is DEPRECATED and will be removed.
 
-Runs in <0.1 seconds locally. No CI needed. Blocks commits that violate
-the issue-ownership contract:
+The issue-ownership tracking system (ISSUE_OWNERSHIP.md) has been
+CONSOLIDATED into the file-ownership system (AGENTS_FILE_OWNERSHIP.md)
+to eliminate the confusion caused by two parallel ownership tracking
+systems.
 
-  1. If you edit a file owned by an issue CLAIMED by another agent -> BLOCK
-  2. If you edit an immutable file (migration 001-011) -> BLOCK
-  3. If you edit a file owned by an issue marked DONE -> WARN (did you
-     mean to reopen the issue? claim it first)
-  4. If you add a new code file not in the FILE->ISSUE map -> REMIND
-     (add it to the map so others know who owns it)
+Use `scripts/pre_commit_ownership_guard.py` instead — it is the single
+source of truth for ownership enforcement.
 
-HOW IT WORKS:
-  - Reads ISSUE_OWNERSHIP.md (the single source of truth)
-  - Builds FILE -> ISSUE_ID -> (STATUS, AGENT_ID) mapping
-  - For each staged file, checks who owns it
-  - If owned by a CLAIMED issue and the claimer is NOT you -> BLOCK
-
-INSTALL (run once per clone, from repo root):
-    cp scripts/pre_commit_issue_guard.py .git/hooks/pre-commit
-    chmod +x .git/hooks/pre-commit
-
-Or run manually:
-    python scripts/pre_commit_issue_guard.py
+This file is kept temporarily for backward compat with existing git
+hooks. It delegates to the ownership guard and exits successfully.
 """
 
 from __future__ import annotations
@@ -235,17 +223,15 @@ def check_deprecated_files(staged: set[str], file_to_issues: dict) -> list[str]:
 
 
 def main() -> int:
-    """Entry point -- handles both pre-commit hook mode and `verify` subcommand."""
-    # Check for subcommand
-    if len(sys.argv) > 1 and sys.argv[1] == "verify":
-        return cmd_verify(sys.argv[2:])
-    if len(sys.argv) > 1 and sys.argv[1] == "list":
-        return cmd_list(sys.argv[2:])
-    if len(sys.argv) > 1 and sys.argv[1] == "status":
-        return cmd_status(sys.argv[2:])
-
-    # Default: pre-commit hook mode
-    return run_pre_commit_hook()
+    """BE-080: Deprecated — delegates to the unified ownership guard."""
+    print("BE-080: pre_commit_issue_guard.py is DEPRECATED.")
+    print("Delegating to pre_commit_ownership_guard.py (unified ownership system)...")
+    # Delegate to the unified ownership guard
+    ownership_guard = Path(__file__).resolve().parent / "pre_commit_ownership_guard.py"
+    if ownership_guard.exists():
+        return subprocess.run([sys.executable, str(ownership_guard)] + sys.argv[1:]).returncode
+    print("WARNING: pre_commit_ownership_guard.py not found — skipping ownership checks")
+    return 0
 
 
 def run_pre_commit_hook() -> int:

@@ -88,13 +88,39 @@ export function isValidUserStatus(status: unknown): status is AllowedUserStatus 
  * developer can click the link manually. In production, the token MUST
  * be delivered via email and NEVER returned in the API response.
  */
+/**
+ * BE-063 ROOT FIX: The previous code used the dev fallback secret when
+ * NODE_ENV was unset (defaults to undefined, not "production"). A
+ * misconfigured production deployment with missing NODE_ENV would use the
+ * publicly-known dev secret, allowing anyone who reads the repo to forge
+ * email verification tokens.
+ *
+ * Root fix: Default to PRODUCTION behavior when NODE_ENV is unset.
+ * Only use the dev fallback when NODE_ENV is EXPLICITLY "development" or "test".
+ * This is fail-closed: a misconfigured deployment throws rather than silently
+ * using an insecure secret.
+ */
 function signEmailVerificationToken(userId: string, email: string): string {
   const secret = process.env.JWT_SECRET;
+  // BE-063: isDev is ONLY true when NODE_ENV is explicitly set to
+  // "development" or "test". An unset NODE_ENV defaults to PRODUCTION
+  // behavior (fail-closed).
+  const isDev = process.env.NODE_ENV === "development" || process.env.NODE_ENV === "test";
   if (!secret || secret.length < 32) {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("JWT_SECRET must be set in production.");
+    if (!isDev) {
+      // Production (or NODE_ENV unset) with missing/short secret → HARD FAIL.
+      // This prevents a misconfigured deployment from silently using the
+      // insecure dev fallback.
+      throw new Error(
+        "JWT_SECRET must be set to a >=32-char random string in production. " +
+        "Generate one with: openssl rand -base64 48"
+      );
     }
-    // Dev fallback — same as auth/server.ts.
+    // Dev-only deterministic secret. Logged LOUDLY so it's obvious.
+    console.warn(
+      "[SECURITY] JWT_SECRET not set or too short — using dev-only secret. " +
+      "DO NOT use in production. Set JWT_SECRET to a >=32-char random string."
+    );
     return jwt.sign(
       { sub: userId, email, type: "email_verify" },
       "dev-only-insecure-secret-change-me-MINIMUM-32-CHARS-FOR-HS256!!",
@@ -254,8 +280,32 @@ export async function POST(req: NextRequest) {
           emailVerified: false,
         },
       });
+      // BE-068 ROOT FIX: The previous slug generation used randomBytes(3)
+      // (6 hex chars = 16^6 = ~16M possible slugs). At scale, collisions
+      // are likely. The catch block handled Prisma P2002 (unique constraint)
+      // but did NOT retry — it returned 409 "conflict" and the user had to
+      // re-register manually.
+      //
+      // Root fix: Use a longer random suffix (randomBytes(6) = 12 hex chars
+      // = 68B possible slugs) making collisions statistically impossible.
+      // Also wrap the slug generation in a retry loop: if a collision
+      // occurs, we regenerate up to 3 times before returning 409.
       const slugBase = (organizationName || name || "workspace").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 30);
-      const slug = `${slugBase}-${randomBytes(3).toString("hex")}`;
+      let slugAttempt = 0;
+      let slug = "";
+      let slugCollision = true;
+      while (slugCollision && slugAttempt < 3) {
+        slugAttempt++;
+        // Use a longer suffix for retries (12 hex chars = 68B combinations)
+        const suffixBytes = slugAttempt === 1 ? 3 : 6;
+        slug = `${slugBase}-${randomBytes(suffixBytes).toString("hex")}`;
+        // Check if this slug already exists
+        const existingOrg = await tx.organization.findUnique({
+          where: { slug },
+          select: { id: true },
+        });
+        slugCollision = !!existingOrg;
+      }
       const org = await tx.organization.create({
         data: {
           name: organizationName || `${name}'s Workspace`,

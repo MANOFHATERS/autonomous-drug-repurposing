@@ -128,13 +128,21 @@ def _load_reward_weights_from_meta(csv_path: Path) -> Optional[Dict[str, float]]
     return None
 
 
-def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Optional[str], limit: int) -> List[Dict[str, Any]]:
-    """Parse the RL ranker's output CSV into the RankedHypothesis schema."""
+def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Optional[str], limit: int) -> Dict[str, Any]:
+    """Parse the RL ranker's output CSV into the RankedHypothesis schema.
+
+    BE-070 ROOT FIX: Returns a dict with 'candidates' and 'total' keys.
+    'total' is the count AFTER filtering but BEFORE pagination — this is
+    required by the frontend's pagination controls ("Showing X-Y of Z").
+    The previous code only returned the candidate list, so the frontend's
+    `total` was the page size (wrong), making it impossible to navigate
+    beyond page 1.
+    """
     import csv as csv_mod
 
     out: List[Dict[str, Any]] = []
     if not csv_path.exists():
-        return out
+        return {"candidates": out, "total": 0}
 
     # P4-004: load reward weights from sidecar (if available)
     _reward_weights = _load_reward_weights_from_meta(csv_path)
@@ -148,92 +156,95 @@ def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Opti
         except (ValueError, TypeError):
             return None
 
-    # P4-013 ROOT FIX: use streaming iterator instead of list(reader).
-    # The previous code loaded ALL rows into memory (~500MB for 1M rows),
-    # then iterated. The break only stopped PROCESSING — the full file was
-    # already in memory. This fix uses a streaming for-loop and breaks
-    # as soon as we have enough candidates, preventing OOM on production.
+    # BE-070: We need to count ALL matching rows for `total`, but we only
+    # want to keep `limit` candidates in memory. We stream the CSV and:
+    #   1. Count every row that passes the filter → total_filtered
+    #   2. Collect up to `limit` candidates for the response
+    # This avoids loading all rows into memory while still providing the
+    # correct total count for pagination.
+    total_filtered = 0
     with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
         reader = csv_mod.DictReader(f)
-        rows = enumerate(reader)  # lazy iterator, NOT list
 
-    for i, row in rows:
-        # Normalize keys to lowercase.
-        r = {k.lower(): v for k, v in row.items()}
-        d = r.get("drug", "")
-        dis = r.get("disease", "")
-        if not d or not dis:
-            continue
-        if drug and drug.lower() not in d.lower():
-            continue
-        if disease and disease.lower() not in dis.lower():
-            continue
+        for i, row in enumerate(reader):
+            # Normalize keys to lowercase.
+            r = {k.lower(): v for k, v in row.items()}
+            d = r.get("drug", "")
+            dis = r.get("disease", "")
+            if not d or not dis:
+                continue
+            if drug and drug.lower() not in d.lower():
+                continue
+            if disease and disease.lower() not in dis.lower():
+                continue
+            # This row passes the filter — increment total.
+            total_filtered += 1
 
-        gnn = _num(r.get("gnn_score"))
-        safety = _num(r.get("safety_score"))
-        market = _num(r.get("market_score"))
-        reward = _num(r.get("reward"))
-        rank = _num(r.get("rank")) or (i + 1)
-        policy_prob = _num(r.get("policy_prob"))
+            gnn = _num(r.get("gnn_score"))
+            safety = _num(r.get("safety_score"))
+            market = _num(r.get("market_score"))
+            reward = _num(r.get("reward"))
+            rank = _num(r.get("rank")) or (i + 1)
+            policy_prob = _num(r.get("policy_prob"))
 
-        # P4-004 ROOT FIX: compute overall using the SAME weights as the
-        # agent's reward function. If the .meta.json sidecar is available,
-        # read the weights from there. Otherwise fall back to the agent's
-        # default weights (NOT the old hardcoded 0.4/0.3/0.3).
-        overall: Optional[float] = None
-        if _reward_weights:
-            # Use weights from sidecar — these are the EXACT weights the
-            # agent trained with
-            signals = []
-            score_keys = {
-                "gnn": gnn, "safety": safety, "market": market,
+            # P4-004 ROOT FIX: compute overall using the SAME weights as the
+            # agent's reward function. If the .meta.json sidecar is available,
+            # read the weights from there. Otherwise fall back to the agent's
+            # default weights (NOT the old hardcoded 0.4/0.3/0.3).
+            overall: Optional[float] = None
+            if _reward_weights:
+                # Use weights from sidecar — these are the EXACT weights the
+                # agent trained with
+                signals = []
+                score_keys = {
+                    "gnn": gnn, "safety": safety, "market": market,
+                    "confidence": _num(r.get("confidence")),
+                    "pathway": _num(r.get("pathway_score")),
+                    "patent": _num(r.get("patent_score")),
+                    "rare_disease": _num(r.get("rare_disease_score")),
+                    "unmet_need": _num(r.get("unmet_need_score")),
+                    "efficacy": _num(r.get("efficacy_score")),
+                    "adme": _num(r.get("adme_score")),
+                }
+                for key, score in score_keys.items():
+                    w = _reward_weights.get(key)
+                    if score is not None and w is not None and w > 0:
+                        signals.append((score, w))
+                if signals:
+                    total_w = sum(w for _, w in signals)
+                    overall = sum(v * w for v, w in signals) / total_w if total_w > 0 else None
+            else:
+                # Fallback: use the agent's DEFAULT reward weights (same as
+                # RewardConfig defaults in rl_drug_ranker.py)
+                signals = []
+                if gnn is not None: signals.append((gnn, 0.04))
+                if safety is not None: signals.append((safety, 0.25))
+                if market is not None: signals.append((market, 0.12))
+                if signals:
+                    total_w = sum(w for _, w in signals)
+                    overall = sum(v * w for v, w in signals) / total_w
+            if overall is None and policy_prob is not None:
+                overall = policy_prob
+
+            out.append({
+                "drug": d,
+                "disease": dis,
+                "rank": int(rank) if rank else (i + 1),
+                "reward": reward,
+                "policyProb": policy_prob,
+                "gnnScore": gnn,
+                "safetyScore": safety,
+                "marketScore": market,
+                "plausibilityScore": gnn,
+                "overallScore": overall,
                 "confidence": _num(r.get("confidence")),
-                "pathway": _num(r.get("pathway_score")),
-                "patent": _num(r.get("patent_score")),
-                "rare_disease": _num(r.get("rare_disease_score")),
-                "unmet_need": _num(r.get("unmet_need_score")),
-                "efficacy": _num(r.get("efficacy_score")),
-                "adme": _num(r.get("adme_score")),
-            }
-            for key, score in score_keys.items():
-                w = _reward_weights.get(key)
-                if score is not None and w is not None and w > 0:
-                    signals.append((score, w))
-            if signals:
-                total_w = sum(w for _, w in signals)
-                overall = sum(v * w for v, w in signals) / total_w if total_w > 0 else None
-        else:
-            # Fallback: use the agent's DEFAULT reward weights (same as
-            # RewardConfig defaults in rl_drug_ranker.py)
-            signals = []
-            if gnn is not None: signals.append((gnn, 0.04))
-            if safety is not None: signals.append((safety, 0.25))
-            if market is not None: signals.append((market, 0.12))
-            if signals:
-                total_w = sum(w for _, w in signals)
-                overall = sum(v * w for v, w in signals) / total_w
-        if overall is None and policy_prob is not None:
-            overall = policy_prob
-
-        out.append({
-            "drug": d,
-            "disease": dis,
-            "rank": int(rank) if rank else (i + 1),
-            "reward": reward,
-            "policyProb": policy_prob,
-            "gnnScore": gnn,
-            "safetyScore": safety,
-            "marketScore": market,
-            "plausibilityScore": gnn,
-            "overallScore": overall,
-            "confidence": _num(r.get("confidence")),
-            "pathwayScore": _num(r.get("pathway_score")),
-            "unmetNeedScore": _num(r.get("unmet_need_score")),
-            "efficacyScore": _num(r.get("efficacy_score")),
-            "admeScore": _num(r.get("adme_score")),
-            "literatureSupport": _num(r.get("literature_support")),
-            "isKnownPositive": str(r.get("is_known_positive", "")).lower() in ("1", "true", "yes"),
-        })
+                "pathwayScore": _num(r.get("pathway_score")),
+                "unmetNeedScore": _num(r.get("unmet_need_score")),
+                "efficacyScore": _num(r.get("efficacy_score")),
+                "admeScore": _num(r.get("adme_score")),
+                "literatureSupport": _num(r.get("literature_support")),
+                "isKnownPositive": str(r.get("is_known_positive", "")).lower() in ("1", "true", "yes"),
+            })
 
     # P4-014 ROOT FIX: sort ALL candidates by rank, THEN apply limit.
     # The previous code broke after ``len(out) >= limit`` and THEN sorted,
@@ -241,8 +252,8 @@ def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Opti
     # NOT the top-``limit`` by rank. If the CSV was unsorted, the API
     # returned arbitrary candidates instead of the true top-N.
     out.sort(key=lambda c: (c.get("rank") or 1e9))
-    out = out[:limit]
-    return out
+    limited = out[:limit]
+    return {"candidates": limited, "total": total_filtered}
 
 
 def _load_candidates_from_checkpoint(checkpoint_path: str, drug: Optional[str], disease: Optional[str], limit: int) -> List[Dict[str, Any]]:
@@ -323,12 +334,17 @@ def _rank_impl(drug: Optional[str], disease: Optional[str], limit: int) -> Dict[
     if checkpoint_path and Path(checkpoint_path).exists():
         candidates = _load_candidates_from_checkpoint(checkpoint_path, drug, disease, limit)
         if candidates:
+            # BE-070: The checkpoint loader returns a list, not a dict.
+            # For checkpoint-loaded candidates, we don't have a pre-filtered
+            # total, so we use the candidate count as the total (they were
+            # already limited by the checkpoint inference).
             return {
                 "candidates": candidates,
                 "source": "rl_service",
                 "modelVersion": "rl_drug_ranker.py-v105",
                 "generatedAt": __import__("datetime").datetime.utcnow().isoformat(),
                 "count": len(candidates),
+                "total": len(candidates),  # BE-070: total for pagination
                 "backend": "checkpoint",
             }
 
@@ -340,15 +356,19 @@ def _rank_impl(drug: Optional[str], disease: Optional[str], limit: int) -> Dict[
             "source": "none",
             "generatedAt": __import__("datetime").datetime.utcnow().isoformat(),
             "count": 0,
+            "total": 0,  # BE-070: total for pagination
             "note": "No RL output yet. Run `python run_4phase.py` to generate top_candidates_*.csv.",
         }
-    candidates = _load_candidates_from_csv(csv_path, drug, disease, limit)
+    # BE-070: _load_candidates_from_csv now returns a dict with both
+    # 'candidates' and 'total' (count after filtering, before pagination).
+    result = _load_candidates_from_csv(csv_path, drug, disease, limit)
     return {
-        "candidates": candidates,
+        "candidates": result["candidates"],
         "source": "rl_service",
         "modelVersion": "rl_drug_ranker.py-v105",
         "generatedAt": __import__("datetime").datetime.utcnow().isoformat(),
-        "count": len(candidates),
+        "count": len(result["candidates"]),
+        "total": result["total"],  # BE-070: REAL total (filtered count, not page size)
         "csvPath": str(csv_path),
         "backend": "csv",
     }

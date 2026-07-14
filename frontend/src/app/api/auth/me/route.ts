@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAuthenticatedUser } from "@/lib/auth/server";
+import { getAuthenticatedUser, signAccessToken, setAuthCookies } from "@/lib/auth/server";
 import { db } from "@/lib/db";
 import { badRequest, writeAuditLog } from "@/lib/api-helpers";
 
@@ -129,11 +129,36 @@ export async function PATCH(req: NextRequest) {
     );
   }
 
-  let body: { name?: string; title?: string; bio?: string };
+  // BE-079 ROOT FIX: Added activeOrganizationId to the PATCH body so users
+  // can switch their active org. Previously, activeOrganizationId was always
+  // the first org (from JWT, set at login), with no way to switch. All
+  // queries were scoped to the first org they joined, preventing multi-org
+  // users from working across organizations.
+  let body: { name?: string; title?: string; bio?: string; activeOrganizationId?: string };
   try {
     body = await req.json();
   } catch {
     return badRequest("Invalid JSON body");
+  }
+
+  // BE-079: If activeOrganizationId is provided, validate it BEFORE
+  // updating any profile fields. The user must be a member of the
+  // target org. Invalid orgId → 400 (don't partially update).
+  if (body.activeOrganizationId !== undefined) {
+    const targetOrgId = body.activeOrganizationId;
+    // null means "clear active org" — allowed.
+    if (targetOrgId !== null) {
+      const membership = await db.organizationMember.findFirst({
+        where: { userId: authUser.userId, organizationId: targetOrgId },
+        select: { id: true },
+      });
+      if (!membership) {
+        return NextResponse.json(
+          { error: "forbidden", message: "You are not a member of the specified organization." },
+          { status: 403 }
+        );
+      }
+    }
   }
 
   const data: { name?: string; title?: string | null; bio?: string | null } = {};
@@ -150,7 +175,10 @@ export async function PATCH(req: NextRequest) {
     data.bio = body.bio.trim().slice(0, 2000) || null;
   }
 
-  if (Object.keys(data).length === 0) {
+  // BE-079: Track whether we're doing an org switch (separate from profile update)
+  const switchingOrg = body.activeOrganizationId !== undefined;
+
+  if (Object.keys(data).length === 0 && !switchingOrg) {
     // FE-054 ROOT FIX: HTTP PATCH semantics allow a no-op patch — the server
     // returns 200 with the current (unchanged) resource. Previously this
     // returned 400 "No updatable fields", which broke clients that send an
@@ -188,12 +216,52 @@ export async function PATCH(req: NextRequest) {
     },
   });
 
+  // BE-079: If the user is switching their active org, issue a new
+  // access token with the updated orgId and set it as a cookie. This
+  // ensures subsequent requests are scoped to the newly-selected org.
+  let newAccessToken: string | null = null;
+  if (switchingOrg && body.activeOrganizationId !== undefined) {
+    const newOrgId = body.activeOrganizationId;  // can be null (clear active org)
+    newAccessToken = signAccessToken({
+      userId: authUser.userId,
+      email: authUser.email,
+      role: authUser.role,
+      orgId: newOrgId || undefined,
+    });
+    // Set the new access token cookie. We keep the existing refresh token
+    // (org switching doesn't require re-authentication).
+    const { cookies } = await import("next/headers");
+    const cookieStore = await cookies();
+    const refreshToken = cookieStore.get("drugos_refresh")?.value;
+    if (refreshToken) {
+      await setAuthCookies(newAccessToken, refreshToken);
+    }
+    await writeAuditLog({
+      user: { ...authUser, orgId: newOrgId || undefined },
+      action: "active_org_switched",
+      resource: `user:${authUser.userId}`,
+      metadata: { previousOrgId: authUser.orgId, newOrgId: newOrgId },
+    });
+  }
+
+  const actionTypes: string[] = [];
+  if (Object.keys(data).length > 0) actionTypes.push("profile_update");
+  if (switchingOrg) actionTypes.push("active_org_switched");
+
   await writeAuditLog({
     user: authUser,
-    action: "profile_update",
+    action: actionTypes.join(","),
     resource: `user:${updated.id}`,
-    metadata: { fields: Object.keys(data) },
+    metadata: { fields: Object.keys(data), switchedOrg: switchingOrg },
   });
 
-  return NextResponse.json({ user: updated });
+  return NextResponse.json({
+    user: updated,
+    // BE-079: Return the new activeOrganizationId so the client can
+    // update its local state without re-fetching /api/auth/me.
+    activeOrganizationId: switchingOrg
+      ? (body.activeOrganizationId || null)
+      : (authUser.orgId || null),
+    orgSwitched: switchingOrg,
+  });
 }

@@ -195,11 +195,17 @@ export async function POST(req: NextRequest) {
     // compat with non-browser API clients.
     const { cookies: loginCookies } = await import("next/headers");
     const loginStore = await loginCookies();
+    // BE-077 ROOT FIX: The previous cookie path was "/api/auth/2fa/login-verify"
+    // (the exact endpoint path). This meant the cookie was ONLY sent on requests
+    // to that exact path. If the verify endpoint is ever moved (e.g., to
+    // "/api/auth/2fa/verify"), the cookie breaks silently. The broader path
+    // "/api/auth/2fa" covers ALL 2FA-related endpoints under that prefix,
+    // making the MFA flow resilient to endpoint reorganization.
     loginStore.set("drugos_mfa_challenge", mfaToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
-      path: "/api/auth/2fa/login-verify",
+      path: "/api/auth/2fa",
       maxAge: 5 * 60, // 5 minutes — matches MFA_CHALLENGE_TTL_SECONDS
     });
     await writeAuditLog({

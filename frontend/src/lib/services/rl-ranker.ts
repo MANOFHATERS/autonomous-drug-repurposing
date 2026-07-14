@@ -350,7 +350,23 @@ async function readLocalCsv(csvPath: string): Promise<RankedHypothesis[]> {
     const admeScore = parseNumber(row["adme_score"]);
     const litNum = parseNumber(row["literature_support"]);
     const isKnownPositive = parseBool(row["is_known_positive"]);
-    const overallRaw = computeOverallScore({ gnnScore: gnn, safetyScore: safety, marketScore: market, policyProb });
+    // BE-072 ROOT FIX: The previous code ALWAYS computed overallScore in
+    // TypeScript using fixed weights (0.4*gnn + 0.3*safety + 0.3*market),
+    // OVERWRITING the value that the Python RL ranker computed. If the
+    // Python ranker used different weights (which it does — the agent's
+    // RewardConfig uses gnn=0.04, safety=0.25, market=0.12), the displayed
+    // overallScore would NOT match what the ranker actually computed.
+    // This causes confusion when debugging: the dashboard shows one score
+    // while the RL logs show another.
+    //
+    // Root fix: If the CSV already contains an overall_score (computed by
+    // the Python ranker using its actual reward weights), USE IT. Only
+    // fall back to TS computation if the CSV doesn't have it. This ensures
+    // the dashboard displays the SAME score the RL agent computed.
+    const csvOverall = parseNumber(row["overall_score"]);
+    const overallRaw = csvOverall !== undefined
+      ? csvOverall
+      : computeOverallScore({ gnnScore: gnn, safetyScore: safety, marketScore: market, policyProb });
     const overall = overallRaw ?? undefined;
     out.push({
       drug,
@@ -635,52 +651,29 @@ export async function getRankedHypotheses(opts?: {
 }
 
 /**
- * Sync the RL ranker's output into the Hypothesis table.
+ * BE-071 ROOT FIX: syncRlOutputToHypotheses was DEAD CODE — exported but
+ * NEVER called by any route. It performed 200 findMany queries (one per
+ * candidate), each with a non-indexed OR clause on drugName + diseaseName
+ * (lowercase variants). For 200 candidates, that's 200 full table scans
+ * of the Hypothesis table — a performance disaster if ever called.
  *
- * FE-010 ROOT FIX: hypotheses touched by this sync are marked
- * rlPredicted=true. Their `status` is set to "predicted" if it was "draft"
- * (we do NOT downgrade a "validated" or "rejected" hypothesis).
+ * The OR clause with `drugName: c.drug.toLowerCase()` would never match
+ * because the DB stores the original case (unless the DB collation is
+ * case-insensitive), making the entire function produce false negatives.
+ *
+ * Root fix: DELETE the function. The actual RL-to-hypothesis sync is
+ * performed by `persistRlCandidates` in `/api/rl/route.ts`, which:
+ *   - Uses a proper indexed lookup (findFirst with exact drugName + diseaseName)
+ *   - Has correct org scoping and ownership checks
+ *   - Is actually called from the route handler
+ *
+ * If a cron-based sync is needed in the future, it should call the
+ * existing `persistRlCandidates` function rather than duplicating the logic.
+ *
+ * NOTE TO FUTURE DEVELOPERS: Do NOT re-implement this function. Use
+ * `persistRlCandidates` from `/api/rl/route.ts` instead. It is the
+ * single source of truth for RL hypothesis persistence.
  */
-export async function syncRlOutputToHypotheses(): Promise<number> {
-  const { db } = await import("@/lib/db");
-  const { candidates } = await getRankedHypotheses({ limit: 200 });
-  if (candidates.length === 0) return 0;
-
-  let updated = 0;
-  for (const c of candidates) {
-    const matches = await db.hypothesis.findMany({
-      where: {
-        OR: [
-          { drugName: c.drug, diseaseName: c.disease },
-          { drugName: c.drug.toLowerCase(), diseaseName: c.disease.toLowerCase() },
-        ],
-      },
-    });
-    for (const h of matches) {
-      const nextStatus = h.status === "draft" ? "predicted" : h.status;
-      await db.hypothesis.update({
-        where: { id: h.id },
-        data: {
-          status: nextStatus,
-          rlPredicted: true,
-          rank: c.rank ?? null,
-          policyProb: c.policyProb ?? null,
-          reward: c.reward ?? null,
-          gnnScore: c.gnnScore ?? null,
-          safetyScore: c.safetyScore ?? null,
-          marketScore: c.marketScore ?? null,
-          plausibilityScore: c.plausibilityScore ?? null,
-          overallScore: c.overallScore ?? computeOverallScore(c),
-          literatureSupport: c.literatureSupportBool ?? (c.literatureSupport !== undefined ? c.literatureSupport > 0 : null),
-          rlModelVersion: "rl_drug_ranker.py-v101",
-          rlUpdatedAt: new Date(),
-        } as any,
-      });
-      updated++;
-    }
-  }
-  return updated;
-}
 
 export function computeOverallScore(c: {
   gnnScore?: number;

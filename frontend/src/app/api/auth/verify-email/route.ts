@@ -76,15 +76,24 @@ export async function POST(req: NextRequest) {
   try {
     const user = await db.user.findUnique({ where: { id: decoded.sub } });
     if (!user) {
+      // BE-064 ROOT FIX: Return the SAME generic error for user-not-found
+      // as for all other token validation failures. The previous code
+      // returned "not_found" which leaked that the user DID exist at some
+      // point (vs. an invalid token). An attacker could use this to
+      // enumerate which userIds have/have not registered.
       return NextResponse.json(
-        { error: "not_found", message: "User not found." },
-        { status: 404 }
+        { error: "invalid_or_expired_token", message: "The verification link is invalid or has expired. Please request a new one." },
+        { status: 400 }
       );
     }
     if (user.email !== decoded.email) {
-      // The token was issued for a different email — possible tampering.
+      // BE-064 ROOT FIX: Return the SAME generic "invalid_or_expired_token"
+      // error for email mismatch instead of the specific "email_mismatch"
+      // error. The previous specific error leaked that the user exists
+      // (an attacker with a stolen token for email A trying it for email B
+      // would see "email_mismatch" — confirming email A's user exists).
       return NextResponse.json(
-        { error: "email_mismatch", message: "Token does not match this account." },
+        { error: "invalid_or_expired_token", message: "The verification link is invalid or has expired. Please request a new one." },
         { status: 400 }
       );
     }

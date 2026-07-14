@@ -27,6 +27,82 @@ datasource db {
 }
 
 // ---------------------------------------------------------------------------
+// BE-066 + BE-067 ROOT FIX: Enum definitions for DB-level role/status enforcement.
+//
+// The previous schema used free-form String fields for role, status, and
+// visibility columns. A raw SQL insert (e.g., via a migration gone wrong, or
+// a DBA with direct access) could set role="superuser" or status="" — values
+// that the application-level allowlists would not recognize, leading to
+// unpredictable authorization behavior.
+//
+// Root fix: Define PostgreSQL enums for all status/role/visibility fields.
+// This provides DB-level enforcement: any insert with an invalid enum value
+// fails at the database layer, before the application ever sees it.
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  researcher
+  data_scientist
+  pi
+  business_dev
+  developer
+  viewer
+  billing
+  admin
+  owner
+}
+
+enum UserStatus {
+  active
+  suspended
+  pending_approval
+}
+
+enum OrgMemberRole {
+  owner
+  admin
+  member
+  viewer
+  billing
+}
+
+enum ProjectVisibility {
+  private
+  org
+  public
+}
+
+enum ProjectStatus {
+  active
+  archived
+  completed
+  on_hold
+}
+
+enum HypothesisStatus {
+  draft
+  predicted
+  reviewing
+  validated
+  rejected
+  archived
+}
+
+enum SubscriptionStatus {
+  active
+  canceled
+  past_due
+  trialing
+}
+
+enum InvoiceStatus {
+  open
+  paid
+  void
+  uncollectible
+}
+
+// ---------------------------------------------------------------------------
 // AUTH & USERS
 // ---------------------------------------------------------------------------
 
@@ -35,10 +111,15 @@ model User {
   email             String        @unique
   passwordHash      String
   name              String?
-  role              String        @default("researcher") // researcher | admin | owner | billing | viewer | data-scientist | pi | business-dev | developer
+  // BE-066 ROOT FIX: role is now a Prisma enum (UserRole) instead of a
+  // free-form String. DB-level enforcement prevents invalid role values
+  // from being inserted via raw SQL or migration errors.
+  role              UserRole      @default(researcher)
   title             String?       // e.g. "Principal Scientist"
   bio               String?
-  status            String        @default("active")     // active | suspended | pending_approval
+  // BE-066 ROOT FIX: status is now a Prisma enum (UserStatus) instead of
+  // a free-form String. DB-level enforcement prevents invalid status values.
+  status            UserStatus    @default(active)
   mfaSecret         String?
   mfaEnabled        Boolean       @default(false)
   emailVerified     Boolean       @default(false)
@@ -101,7 +182,9 @@ model OrganizationMember {
   id              String       @id @default(cuid())
   userId          String
   organizationId  String
-  role            String       @default("member") // owner | admin | member | viewer | billing
+  // BE-067 ROOT FIX: role is now a Prisma enum (OrgMemberRole) instead of
+  // a free-form String. DB-level enforcement prevents invalid role values.
+  role            OrgMemberRole @default(member)
   invitedBy       String?
   joinedAt        DateTime     @default(now())
 
@@ -151,8 +234,13 @@ model Project {
   id              String       @id @default(cuid())
   name            String
   description     String?
-  status          String       @default("active") // active | archived | completed | on_hold
-  visibility      String       @default("private") // private | org | public
+  // BE-067 ROOT FIX: status is now a Prisma enum (ProjectStatus) instead
+  // of a free-form String. DB-level enforcement prevents invalid values.
+  status          ProjectStatus @default(active)
+  // BE-067 ROOT FIX: visibility is now a Prisma enum (ProjectVisibility)
+  // instead of a free-form String. DB-level enforcement prevents invalid
+  // visibility values (e.g., accidental "pubic" typo → DB rejects).
+  visibility      ProjectVisibility @default(private)
   ownerId         String
   organizationId  String
   tags            String       @default("") // comma-separated
@@ -184,7 +272,9 @@ model Hypothesis {
   // pharma means wet-lab or clinical confirmation, which a model output is
   // NOT). The rlPredicted boolean below distinguishes RL-sourced hypotheses
   // from human-created ones at query time.
-  status        String   @default("draft") // draft | predicted | reviewing | validated | rejected | archived
+  // BE-067 ROOT FIX: status is now a Prisma enum (HypothesisStatus) instead
+  // of a free-form String. DB-level enforcement prevents invalid values.
+  status        HypothesisStatus @default(draft)
   // FE-010 ROOT FIX: true when this hypothesis was created or last updated
   // by the RL ranker (via /api/rl persistRlCandidates). Lets researchers
   // filter "RL predictions" vs "human-curated hypotheses" vs "validated by
@@ -260,7 +350,10 @@ model Subscription {
   id              String       @id @default(cuid())
   organizationId  String       @unique
   plan            String       @default("free")
-  status          String       @default("active") // active | canceled | past_due | trialing
+  // BE-067 ROOT FIX: status is now a Prisma enum (SubscriptionStatus)
+  // instead of a free-form String. DB-level enforcement prevents invalid
+  // subscription status values.
+  status          SubscriptionStatus @default(active)
   seats           Int          @default(1)
   currentPeriodStart DateTime
   currentPeriodEnd   DateTime
@@ -278,7 +371,10 @@ model BillingInvoice {
   number          String   @unique
   amountCents     Int
   currency        String   @default("usd")
-  status          String   @default("open") // open | paid | void | uncollectible
+  // BE-067 ROOT FIX: status is now a Prisma enum (InvoiceStatus) instead
+  // of a free-form String. DB-level enforcement prevents invalid invoice
+  // status values.
+  status          InvoiceStatus @default(open)
   periodStart     DateTime
   periodEnd       DateTime
   dueDate         DateTime
@@ -401,23 +497,25 @@ model AuditLog {
 // ---------------------------------------------------------------------------
 // WEBHOOKS
 // ---------------------------------------------------------------------------
-
-model WebhookEndpoint {
-  id              String   @id @default(cuid())
-  organizationId  String
-  url             String
-  // FE-017 ROOT FIX: Webhook signing secrets are now stored as AES-256-GCM
-  // ciphertext (format: "v1:<base64 iv>:<base64 ciphertext>:<base64 tag>").
-  // The plaintext secret is NEVER persisted. Encryption/decryption is handled
-  // by lib/crypto.ts using WEBHOOK_SECRET_KEY (32-byte key, env var). This
-  // means a DB backup leak does NOT expose signing secrets — an attacker
-  // would also need the KMS/env var to forge webhook deliveries.
-  secretEncrypted String
-  events          String   @default("*") // comma-separated event types
-  enabled         Boolean  @default(true)
-  lastTriggeredAt DateTime?
-  createdAt       DateTime @default(now())
-
-  @@index([organizationId])
-  @@index([enabled])
-}
+// BE-069 ROOT FIX: The WebhookEndpoint model and the entire webhook
+// infrastructure (including lib/crypto.ts) have been REMOVED. There was
+// NO `/api/webhooks` route — the model was dead code. The WebhooksScreen
+// UI rendered hardcoded fake webhooks. The lib/crypto.ts module (for
+// AES-256-GCM encryption of webhook secrets) existed but was never called.
+//
+// A customer paying for "webhook notifications" (a Team plan feature)
+// would get nothing — the infrastructure was non-functional.
+//
+// Root fix: Remove the model and the crypto module. When webhooks are
+// added to the roadmap, they should be implemented as a COMPLETE feature:
+//   1. CRUD /api/webhooks routes
+//  2. Webhook delivery service with retry logic
+//   3. UI for managing endpoints
+//   4. Encrypted secret storage (lib/crypto.ts or a proper KMS)
+//
+// NOTE TO FUTURE DEVELOPERS: If adding webhooks, create a NEW migration
+// that adds the WebhookEndpoint table back. Do NOT reuse this removed
+// model without the full feature implementation.
+//
+// REMOVED: model WebhookEndpoint { ... }
+// REMOVED: frontend/src/lib/crypto.ts (see git history to restore)
