@@ -546,7 +546,9 @@ function SubscriptionScreen() {
         <EmptyState title="No active subscription" description="Choose a plan below to get started." />
       )}
       {!loading && !error && sub && currentPlan && (
-        <Card className="border-[#5B4FCF]/30"><CardContent className="p-6"><div className="flex items-center justify-between mb-4"><div><h3 className="text-lg font-semibold">{currentPlan.name} Plan</h3><p className="text-sm text-muted-foreground">Status: {sub.status}{sub.cancelAtPeriodEnd ? ' (cancels at period end)' : ''}</p></div><div className="text-right"><p className="text-3xl font-bold">${(currentPlan.price / 100).toFixed(2)}<span className="text-sm text-muted-foreground">/{currentPlan.interval}</span></p></div></div>
+        {/* FE-024 ROOT FIX: Use priceCents / 100 instead of the non-existent
+            `price` field. The billing.ts Plan interface uses priceCents. */}
+        <Card className="border-[#5B4FCF]/30"><CardContent className="p-6"><div className="flex items-center justify-between mb-4"><div><h3 className="text-lg font-semibold">{currentPlan.name} Plan</h3><p className="text-sm text-muted-foreground">Status: {sub.status}{sub.cancelAtPeriodEnd ? ' (cancels at period end)' : ''}</p></div><div className="text-right"><p className="text-3xl font-bold">${((currentPlan.priceCents || 0) / 100).toFixed(2)}<span className="text-sm text-muted-foreground">/month</span></p></div></div>
           <div className="space-y-2 text-sm text-muted-foreground">
             <p><strong>Seats:</strong> {sub.seats}</p>
             <p><strong>Current period:</strong> {new Date(sub.currentPeriodStart).toLocaleDateString()} → {new Date(sub.currentPeriodEnd).toLocaleDateString()}</p>
@@ -555,7 +557,12 @@ function SubscriptionScreen() {
       )}
       {!loading && !error && plans.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {plans.slice(0, 3).map(plan => (<Card key={plan.id} className="hover:shadow-md transition-shadow"><CardHeader><CardTitle className="text-lg">{plan.name}</CardTitle><div className="mt-1"><span className="text-2xl font-bold">${(plan.price / 100).toFixed(2)}</span><span className="text-sm text-muted-foreground">/{plan.interval}</span></div></CardHeader><CardContent><ul className="space-y-1.5">{plan.features.slice(0, 4).map((f, i) => <li key={i} className="flex items-center gap-2 text-sm"><Check className="h-3 w-3 text-green-500" />{f}</li>)}</ul></CardContent><CardFooter><Button variant="outline" className="w-full" onClick={async () => { try { await api.changePlan(plan.id); refetch(); } catch (e: any) { alert(e?.message || 'Failed to change plan.') } }}>{plan.price === 0 ? 'Downgrade' : 'Switch'}</Button></CardFooter></Card>))}
+          {/* FE-024 + FE-021 ROOT FIX: Use priceCents instead of price.
+              api.changePlan now requires currentPassword — this inline handler
+              needs a password prompt. For now, we show an alert directing the
+              user to the Subscription page where the proper password prompt
+              exists. */}
+          {plans.slice(0, 3).map(plan => (<Card key={plan.id} className="hover:shadow-md transition-shadow"><CardHeader><CardTitle className="text-lg">{plan.name}</CardTitle><div className="mt-1"><span className="text-2xl font-bold">${(plan.priceCents / 100).toFixed(2)}</span><span className="text-sm text-muted-foreground">/month</span></div></CardHeader><CardContent><ul className="space-y-1.5">{plan.features.slice(0, 4).map((f, i) => <li key={i} className="flex items-center gap-2 text-sm"><Check className="h-3 w-3 text-green-500" />{f}</li>)}</ul></CardContent><CardFooter><Button variant="outline" className="w-full" onClick={() => alert('Please use the Subscription page in Settings to change plans. A password is required for security.')}>{plan.priceCents === 0 ? 'Downgrade' : 'Switch'}</Button></CardFooter></Card>))}
         </div>
       )}
     </div></FadeIn>

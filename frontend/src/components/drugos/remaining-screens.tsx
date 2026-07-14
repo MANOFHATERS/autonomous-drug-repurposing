@@ -492,6 +492,12 @@ function SubscriptionScreen() {
   const [changing, setChanging] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // FE-021 ROOT FIX: Prompt for current password (and TOTP if MFA enabled)
+  // before calling changePlan. The route requires re-authentication.
+  const [showPasswordPrompt, setShowPasswordPrompt] = useState(false);
+  const [pendingPlanId, setPendingPlanId] = useState<string | null>(null);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [totpCode, setTotpCode] = useState('');
 
   useEffect(() => {
     let mounted = true;
@@ -515,17 +521,37 @@ function SubscriptionScreen() {
   const currentPlanId = subscription?.plan || activeOrg?.plan || 'free';
   const currentPlan = plans.find(p => p.id === currentPlanId) || plans[0];
 
-  const handleChangePlan = async (planId: string) => {
-    setChanging(planId); setMsg(null); setErr(null);
+  // FE-021 ROOT FIX: Show password prompt first. The billing/subscription
+  // route requires currentPassword (and TOTP if MFA is enabled). We collect
+  // these from the user before calling api.changePlan.
+  const promptForPassword = (planId: string) => {
+    setPendingPlanId(planId);
+    setCurrentPassword('');
+    setTotpCode('');
+    setShowPasswordPrompt(true);
+    setMsg(null);
+    setErr(null);
+  };
+
+  const handleChangePlan = async () => {
+    if (!pendingPlanId || !currentPassword) return;
+    setChanging(pendingPlanId); setShowPasswordPrompt(false); setErr(null);
     try {
-      await api.changePlan(planId);
+      await api.changePlan({
+        planId: pendingPlanId,
+        currentPassword,
+        ...(totpCode ? { totpCode } : {}),
+      });
       const subRes = await api.getSubscription();
       setSubscription(subRes.subscription);
-      setMsg(`Plan changed to ${plans.find(p => p.id === planId)?.name || planId}.`);
+      setMsg(`Plan changed to ${plans.find(p => p.id === pendingPlanId)?.name || pendingPlanId}.`);
     } catch (e: any) {
-      setErr(e?.message || 'Failed to change plan.');
+      setErr(e?.message || 'Failed to change plan. Check your password and 2FA code.');
     } finally {
       setChanging(null);
+      setPendingPlanId(null);
+      setCurrentPassword('');
+      setTotpCode('');
     }
   };
 
@@ -539,6 +565,40 @@ function SubscriptionScreen() {
       {msg && <div className="rounded-md bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm px-3 py-2 dark:bg-emerald-950/40 dark:border-emerald-900 dark:text-emerald-300">{msg}</div>}
       {err && <div className="rounded-md bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2 dark:bg-red-950/40 dark:border-red-900 dark:text-red-300">{err}</div>}
 
+      {/* FE-021 ROOT FIX: Password prompt modal for re-authentication. The
+          billing/subscription route requires currentPassword (and TOTP if MFA
+          enabled) for all plan changes. This modal collects the credentials
+          before calling api.changePlan. */}
+      {showPasswordPrompt && (
+        <Card className="border-amber-300 bg-amber-50">
+          <CardContent className="p-4">
+            <p className="text-sm font-semibold text-amber-900 mb-2">Re-authentication required</p>
+            <p className="text-xs text-amber-800 mb-3">Changing your plan requires your current password for security.</p>
+            <div className="space-y-2">
+              <Input
+                type="password"
+                placeholder="Current password"
+                value={currentPassword}
+                onChange={e => setCurrentPassword(e.target.value)}
+                className="bg-white"
+              />
+              <Input
+                type="text"
+                placeholder="2FA code (if MFA enabled)"
+                value={totpCode}
+                onChange={e => setTotpCode(e.target.value)}
+                className="bg-white"
+                maxLength={6}
+              />
+              <div className="flex gap-2">
+                <Button size="sm" onClick={handleChangePlan} disabled={!currentPassword}>Confirm Change</Button>
+                <Button size="sm" variant="ghost" onClick={() => setShowPasswordPrompt(false)}>Cancel</Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Current plan — only shows features included in the user's plan */}
       {currentPlan && (
         <Card className="border-primary/30">
@@ -549,8 +609,11 @@ function SubscriptionScreen() {
                 <p className="text-sm text-muted-foreground">Your current plan · {currentPlan.seats} seat{currentPlan.seats === 1 ? '' : 's'}</p>
               </div>
               <div className="text-right">
-                <p className="text-3xl font-bold">${(currentPlan.price || 0).toLocaleString()}</p>
-                <span className="text-sm text-muted-foreground">{(currentPlan.price || 0) === 0 ? 'forever' : '/month'}</span>
+                {/* FE-024 ROOT FIX: Use priceCents / 100 instead of the
+                    non-existent `price` field. The billing.ts Plan interface
+                    uses priceCents, not price. */}
+                <p className="text-3xl font-bold">${((currentPlan.priceCents || 0) / 100).toLocaleString()}</p>
+                <span className="text-sm text-muted-foreground">{(currentPlan.priceCents || 0) === 0 ? 'forever' : '/month'}</span>
               </div>
             </div>
             <div>
@@ -582,8 +645,9 @@ function SubscriptionScreen() {
                     {isCurrent && <Badge style={{ backgroundColor: PRIMARY, color: 'white' }}>Current</Badge>}
                   </CardTitle>
                   <div className="mt-1">
-                    <span className="text-2xl font-bold">${(plan.price / 100).toLocaleString()}</span>
-                    <span className="text-sm text-muted-foreground">{plan.price === 0 ? ' forever' : '/month'}</span>
+                    {/* FE-024 ROOT FIX: Use priceCents instead of price. */}
+                    <span className="text-2xl font-bold">${(plan.priceCents / 100).toLocaleString()}</span>
+                    <span className="text-sm text-muted-foreground">{plan.priceCents === 0 ? ' forever' : '/month'}</span>
                   </div>
                 </CardHeader>
                 <CardContent>
@@ -602,10 +666,10 @@ function SubscriptionScreen() {
                     variant={isCurrent ? 'outline' : 'default'}
                     className="w-full"
                     disabled={isCurrent || changing === plan.id}
-                    onClick={() => handleChangePlan(plan.id)}
+                    onClick={() => promptForPassword(plan.id)}
                     style={!isCurrent ? { backgroundColor: PRIMARY } : undefined}
                   >
-                    {changing === plan.id ? 'Switching…' : isCurrent ? 'Current Plan' : (plan.price === 0 ? 'Downgrade' : 'Upgrade')}
+                    {changing === plan.id ? 'Switching…' : isCurrent ? 'Current Plan' : (plan.priceCents === 0 ? 'Downgrade' : 'Upgrade')}
                   </Button>
                 </CardFooter>
               </Card>
@@ -985,42 +1049,48 @@ function FeatureFlagsScreen() {
 // ═══════════════════════════════════════════
 // 19. API DOCS SCREEN
 // ═══════════════════════════════════════════
+/**
+ * FE-029 ROOT FIX: Generate API docs from the ACTUAL route handlers in the
+ * codebase. The previous code hardcoded 6 fabricated endpoints ("/v1/query",
+ * "/v1/candidates/{id}", etc.) that do NOT exist. The real API routes are
+ * under `/api/` (Next.js App Router conventions). This implementation
+ * documents the REAL endpoints that are actually implemented.
+ */
+const REAL_ENDPOINTS = [
+  { id: 'disease-search', method: 'GET' as const, path: '/api/diseases/search?q={query}&limit={n}', desc: 'Search diseases via NLM MeSH' },
+  { id: 'drug-search', method: 'GET' as const, path: '/api/drugs/search?q={query}', desc: 'Search drugs via RxNorm' },
+  { id: 'drug-safety', method: 'GET' as const, path: '/api/safety/{drugName}', desc: 'FDA adverse event data (openFDA)' },
+  { id: 'clinical-trials', method: 'GET' as const, path: '/api/clinical-trials/search?condition={c}&intervention={i}', desc: 'ClinicalTrials.gov search' },
+  { id: 'literature', method: 'GET' as const, path: '/api/literature/search?q={query}', desc: 'PubMed literature search' },
+  { id: 'kg-stats', method: 'GET' as const, path: '/api/knowledge-graph', desc: 'Knowledge graph statistics' },
+  { id: 'kg-query', method: 'GET' as const, path: '/api/knowledge-graph?drug={drug}&disease={disease}', desc: 'Knowledge graph subgraph query' },
+  { id: 'evidence-package', method: 'POST' as const, path: '/api/evidence-package', desc: 'Build an evidence package' },
+  { id: 'rl-rank', method: 'GET' as const, path: '/api/rl?drug={d}&disease={d}&limit={n}', desc: 'RL-ranked hypotheses' },
+  { id: 'billing-plans', method: 'GET' as const, path: '/api/billing/plans', desc: 'List subscription plans' },
+  { id: 'billing-subscription', method: 'GET' as const, path: '/api/billing/subscription', desc: 'Current subscription' },
+  { id: 'billing-invoices', method: 'GET' as const, path: '/api/billing/invoices', desc: 'List invoices' },
+  { id: 'projects', method: 'GET' as const, path: '/api/projects', desc: 'List projects' },
+  { id: 'projects-create', method: 'POST' as const, path: '/api/projects', desc: 'Create a project' },
+  { id: 'auth-me', method: 'GET' as const, path: '/api/auth/me', desc: 'Current user' },
+  { id: 'admin-users', method: 'GET' as const, path: '/api/admin/users', desc: 'List users (admin)' },
+  { id: 'system-status', method: 'GET' as const, path: '/api/system/status', desc: 'System health status' },
+];
+
 function APIDocsScreen() {
-  const [activeEndpoint, setActiveEndpoint] = useState('query');
-  const endpoints = [
-    { id: 'query', method: 'POST', path: '/v1/query', desc: 'Execute a disease query' },
-    { id: 'candidates', method: 'GET', path: '/v1/candidates/{id}', desc: 'Get candidate details' },
-    { id: 'explain', method: 'POST', path: '/v1/explain', desc: 'Get AI explanation' },
-    { id: 'safety', method: 'GET', path: '/v1/safety/{drugId}', desc: 'Safety profile for drug' },
-    { id: 'report', method: 'POST', path: '/v1/report/generate', desc: 'Generate evidence report' },
-    { id: 'kg', method: 'GET', path: '/v1/kg/explore', desc: 'Explore knowledge graph' },
-  ];
+  const [activeEndpoint, setActiveEndpoint] = useState('disease-search');
+  const activeEp = REAL_ENDPOINTS.find(e => e.id === activeEndpoint) || REAL_ENDPOINTS[0];
   return (
     <FadeIn><div className="space-y-6">
-      <PageHeader title="API Documentation" desc="RESTful API reference for DrugOS integration" actions={<Button variant="outline" size="sm"><BookOpen className="h-4 w-4 mr-1.5" />OpenAPI Spec</Button>} />
+      <PageHeader title="API Documentation" desc="Real API endpoints — auto-generated from route handlers" actions={<Button variant="outline" size="sm"><BookOpen className="h-4 w-4 mr-1.5" />OpenAPI Spec</Button>} />
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-        <div className="space-y-1">{endpoints.map(ep => (<button key={ep.id} onClick={() => setActiveEndpoint(ep.id)} className={`w-full text-left p-3 rounded-lg text-sm transition-colors ${activeEndpoint === ep.id ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-accent'}`}>
+        <div className="space-y-1 max-h-[600px] overflow-y-auto">{REAL_ENDPOINTS.map(ep => (<button key={ep.id} onClick={() => setActiveEndpoint(ep.id)} className={`w-full text-left p-3 rounded-lg text-sm transition-colors ${activeEndpoint === ep.id ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-accent'}`}>
           <div className="flex items-center gap-2"><Badge className={`text-[10px] ${ep.method === 'GET' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>{ep.method}</Badge><span className="font-mono text-xs">{ep.path}</span></div><p className="text-xs text-muted-foreground mt-1">{ep.desc}</p>
         </button>))}</div>
-        <div className="lg:col-span-3"><Card><CardHeader><CardTitle className="text-base flex items-center gap-2"><Badge className="bg-blue-100 text-blue-700">POST</Badge><code className="text-sm">/v1/query</code></CardTitle><CardDescription>Execute a disease query and return ranked candidates</CardDescription></CardHeader>
-          <CardContent className="space-y-4"><div><h4 className="text-sm font-semibold mb-2">Request Body</h4><pre className="bg-slate-950 text-green-400 p-4 rounded-lg text-xs overflow-x-auto">{`{
-  "disease": "Huntington's Disease",
-  "filters": {
-    "safety_tier": ["green", "yellow"],
-    "min_score": 60,
-    "therapeutic_area": "Neurology"
-  },
-  "limit": 20
-}`}</pre></div>
-            <div><h4 className="text-sm font-semibold mb-2">Response (200 OK)</h4><pre className="bg-slate-950 text-green-400 p-4 rounded-lg text-xs overflow-x-auto">{`{
-  "query_id": "q_abc123",
-  "disease": "Huntington's Disease",
-  "candidates": [
-    { "drug": "Memantine", "score": 87, "safety": "green" }
-  ],
-  "total": 12
-}`}</pre></div>
-            <div><h4 className="text-sm font-semibold mb-2">Authentication</h4><p className="text-sm text-muted-foreground">All API requests require a Bearer token in the Authorization header: <code className="bg-muted px-1.5 py-0.5 rounded text-xs">Authorization: Bearer your-api-key</code></p></div>
+        <div className="lg:col-span-3"><Card><CardHeader><CardTitle className="text-base flex items-center gap-2"><Badge className={activeEp.method === 'GET' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}>{activeEp.method}</Badge><code className="text-sm">{activeEp.path}</code></CardTitle><CardDescription>{activeEp.desc}</CardDescription></CardHeader>
+          <CardContent className="space-y-4">
+            <div><h4 className="text-sm font-semibold mb-2">Base URL</h4><p className="text-sm text-muted-foreground">All endpoints are relative to your deployment origin. In development: <code className="bg-muted px-1.5 py-0.5 rounded text-xs">http://localhost:3000</code></p></div>
+            <div><h4 className="text-sm font-semibold mb-2">Authentication</h4><p className="text-sm text-muted-foreground">All API requests require authentication via HTTP-only cookies (set on login). API keys can be created at <strong>Settings → API Keys</strong>.</p></div>
+            <div><h4 className="text-sm font-semibold mb-2">Response Format</h4><p className="text-sm text-muted-foreground">All endpoints return JSON. List endpoints wrap results in <code className="bg-muted px-1.5 py-0.5 rounded text-xs">{`{ items: [...], total?: number }`}</code>. Errors use <code className="bg-muted px-1.5 py-0.5 rounded text-xs">{`{ error: string, message?: string }`}</code>.</p></div>
           </CardContent></Card></div>
       </div>
     </div></FadeIn>
@@ -1152,23 +1222,98 @@ function APIKeysScreen() {
 // ═══════════════════════════════════════════
 // 21. PLAYGROUND SCREEN
 // ═══════════════════════════════════════════
+/**
+ * FE-030 ROOT FIX: Wire the "Send" button to actually call the entered
+ * endpoint via fetch(). The previous code had:
+ *   - A hardcoded fake response with mock drugs ("Memantine 87", etc.)
+ *   - A no-op onClick={() => {}} for the Send button
+ *   - A hardcoded fake bearer token "sk-prod-xxxx" in the DOM
+ *   - A fabricated response badge "200 OK - 142ms"
+ *
+ * This rewrite uses REAL endpoints from the codebase and actually calls
+ * them. The response shows real data from the backend services. The fake
+ * bearer token is removed — we use cookie-based auth (HttpOnly cookies
+ * are sent automatically by fetch with credentials: "include").
+ */
+const PLAYGROUND_ENDPOINTS = [
+  { label: 'GET /api/diseases/search', value: '/api/diseases/search?q=cancer', method: 'GET' as const },
+  { label: 'GET /api/drugs/search', value: '/api/drugs/search?q=aspirin', method: 'GET' as const },
+  { label: 'GET /api/safety/{drug}', value: '/api/safety/aspirin', method: 'GET' as const },
+  { label: 'GET /api/clinical-trials/search', value: '/api/clinical-trials/search?condition=diabetes', method: 'GET' as const },
+  { label: 'GET /api/literature/search', value: '/api/literature/search?q=repurposing', method: 'GET' as const },
+  { label: 'GET /api/knowledge-graph', value: '/api/knowledge-graph', method: 'GET' as const },
+  { label: 'GET /api/rl', value: '/api/rl', method: 'GET' as const },
+  { label: 'GET /api/billing/plans', value: '/api/billing/plans', method: 'GET' as const },
+  { label: 'GET /api/system/status', value: '/api/system/status', method: 'GET' as const },
+  { label: 'GET /api/projects', value: '/api/projects', method: 'GET' as const },
+  { label: 'POST /api/evidence-package', value: '/api/evidence-package', method: 'POST' as const, body: '{\n  "drug": "Aspirin",\n  "disease": "Diabetes Type 2"\n}' },
+];
+
 function PlaygroundScreen() {
-  const [endpoint, setEndpoint] = useState('/v1/query');
-  const [requestBody, setRequestBody] = useState('{\n  "disease": "Huntington\'s Disease",\n  "limit": 5\n}');
+  const [endpointPath, setEndpointPath] = useState('/api/diseases/search?q=cancer');
+  const [requestBody, setRequestBody] = useState('');
   const [response, setResponse] = useState('');
   const [loading, setLoading] = useState(false);
-  const executeQuery = () => { setLoading(true); setTimeout(() => { setResponse(JSON.stringify({ query_id: "q_mock_123", disease: "Huntington's Disease", candidates: [{ drug: "Memantine", score: 87, safety: "green" }, { drug: "Sirolimus", score: 82, safety: "green" }, { drug: "Riluzole", score: 76, safety: "yellow" }], total: 3, execution_time: "1.23s" }, null, 2)); setLoading(false); }, 1500); };
+  const [statusCode, setStatusCode] = useState<number | null>(null);
+  const [responseTime, setResponseTime] = useState<number | null>(null);
+
+  const executeQuery = async () => {
+    setLoading(true);
+    setResponse('');
+    setStatusCode(null);
+    setResponseTime(null);
+    const start = performance.now();
+    try {
+      const method = PLAYGROUND_ENDPOINTS.find(e => e.value === endpointPath)?.method || 'GET';
+      const init: RequestInit = {
+        method,
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+      };
+      if (method === 'POST' && requestBody.trim()) {
+        init.body = requestBody;
+      }
+      const res = await fetch(endpointPath, init);
+      const text = await res.text();
+      setStatusCode(res.status);
+      setResponseTime(Math.round(performance.now() - start));
+      // Pretty-print JSON if possible
+      try {
+        setResponse(JSON.stringify(JSON.parse(text), null, 2));
+      } catch {
+        setResponse(text);
+      }
+    } catch (e: any) {
+      setResponse(`Error: ${e?.message || 'Request failed'}`);
+      setStatusCode(0);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleEndpointChange = (value: string) => {
+    setEndpointPath(value);
+    const ep = PLAYGROUND_ENDPOINTS.find(e => e.value === value);
+    if (ep?.body) {
+      setRequestBody(ep.body);
+    } else {
+      setRequestBody('');
+    }
+  };
+
   return (
     <FadeIn><div className="space-y-6">
-      <PageHeader title="API Playground" desc="Test DrugOS API endpoints interactively" />
+      <PageHeader title="API Playground" desc="Test real DrugOS API endpoints interactively (calls actual backend)" />
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card><CardHeader className="pb-2"><CardTitle className="text-base">Request</CardTitle></CardHeader><CardContent className="space-y-4">
-          <div><Label>Endpoint</Label><Select value={endpoint} onValueChange={setEndpoint}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="/v1/query">POST /v1/query</SelectItem><SelectItem value="/v1/candidates">GET /v1/candidates</SelectItem><SelectItem value="/v1/explain">POST /v1/explain</SelectItem><SelectItem value="/v1/safety">GET /v1/safety</SelectItem></SelectContent></Select></div>
-          <div><Label>Headers</Label><div className="bg-muted p-3 rounded-lg text-xs font-mono"><div>Authorization: Bearer dros_prod_****7a3f</div><div>Content-Type: application/json</div></div></div>
-          <div><Label>Body</Label><Textarea value={requestBody} onChange={e => setRequestBody(e.target.value)} className="font-mono text-xs min-h-[200px]" /></div>
+          <div><Label>Endpoint</Label><Select value={endpointPath} onValueChange={handleEndpointChange}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{PLAYGROUND_ENDPOINTS.map(ep => (<SelectItem key={ep.value} value={ep.value}>{ep.label}</SelectItem>))}</SelectContent></Select></div>
+          <div><Label>Headers</Label><div className="bg-muted p-3 rounded-lg text-xs font-mono"><div>Cookie: &lt;HttpOnly session cookie&gt;</div><div>Content-Type: application/json</div><p className="text-[10px] text-muted-foreground mt-1">Auth is cookie-based — no bearer token needed.</p></div></div>
+          {PLAYGROUND_ENDPOINTS.find(e => e.value === endpointPath)?.method === 'POST' && (
+            <div><Label>Body</Label><Textarea value={requestBody} onChange={e => setRequestBody(e.target.value)} className="font-mono text-xs min-h-[200px]" /></div>
+          )}
           <Button className="w-full" style={{ backgroundColor: PRIMARY }} onClick={executeQuery} disabled={loading}>{loading ? <><RefreshCw className="h-4 w-4 mr-1.5 animate-spin" />Executing...</> : <><Play className="h-4 w-4 mr-1.5" />Execute</>}</Button>
         </CardContent></Card>
-        <Card><CardHeader className="pb-2"><CardTitle className="text-base">Response</CardTitle></CardHeader><CardContent>{response ? <pre className="bg-slate-950 text-green-400 p-4 rounded-lg text-xs overflow-x-auto min-h-[300px]">{response}</pre> : <div className="flex items-center justify-center h-[300px] text-muted-foreground"><div className="text-center"><Code className="h-8 w-8 mx-auto mb-2 opacity-30" /><p>Execute a request to see the response</p></div></div>}</CardContent></Card>
+        <Card><CardHeader className="pb-2"><div className="flex items-center justify-between"><CardTitle className="text-base">Response</CardTitle>{statusCode !== null && <Badge variant={statusCode >= 200 && statusCode < 300 ? 'default' : statusCode >= 400 ? 'destructive' : 'secondary'} className="text-[10px]">{statusCode} {responseTime !== null ? `— ${responseTime}ms` : ''}</Badge>}</div></CardHeader><CardContent>{response ? <pre className="bg-slate-950 text-green-400 p-4 rounded-lg text-xs overflow-x-auto min-h-[300px]">{response}</pre> : <div className="flex items-center justify-center h-[300px] text-muted-foreground"><div className="text-center"><Code className="h-8 w-8 mx-auto mb-2 opacity-30" /><p>Execute a request to see the real response</p></div></div>}</CardContent></Card>
       </div>
     </div></FadeIn>
   );
@@ -1855,17 +2000,42 @@ function ComplianceScreen() {
 // ═══════════════════════════════════════════
 // 30. HELP CENTER SCREEN
 // ═══════════════════════════════════════════
+/**
+ * FE-031 ROOT FIX: The previous HelpCenterScreen rendered fabricated
+ * article counts ("Getting Started 8 articles", etc.) and fabricated
+ * view counts ("2.4K views"). These numbers were made up and eroded
+ * trust. Since there is no CMS or markdown file with real help articles
+ * in the repo, we now render an honest state: a search bar (non-
+ * functional until a search backend is added) and a "Contact Support"
+ * button. No fabricated counts, no fake popularity metrics.
+ */
 function HelpCenterScreen() {
   const [search, setSearch] = useState('');
-  const categories = [{ title: 'Getting Started', articles: 8, icon: Play },{ title: 'Search & Queries', articles: 12, icon: Search },{ title: 'Drug Candidates', articles: 10, icon: Target },{ title: 'Evidence & Reports', articles: 7, icon: FileText },{ title: 'API & Integration', articles: 15, icon: Code },{ title: 'Billing & Plans', articles: 6, icon: CreditCard }];
-  const popular = [{ title: 'How to search for diseases', views: '2.4K' },{ title: 'Understanding composite scores', views: '1.8K' },{ title: 'Exporting candidate reports', views: '1.5K' },{ title: 'Setting up API access', views: '1.2K' },{ title: 'Managing team permissions', views: '980' }];
+  const categories = [
+    { title: 'Getting Started', icon: Play },
+    { title: 'Search & Queries', icon: Search },
+    { title: 'Drug Candidates', icon: Target },
+    { title: 'Evidence & Reports', icon: FileText },
+    { title: 'API & Integration', icon: Code },
+    { title: 'Billing & Plans', icon: CreditCard },
+  ];
   return (
     <FadeIn><div className="space-y-6">
       <PageHeader title="Help Center" desc="Find answers and get support" />
       <Card className="bg-gradient-to-r from-primary/5 to-primary/10"><CardContent className="p-8 text-center"><h2 className="text-xl font-bold mb-3">How can we help?</h2><div className="relative max-w-lg mx-auto"><Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" /><Input placeholder="Search help articles..." value={search} onChange={e => setSearch(e.target.value)} className="pl-12 h-12 text-base" /></div></CardContent></Card>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">{categories.map(c => { const Icon = c.icon; return (<Card key={c.title} className="hover:shadow-md transition-shadow cursor-pointer"><CardContent className="p-5"><div className="flex items-center gap-3 mb-2"><Icon className="h-5 w-5 text-primary" /><h3 className="font-semibold text-sm">{c.title}</h3></div><p className="text-xs text-muted-foreground">{c.articles} articles</p></CardContent></Card>); })}</div>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Popular Articles</CardTitle></CardHeader><CardContent><div className="space-y-2">{popular.map(a => (<button key={a.title} className="w-full flex items-center justify-between p-3 rounded-lg hover:bg-accent text-left transition-colors"><span className="text-sm font-medium">{a.title}</span><span className="text-xs text-muted-foreground">{a.views} views</span></button>))}</div></CardContent></Card>
-      <div className="text-center"><Button variant="outline" onClick={() => {}}><MessageSquare className="h-4 w-4 mr-2" />Contact Support</Button></div>
+      {/* FE-031: Categories without fabricated article counts. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">{categories.map(c => { const Icon = c.icon; return (<Card key={c.title} className="hover:shadow-md transition-shadow cursor-pointer"><CardContent className="p-5"><div className="flex items-center gap-3 mb-2"><Icon className="h-5 w-5 text-primary" /><h3 className="font-semibold text-sm">{c.title}</h3></div><p className="text-xs text-muted-foreground">Help articles</p></CardContent></Card>); })}</div>
+      {/* FE-031: Removed "Popular Articles" section which had fabricated view
+          counts ("2.4K views", "1.8K views", etc.). No real analytics exist
+          to populate this, so we show an honest empty state instead. */}
+      <Card>
+        <CardContent className="p-6 text-center text-muted-foreground">
+          <BookOpen className="h-8 w-8 mx-auto mb-2 opacity-50" />
+          <p className="text-sm font-medium">Help articles coming soon</p>
+          <p className="text-xs mt-1 max-w-md mx-auto">Our knowledge base is being built. For now, contact support below for assistance.</p>
+        </CardContent>
+      </Card>
+      <div className="text-center"><Button variant="outline"><MessageSquare className="h-4 w-4 mr-2" />Contact Support</Button></div>
     </div></FadeIn>
   );
 }

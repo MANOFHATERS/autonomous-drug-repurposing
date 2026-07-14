@@ -112,13 +112,17 @@ export interface ProjectDetail extends Project {
   activities: ProjectActivity[];
 }
 
+/**
+ * FE-024 ROOT FIX: Aligned with the actual billing.ts Plan interface.
+ * The backend Plan has `priceCents` (NOT `price`), NO `currency`, and
+ * NO `interval` field. The previous type had `price: number` which was
+ * always undefined because the route returns PLANS directly from
+ * billing.ts — causing "$0" and "$NaN" renders in the subscription UI.
+ */
 export interface Plan {
   id: string;
   name: string;
-  price: number;
-  priceCents?: number; // FE-027 unblock: some components read priceCents
-  currency: string;
-  interval: string;
+  priceCents: number;
   seats: number;
   features: string[];
 }
@@ -205,11 +209,18 @@ export interface DrugSearchResult {
   tty?: string;
 }
 
+/**
+ * FE-023 ROOT FIX: Aligned with the actual MeshDescriptor returned by
+ * the MeSH service (mesh.ts). The service returns `descriptorUi`
+ * (lowercase 'i') and `name` — NOT `descriptorUI` (uppercase 'I') and
+ * NOT `descriptorName`. The previous type caused disease search
+ * suggestions to render with id=undefined and name=undefined.
+ */
 export interface DiseaseSearchResult {
-  descriptorUI: string;
-  descriptorName: string;
+  descriptorUi: string;
+  name: string;
   scopeNote?: string;
-  synonyms?: string[];
+  treeNumber?: string[];
 }
 
 export interface ClinicalTrial {
@@ -513,8 +524,13 @@ export const api = {
   // BILLING
   listPlans: () => request<{ plans: Plan[] }>("/api/billing/plans"),
   getSubscription: () => request<{ subscription: Subscription | null; plans: Plan[] }>("/api/billing/subscription"),
-  changePlan: (planId: string) =>
-    request<{ ok: true }>("/api/billing/subscription", { method: "POST", body: JSON.stringify({ planId }) }),
+  // FE-021 ROOT FIX: The billing/subscription route requires currentPassword
+  // (re-authentication) and optionally totpCode or mfaTicket when MFA is
+  // enabled. The previous signature only sent { planId } — every plan change
+  // got 400 "currentPassword is required". Updated signature accepts the
+  // full required parameter object.
+  changePlan: (body: { planId: string; currentPassword: string; totpCode?: string; mfaTicket?: string }) =>
+    request<{ ok: true }>("/api/billing/subscription", { method: "POST", body: JSON.stringify(body) }),
   listInvoices: () => request<{ items: Invoice[] }>("/api/billing/invoices"),
 
   // API KEYS
@@ -547,8 +563,18 @@ export const api = {
     request<{ items: DrugSearchResult[] }>(`/api/drugs/search?q=${encodeURIComponent(q)}`),
   searchDiseases: (q: string) =>
     request<{ items: DiseaseSearchResult[] }>(`/api/diseases/search?q=${encodeURIComponent(q)}`),
-  searchClinicalTrials: (q: string) =>
-    request<{ items: ClinicalTrial[] }>(`/api/clinical-trials/search?q=${encodeURIComponent(q)}`),
+  // FE-022 ROOT FIX: The clinical-trials/search route requires `condition`
+  // OR `intervention` — it does NOT accept a `q` param. The previous
+  // signature always caused 400 errors. Updated to accept the correct
+  // params object matching the route's expected query parameters.
+  searchClinicalTrials: (params: { condition?: string; intervention?: string; limit?: number; pageToken?: string }) => {
+    const qs = new URLSearchParams();
+    if (params.condition) qs.set("condition", params.condition);
+    if (params.intervention) qs.set("intervention", params.intervention);
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.pageToken) qs.set("pageToken", params.pageToken);
+    return request<{ items: ClinicalTrial[] }>(`/api/clinical-trials/search?${qs.toString()}`);
+  },
   searchLiterature: (q: string) =>
     request<{ items: PubMedArticle[] }>(`/api/literature/search?q=${encodeURIComponent(q)}`),
   getSafety: (drug: string) =>
@@ -567,15 +593,15 @@ export const api = {
   // ROOT FIX for FE-001/FE-002/FE-003: the UI now calls these real endpoints
   // instead of rendering mock data. The endpoints serve real data from the
   // Phase 1/2/4 Python pipeline artifacts.
-  getRankedHypotheses: (params?: { drug?: string; disease?: string; limit?: number }) => {
-    const qs = new URLSearchParams();
-    if (params?.drug) qs.set("drug", params.drug);
-    if (params?.disease) qs.set("disease", params.disease);
-    if (params?.limit) qs.set("limit", String(params.limit));
-    return request<RlRankerResponse>(`/api/rl?${qs.toString()}`);
-  },
-  syncRlOutput: () =>
-    request<RlRankerResponse>("/api/rl", { method: "POST", body: JSON.stringify({ sync: true, limit: 200 }) }),
-  getDatasetStats: () => request<DatasetStatsResponse>("/api/dataset"),
+  //
+  // FE-025 ROOT FIX: Removed dead methods:
+  //   - getRankedHypotheses: replaced by inline fetch in useRlCandidates hook.
+  //   - syncRlOutput: no-op semantic (POST {sync: true} but route ignores
+  //     `sync` param). A future developer calling it would expect a sync
+  //     to happen — nothing would. Removed to prevent confusion.
+  //   - getDatasetStats: never called by any component. DataSourcesScreen
+  //     uses hardcoded data instead. If wired in the future, the method
+  //     should be re-added with a real consumer.
+  // Kept: getKnowledgeGraphStats (used by admin dashboard).
   getKnowledgeGraphStats: () => request<KnowledgeGraphStatsResponse>("/api/knowledge-graph"),
 };

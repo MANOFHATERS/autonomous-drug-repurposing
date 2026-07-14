@@ -152,12 +152,16 @@ function DiseaseSearchScreen() {
   // query the real MeSH database via the API.
   const { data: diseaseResults, loading: diseasesLoading, error: diseasesError } = useDiseaseSearch(query, 2);
 
+  // FE-023 ROOT FIX: Use `descriptorUi` (lowercase 'i') and `name` to match
+  // the actual MeshDescriptor shape returned by the MeSH service. The previous
+  // code used `descriptorUI` (uppercase 'I') and `descriptorName` — both
+  // undefined — causing blank dropdown suggestions.
   const suggestions = useMemo(() => {
     if (!diseaseResults?.items) return [];
     return diseaseResults.items.slice(0, 8).map(d => ({
-      id: d.descriptorUI,
-      name: d.descriptorName,
-      icdCode: d.descriptorUI, // MeSH descriptor UI (no ICD code from MeSH)
+      id: d.descriptorUi,
+      name: d.name,
+      icdCode: d.descriptorUi, // MeSH descriptor UI (no ICD code from MeSH)
       therapeuticArea: d.scopeNote ? d.scopeNote.slice(0, 60) + '...' : '',
     }));
   }, [diseaseResults]);
@@ -180,11 +184,12 @@ function DiseaseSearchScreen() {
   const handleSearch = () => {
     if (query.trim()) {
       // Try to match against the real API results first.
+      // FE-023 ROOT FIX: Use `name` and `descriptorUi` matching MeshDescriptor.
       const match = diseaseResults?.items?.find(d =>
-        d.descriptorName.toLowerCase().includes(query.toLowerCase())
+        d.name.toLowerCase().includes(query.toLowerCase())
       );
       if (match) {
-        handleSelectDisease(match.descriptorUI, match.descriptorName);
+        handleSelectDisease(match.descriptorUi, match.name);
       } else {
         // No MeSH match — navigate with the raw query so SearchResultsScreen
         // can do a drug search by disease name.
@@ -716,8 +721,11 @@ function SearchResultsScreen() {
             </TableHeader>
             <TableBody>
               {filtered.map((c, i) => (
-                <>
-                  <TableRow key={c.id} className="cursor-pointer hover:bg-muted/30" onClick={() => navigate({ page: 'app', section: 'candidate', id: c.id })}>
+                // FE-028 ROOT FIX: React Fragment shorthand <> has no key
+                // prop. React requires a key on the outermost element in a
+                // .map(). Using React.Fragment with explicit key.
+                <React.Fragment key={c.id}>
+                  <TableRow className="cursor-pointer hover:bg-muted/30" onClick={() => navigate({ page: 'app', section: 'candidate', id: c.id })}>
                     <TableCell onClick={e => { e.stopPropagation(); toggleShortlist(c.id); }}>
                       <Star className={`h-4 w-4 ${shortlisted.has(c.id) ? 'fill-yellow-400 text-yellow-400' : 'text-muted-foreground hover:text-yellow-400'} transition-colors`} />
                     </TableCell>
@@ -767,7 +775,7 @@ function SearchResultsScreen() {
                       </TableCell>
                     </TableRow>
                   )}
-                </>
+                </React.Fragment>
               ))}
             </TableBody>
           </Table>
@@ -1014,18 +1022,18 @@ function CandidateDetailScreen() {
                   <PhaseDistributionChart trials={relatedTrials} />
                 </CardContent>
               </Card>
-              <Card>
-                <CardHeader className="pb-3"><CardTitle className="text-base">Success Prediction</CardTitle></CardHeader>
-                <CardContent>
-                  <div className="text-center">
-                    <div className="text-4xl font-bold" style={{ color: scoreColor(candidate.clinicalScore) }}>
-                      {Math.round(candidate.clinicalScore * 0.6 + 15)}%
-                    </div>
-                    <p className="text-sm text-muted-foreground mt-1">Predicted trial success rate</p>
-                    <Progress value={Math.round(candidate.clinicalScore * 0.6 + 15)} max={100} />
-                  </div>
-                </CardContent>
-              </Card>
+              {/* FE-026 ROOT FIX: The "Success Prediction" card has been
+                  removed. It displayed `clinicalScore * 0.6 + 15` as a
+                  "Predicted trial success rate" — a completely fabricated
+                  formula with no clinical validation. A drug with
+                  clinicalScore=80 showed "63% predicted trial success
+                  rate", a number with no scientific basis. Clinical trial
+                  success prediction requires Phase II data, historical
+                  benchmarking, and regulatory consultation — not a linear
+                  transform of a model score. If this feature is needed in
+                  the future, it must be implemented as a real ML model
+                  trained on ClinicalTrials.gov historical outcomes with a
+                  published validation study. */}
             </div>
           </div>
         </TabsContent>
@@ -1279,6 +1287,31 @@ function PatentTimeline({ patents }: { patents: Patent[] }) {
 // 4. KNOWLEDGE GRAPH SCREEN
 // ═══════════════════════════════════════════
 
+/**
+ * FE-018 ROOT FIX: Compute positions for real KG nodes using a circular
+ * layout when pre-computed positions are missing. The previous code
+ * initialized positions from graphNodes (empty array from empty-defaults.ts),
+ * producing an empty Map. When real KG nodes arrived from /api/knowledge-graph,
+ * they had no entries in positions — every edge and node returned null.
+ *
+ * This helper builds a Map with a circular layout for nodes that don't
+ * already have pre-computed positions. It is called whenever the node set
+ * changes so real nodes always get positions.
+ */
+function computePositions(
+  nodes: Array<{ id: string; x?: number; y?: number }>,
+  existing?: Map<string, { x: number; y: number }>
+): Map<string, { x: number; y: number }> {
+  const pos = new Map<string, { x: number; y: number }>(existing);
+  const cx = 400, cy = 250, radius = 180;
+  const needsLayout = nodes.filter(n => !pos.has(n.id));
+  needsLayout.forEach((n, i) => {
+    const angle = (2 * Math.PI * i) / Math.max(needsLayout.length, 1) - Math.PI / 2;
+    pos.set(n.id, { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) });
+  });
+  return pos;
+}
+
 function KnowledgeGraphScreen() {
   const { navigate } = useDrugOSNav();
   const [searchQuery, setSearchQuery] = useState('');
@@ -1286,7 +1319,10 @@ function KnowledgeGraphScreen() {
   const [zoom, setZoom] = useState(1);
   const [nodeFilters, setNodeFilters] = useState<Record<string, boolean>>({ drug: true, disease: true, gene: true, protein: true, pathway: true });
   const [evidenceThreshold, setEvidenceThreshold] = useState(0.3);
-  const [positions, setPositions] = useState<Map<string, { x: number; y: number }>>(() => new Map(graphNodes.map(n => [n.id, { x: n.x * 1.2, y: n.y * 0.7 + 50 }])));
+  // FE-018 ROOT FIX: Start with empty Map and compute positions dynamically
+  // whenever nodes change. Pre-computed positions from graphNodes (empty) are
+  // merged with auto-generated circular-layout positions for real nodes.
+  const [positions, setPositions] = useState<Map<string, { x: number; y: number }>>(() => new Map());
 
   // FE-001 + FE-003 ROOT FIX: Call the real /api/knowledge-graph endpoint.
   // The previous code rendered mock graphNodes/graphEdges. Now we call the
@@ -1320,11 +1356,25 @@ function KnowledgeGraphScreen() {
   const realNodes = kgData?.nodes || [];
   const realEdges = kgData?.edges || [];
 
-  const filteredNodes = [...graphNodes, ...realNodes].filter(n => nodeFilters[n.type]);
-  const filteredEdges = [...graphEdges, ...realEdges].filter(e => {
-    const src = [...graphNodes, ...realNodes].find(n => n.id === e.source);
-    const tgt = [...graphNodes, ...realNodes].find(n => n.id === e.target);
-    return e.evidence >= evidenceThreshold && src && tgt && nodeFilters[src.type] && nodeFilters[tgt.type];
+  // FE-018 ROOT FIX: Recompute positions whenever the merged node set changes.
+  // Real nodes from the KG service get circular-layout positions so they are
+  // actually visible. Pre-computed positions (if any) are preserved.
+  const allNodes = useMemo(() => [...graphNodes, ...realNodes], [realNodes]);
+  const allEdges = useMemo(() => [...graphEdges, ...realEdges], [realEdges]);
+  useEffect(() => {
+    setPositions(prev => computePositions(allNodes, prev));
+  }, [allNodes.length]);
+
+  const filteredNodes = allNodes.filter(n => nodeFilters[n.type]);
+  // FE-019 ROOT FIX: GraphEdge has `weight?: number` and `type: string` —
+  // there is NO `evidence` field and `relation` is only a backward-compat alias.
+  // The Python phase2/service.py returns `type` not `relation`. Use `e.weight`
+  // (with fallback to 0.5) for filtering/coloring and `e.type` for labels.
+  const filteredEdges = allEdges.filter(e => {
+    const src = allNodes.find(n => n.id === e.source);
+    const tgt = allNodes.find(n => n.id === e.target);
+    const w = (e as any).weight ?? 0.5;
+    return w >= evidenceThreshold && src && tgt && nodeFilters[src.type] && nodeFilters[tgt.type];
   });
 
   const searchedNodes = searchQuery.length >= 2
@@ -1426,14 +1476,19 @@ function KnowledgeGraphScreen() {
                   const tgt = positions.get(e.target);
                   if (!src || !tgt) return null;
                   const isHighlighted = !selectedNode || connectedToSelected.has(e.source) && connectedToSelected.has(e.target);
+                  // FE-019 ROOT FIX: Use `weight` (fallback 0.5) instead of the
+                  // non-existent `evidence` field. Use `type` instead of `relation`
+                  // (the Python service returns `type`; `relation` is only an alias).
+                  const w = (e as any).weight ?? 0.5;
+                  const edgeType = (e as any).type || (e as any).relation || 'related';
                   return (
                     <g key={i} opacity={isHighlighted ? 0.6 : 0.1}>
                       <line x1={src.x} y1={src.y} x2={tgt.x} y2={tgt.y}
-                        stroke={e.evidence > 0.9 ? ACCENT_GREEN : e.evidence > 0.7 ? PRIMARY : ACCENT_ORANGE}
-                        strokeWidth={e.evidence > 0.9 ? 2 : 1}
-                        strokeDasharray={e.evidence < 0.7 ? '4 3' : undefined}
+                        stroke={w > 0.9 ? ACCENT_GREEN : w > 0.7 ? PRIMARY : ACCENT_ORANGE}
+                        strokeWidth={w > 0.9 ? 2 : 1}
+                        strokeDasharray={w < 0.7 ? '4 3' : undefined}
                       />
-                      <text x={(src.x + tgt.x) / 2} y={(src.y + tgt.y) / 2 - 5} textAnchor="middle" className="text-[8px] fill-muted-foreground pointer-events-none">{e.relation}</text>
+                      <text x={(src.x + tgt.x) / 2} y={(src.y + tgt.y) / 2 - 5} textAnchor="middle" className="text-[8px] fill-muted-foreground pointer-events-none">{edgeType}</text>
                     </g>
                   );
                 })}
@@ -1457,7 +1512,12 @@ function KnowledgeGraphScreen() {
             </svg>
             {/* Selected node info */}
             {selectedNode && (() => {
-              const node = graphNodes.find(n => n.id === selectedNode);
+              // FE-020 ROOT FIX: Search in the merged allNodes array (which
+              // includes real nodes from the KG service) instead of just
+              // graphNodes (which is the empty array from empty-defaults.ts).
+              // Previously find() always returned undefined and the panel
+              // NEVER rendered — researchers could not see node details.
+              const node = allNodes.find(n => n.id === selectedNode);
               if (!node) return null;
               const nodeEdges = filteredEdges.filter(e => e.source === selectedNode || e.target === selectedNode);
               return (
@@ -1614,9 +1674,14 @@ function ClinicalTrialsScreen() {
 // ═══════════════════════════════════════════
 
 function SafetyProfileScreen() {
-  const [selectedDrug, setSelectedDrug] = useState<string>(drugCandidates[0].drugName);
+  // FE-017 ROOT FIX: drugCandidates is the empty array from empty-defaults.ts.
+  // drugCandidates[0] is undefined — accessing .drugName on undefined throws
+  // TypeError during initial state initialization, so the component never mounts.
+  // Fix: Initialize selectedDrug to empty string. All downstream code that
+  // depended on drugCandidates[0] as a fallback now guards against empty.
+  const [selectedDrug, setSelectedDrug] = useState<string>('');
   const [drugSearch, setDrugSearch] = useState('');
-  const candidate = drugCandidates.find(c => c.drugName === selectedDrug) || drugCandidates[0];
+  const candidate = drugCandidates.find(c => c.drugName === selectedDrug) || null;
   const admet = admetProfiles.find(a => a.drugName === selectedDrug);
   const offTargets = offTargetPredictions.filter(o => o.drugName === selectedDrug);
   const interactions = drugInteractions.filter(d => d.drug1 === selectedDrug);
@@ -1716,7 +1781,7 @@ function SafetyProfileScreen() {
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
               <CardTitle className="text-base">Safety Tier</CardTitle>
-              <SafetyBadge tier={candidate.safetyTier} />
+              <SafetyBadge tier={candidate?.safetyTier ?? 'unknown'} />
             </div>
           </CardHeader>
           <CardContent>
@@ -1784,7 +1849,7 @@ function SafetyProfileScreen() {
             })}
             <div className="mt-3 p-2.5 bg-red-50 border border-red-200 rounded-lg">
               <div className="flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-red-600" /><span className="text-sm font-medium text-red-700">Black Box Warning</span></div>
-              <p className="text-xs text-red-600 mt-1">{candidate.safetyTier === 'red' ? 'This drug carries significant safety risks requiring close monitoring.' : candidate.safetyTier === 'unknown' ? 'Safety tier not assigned — model-derived score only. Verify black-box warning status via openFDA labels before proceeding.' : 'No black box warnings identified for repurposing context.'}</p>
+              <p className="text-xs text-red-600 mt-1">{candidate?.safetyTier === 'red' ? 'This drug carries significant safety risks requiring close monitoring.' : candidate?.safetyTier === 'unknown' || !candidate ? 'Safety tier not assigned — model-derived score only. Verify black-box warning status via openFDA labels before proceeding.' : 'No black box warnings identified for repurposing context.'}</p>
             </div>
           </CardContent>
         </Card>
@@ -1798,10 +1863,13 @@ function SafetyProfileScreen() {
 // ═══════════════════════════════════════════
 
 function IPPatentsScreen() {
-  const [selectedDrug, setSelectedDrug] = useState<string>(drugCandidates[0].drugName);
+  // FE-017 ROOT FIX: Same crash as SafetyProfileScreen — drugCandidates[0]
+  // is undefined because drugCandidates is the empty array. Initialize to
+  // empty string and guard all downstream accesses.
+  const [selectedDrug, setSelectedDrug] = useState<string>('');
   const uniqueDrugNames = [...new Set(drugCandidates.map(c => c.drugName))];
   const relatedPatents = patents.filter(p => p.drugName === selectedDrug);
-  const candidate = drugCandidates.find(c => c.drugName === selectedDrug);
+  const candidate = drugCandidates.find(c => c.drugName === selectedDrug) || null;
 
   return (
     <FadeIn>

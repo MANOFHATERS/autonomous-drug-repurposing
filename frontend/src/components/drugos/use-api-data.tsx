@@ -249,9 +249,20 @@ export function useLiteratureSearch(query: string, minLength = 3) {
 }
 
 /**
- * Fetch the knowledge graph for a drug or disease via the real
- * /api/knowledge-graph endpoint. Returns 503 if the KG service is not
- * deployed (KG_SERVICE_URL not set) — we surface that honestly.
+ * FE-027 ROOT FIX: Fetch the knowledge graph subgraph for a drug or disease
+ * via the real /api/knowledge-graph endpoint.
+ *
+ * Previously: the hook short-circuited when no drug/disease was provided,
+ * so the KG explorer showed a blank graph on initial load. It also only
+ * handled the `{ nodes, edges }` subgraph response shape — but the stats
+ * endpoint (no params) returns `{ sources, nodeCount, edgeCount, ... }`.
+ *
+ * Fix: The hook ALWAYS fires. When drug/disease are provided, it calls
+ * `GET /api/knowledge-graph?drug=X&disease=Y` which returns `{ nodes, edges }`
+ * (subgraph). When no params are provided, it calls `GET /api/knowledge-graph`
+ * which returns stats — we normalize stats to `{ nodes: [], edges: [] }` so
+ * the KG explorer doesn't crash. The stats can be fetched separately via
+ * `api.getKnowledgeGraphStats()` if needed.
  */
 export function useKnowledgeGraph(params: { drug?: string; disease?: string }) {
   const [state, setState] = useState<
@@ -260,10 +271,6 @@ export function useKnowledgeGraph(params: { drug?: string; disease?: string }) {
 
   const paramsKey = JSON.stringify(params);
   useEffect(() => {
-    if (!params.drug && !params.disease) {
-      setState({ data: null, loading: false, error: null });
-      return;
-    }
     let cancelled = false;
     setState({ data: null, loading: true, error: null });
     const qs = new URLSearchParams();
@@ -283,6 +290,14 @@ export function useKnowledgeGraph(params: { drug?: string; disease?: string }) {
             message: body?.message || `Request failed with status ${res.status}`,
             status: res.status,
           } as ApiError;
+        }
+        // FE-027: Normalize the stats response (no params) to the subgraph
+        // shape. The stats endpoint returns { sources, nodeCount, edgeCount,
+        // ... } which is NOT { nodes, edges }. We normalize so the
+        // KnowledgeGraphScreen always gets the expected shape.
+        if (body && 'sources' in body && !('nodes' in body)) {
+          // Stats response — normalize to empty graph with metadata
+          return { nodes: [], edges: [], _stats: body } as { nodes: any[]; edges: any[] };
         }
         return body as { nodes: any[]; edges: any[] };
       })
