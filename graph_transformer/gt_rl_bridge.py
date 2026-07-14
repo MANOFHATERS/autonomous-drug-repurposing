@@ -4221,7 +4221,12 @@ class GTRLBridge:
         # is achievable when the GT model has real multi-hop signal
         # (W-02 fix) and the trainer selects the checkpoint by val loss
         # instead of noisy val AUC (W-01 fix).
-        from .data import V1_AUC_THRESHOLD
+        # P3-TM8 v108: removed the duplicate `from .data import V1_AUC_THRESHOLD`
+        # here (it was redefining the same name imported at line 4308 below,
+        # triggering ruff F811). The import at line 4308 is the canonical one
+        # (it also imports get_auc_threshold_for_scale, which is what this
+        # code block actually uses). Removing this redundant import has no
+        # runtime effect — Python rebinds the name to the same value.
         # V90 ROOT FIX (BUG #31): raise the KP recovery threshold from 0.2
         # to 0.5. The previous 0.2 threshold was trivially satisfied:
         #   - With 5 KPs split 60/40 (FORENSIC-AUDIT-I14), the test set
