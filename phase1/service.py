@@ -245,6 +245,100 @@ def datasets() -> Dict[str, Any]:
     return _load_dataset_stats()
 
 
+# BE-024 ROOT FIX (Team Member 12): the frontend's
+# `frontend/src/lib/services/dataset-stats.ts:proxyToDatasetService()`
+# issues `GET ${DATASET_SERVICE_URL}/stats`. The previous Phase 1 service
+# only exposed /health, /datasets, and /datasets/{drug}/mechanism — so
+# when an operator set DATASET_SERVICE_URL, the proxy 404'd and fell back
+# to the local checkpoint silently. The operator believed they were
+# fetching live stats when they were not.
+#
+# Root fix: expose /stats with the EXACT response shape the frontend
+# expects (DatasetStatsResponse in dataset-stats.ts). We translate the
+# Phase-1-internal _load_dataset_stats() output into that shape — using
+# the real CSV row counts as the source of truth. No fabrication: if no
+# CSVs exist (Phase 1 hasn't run), we return zero counts with a clear
+# `backend: "phase1_service_no_data"` marker so the dashboard can render
+# the "no data ingested yet" state honestly.
+@app.get("/stats")
+def stats() -> Dict[str, Any]:
+    """Phase 1 stats in the DatasetStatsResponse shape the frontend expects.
+
+    This endpoint is the contract-satisfying peer of
+    ``frontend/src/lib/services/dataset-stats.ts:proxyToDatasetService``.
+    It returns the fields the frontend destructures: sources, nodesLoaded,
+    edgesLoaded, edgeTypesPresent, pipelineVersion, schemaVersion,
+    bridgeVersion, backend, warnings, errors, generatedAt.
+    """
+    raw = _load_dataset_stats()
+    # Translate Phase-1-internal source rows into the frontend's
+    # DatasetSourceStat shape: { name, loaded, rowsLoaded?, sha256? }.
+    sources_out: List[Dict[str, Any]] = []
+    for s in raw.get("sources", []):
+        sources_out.append({
+            "name": s.get("name", "unknown"),
+            "loaded": bool(s.get("available", False)),
+            "rowsLoaded": int(s.get("row_count", 0) or 0),
+        })
+
+    # nodesLoaded / edgesLoaded: Phase 1 doesn't build the graph (Phase 2
+    # does), but the bridge summary records how many nodes/edges were
+    # STAGED for Phase 2. We surface the drug + protein + interaction
+    # counts as the closest Phase-1-native equivalent. Phase 2's own
+    # /kg/stats endpoint is the canonical source for final graph counts.
+    nodes_loaded = (
+        int(raw.get("total_drugs", 0) or 0)
+        + int(raw.get("total_proteins", 0) or 0)
+    )
+    edges_loaded = int(raw.get("total_ppi", 0) or 0)
+
+    # edgeTypesPresent: Phase 1 stages Compound→Protein (DrugBank
+    # interactions) and Protein→Protein (STRING). Other edge types
+    # (Protein→Pathway, Pathway→Disease, Drug→AdverseEvent) are added by
+    # Phase 2. We surface only what Phase 1 actually produced — never
+    # fabricate.
+    edge_types: List[str] = []
+    for s in raw.get("sources", []):
+        if not s.get("available", False):
+            continue
+        name = s.get("name", "")
+        if name == "drugbank":
+            edge_types.append("Compound->Protein")
+        elif name == "string":
+            edge_types.append("Protein->Protein")
+        elif name in ("disgenet", "omim"):
+            edge_types.append("Gene->Disease")
+
+    warnings: List[str] = []
+    errors: List[str] = []
+    if raw.get("total_sources_available", 0) < raw.get("total_sources_expected", 0):
+        warnings.append(
+            f"Phase 1 has {raw.get('total_sources_available', 0)}/"
+            f"{raw.get('total_sources_expected', 0)} sources available. "
+            "Run the full Airflow ETL pipeline to ingest all 7 sources."
+        )
+
+    return {
+        "sources": sources_out,
+        "nodesLoaded": nodes_loaded,
+        "edgesLoaded": edges_loaded,
+        "edgeTypesPresent": edge_types,
+        "pipelineVersion": "phase1-service-v1",
+        "schemaVersion": "1.0",
+        "bridgeVersion": None,
+        "backend": "phase1_service",
+        "warnings": warnings,
+        "errors": errors,
+        "generatedAt": _now_iso(),
+    }
+
+
+def _now_iso() -> str:
+    """Return current UTC time in ISO-8601 (seconds precision)."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
 @app.get("/datasets/{drug}/mechanism")
 def drug_mechanism(drug: str) -> Dict[str, Any]:
     """Return the mechanism-of-action (targets + indications) for a drug."""

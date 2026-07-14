@@ -9,6 +9,8 @@ import {
   clearAuthCookies,
 } from "@/lib/auth/server";
 import { badRequest, internalError, writeAuditLog, requireCsrfOrSend } from "@/lib/api-helpers";
+// BE-029 ROOT FIX (Team Member 12): Zod-validated request body.
+import { validateBody, PasswordChangeBody } from "@/lib/zod-schemas";
 
 /**
  * POST /api/auth/password
@@ -34,12 +36,15 @@ export async function POST(req: NextRequest) {
     return badRequest("Invalid JSON body");
   }
 
-  const currentPassword = body.currentPassword || "";
-  const newPassword = body.newPassword || "";
-
-  if (!currentPassword || !newPassword) {
-    return badRequest("Both currentPassword and newPassword are required.");
-  }
+  // BE-029 ROOT FIX: schema-validate the body before any business logic.
+  // Rejects: missing fields, non-string fields, oversize values, and
+  // newPassword shorter than 8 chars (defense-in-depth — the policy
+  // check below does a richer validation, but the schema catches the
+  // obviously-bad cases before we touch the DB).
+  const parsed = validateBody(PasswordChangeBody, body);
+  if (!parsed.ok) return parsed.response;
+  const currentPassword = parsed.data.currentPassword;
+  const newPassword = parsed.data.newPassword;
 
   const policy = validatePasswordPolicy(newPassword);
   if (!policy.ok) {
@@ -53,9 +58,15 @@ export async function POST(req: NextRequest) {
 
   const ok = await verifyPassword(currentPassword, dbUser.passwordHash);
   if (!ok) {
+    // BE-032 ROOT FIX (Team Member 12): return 401 (authentication
+    // failure) — NOT 403. A wrong current password is an authentication
+    // failure: the user has not proven they own the account. 403 means
+    // "authenticated but forbidden", which is wrong here. API clients
+    // that distinguish 401 (re-authenticate) from 403 (forbidden) rely
+    // on this to prompt the user to re-enter their password.
     return NextResponse.json(
       { error: "invalid_credentials", message: "Current password is incorrect." },
-      { status: 403 }
+      { status: 401 }
     );
   }
 

@@ -8,6 +8,8 @@ import {
 } from "@/lib/auth/server";
 import { verifyTotpWithReplayCheck } from "@/lib/auth/totp";
 import { badRequest, internalError, writeAuditLog, issueCsrfToken, setCsrfCookie } from "@/lib/api-helpers";
+// BE-029 ROOT FIX (Team Member 12): Zod-validated request body.
+import { validateBody, TwoFaLoginVerifyBody } from "@/lib/zod-schemas";
 import {
   recordSuccessfulLogin,
   recordFailedLogin,
@@ -103,11 +105,16 @@ export async function POST(req: NextRequest) {
   if (!mfaToken) {
     mfaToken = (body.mfaToken || "").trim();
   }
-  const code = (body.code || "").trim();
+  // BE-029 ROOT FIX: schema-validate the body. The schema enforces
+  // `code` is exactly 6 digits (rejects malformed input with 400) and
+  // `mfaToken` is a non-empty string when present. The 6-digit shape
+  // check is the LINE between "malformed input → 400" and "wrong code
+  // → 401" (BE-034). A 6-digit code that does not match the user's
+  // TOTP secret is an authentication failure, NOT a malformed request.
+  const parsed = validateBody(TwoFaLoginVerifyBody, body);
+  if (!parsed.ok) return parsed.response;
+  const code = parsed.data.code;
   if (!mfaToken) return badRequest("mfaToken is required (either the drugos_mfa_challenge cookie or the body field)");
-  if (!/^\d{6}$/.test(code)) {
-    return badRequest("A 6-digit TOTP code is required");
-  }
 
   // Verify the challenge token (signature + expiry + type).
   const challenge = verifyMfaChallengeToken(mfaToken);
@@ -276,13 +283,23 @@ export async function POST(req: NextRequest) {
         result.reason === "replayed"
           ? "This code has already been used. Wait for the next 30-second window."
           : `Invalid 6-digit code. ${afterFail.attemptsRemaining} attempt(s) remaining before 2FA is locked.`;
+      // BE-034 ROOT FIX (Team Member 12): return 401 (authentication
+      // failure) — NOT 400. The previous 400 was wrong: 400 means "bad
+      // request" (malformed input), but a 6-digit code that doesn't
+      // match is an authentication failure. The Zod schema (BE-029)
+      // already rejects NON-6-digit codes with 400 at the body-parse
+      // stage; ONLY 6-digit codes that fail TOTP verification reach
+      // this branch, and they MUST be 401 so API clients can
+      // distinguish "malformed" (re-enter the code in the same form)
+      // from "wrong code" (re-authenticate). The 429 path above is
+      // unchanged (rate-limit responses are always 429 per RFC 6585).
       return NextResponse.json(
         {
           error: result.reason === "replayed" ? "code_replayed" : "invalid_code",
           message,
           attemptsRemaining: afterFail.attemptsRemaining,
         },
-        { status: 400 }
+        { status: 401 }
       );
     }
 

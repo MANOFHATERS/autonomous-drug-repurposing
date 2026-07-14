@@ -73,6 +73,57 @@ export function __clearRlRankerCsvCacheForTests(): void {
   watchedPaths.clear();
 }
 
+// BE-027 ROOT FIX (Team Member 12): the previous code had TWO independent
+// CSV caches — this one inside rl-ranker.ts AND a separate one inside
+// rl-csv-cache.ts. The /api/rl/refresh route cleared only rl-csv-cache.ts's
+// cache, leaving THIS cache stale. The operator's "Refresh" click was a
+// no-op for the actual /api/rl route that serves RL data (which uses
+// rl-ranker.ts's cache via readLocalCsv).
+//
+// Root fix: delete rl-csv-cache.ts entirely (it was dead code — no
+// production route imported its `readRlCsvCached`). Expose PRODUCTION-SAFE
+// clear + inspect functions here so /api/rl/refresh can evict the cache
+// that the /api/rl route actually uses. The `__clearRlRankerCsvCacheForTests`
+// alias above is kept for backward-compat with existing test imports.
+
+/**
+ * Production-safe cache clear. Evicts ALL parsed-CSV entries from the
+ * rl-ranker cache. Called by POST /api/rl/refresh when an operator clicks
+ * the "Refresh" button on the dashboard.
+ *
+ * Multi-node note: this clears the cache ONLY on the receiving node. For
+ * a horizontally-scaled deployment, the refresh endpoint should broadcast
+ * a Redis pub/sub message so all nodes clear their caches. For the
+ * documented single-instance deployment, in-memory clear is sufficient.
+ */
+export function clearRlRankerCsvCache(): void {
+  csvCache.clear();
+}
+
+/**
+ * Inspect the cache state for observability / debugging. Returns the list
+ * of cached paths and their parsedAt timestamps. Used by /api/rl/refresh
+ * to report `clearedEntries` in the audit log.
+ */
+export function getRlRankerCsvCacheState(): Array<{
+  path: string;
+  parsedAt: number;
+  mtimeMs: number;
+  candidateCount: number;
+  ageMs: number;
+  ttlRemainingMs: number;
+}> {
+  const now = Date.now();
+  return Array.from(csvCache.entries()).map(([p, entry]) => ({
+    path: p,
+    parsedAt: entry.parsedAt,
+    mtimeMs: entry.mtimeMs,
+    candidateCount: entry.candidates.length,
+    ageMs: now - entry.parsedAt,
+    ttlRemainingMs: Math.max(0, TTL_MS - (now - entry.parsedAt)),
+  }));
+}
+
 export interface RankedHypothesis {
   drug: string;
   disease: string;
@@ -523,8 +574,8 @@ export async function getRankedHypotheses(opts?: {
   if (serviceUrl) {
     try {
       const upstream = await proxyToRlService(serviceUrl, queryParams);
-      // BE-013 + BE-070 ROOT FIX (merged — both teams independently identified
-      // the same root cause and converged on the same fix).
+      // BE-013 + BE-070 + BE-026 ROOT FIX (merged — three teams independently
+      // identified the same root cause and converged on the same fix).
       //
       // The prior code at this exact line was:
       //     total: upstream.count,
@@ -555,7 +606,7 @@ export async function getRankedHypotheses(opts?: {
         ...upstream,
         page: Math.floor(offset / pageSize),
         pageSize,
-        // BE-013/BE-070: trust upstream.total — do NOT override with count.
+        // BE-013/BE-070/BE-026: trust upstream.total — do NOT override with count.
         total: typeof upstream.total === "number" ? upstream.total : upstream.count,
       } as RlRankerResponse & { page: number; pageSize: number; total: number; count: number };
     } catch (e) {

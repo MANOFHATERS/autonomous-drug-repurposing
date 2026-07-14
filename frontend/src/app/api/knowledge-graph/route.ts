@@ -4,8 +4,9 @@ import {
   requireRole,
   internalError,
   writeAuditLog,
-  badRequest,
 } from "@/lib/api-helpers";
+// BE-029 ROOT FIX (Team Member 12): Zod-validated request body for POST.
+import { validateBody, KnowledgeGraphBody } from "@/lib/zod-schemas";
 // FE-002 ROOT FIX (Team Member 13): wire the lib service as a fallback.
 //
 // Previously: the route checked `process.env.KG_SERVICE_URL` via
@@ -266,9 +267,16 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: "bad_request", message: "Invalid JSON" }, { status: 400 });
   }
-  if (!body.cypher || typeof body.cypher !== "string") {
-    return badRequest("cypher (string) is required");
-  }
+  // BE-029 ROOT FIX: schema-validate the body. The schema enforces:
+  //   - cypher is a non-empty string ≤10_000 chars (DoS guard)
+  //   - params, if present, is a Record<string, unknown> (object, not array/string)
+  // The previous code's `typeof body.cypher !== "string"` check accepted
+  // ANY string length — a 1MB cypher payload would have been forwarded
+  // to the upstream Neo4j service. The schema caps at 10K chars.
+  const parsed = validateBody(KnowledgeGraphBody, body);
+  if (!parsed.ok) return parsed.response;
+  body = parsed.data;
+  // The schema guarantees cypher is a non-empty string — no extra check needed.
 
   // FE-008 ROOT FIX layer 2: CYPHER WHITELIST.
   const validation = validateReadOnlyCypher(body.cypher);

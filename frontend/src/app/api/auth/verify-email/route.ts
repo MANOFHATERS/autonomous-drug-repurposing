@@ -1,6 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { badRequest, internalError, writeAuditLog } from "@/lib/api-helpers";
+import { badRequest, internalError } from "@/lib/api-helpers";
+// BE-029 ROOT FIX (Team Member 12): Zod-validated request body.
+import { validateBody, VerifyEmailBody } from "@/lib/zod-schemas";
+// BE-035 ROOT FIX (Team Member 12): per-IP rate limit on email verification.
+// The email verification endpoint mutates state (sets emailVerified=true)
+// and is reachable by unauthenticated callers. Although the JWT signature
+// is computationally infeasible to brute-force, every state-mutating
+// endpoint should be rate-limited as defense in depth (OWASP
+// recommendation). We reuse the existing per-IP rate-limit primitives
+// from the login flow — `checkIpRateLimit` + `recordIpAttempt`.
+import { checkIpRateLimit, recordIpAttempt } from "@/lib/auth/rate-limit";
 import jwt from "jsonwebtoken";
 
 /**
@@ -32,6 +42,29 @@ import jwt from "jsonwebtoken";
  *     separately after verification.
  */
 export async function POST(req: NextRequest) {
+  // BE-035 ROOT FIX (Team Member 12): per-IP rate limit BEFORE any work.
+  // Email verification mutates state (emailVerified=true) and is
+  // reachable by unauthenticated callers. The JWT signature is
+  // computationally infeasible to brute-force, but defense in depth
+  // requires every state-mutating endpoint to be rate-limited. We reuse
+  // the existing per-IP limiter from the login flow: same window
+  // (IP_WINDOW_MINUTES), same max attempts (IP_MAX_ATTEMPTS).
+  const ipLock = checkIpRateLimit(req);
+  if (ipLock.blocked) {
+    return NextResponse.json(
+      {
+        error: "rate_limited",
+        message: "Too many verification attempts. Please try again later.",
+        retryAfterSeconds: ipLock.retryAfterSeconds,
+      },
+      { status: 429, headers: { "Retry-After": String(ipLock.retryAfterSeconds) } }
+    );
+  }
+  // Record the attempt up-front so a flood of requests is capped
+  // regardless of whether each one succeeds or fails. (The login route
+  // uses the same pattern — FE-056.)
+  recordIpAttempt(req);
+
   let body: { token?: string };
   try {
     body = await req.json();
@@ -39,8 +72,12 @@ export async function POST(req: NextRequest) {
     return badRequest("Invalid JSON body");
   }
 
-  const token = (body.token || "").trim();
-  if (!token) return badRequest("token is required");
+  // BE-029 ROOT FIX: schema-validate the body. Rejects: missing token,
+  // non-string token, tokens shorter than 10 chars (clearly malformed)
+  // or longer than 8192 chars (DoS guard).
+  const parsed = validateBody(VerifyEmailBody, body);
+  if (!parsed.ok) return parsed.response;
+  const token = parsed.data.token;
 
   const secret = process.env.JWT_SECRET;
   if (!secret || secret.length < 32) {
@@ -102,22 +139,54 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, alreadyVerified: true });
     }
 
-    await db.user.update({
-      where: { id: user.id },
-      data: { emailVerified: true },
-    });
-
-    // FE-034: Verification is a security event — audit it as critical.
-    const audit = await writeAuditLog({
-      user: { userId: user.id, email: user.email, role: user.role },
-      action: "email_verified",
-      resource: `user:${user.id}`,
-      critical: true,
-    });
-    if (!audit.ok) {
-      // The email was verified, but the audit failed. The user CAN log
-      // in (emailVerified is true), but we log the audit failure.
-      console.error("[AUDIT-LOG-FAILURE] email_verified action could not be audited.");
+    // BE-037 ROOT FIX (Team Member 12): wrap the email update + audit log
+    // in a db.$transaction so they are ATOMIC. The previous code did two
+    // separate writes: first `db.user.update({ emailVerified: true })`,
+    // then `writeAuditLog({ critical: true })`. If the audit write
+    // failed, the code logged to stderr but returned 200 — the user
+    // could log in but the audit trail had a gap (FDA 21 CFR Part 11
+    // compliance issue for security events).
+    //
+    // Root fix: inline the audit log creation inside a Prisma
+    // transaction. If the audit row cannot be created, the transaction
+    // rolls back the emailVerified update — the user must re-verify.
+    // This is the proper trade-off for audit completeness: a brief
+    // user-facing error is preferable to a silent compliance gap.
+    try {
+      await db.$transaction(async (tx) => {
+        await tx.user.update({
+          where: { id: user.id },
+          data: { emailVerified: true },
+        });
+        await tx.auditLog.create({
+          data: {
+            userId: user.id,
+            actorName: user.email,
+            action: "email_verified",
+            resource: `user:${user.id}`,
+            // Note: AuditLog.organizationId is nullable and only set for
+            // org-scoped events. Email verification happens BEFORE the
+            // user has an active org session (they haven't logged in
+            // yet), so we leave it null here. The first login after
+            // verification will populate organizationId on subsequent
+            // audit entries.
+            metadata: JSON.stringify({
+              critical: true,
+              timestamp: new Date().toISOString(),
+            }),
+          } as any,
+        });
+      });
+    } catch (e: unknown) {
+      // Transaction failed — emailVerified was NOT updated (rollback).
+      // Return an error so the user knows to re-verify.
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[verify-email] atomic update+audit transaction failed:", msg);
+      return internalError(
+        "Email verification could not be completed — the audit log " +
+          "could not be written. Please try again; if the problem " +
+          "persists, request a new verification link."
+      );
     }
 
     return NextResponse.json({ ok: true, alreadyVerified: false });

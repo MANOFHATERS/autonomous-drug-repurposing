@@ -6,6 +6,8 @@ import {
   getRankedHypotheses,
   type RankedHypothesis,
 } from "@/lib/services/rl-ranker";
+// BE-029 ROOT FIX (Team Member 12): Zod-validated request body for /api/rl.
+import { validateBody, RlBody } from "@/lib/zod-schemas";
 // FE-069 ROOT FIX: per-user rate limiting. The CSV cache lives inside
 // rl-ranker.ts (the single source of truth for parsing); the rate limiter
 // lives here at the route boundary so a flood of requests is rejected
@@ -107,6 +109,14 @@ export async function POST(req: NextRequest) {
   } catch {
     body = {};
   }
+  // BE-029 ROOT FIX: schema-validate the body. The RlBody schema enforces
+  // types (no `body.drug` as object → .trim() throws), lengths (no
+  // 10MB drug name), and enum values for sort/sortDir. The previous
+  // ad-hoc validation only checked `body.drug || ""` which accepted ANY
+  // type and would throw on `.trim()` if body.drug was a number/object.
+  const parsed = validateBody(RlBody, body);
+  if (!parsed.ok) return parsed.response;
+  body = parsed.data;
   const drug = (body.drug || "").trim();
   const disease = (body.disease || "").trim();
 
@@ -520,8 +530,9 @@ async function persistRlCandidates(
     }
   }
 
-  // BE-014 ROOT FIX: persist all candidates in a SINGLE TRANSACTION.
-  // This is:
+  // BE-014 + BE-028 ROOT FIX (merged): persist all candidates in a SINGLE
+  // TRANSACTION using upsert (BE-028) and return a structured result so
+  // the caller can surface errors (BE-014). This is:
   //   - ATOMIC: either ALL candidates are persisted or NONE are (no partial
   //     state where half the candidates saved and the other half didn't).
   //     The previous findFirst+update/create loop was non-atomic — a
@@ -531,33 +542,53 @@ async function persistRlCandidates(
   //     The caller surfaces a 500 with a clear error message AND writes
   //     a critical audit log entry. The previous code's `catch { console.error }
   //     return` pattern gave users a false "predictions saved" signal.
+  //   - EFFICIENT (BE-028): the previous code did findFirst+update/create
+  //     PER candidate — 50 findFirst + 50 update/create = 100 DB
+  //     round-trips per request. At 60 req/min that's 6000 DB queries/min
+  //     just for RL persistence, exhausting the connection pool. The
+  //     BE-028 fix adds a `@@unique([projectId, drugName, diseaseName])`
+  //     composite constraint (see schema.prisma) and uses `upsert` via
+  //     the `projectId_drugName_diseaseName` compound key. We also
+  //     pre-fetch existing rows in ONE findMany (indexed by the composite
+  //     key) so we can decide `status` for the upsert `update` branch
+  //     without per-candidate findFirst. Net: 1 findMany + 1 transaction
+  //     (50 server-side upserts) = 2 round-trips, down from 100.
   //
-  // We use $transaction(cb) (interactive transaction) rather than
-  // $transaction([array]) because we need conditional logic per candidate
-  // (preserve "validated"/"rejected" status). $transaction([array]) only
-  // accepts a flat array of Prisma operations — no control flow. The
-  // callback form lets us run findFirst + update/create inside the
-  // transaction with full TypeScript control flow.
-  //
-  // NOTE: there is no DB unique constraint on (projectId, drugName,
-  // diseaseName), so we cannot use `upsert`. The findFirst+update/create
-  // pattern is the correct way to emulate upsert without a unique
-  // constraint. Inside a transaction, two parallel requests will serialize
-  // (one waits for the other), so the second request's findFirst will see
-  // the row the first request created — no duplicate inserts.
+  // FE-010 preservation: we do NOT downgrade a wet-lab "validated" or
+  // "rejected" hypothesis to "predicted". The pre-fetched existingMap
+  // carries the existing status; the upsert `update` branch uses it.
   const candidatesToPersist = candidates.slice(0, 50);
   try {
+    // BE-028: pre-fetch existing rows in ONE query (indexed by the
+    // composite unique key) so we can decide `status` for the upsert
+    // `update` branch without per-candidate findFirst.
+    const existingRows = await db.hypothesis.findMany({
+      where: {
+        projectId: project!.id,
+        OR: candidatesToPersist.map((c) => ({
+          drugName: c.drug,
+          diseaseName: c.disease,
+        })),
+      },
+      select: { id: true, drugName: true, diseaseName: true, status: true },
+    });
+    const existingMap = new Map(
+      existingRows.map((r) => [`${r.drugName}\u0000${r.diseaseName}`, r])
+    );
+
     const persistedCount = await db.$transaction(async (tx) => {
       let count = 0;
       for (const c of candidatesToPersist) {
-        const existing = await tx.hypothesis.findFirst({
-          where: {
-            projectId: project!.id,
-            drugName: c.drug,
-            diseaseName: c.disease,
-          },
-          select: { id: true, status: true },
-        });
+        const key = `${c.drug}\u0000${c.disease}`;
+        const existing = existingMap.get(key);
+        // FE-010: do NOT downgrade a wet-lab "validated" or "rejected"
+        // hypothesis to "predicted". Those are terminal states set by
+        // the hypothesis_validate route after wet-lab confirmation.
+        const nextStatus =
+          existing &&
+          (existing.status === "validated" || existing.status === "rejected")
+            ? existing.status
+            : "predicted";
         const rlData = {
           plausibilityScore: c.plausibilityScore ?? c.gnnScore ?? null,
           safetyScore: c.safetyScore ?? null,
@@ -574,33 +605,32 @@ async function persistRlCandidates(
           rlUpdatedAt: new Date(),
           rlPredicted: true,
         } as any;
-        if (existing) {
-          // FE-010: do NOT downgrade a wet-lab "validated" or "rejected"
-          // hypothesis to "predicted". Those are terminal states set by
-          // the hypothesis_validate route after wet-lab confirmation.
-          const nextStatus =
-            existing.status === "validated" || existing.status === "rejected"
-              ? existing.status
-              : "predicted";
-          await tx.hypothesis.update({
-            where: { id: existing.id },
-            data: { ...rlData, status: nextStatus },
-          });
-        } else {
-          await tx.hypothesis.create({
-            data: {
+        // BE-028: use upsert with the composite unique key
+        // (projectId_drugName_diseaseName) added by the BE-028 schema fix.
+        await tx.hypothesis.upsert({
+          where: {
+            projectId_drugName_diseaseName: {
               projectId: project!.id,
-              title: `${c.drug} for ${c.disease}`,
               drugName: c.drug,
               diseaseName: c.disease,
-              // FE-010: NEW RL-sourced hypotheses are "predicted", NOT "validated".
-              status: "predicted",
-              createdById: userId,
-              notes: `RL rank ${c.rank ?? "—"}, reward ${c.reward?.toFixed(4) ?? "—"}, policy_prob ${c.policyProb?.toFixed(4) ?? "—"}`,
-              ...rlData,
-            } as any,
-          });
-        }
+            },
+          },
+          create: {
+            projectId: project!.id,
+            title: `${c.drug} for ${c.disease}`,
+            drugName: c.drug,
+            diseaseName: c.disease,
+            // FE-010: NEW RL-sourced hypotheses are "predicted", NOT "validated".
+            status: "predicted",
+            createdById: userId,
+            notes: `RL rank ${c.rank ?? "—"}, reward ${c.reward?.toFixed(4) ?? "—"}, policy_prob ${c.policyProb?.toFixed(4) ?? "—"}`,
+            ...rlData,
+          },
+          update: {
+            ...rlData,
+            status: nextStatus,
+          },
+        });
         count++;
       }
       return count;

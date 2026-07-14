@@ -168,71 +168,16 @@ describe("FE-021: dataset-stats.ts no_data fallback", () => {
 });
 
 // ─── FE-022: rl-csv-cache.ts manual refresh ────────────────────────────────
-
-import {
-  parseRlCsvContent,
-  readRlCsvCached,
-  clearRlCsvCache,
-  getRlCsvCacheState,
-  __clearRlCsvCacheForTests,
-} from "../rl-csv-cache";
-
-describe("FE-022: rl-csv-cache.ts manual refresh", () => {
-  let tmpFile: string;
-
-  beforeEach(() => {
-    __clearRlCsvCacheForTests();
-    tmpFile = path.join(
-      fs.mkdtempSync(path.join(os.tmpdir(), "fe022-")),
-      "rl.csv"
-    );
-    const csv =
-      "drug,disease,gnn_score,safety_score,market_score,reward,rank,policy_prob,confidence,pathway_score,unmet_need_score,efficacy_score,adme_score,literature_support,is_known_positive\n" +
-      "aspirin,headache,0.9,0.8,0.7,0.5,1,0.3,0.6,0.4,0.5,0.6,0.5,1,0\n";
-    fs.writeFileSync(tmpFile, csv);
-  });
-
-  afterEach(() => {
-    __clearRlCsvCacheForTests();
-    fs.rmSync(path.dirname(tmpFile), { recursive: true, force: true });
-  });
-
-  it("clearRlCsvCache() evicts entries so next read re-parses from disk", async () => {
-    const r1 = await readRlCsvCached(tmpFile);
-    expect(r1).toHaveLength(1);
-    expect(getRlCsvCacheState()).toHaveLength(1);
-
-    clearRlCsvCache();
-    expect(getRlCsvCacheState()).toHaveLength(0);
-
-    // Re-read — cache is repopulated.
-    const r2 = await readRlCsvCached(tmpFile);
-    expect(r2).toHaveLength(1);
-    expect(getRlCsvCacheState()).toHaveLength(1);
-  });
-
-  it("clearRlCsvCache(path) evicts only that path", async () => {
-    await readRlCsvCached(tmpFile);
-    const tmpFile2 = path.join(path.dirname(tmpFile), "rl2.csv");
-    fs.writeFileSync(
-      tmpFile2,
-      "drug,disease,gnn_score,safety_score,market_score,reward,rank,policy_prob,confidence,pathway_score,unmet_need_score,efficacy_score,adme_score,literature_support,is_known_positive\nibuprofen,pain,0.8,0.7,0.6,0.4,1,0.2,0.5,0.3,0.4,0.5,0.4,0,0\n"
-    );
-    await readRlCsvCached(tmpFile2);
-    expect(getRlCsvCacheState()).toHaveLength(2);
-
-    clearRlCsvCache(tmpFile);
-    expect(getRlCsvCacheState()).toHaveLength(1);
-    expect(getRlCsvCacheState()[0].path).toBe(tmpFile2);
-  });
-
-  it("parseRlCsvContent computes overallScore as 0.4*gnn + 0.3*safety + 0.3*market", () => {
-    const csv =
-      "drug,disease,gnn_score,safety_score,market_score\naspirin,headache,1.0,1.0,1.0\n";
-    const [c] = parseRlCsvContent(csv);
-    expect(c.overallScore).toBeCloseTo(1.0, 5);
-  });
-});
+//
+// BE-027 ROOT FIX (Team Member 12): this test block was removed because
+// it tested rl-csv-cache.ts — a DUPLICATE cache module that NO production
+// route actually read from. rl-csv-cache.ts has been DELETED; the single
+// source of truth is now rl-ranker.ts (whose `clearRlRankerCsvCache` +
+// `getRlRankerCsvCacheState` are exercised by the new be-021-to-040 test
+// suite). The dashboard's "Refresh" button now calls /api/rl/refresh
+// which calls `clearRlRankerCsvCache` from rl-ranker.ts — the cache that
+// /api/rl actually uses. Tests for that flow live in
+// frontend/src/lib/services/__tests__/be-021-to-040-team12.test.ts.
 
 // ─── FE-023: pubmed.ts abstract truncation ─────────────────────────────────
 
