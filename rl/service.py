@@ -149,91 +149,93 @@ def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Opti
             return None
 
     # P4-013 ROOT FIX: use streaming iterator instead of list(reader).
-    # The previous code loaded ALL rows into memory (~500MB for 1M rows),
-    # then iterated. The break only stopped PROCESSING — the full file was
-    # already in memory. This fix uses a streaming for-loop and breaks
-    # as soon as we have enough candidates, preventing OOM on production.
+    # The previous code loaded ALL rows into memory (~500MB for 1M rows)
+    # with ``rows = list(reader)``. This fix uses a streaming for-loop
+    # inside the with-block so the file handle stays open during iteration.
+    # NOTE: we cannot break early because P4-014 requires sorting ALL
+    # matching candidates by rank before applying the limit. Breaking early
+    # would return the first N matches in CSV order, not the top-N by rank.
+    # The out list grows with each matching candidate (not all rows — only
+    # those passing the drug/disease filters).
     with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
         reader = csv_mod.DictReader(f)
-        rows = enumerate(reader)  # lazy iterator, NOT list
+        for i, row in enumerate(reader):
+            # Normalize keys to lowercase.
+            r = {k.lower(): v for k, v in row.items()}
+            d = r.get("drug", "")
+            dis = r.get("disease", "")
+            if not d or not dis:
+                continue
+            if drug and drug.lower() not in d.lower():
+                continue
+            if disease and disease.lower() not in dis.lower():
+                continue
 
-    for i, row in rows:
-        # Normalize keys to lowercase.
-        r = {k.lower(): v for k, v in row.items()}
-        d = r.get("drug", "")
-        dis = r.get("disease", "")
-        if not d or not dis:
-            continue
-        if drug and drug.lower() not in d.lower():
-            continue
-        if disease and disease.lower() not in dis.lower():
-            continue
+            gnn = _num(r.get("gnn_score"))
+            safety = _num(r.get("safety_score"))
+            market = _num(r.get("market_score"))
+            reward = _num(r.get("reward"))
+            rank = _num(r.get("rank")) or (i + 1)
+            policy_prob = _num(r.get("policy_prob"))
 
-        gnn = _num(r.get("gnn_score"))
-        safety = _num(r.get("safety_score"))
-        market = _num(r.get("market_score"))
-        reward = _num(r.get("reward"))
-        rank = _num(r.get("rank")) or (i + 1)
-        policy_prob = _num(r.get("policy_prob"))
+            # P4-004 ROOT FIX: compute overall using the SAME weights as the
+            # agent's reward function. If the .meta.json sidecar is available,
+            # read the weights from there. Otherwise fall back to the agent's
+            # default weights (NOT the old hardcoded 0.4/0.3/0.3).
+            overall: Optional[float] = None
+            if _reward_weights:
+                # Use weights from sidecar — these are the EXACT weights the
+                # agent trained with
+                signals = []
+                score_keys = {
+                    "gnn": gnn, "safety": safety, "market": market,
+                    "confidence": _num(r.get("confidence")),
+                    "pathway": _num(r.get("pathway_score")),
+                    "patent": _num(r.get("patent_score")),
+                    "rare_disease": _num(r.get("rare_disease_score")),
+                    "unmet_need": _num(r.get("unmet_need_score")),
+                    "efficacy": _num(r.get("efficacy_score")),
+                    "adme": _num(r.get("adme_score")),
+                }
+                for key, score in score_keys.items():
+                    w = _reward_weights.get(key)
+                    if score is not None and w is not None and w > 0:
+                        signals.append((score, w))
+                if signals:
+                    total_w = sum(w for _, w in signals)
+                    overall = sum(v * w for v, w in signals) / total_w if total_w > 0 else None
+            else:
+                # Fallback: use the agent's DEFAULT reward weights (same as
+                # RewardConfig defaults in rl_drug_ranker.py)
+                signals = []
+                if gnn is not None: signals.append((gnn, 0.04))
+                if safety is not None: signals.append((safety, 0.25))
+                if market is not None: signals.append((market, 0.12))
+                if signals:
+                    total_w = sum(w for _, w in signals)
+                    overall = sum(v * w for v, w in signals) / total_w
+            if overall is None and policy_prob is not None:
+                overall = policy_prob
 
-        # P4-004 ROOT FIX: compute overall using the SAME weights as the
-        # agent's reward function. If the .meta.json sidecar is available,
-        # read the weights from there. Otherwise fall back to the agent's
-        # default weights (NOT the old hardcoded 0.4/0.3/0.3).
-        overall: Optional[float] = None
-        if _reward_weights:
-            # Use weights from sidecar — these are the EXACT weights the
-            # agent trained with
-            signals = []
-            score_keys = {
-                "gnn": gnn, "safety": safety, "market": market,
+            out.append({
+                "drug": d,
+                "disease": dis,
+                "rank": int(rank) if rank else (i + 1),
+                "reward": reward,
+                "policyProb": policy_prob,
+                "gnnScore": gnn,
+                "safetyScore": safety,
+                "marketScore": market,
+                "plausibilityScore": gnn,
+                "overallScore": overall,
                 "confidence": _num(r.get("confidence")),
-                "pathway": _num(r.get("pathway_score")),
-                "patent": _num(r.get("patent_score")),
-                "rare_disease": _num(r.get("rare_disease_score")),
-                "unmet_need": _num(r.get("unmet_need_score")),
-                "efficacy": _num(r.get("efficacy_score")),
-                "adme": _num(r.get("adme_score")),
-            }
-            for key, score in score_keys.items():
-                w = _reward_weights.get(key)
-                if score is not None and w is not None and w > 0:
-                    signals.append((score, w))
-            if signals:
-                total_w = sum(w for _, w in signals)
-                overall = sum(v * w for v, w in signals) / total_w if total_w > 0 else None
-        else:
-            # Fallback: use the agent's DEFAULT reward weights (same as
-            # RewardConfig defaults in rl_drug_ranker.py)
-            signals = []
-            if gnn is not None: signals.append((gnn, 0.04))
-            if safety is not None: signals.append((safety, 0.25))
-            if market is not None: signals.append((market, 0.12))
-            if signals:
-                total_w = sum(w for _, w in signals)
-                overall = sum(v * w for v, w in signals) / total_w
-        if overall is None and policy_prob is not None:
-            overall = policy_prob
-
-        out.append({
-            "drug": d,
-            "disease": dis,
-            "rank": int(rank) if rank else (i + 1),
-            "reward": reward,
-            "policyProb": policy_prob,
-            "gnnScore": gnn,
-            "safetyScore": safety,
-            "marketScore": market,
-            "plausibilityScore": gnn,
-            "overallScore": overall,
-            "confidence": _num(r.get("confidence")),
-            "pathwayScore": _num(r.get("pathway_score")),
-            "unmetNeedScore": _num(r.get("unmet_need_score")),
-            "efficacyScore": _num(r.get("efficacy_score")),
-            "admeScore": _num(r.get("adme_score")),
-            "literatureSupport": _num(r.get("literature_support")),
-            "isKnownPositive": str(r.get("is_known_positive", "")).lower() in ("1", "true", "yes"),
-        })
+                "pathwayScore": _num(r.get("pathway_score")),
+                "unmetNeedScore": _num(r.get("unmet_need_score")),
+                "efficacyScore": _num(r.get("efficacy_score")),
+                "admeScore": _num(r.get("adme_score")),
+                "literatureSupport": _num(r.get("literature_support")),
+                "isKnownPositive": str(r.get("is_known_positive", "")).lower() in ("1", "true", "yes"),
+            })
 
     # P4-014 ROOT FIX: sort ALL candidates by rank, THEN apply limit.
     # The previous code broke after ``len(out) >= limit`` and THEN sorted,

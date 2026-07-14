@@ -1733,6 +1733,108 @@ class GraphTransformerTrainer:
             f"Checkpoint loaded from {path} (best_epoch={self.best_epoch})"
         )
 
+    # P4-009 ROOT FIX: load_validated_for_retraining as a METHOD of the
+    # GraphTransformerTrainer class. The previous code had this as a
+    # standalone function that callers had to invoke manually — the data
+    # flywheel was broken because nothing automatically called it.
+    # Adding it as a class method lets the bridge/training pipeline call
+    # trainer.load_validated_for_retraining() as part of the standard
+    # training workflow, closing the Phase 3 writeback loop automatically.
+    def load_validated_for_retraining(
+        self,
+        checkpoint_path: str,
+        retrain_trigger_path: Optional[str] = None,
+        output_checkpoint_path: Optional[str] = None,
+        fine_tune_epochs: int = 10,
+        learning_rate: float = 1e-4,
+    ) -> Dict[str, Any]:
+        """P4-009: Load validated hypotheses from Phase 3 retrain trigger.
+
+        Reads ``graph_transformer/retrain_triggered.json`` (written by
+        ``writeback_to_phase3`` in phase4/writeback.py) and initiates
+        fine-tuning of the GT model with the validated pairs. This closes
+        the data flywheel loop: pharma validations → writeback → retrain
+        trigger → GT model update.
+
+        Positive outcomes ("validated_positive") are added as positive
+        labels. Negative outcomes ("validated_negative", "validated_toxic")
+        are added as negative labels.
+
+        Args:
+            checkpoint_path: Path to the trained GT checkpoint (.pt file).
+            retrain_trigger_path: Path to retrain_triggered.json. If None,
+                defaults to <repo>/graph_transformer/retrain_triggered.json.
+            output_checkpoint_path: Where to save the fine-tuned model.
+            fine_tune_epochs: Number of fine-tune epochs.
+            learning_rate: Fine-tune learning rate.
+
+        Returns:
+            Dict with trigger_entries_read, positive_pairs, negative_pairs,
+            and all keys from retrain_on_validated.
+        """
+        import json as _json
+        import os as _os
+        from pathlib import Path as _Path
+        import csv as _csv
+        import tempfile as _tempfile
+
+        if retrain_trigger_path is None:
+            _repo_root = _Path(__file__).resolve().parents[2]
+            retrain_trigger_path = str(_repo_root / "graph_transformer" / "retrain_triggered.json")
+
+        positive_pairs: List[Tuple[str, str]] = []
+        negative_pairs: List[Tuple[str, str]] = []
+        trigger_entries_read = 0
+
+        if _os.path.exists(retrain_trigger_path):
+            try:
+                with open(retrain_trigger_path, "r", encoding="utf-8") as f:
+                    entries = _json.load(f)
+                if isinstance(entries, list):
+                    trigger_entries_read = len(entries)
+                    for entry in entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        drug = (entry.get("drug") or "").strip()
+                        disease = (entry.get("disease") or "").strip()
+                        outcome = (entry.get("outcome") or "").strip().lower()
+                        if not drug or not disease:
+                            continue
+                        if outcome == "validated_positive":
+                            positive_pairs.append((drug, disease))
+                        elif outcome in ("validated_negative", "validated_toxic"):
+                            negative_pairs.append((drug, disease))
+            except Exception as exc:
+                logger.warning("P4-009: failed to read retrain trigger JSON (%s): %s", retrain_trigger_path, exc)
+
+        # Write a temporary CSV in the format expected by retrain_on_validated.
+        tmp_csv = _tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, encoding="utf-8")
+        try:
+            writer = _csv.DictWriter(tmp_csv, fieldnames=["drug", "disease", "validated"])
+            writer.writeheader()
+            for drug, disease in positive_pairs:
+                writer.writerow({"drug": drug, "disease": disease, "validated": "true"})
+            for drug, disease in negative_pairs:
+                writer.writerow({"drug": drug, "disease": disease, "validated": "false"})
+            tmp_csv.close()
+
+            result = retrain_on_validated(
+                checkpoint_path=checkpoint_path,
+                validated_csv_path=tmp_csv.name,
+                output_checkpoint_path=output_checkpoint_path,
+                fine_tune_epochs=fine_tune_epochs,
+                learning_rate=learning_rate,
+            )
+            result["trigger_entries_read"] = trigger_entries_read
+            result["positive_pairs"] = len(positive_pairs)
+            result["negative_pairs"] = len(negative_pairs)
+            return result
+        finally:
+            try:
+                _os.unlink(tmp_csv.name)
+            except Exception:
+                pass
+
 
 # ============================================================================
 # Data Flywheel Writeback (Step 6, RT-010 v105)
