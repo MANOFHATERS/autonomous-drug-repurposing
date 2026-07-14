@@ -97,16 +97,22 @@ HTTP_USER_AGENT = "DrugRepurposingPipeline/1.0 (contact=team-cosmic@venturelab.e
 
 # 10 well-known FDA-approved drugs for sample mode (InChIKeys + ChEMBL IDs)
 SAMPLE_CHEMBL_IDS = [
-    "CHEMBL112",    # Aspirin
-    "CHEMBL21",     # Acetaminophen
-    "CHEMBL705",    # Ibuprofen
-    "CHEMBL521",    # Caffeine
-    "CHEMBL503",    # Diazepam
-    "CHEMBL2114647",  # Warfarin
-    "CHEMBL546",    # Metformin
-    "CHEMBL1085",   # Atorvastatin
-    "CHEMBL2318659",  # Captopril
-    "CHEMBL586447",   # Lisinopril
+    # v108 FORENSIC ROOT FIX (ISSUE-P1-003): every ChEMBL ID below was WRONG.
+    # The IDs were a jumbled mess: CHEMBL112 is Acetaminophen (not Aspirin),
+    # CHEMBL521 is Ibuprofen (not Caffeine), CHEMBL503 is Dihydroergotamine
+    # (not Diazepam), CHEMBL2114647 does not exist, CHEMBL546 is Ethinylestradiol
+    # (not Metformin), CHEMBL1085 is Levonorgestrel (not Atorvastatin).
+    # Verified against ChEMBL API 2026-07-14.
+    "CHEMBL25",     # Aspirin
+    "CHEMBL112",    # Acetaminophen
+    "CHEMBL521",    # Ibuprofen
+    "CHEMBL113",    # Caffeine
+    "CHEMBL12",     # Diazepam
+    "CHEMBL1464",   # Warfarin
+    "CHEMBL1431",   # Metformin
+    "CHEMBL1487",   # Atorvastatin
+    "CHEMBL1560",   # Captopril
+    "CHEMBL419213",   # Lisinopril
 ]
 
 # 8 well-known human proteins for sample mode (UniProt accessions)
