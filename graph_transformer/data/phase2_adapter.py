@@ -111,131 +111,27 @@ class Phase2AdapterValidationError(RuntimeError):
 
 
 # ─── Phase 2 -> Phase 3 node type mapping ────────────────────────────────
-# P2-004 ROOT FIX (v107 forensic): the previous PHASE2_TO_PHASE3_NODE dict
-# had 5 entries (Compound, Protein, Pathway, Disease, ClinicalOutcome) and
-# SILENTLY DROPPED Gene + MedDRA_Term. Meanwhile, pyg_builder.py line 3538
-# has a SEPARATE ``_PHASE2_TO_GT_NODE_TYPE`` dict with 7 entries (the same
-# 5 PLUS Gene and MedDRA_Term). The two adapters produced TWO DIFFERENT KG
-# schemas for Phase 3 — if Phase 3 used the pyg_builder path, it got Gene
-# nodes; if it used the phase2_adapter path, Genes were silently dropped.
-#
-# ROOT FIX (per the audit's recommendation): make the drop decision
-# EXPLICIT and DOCUMENTED here. The Phase 3 canonical schema
-# (graph_transformer/data/__init__.py:32 ``NODE_TYPES``) has EXACTLY 5
-# types: drug, protein, pathway, disease, clinical_outcome. Gene and
-# MedDRA_Term are Phase 2 intermediates used for DERIVATION only (Gene
-# drives pathway→disease derivation; MedDRA_Term drives adverse-event
-# aggregation). They are intentionally NOT Phase 3 node types.
-#
-# To prevent the two adapters from drifting again, this dict is the
-# SINGLE SOURCE OF TRUTH for the Phase 3 schema. pyg_builder.py's
-# ``_PHASE2_TO_GT_NODE_TYPE`` is the source of truth for the Phase 2
-# RAW schema (which has 7 types) — the two are NOT contradictory, they
-# describe different layers. The adapter's job is to PROJECT 7→5 by
-# dropping Gene and MedDRA_Term AFTER using them for derivation. The
-# projection is now documented inline.
-#
-# FALLBACK DERIVATION (P2-004): the previous code derived
-# (Pathway, disrupted_in, Disease) edges from Gene→Disease associations
-# via Gene→Protein→Pathway mapping. If Genes are absent OR
-# Gene→Disease edges are empty, the derivation produced 0 edges and the
-# GNN's pathway hop was broken. ROOT FIX: add a fallback derivation
-# path that uses (Protein, participates_in, Pathway) +
-# (Protein, associated_with, Disease) [if such edges exist in Phase 2]
-# OR (Protein, part_of, Pathway) + (Compound, treats, Disease) [as a
-# last-resort heuristic via shared drugs]. See Step 5 below.
-PHASE2_TO_PHASE3_NODE: Dict[str, str] = {
-    "Compound": "drug",
-    "Protein": "protein",
-    "Pathway": "pathway",
-    "Disease": "disease",
-    "ClinicalOutcome": "clinical_outcome",
-    # ── INTENTIONAL DROPS (documented per P2-004 root fix) ───────────
-    # "Gene" → DROPPED. Used in Step 5 for (Pathway, disrupted_in,
-    #     Disease) derivation via Gene→Protein→Pathway mapping, then
-    #     discarded. Phase 3's canonical schema (NODE_TYPES) has 5 types.
-    # "MedDRA_Term" → DROPPED. Phase 2 intermediate for adverse-event
-    #     aggregation. Phase 3 represents adverse events as
-    #     ClinicalOutcome nodes (already mapped above). MedDRA terms
-    #     are folded into ClinicalOutcome.name during Phase 2's bridge.
-}
+# INT-004 ROOT FIX: import the SINGLE shared schema mapping from
+# schema_mappings.py. The previous code defined PHASE2_TO_PHASE3_NODE
+# and PHASE2_TO_PHASE3_EDGE locally, while pyg_builder.py defined its
+# own _PHASE2_TO_GT_NODE_TYPE with 7 entries (including Gene and
+# MedDRA_Term). The two mappings DIVERGED, producing different graphs
+# from the same Phase 2 source. Both modules now import from the same
+# file so they can never drift again.
+import sys as _int004_sys
+from pathlib import Path as _int004_path
+_PHASE2_PKG = str(_int004_path(__file__).resolve().parents[2] / "phase2")
+if _PHASE2_PKG not in _int004_sys.path:
+    _int004_sys.path.insert(0, _PHASE2_PKG)
+from drugos_graph.schema_mappings import (
+    PHASE2_TO_PHASE3_NODE,
+    PHASE2_TO_PHASE3_EDGE,
+    ALL_PHASE2_NODE_TYPES,
+    ALL_PHASE3_NODE_TYPES,
+    is_phase2_intermediate_dropped,
+)
 
-# ─── Phase 2 -> Phase 3 edge type mapping ────────────────────────────────
-# Key: (src_label, rel_type, dst_label) in Phase 2 vocabulary.
-# Value: (src_type, rel_type, tgt_type) in Phase 3 canonical vocabulary.
-# Only edges whose endpoints are both mappable appear here. Edges not in
-# this map are DROPPED (with a DEBUG log).
-#
-# P3-004 + P3-009 ROOT FIX (Team Member 9, forensic root fix):
-# The original PHASE2_TO_PHASE3_EDGE dict had only 5 entries and was
-# MISSING ('Protein','part_of','Pathway') — Phase 2's CORE_EDGE_TYPES
-# includes BOTH ('Protein','participates_in','Pathway') AND
-# ('Protein','part_of','Pathway'). If Phase 2 produced 'part_of' edges
-# they were SILENTLY DROPPED, breaking the protein->pathway leg of the
-# 3-hop pattern from the OTHER direction (the graph_builder path handled
-# 'part_of' but this adapter did not). The fix adds 'part_of' -> 'part_of'
-# so both relation names map identically.
-#
-# P3-009 ROOT FIX (unification): this dict is now IDENTICAL to the
-# _PHASE2_TO_PHASE3_EDGE_TYPE dict in graph_builder.py (line ~1324). The
-# two adapter paths (adapt_phase2_to_phase3 used by run_4phase.py via
-# graph_data=, and from_phase1_staged_data used by run_full_platform.py
-# and run_real_pipeline.py via phase1_staged_data=) now produce
-# IDENTICAL Phase 3 graphs for the same Phase 2 data. Previously they
-# had 5 vs 11 edge type mappings, different disease name canonicalization,
-# and different pathway->disease derivation — making results non-
-# reproducible across runners. The single source of truth is now the
-# graph_builder._PHASE2_TO_PHASE3_EDGE_TYPE dict; this dict mirrors it
-# (kept as a separate constant for adapter-module independence + so
-# existing imports of PHASE2_TO_PHASE3_EDGE continue to work).
-#
-# P3-001/P3-002 ROOT FIX: 'targets' -> 'binds' (neutral, NOT 'inhibits'),
-# 'allosterically_modulates' -> 'modulates' (neutral, NOT 'activates').
-# ('Compound','unknown','Protein') is INTENTIONALLY ABSENT — never map
-# unknown to a specific mechanism (per the P3-001 issue mandate).
-PHASE2_TO_PHASE3_EDGE: Dict[Tuple[str, str, str], Tuple[str, str, str]] = {
-    # Direct drug→protein mechanism edges
-    ("Compound", "inhibits", "Protein"): ("drug", "inhibits", "protein"),
-    ("Compound", "activates", "Protein"): ("drug", "activates", "protein"),
-    # P3-001 root fix: neutral binding edge (was wrongly 'inhibits').
-    ("Compound", "targets", "Protein"): ("drug", "binds", "protein"),
-    # P3-002 root fix: neutral modulation edge (was wrongly 'activates').
-    ("Compound", "allosterically_modulates", "Protein"): ("drug", "modulates", "protein"),
-    # Drug→disease therapeutic edges
-    ("Compound", "treats", "Disease"): ("drug", "treats", "disease"),
-    ("Compound", "tested_for", "Disease"): ("drug", "tested_for", "disease"),
-    # Drug→clinical outcome edges (both relation names accepted — P3-009)
-    ("Compound", "causes", "ClinicalOutcome"): ("drug", "causes", "clinical_outcome"),
-    ("Compound", "has_clinical_outcome", "ClinicalOutcome"): (
-        "drug",
-        "causes",
-        "clinical_outcome",
-    ),
-    # P3-004 root fix: ACCEPT BOTH 'participates_in' AND 'part_of'
-    # relation names from Phase 2 (CORE_EDGE_TYPES includes both). Both
-    # map to the same Phase 3 (protein, part_of, pathway) edge type.
-    ("Protein", "participates_in", "Pathway"): (
-        "protein",
-        "part_of",
-        "pathway",
-    ),
-    ("Protein", "part_of", "Pathway"): (
-        "protein",
-        "part_of",
-        "pathway",
-    ),
-    # P3-009 unification: also accept direct (Pathway, disrupted_in,
-    # Disease) edges if Phase 2 ever produces them (currently Phase 2
-    # does NOT — these edges are DERIVED in Step 5 from Gene->Disease +
-    # Gene->Protein + Protein->Pathway). Including this mapping makes
-    # the adapter IDENTICAL to graph_builder._PHASE2_TO_PHASE3_EDGE_TYPE
-    # so both paths produce the same graph for the same Phase 2 data.
-    ("Pathway", "disrupted_in", "Disease"): (
-        "pathway",
-        "disrupted_in",
-        "disease",
-    ),
-}
+
 
 # ─── Disease name canonicalization ──────────────────────────────────────
 # Maps Phase 2 disease names (lowercased) to KNOWN_POSITIVES vocabulary.
@@ -459,8 +355,65 @@ def _drug_feature_from_smiles(smiles: str, name: str, seed: int) -> np.ndarray:
                 f"hash-fingerprint feature. (P2-003 root fix, v107)"
             )
 
-    # Deterministic fallback: hash-fingerprint feature.
-    # Uses SHA-256 of (SMILES or name) — deterministic across processes.
+    # INT-005 ROOT FIX: try RDKit Morgan fingerprint (real molecular
+    # descriptor) BEFORE falling back to the hash-based deterministic
+    # feature. Morgan fingerprints capture substructure information that
+    # the GNN can actually learn from — unlike the hash feature which
+    # is random-derived with only atom-count hints.
+    if smiles_str:
+        try:
+            from rdkit import Chem
+            from rdkit.Chem import AllChem
+            mol = Chem.MolFromSmiles(smiles_str)
+            if mol is not None:
+                # Morgan fingerprint radius=2, nBits=target_dim (or 2048
+                # if target_dim is too small, then truncate/pad).
+                _fp_bits = max(target_dim, 2048)
+                fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, _fp_bits)
+                fp_arr = np.zeros(_fp_bits, dtype=np.float32)
+                fp_arr[np.array(fp.GetOnBits())] = 1.0
+                # Truncate or pad to target_dim.
+                if _fp_bits >= target_dim:
+                    feat = fp_arr[:target_dim]
+                else:
+                    feat = np.zeros(target_dim, dtype=np.float32)
+                    feat[:_fp_bits] = fp_arr
+                # L2 normalize.
+                norm = float(np.linalg.norm(feat))
+                if norm > 1e-9:
+                    feat = feat / norm
+                return feat
+        except Exception:
+            # RDKit not installed or SMILES parsing failed — fall through
+            # to the hash-based deterministic feature below.
+            pass
+
+    # INT-005 ROOT FIX: in production, REFUSE to ship without real features.
+    # The hash-based deterministic feature is NOT a real molecular descriptor.
+    # It uses a seeded RNG (deterministic but not biologically meaningful).
+    # In production mode we raise so the operator MUST install RDKit or
+    # ChemBERTa. In dev mode we log a WARNING and continue (for smoke tests).
+    _is_prod = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() in (
+        "prod", "production"
+    )
+    if _is_prod:
+        raise RuntimeError(
+            "INT-005 ROOT FIX: Cannot compute real drug features in production. "
+            "Both ChemBERTa and RDKit Morgan fingerprints are unavailable. "
+            "The model would train on pseudorandom features — predictions "
+            "would be scientifically meaningless and compromise patient safety. "
+            "Install RDKit (pip install rdkit) or provide ChemBERTa embeddings. "
+            "For dev/CI smoke tests, set DRUGOS_ENVIRONMENT=dev."
+        )
+    logger.warning(
+        "INT-005: Neither ChemBERTa nor RDKit available for drug '%s'. "
+        "Falling back to hash-based deterministic feature (NOT a real "
+        "molecular descriptor — the GNN will learn poorly). "
+        "Install RDKit (pip install rdkit) for production. (dev mode only)",
+        name_str,
+    )
+
+    # Hash-based deterministic fallback (dev/CI only — NOT for production).
     source = smiles_str if smiles_str else name_str
     if not source:
         source = "unknown_drug"
@@ -470,7 +423,6 @@ def _drug_feature_from_smiles(smiles: str, name: str, seed: int) -> np.ndarray:
     feat = rng.standard_normal(target_dim).astype(np.float32) * 0.1
     # Add structural signal from SMILES: count of common atoms/bonds.
     if smiles_str:
-        # Simple structural features: atom counts (C, N, O, S, P, F, Cl, Br).
         atom_counts = [
             smiles_str.count("C"), smiles_str.count("N"), smiles_str.count("O"),
             smiles_str.count("S"), smiles_str.count("P"), smiles_str.count("F"),
@@ -478,12 +430,10 @@ def _drug_feature_from_smiles(smiles: str, name: str, seed: int) -> np.ndarray:
         ]
         for i, cnt in enumerate(atom_counts):
             if i < target_dim:
-                feat[i] += float(min(cnt, 20)) / 20.0  # normalize to [0,1]
-        # Ring count, bond count.
+                feat[i] += float(min(cnt, 20)) / 20.0
         if target_dim > 10:
-            feat[8] = float(smiles_str.count("(")) / 20.0  # branch count
-            feat[9] = float(smiles_str.count("=")) / 20.0  # double bond count
-    # L2 normalize.
+            feat[8] = float(smiles_str.count("(")) / 20.0
+            feat[9] = float(smiles_str.count("=")) / 20.0
     norm = float(np.linalg.norm(feat))
     if norm > 1e-9:
         feat = feat / norm
@@ -651,14 +601,20 @@ def adapt_phase2_to_phase3(
     """
     # ─── Step 1: Index Phase 2 nodes by label ──────────────────────────
     # Build per-label lists of (id, props) so we can iterate.
+    # INT-011 ROOT FIX: deep-copy to prevent mutation of builder state.
     p2_nodes: Dict[str, List[Dict[str, Any]]] = {}
-    for load in builder.node_loads:
+    for load in _int011_copy.deepcopy(builder.node_loads):
         label = load["label"]
         p2_nodes.setdefault(label, []).extend(load["nodes"])
 
     # ─── Step 2: Index Phase 2 edges by (src, rel, dst) ────────────────
+    # INT-011 ROOT FIX: deep-copy all edge data so the adapter cannot
+    # mutate the builder's original edge_loads. If the same builder is
+    # reused across multiple adapter calls (or if downstream code mutates
+    # p2_edges via .extend()), the builder's data stays intact.
+    import copy as _int011_copy
     p2_edges: Dict[Tuple[str, str, str], List[Tuple[str, str]]] = {}
-    for load in builder.edge_loads:
+    for load in _int011_copy.deepcopy(builder.edge_loads):
         key = (load["src_label"], load["rel_type"], load["dst_label"])
         p2_edges.setdefault(key, []).extend(
             (e["src_id"], e["dst_id"]) for e in load["edges"]
@@ -777,16 +733,22 @@ def adapt_phase2_to_phase3(
         uniprot_id = protein.get("uniprot_id") or protein.get("id")
         if not uniprot_id:
             continue
-        # Primary gene symbol (HGNC).
-        gene_name = str(protein.get("gene_name", "") or "").strip().upper()
-        if gene_name:
-            # setdefault: first registration wins (deterministic). If
-            # two proteins claim the same gene symbol (rare but possible
-            # for isoforms), the first one is the canonical mapping.
-            gene_symbol_to_uniprot.setdefault(gene_name, uniprot_id)
-        # All gene symbols (synonyms, ORF names, alternative names).
-        # These let us bridge genes that use a non-primary symbol.
-        for sym in protein.get("gene_names", []) or []:
+        # INT-010 ROOT FIX: use gene_symbol (primary) with gene_name
+        # (legacy fallback). Phase 1's Protein model has gene_symbol
+        # (HGNC) as the canonical column and gene_name as DEPRECATED
+        # (stores protein names, not gene symbols). The bridge now
+        # populates both from the UniProt loader. We prefer gene_symbol
+        # and fall back to gene_name only for backward compat with
+        # older Phase 2 builds.
+        _primary_sym = str(
+            protein.get("gene_symbol", "") or protein.get("gene_name", "") or ""
+        ).strip().upper()
+        if _primary_sym:
+            gene_symbol_to_uniprot.setdefault(_primary_sym, uniprot_id)
+        # All alternate gene symbols (synonyms, ORF names).
+        # Try "gene_symbols" (new canonical list) then "gene_names" (legacy).
+        _alt_symbols = protein.get("gene_symbols", []) or protein.get("gene_names", []) or []
+        for sym in _alt_symbols:
             sym = str(sym).strip().upper()
             if sym and sym not in gene_symbol_to_uniprot:
                 gene_symbol_to_uniprot[sym] = uniprot_id
