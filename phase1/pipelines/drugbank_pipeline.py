@@ -1228,11 +1228,32 @@ class DrugBankPipeline(BasePipeline):
 
         # ID5 / LIN5: record SHA for audit trail.
         self._sha256_raw = actual_sha
+        # P1-055 ROOT FIX (v108): set source_version from the DrugBank XML.
+        # DrugBank XML files embed the version in the <drugbank> root
+        # element's "version" attribute. We extract it so the audit trail
+        # records the exact DrugBank release (e.g. "DrugBank_5.1.10").
+        # If extraction fails, fall back to a SHA-based version so the
+        # audit trail is never None.
+        try:
+            import lxml.etree as _ET
+            # Only read the first 4KB to find the root element's version
+            # attribute — avoid parsing the entire (potentially 2GB) XML.
+            with open(xml_path, "rb") as _fh:
+                _head = _fh.read(4096)
+            # Find version="X.Y.Z" in the first 4KB
+            _ver_match = re.search(r'version="([^"]+)"', _head.decode("utf-8", errors="ignore"))
+            if _ver_match:
+                self.source_version = f"DrugBank_{_ver_match.group(1)}"
+            else:
+                self.source_version = f"DrugBank_xml_sha_{actual_sha[:12]}"
+        except Exception:  # noqa: BLE001 -- best-effort version extraction
+            self.source_version = f"DrugBank_xml_sha_{actual_sha[:12]}"
         logger.info(
-            "[%s] DrugBank XML verified: %s (SHA-256: %s...)",
+            "[%s] DrugBank XML verified: %s (SHA-256: %s..., version: %s)",
             self.source_name,
             _log_path(xml_path),
             actual_sha[:16],
+            self.source_version,
         )
         return xml_path
 
@@ -1287,6 +1308,15 @@ class DrugBankPipeline(BasePipeline):
         self._metrics["sample_drug_count"] = len(embedded_drugbank_drugs())
         self._metrics["sample_interaction_count"] = len(embedded_drugbank_interactions())
         self._metrics["sample_indication_count"] = len(embedded_drugbank_indications())
+
+        # P1-055 ROOT FIX (v108): set source_version for the audit trail.
+        # The previous code did NOT set self.source_version in any of the
+        # 3 download paths (sample, open-data, real XML). The audit trail
+        # had source_version=None for every DrugBank run, violating FDA
+        # 21 CFR Part 11 version traceability. ROOT FIX: set a meaningful
+        # version string in each path so the audit trail can answer
+        # "which DrugBank version produced this KG?".
+        self.source_version = "DrugBank_5.1.10_embedded_sample"
 
         logger.info(
             "[%s] Embedded DrugBank samples written: %s (%d drugs), "
@@ -1353,6 +1383,8 @@ class DrugBankPipeline(BasePipeline):
                 # extension and call _clean_embedded_samples)
                 drugs_csv = self.raw_dir / "drugbank_drugs_sample.csv"
                 drugs_df.to_csv(drugs_csv, index=False)
+                # P1-055 ROOT FIX (v108): set source_version for open-data path.
+                self.source_version = "DrugBank_open_data_chembl_fda_approved"
                 logger.info(
                     "[%s] Open-data DrugBank solution: %d drugs written to %s",
                     self.source_name, len(drugs_df), drugs_csv.name,
