@@ -97,11 +97,25 @@ class ValidatedHypothesis:
 # ---------------------------------------------------------------------------
 # Phase 1 writeback: append to validated_hypotheses.csv
 # ---------------------------------------------------------------------------
-
-PHASE1_VALIDATED_CSV = os.environ.get(
-    "PHASE1_VALIDATED_CSV",
-    str(Path(__file__).resolve().parent.parent / "phase1" / "processed_data" / "validated_hypotheses.csv"),
+# INT-014 ROOT FIX: use the canonical path from shared schema so RL
+# ranker and GT trainer read the SAME file. No component should define
+# its own path.
+from common.validated_hypotheses_schema import (
+    CANONICAL_VALIDATED_CSV,
+    get_validated_csv_path,
+    DRUG_COL,
+    DISEASE_COL,
+    OUTCOME_COL,
+    TIMESTAMP_COL,
+    VALIDATED_BY_COL,
+    OUTCOME_VALIDATED_POSITIVE,
+    OUTCOME_VALIDATED_TOXIC,
+    POSITIVE_OUTCOMES,
+    PENALTY_OUTCOMES,
 )
+
+# Backward-compatible env var lookup (falls back to canonical schema path).
+PHASE1_VALIDATED_CSV = os.environ.get("PHASE1_VALIDATED_CSV") or get_validated_csv_path()
 
 
 def writeback_to_phase1(vh: ValidatedHypothesis) -> Path:

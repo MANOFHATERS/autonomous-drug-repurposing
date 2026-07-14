@@ -227,7 +227,7 @@ export async function POST(req: NextRequest) {
         sortDir: sortDir || 'asc',
         page: pageRaw,
         pageSize: pageSizeRaw,
-        total: result.total ?? result.candidates.length,
+        total: (typeof result.total === "number" && result.total > 0 ? result.total : (result.candidates?.length ?? 0)),
       },
     });
     return NextResponse.json({
@@ -238,7 +238,7 @@ export async function POST(req: NextRequest) {
       // The candidate table uses this to render "Showing X–Y of Z" and
       // pagination controls. `count` is the page size (length of candidates
       // on the current page).
-      total: result.total ?? result.candidates.length,
+      total: (typeof result.total === "number" && result.total > 0 ? result.total : (result.candidates?.length ?? 0)),
       page: pageRaw,
       pageSize: pageSizeRaw,
       note: result.note,
@@ -329,7 +329,7 @@ export async function GET(req: NextRequest) {
       candidates: result.candidates,
       source: result.source,
       csvPath: result.csvPath,
-      total: result.total ?? result.candidates.length,
+      total: (typeof result.total === "number" && result.total > 0 ? result.total : (result.candidates?.length ?? 0)),
       page: pageRaw,
       pageSize: pageSizeRaw,
       note: result.note,

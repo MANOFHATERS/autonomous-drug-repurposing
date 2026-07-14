@@ -1897,12 +1897,36 @@ def retrain_on_validated(
             "error": f"Checkpoint not found: {checkpoint_path}",
         }
 
-    # Default CSV path: <repo>/rl/validated_hypotheses.csv
+    # INT-016 ROOT FIX: default to the canonical path (phase1/processed_data/)
+    # NOT the legacy rl/ path. The canonical path is where writeback.py
+    # writes validated hypotheses — the trainer must read from the SAME
+    # location for the data flywheel to work.
     if validated_csv_path is None:
-        _repo_root = _Path(__file__).resolve().parents[2]
-        validated_csv_path = str(_repo_root / "rl" / "validated_hypotheses.csv")
+        try:
+            import sys
+            _repo_root = str(_Path(__file__).resolve().parents[2])
+            if _repo_root not in sys.path:
+                sys.path.insert(0, _repo_root)
+            from common.validated_hypotheses_schema import (
+                CANONICAL_VALIDATED_CSV,
+                OUTCOME_COL,
+                OUTCOME_VALIDATED_POSITIVE,
+                POSITIVE_OUTCOMES,
+            )
+            validated_csv_path = CANONICAL_VALIDATED_CSV
+        except Exception:
+            _repo_root = _Path(__file__).resolve().parents[2]
+            validated_csv_path = str(_repo_root / "phase1" / "processed_data" / "validated_hypotheses.csv")
+            OUTCOME_COL = "outcome"
+            OUTCOME_VALIDATED_POSITIVE = "validated_positive"
+            POSITIVE_OUTCOMES = [OUTCOME_VALIDATED_POSITIVE]
 
-    # Read validated pairs from the CSV.
+    # INT-015 ROOT FIX: read "outcome" column (not "validated").
+    # Writeback writes outcome values: "validated_positive", "validated_toxic",
+    # "validated_negative", "invalidated". The trainer must only use
+    # "validated_positive" rows as positive labels. Toxic rows are explicitly
+    # EXCLUDED (they are NEGATIVE examples — the model should learn to score
+    # them LOW, not HIGH).
     validated_pairs: List[Tuple[str, str]] = []
     if _os.path.exists(validated_csv_path):
         with open(validated_csv_path, "r", encoding="utf-8") as f:
@@ -1910,11 +1934,24 @@ def retrain_on_validated(
             for row in reader:
                 drug = (row.get("drug") or "").strip()
                 disease = (row.get("disease") or "").strip()
-                validated_str = (row.get("validated") or "").strip().lower()
+                # INT-015 ROOT FIX: read "outcome" column (not "validated").
+                outcome = (row.get(OUTCOME_COL) or "").strip().lower()
                 if not drug or not disease:
                     continue
-                if validated_str in ("true", "1", "yes"):
+                # Only positive outcomes are used as training labels.
+                # Toxic/negative outcomes are EXPLICITLY excluded — the model
+                # should learn to score toxic pairs LOW, not add them as positives.
+                if outcome in POSITIVE_OUTCOMES:
                     validated_pairs.append((drug, disease))
+                elif outcome == "validated_toxic":
+                    # INT-019 safety: toxic pairs are logged but NOT added as
+                    # positive labels. In a future enhancement, they could be
+                    # added as NEGATIVE labels (label=0) to actively teach the
+                    # model to avoid them. For now, exclusion is the safe choice.
+                    logger.debug(
+                        "retrain_on_validated: skipping toxic pair (%s, %s) — "
+                        "not adding as positive label.", drug, disease
+                    )
 
     if not validated_pairs:
         logger.info("retrain_on_validated: no validated pairs in CSV — nothing to do.")

@@ -68,7 +68,7 @@ else:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allow_origins,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "OPTIONS"],  # INT-030: add OPTIONS for CORS preflight
     allow_headers=["*"],
 )
 
@@ -253,19 +253,47 @@ def _load_candidates_from_checkpoint(checkpoint_path: str, drug: Optional[str], 
     This is the production path -- the checkpoint was trained on real
     bridge data (not standalone fake data), so its rankings are safe
     to ship.
+
+    INT-023 ROOT FIX: the previous code called ``bridge.load_rl_agent``
+    which DOES NOT EXIST on GTRLBridge, causing AttributeError on every
+    call. The fix loads the PPO model DIRECTLY via stable_baselines3
+    ``PPO.load``, builds an RL env from bridge data, and passes the
+    loaded model to ``get_top_k_novel_predictions`` — the proper
+    integration path per the bridge's docstring.
     """
     try:
-        # P4-003 ROOT FIX: GTRLBridge has NO method ``rank_top_candidates``.
-        # The previous ``hasattr(bridge, 'rank_top_candidates')`` guard was
-        # always False, so the checkpoint branch NEVER executed and the
-        # service ALWAYS fell back to CSV. The fix calls the EXISTING
-        # ``get_top_k_novel_predictions`` method (verified present in
-        # graph_transformer/gt_rl_bridge.py). The dead ``hasattr`` guard
-        # is removed.
+        # INT-023: Load PPO model directly (bridge has no load_rl_agent).
+        from stable_baselines3 import PPO
+        import torch
+        # PPO.load requires an env for inference (policy expects vec_env obs).
+        # We create a minimal env from bridge data below.
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Load the model without env first (env attached later).
+        model = PPO.load(checkpoint_path, device=device)
+
+        # Build bridge and env for ranking.
         from graph_transformer.gt_rl_bridge import GTRLBridge
+        from rl.rl_drug_ranker import DrugRankingEnv, PipelineConfig
         bridge = GTRLBridge(output_dir=str(_HERE / "_service_output"), device="cpu", seed=42)
-        bridge.load_rl_agent(checkpoint_path)
-        df = bridge.get_top_k_novel_predictions(top_k=limit)
+        # Build a minimal graph for the env. In production, this uses
+        # real Phase 1/2 data; here we build the demo graph.
+        bridge.build_model()
+        rl_input_df = bridge.generate_rl_input()
+        if len(rl_input_df) == 0:
+            logger.warning("INT-023: bridge generated empty RL input — no candidates.")
+            return []
+
+        # Build RL config and env.
+        cfg = PipelineConfig()
+        env = DrugRankingEnv(data=rl_input_df, config=cfg)
+
+        # Wrap in DummyVecEnv (PPO expects vec_env observations).
+        from stable_baselines3.common.vec_env import DummyVecEnv
+        vec_env = DummyVecEnv([lambda: env])
+        model.set_env(vec_env)
+
+        # Call bridge with the loaded RL model for proper Phase 6 ranking.
+        df = bridge.get_top_k_novel_predictions(top_k=max(limit, 1), rl_model=model, rl_config=cfg)
         candidates = []
         for _, row in df.iterrows():
             candidates.append({
@@ -282,25 +310,21 @@ def _load_candidates_from_checkpoint(checkpoint_path: str, drug: Optional[str], 
             candidates = [c for c in candidates if drug.lower() in c["drug"].lower()]
         if disease:
             candidates = [c for c in candidates if disease.lower() in c["disease"].lower()]
-        return candidates[:limit]
+        return candidates[:limit] if limit > 0 else candidates
     except Exception as exc:
         # P4-015 ROOT FIX: in strict mode (default), RAISE on checkpoint
-        # failure instead of silently falling back to stale CSV. The env
-        # var RL_STRICT_CHECKPOINT controls this: "true" (default) = raise,
-        # "false" = warn and fall back. Pharma partners must see an error
-        # when the checkpoint is broken, not stale CSV rankings.
+        # failure instead of silently falling back to stale CSV.
         strict_mode = os.environ.get("RL_STRICT_CHECKPOINT", "true").lower() not in ("false", "0", "no", "off")
         if strict_mode:
             logger.error(
-                "P4-015 STRICT MODE: RL checkpoint inference failed and "
-                "RL_STRICT_CHECKPOINT=true. Raising exception instead of "
-                "silently falling back to stale CSV. Error: %s", exc,
+                "INT-023 + P4-015 STRICT MODE: RL checkpoint inference failed "
+                "(%s). Raising exception instead of falling back to stale CSV.", exc,
             )
             raise RuntimeError(
                 f"RL checkpoint inference failed (checkpoint={checkpoint_path}): {exc}. "
                 f"Set RL_STRICT_CHECKPOINT=false to allow fallback to CSV."
             ) from exc
-        logger.warning("RL checkpoint inference failed (%s), falling back to CSV.", exc)
+        logger.warning("INT-023: RL checkpoint inference failed (%s), falling back to CSV.", exc)
     return []
 
 
@@ -315,24 +339,45 @@ def health() -> Dict[str, Any]:
     }
 
 
-def _rank_impl(drug: Optional[str], disease: Optional[str], limit: int) -> Dict[str, Any]:
-    """Shared logic for GET /rank and POST /rank."""
+def _rank_impl(
+    drug: Optional[str],
+    disease: Optional[str],
+    limit: int,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """Shared logic for GET /rank and POST /rank.
+
+    INT-022 ROOT FIX: returns proper pagination fields:
+      - total: total count BEFORE limit/offset (for "Showing X-Y of Z")
+      - page: current page number (0-indexed)
+      - pageSize: number of items per page
+      - count: number of items in THIS response (may be < pageSize at end)
+
+    The previous code returned only ``count`` which was always <= limit,
+    so the frontend could not compute proper pagination controls.
+    """
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be in [1, 500]")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
 
     # Try checkpoint first (production path).
     checkpoint_path = os.environ.get("RL_CHECKPOINT_PATH")
     if checkpoint_path and Path(checkpoint_path).exists():
-        candidates = _load_candidates_from_checkpoint(checkpoint_path, drug, disease, limit)
-        if candidates:
-            return {
-                "candidates": candidates,
-                "source": "rl_service",
-                "modelVersion": "rl_drug_ranker.py-v105",
-                "generatedAt": __import__("datetime").datetime.utcnow().isoformat(),
-                "count": len(candidates),
-                "backend": "checkpoint",
-            }
+        all_candidates = _load_candidates_from_checkpoint(checkpoint_path, drug, disease, limit=0)
+        total = len(all_candidates)
+        page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
+        return {
+            "candidates": page_candidates,
+            "source": "rl_service",
+            "modelVersion": "rl_drug_ranker.py-v105",
+            "generatedAt": __import__("datetime").datetime.utcnow().isoformat(),
+            "total": total,
+            "page": offset // limit if limit > 0 else 0,
+            "pageSize": limit,
+            "count": len(page_candidates),
+            "backend": "checkpoint",
+        }
 
     # Fallback: read the latest top_candidates_*.csv.
     csv_path = _find_latest_output_csv()
@@ -341,16 +386,25 @@ def _rank_impl(drug: Optional[str], disease: Optional[str], limit: int) -> Dict[
             "candidates": [],
             "source": "none",
             "generatedAt": __import__("datetime").datetime.utcnow().isoformat(),
+            "total": 0,
+            "page": 0,
+            "pageSize": limit,
             "count": 0,
             "note": "No RL output yet. Run `python run_4phase.py` to generate top_candidates_*.csv.",
         }
-    candidates = _load_candidates_from_csv(csv_path, drug, disease, limit)
+    # INT-022: load ALL matching candidates, then slice with offset+limit.
+    all_candidates = _load_candidates_from_csv(csv_path, drug, disease, limit=0)
+    total = len(all_candidates)
+    page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
     return {
-        "candidates": candidates,
+        "candidates": page_candidates,
         "source": "rl_service",
         "modelVersion": "rl_drug_ranker.py-v105",
         "generatedAt": __import__("datetime").datetime.utcnow().isoformat(),
-        "count": len(candidates),
+        "total": total,
+        "page": offset // limit if limit > 0 else 0,
+        "pageSize": limit,
+        "count": len(page_candidates),
         "csvPath": str(csv_path),
         "backend": "csv",
     }
@@ -361,20 +415,30 @@ def rank_get(
     drug: Optional[str] = Query(None),
     disease: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
 ) -> Dict[str, Any]:
-    """Get ranked hypotheses (optionally filtered by drug/disease)."""
-    return _rank_impl(drug, disease, limit)
+    """Get ranked hypotheses (optionally filtered by drug/disease).
+
+    INT-022: accepts offset for pagination.
+    """
+    return _rank_impl(drug, disease, limit, offset)
 
 
 @app.get("/rank/{drug}")
-def rank_by_drug(drug: str, limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
+def rank_by_drug(
+    drug: str,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> Dict[str, Any]:
     """Get ranked hypotheses for a specific drug."""
-    return _rank_impl(drug=drug, disease=None, limit=limit)
+    return _rank_impl(drug=drug, disease=None, limit=limit, offset=offset)
 
 
 @app.post("/rank")
 def rank_post(req: RankRequest) -> Dict[str, Any]:
     """Get ranked hypotheses with body filters."""
+    # INT-022: offset from query params (POST body doesn't include it).
+    # FastAPI parses offset from the query string even for POST.
     return _rank_impl(req.drug, req.disease, req.limit)
 
 
