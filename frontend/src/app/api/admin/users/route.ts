@@ -247,7 +247,15 @@ export async function PATCH(req: NextRequest) {
   // org is allowed if you're already an admin/owner of that org. Promotion
   // to `platformOwner` is NEVER allowed via API — that role is settable
   // only via direct DB access.
-  if (body.role === "platformOwner") {
+  // FE-016 ROOT FIX (Team Member 15, v108 — pre-existing build blocker):
+  // Cast to string for the comparison — body.role is typed as
+  // AllowedAdminRole which doesn't include 'platformOwner' (that role is
+  // intentionally not in the API-grantable list). The runtime check is
+  // still meaningful: if a caller attempts to send role='platformOwner',
+  // the isValidAdminRole validator above rejects it with 400 BEFORE
+  // reaching this line, but this defensive check guards against any
+  // future code path that bypasses the validator.
+  if ((body.role as string) === "platformOwner") {
     return NextResponse.json(
       { error: "forbidden", message: "The platformOwner role cannot be granted via the API. It is settable only via direct database access by the SaaS operator." },
       { status: 403 }
