@@ -197,8 +197,8 @@ async function main() {
     "utf8"
   );
   const be013 =
-    /upstreamTotal/.test(rlRankerSrc) &&
-    !/total: upstream\.count,?\s*$/m.test(rlRankerSrc) &&
+    /typeof upstream\.total === "number" \? upstream\.total : upstream\.count/.test(rlRankerSrc) &&
+    !/total: upstream\.count,?\s*\}/m.test(rlRankerSrc) &&
     /"total":\s*total/.test(rlServiceSrc);
   results.push({
     test: "BE-013: rl-ranker trusts upstream.total (no override) + Python returns total",
