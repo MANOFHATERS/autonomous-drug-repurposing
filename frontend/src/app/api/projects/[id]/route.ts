@@ -44,13 +44,21 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   const project = await getProject(id);
   if (!project) return notFound("Project not found");
 
-  // FE-017: visibility enforcement.
-  if (project.visibility === "public") {
-    return NextResponse.json(project);
-  }
+  // BE-061 ROOT FIX: The previous "public" visibility check returned the
+  // project to ANY authenticated user without verifying org membership.
+  // This meant a user in Org A could read any "public" project in Org B,
+  // potentially leaking competitor research data if "public" was set by
+  // mistake. The "public" visibility now means "visible to any member of
+  // the owning organization" — NOT "visible to anyone on the internet".
+  // Cross-org visibility must be explicitly enabled via a separate
+  // "published" visibility level (future feature). For now, ALL projects
+  // require org membership to read.
   if (project.organizationId !== auth.user.orgId) {
-    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    return NextResponse.json({ error: "forbidden", message: "Project belongs to a different organization." }, { status: 403 });
   }
+  // BE-061: Additional check — "public" projects are readable by any org
+  // member; "private" projects are only readable by the owner + admin/owner
+  // roles; "org" projects are readable by any org member (same as public).
   if (project.visibility === "private") {
     const isOwner = project.ownerId === auth.user.userId;
     const isAdminOrOwner = auth.user.role === "admin" || auth.user.role === "owner";

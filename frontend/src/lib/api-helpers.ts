@@ -383,28 +383,48 @@ export async function clearCsrfCookie(): Promise<void> {
 }
 
 /**
- * FE-011 ROOT FIX: Validate the CSRF token on every state-changing request.
- * Returns { ok: true, response: null } if the request passes, or
- * { ok: false, response: <403 Response> } if it fails.
+ * BE-078 ROOT FIX: CSRF bypass via fake API key.
+ *
+ * The previous code exempted ANY request with `Authorization: Bearer drugos_...`
+ * from CSRF checks — even if the key was INVALID. An attacker with the victim's
+ * session cookie could send `Authorization: Bearer drugos_fake_key` to skip the
+ * CSRF check, then the cookie auth would still succeed. The attacker could now
+ * make state-changing requests (POST, PATCH, DELETE) without the CSRF token.
+ *
+ * Root fix: Only exempt CSRF if the API key is VALID. We now call
+ * authenticateApiKey() to verify the key before exempting. Invalid API keys
+ * fall through to the normal CSRF check (which will reject the request if
+ * cookies are present but no CSRF token is provided).
  *
  * Exemptions:
- *   - Requests with an `Authorization: Bearer drugos_…` header are EXEMPT.
+ *   - Requests with a VALID `Authorization: Bearer drugos_…` API key are EXEMPT.
  *     API-key auth is not vulnerable to CSRF (the attacker cannot make the
- *     victim's browser send the attacker's key, and even if they could,
- *     they'd be using their own key). Exempting programmatic clients is
+ *     victim's browser send the attacker's key). Exempting VALID API keys is
  *     necessary for the developer platform to work.
  */
 export async function requireCsrfOrSend(req: NextRequest): Promise<{
   ok: boolean;
   response: null;
 } | { ok: false; response: Response }> {
-  // Exemption 1: API-key auth (Bearer drugos_…). Programmatic clients are
-  // not vulnerable to CSRF.
+  // BE-078: Exemption 1 — API-key auth (Bearer drugos_…) ONLY if the key
+  // is VALID. An attacker sending a fake drugos_ prefix to bypass CSRF
+  // will fail the auth check and fall through to the cookie-based CSRF
+  // validation, which will reject the request.
   const authHeader = req.headers.get("authorization") || req.headers.get("Authorization");
   if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
     const rawKey = authHeader.slice(7).trim();
     if (rawKey.startsWith("drugos_")) {
-      return { ok: true, response: null };
+      // Verify the key is actually valid before exempting CSRF.
+      const { authenticateApiKey } = await import("@/lib/auth/server");
+      const apiUser = await authenticateApiKey(rawKey);
+      if (apiUser) {
+        // Valid API key — exempt from CSRF (programmatic clients are not
+        // vulnerable to browser-based CSRF attacks).
+        return { ok: true, response: null };
+      }
+      // Invalid API key — do NOT exempt. Fall through to the cookie-based
+      // CSRF check below. This closes the bypass: an attacker with a fake
+      // key and a valid session cookie will still need the CSRF token.
     }
   }
 

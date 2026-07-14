@@ -128,13 +128,30 @@ def _load_reward_weights_from_meta(csv_path: Path) -> Optional[Dict[str, float]]
     return None
 
 
-def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Optional[str], limit: int) -> List[Dict[str, Any]]:
-    """Parse the RL ranker's output CSV into the RankedHypothesis schema."""
+def _load_candidates_from_csv(
+    csv_path: Path,
+    drug: Optional[str],
+    disease: Optional[str],
+    limit: int,
+) -> Dict[str, Any]:
+    """Parse the RL ranker's output CSV into the RankedHypothesis schema.
+
+    BE-070 + INT-022 MERGED FIX: Returns a dict with 'candidates' and 'total'
+    keys. 'total' is the count AFTER filtering but BEFORE pagination — this is
+    required by the frontend's pagination controls ("Showing X-Y of Z").
+    The previous code only returned the candidate list, so the frontend's
+    `total` was the page size (wrong), making it impossible to navigate
+    beyond page 1.
+
+    P4-013: Uses streaming iteration instead of list(reader) to avoid OOM
+    on large CSV files. We cannot break early because P4-014 requires sorting
+    ALL matching candidates by rank before applying the limit.
+    """
     import csv as csv_mod
 
     out: List[Dict[str, Any]] = []
     if not csv_path.exists():
-        return out
+        return {"candidates": out, "total": 0}
 
     # P4-004: load reward weights from sidecar (if available)
     _reward_weights = _load_reward_weights_from_meta(csv_path)
@@ -148,15 +165,12 @@ def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Opti
         except (ValueError, TypeError):
             return None
 
-    # P4-013 ROOT FIX: use streaming iterator instead of list(reader).
-    # The previous code loaded ALL rows into memory (~500MB for 1M rows)
-    # with ``rows = list(reader)``. This fix uses a streaming for-loop
-    # inside the with-block so the file handle stays open during iteration.
-    # NOTE: we cannot break early because P4-014 requires sorting ALL
-    # matching candidates by rank before applying the limit. Breaking early
-    # would return the first N matches in CSV order, not the top-N by rank.
-    # The out list grows with each matching candidate (not all rows — only
-    # those passing the drug/disease filters).
+    # BE-070: Count ALL matching rows for `total`, but only keep candidates
+    # in memory. We stream the CSV and:
+    #   1. Count every row that passes the filter → total_filtered
+    #   2. Collect ALL matching candidates for sorting (P4-014)
+    #   3. Sort by rank, then apply limit
+    total_filtered = 0
     with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
         reader = csv_mod.DictReader(f)
         for i, row in enumerate(reader):
@@ -170,6 +184,8 @@ def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Opti
                 continue
             if disease and disease.lower() not in dis.lower():
                 continue
+            # This row passes the filter — increment total.
+            total_filtered += 1
 
             gnn = _num(r.get("gnn_score"))
             safety = _num(r.get("safety_score"))
@@ -243,11 +259,15 @@ def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Opti
     # NOT the top-``limit`` by rank. If the CSV was unsorted, the API
     # returned arbitrary candidates instead of the true top-N.
     out.sort(key=lambda c: (c.get("rank") or 1e9))
-    out = out[:limit]
-    return out
+    return {"candidates": out, "total": total_filtered}
 
 
-def _load_candidates_from_checkpoint(checkpoint_path: str, drug: Optional[str], disease: Optional[str], limit: int) -> List[Dict[str, Any]]:
+def _load_candidates_from_checkpoint(
+    checkpoint_path: str,
+    drug: Optional[str],
+    disease: Optional[str],
+    limit: int,
+) -> List[Dict[str, Any]]:
     """Load the PPO checkpoint and run inference to produce rankings.
 
     This is the production path -- the checkpoint was trained on real
@@ -347,14 +367,14 @@ def _rank_impl(
 ) -> Dict[str, Any]:
     """Shared logic for GET /rank and POST /rank.
 
-    INT-022 ROOT FIX: returns proper pagination fields:
+    INT-022 + BE-070 MERGED FIX: returns proper pagination fields:
       - total: total count BEFORE limit/offset (for "Showing X-Y of Z")
       - page: current page number (0-indexed)
       - pageSize: number of items per page
       - count: number of items in THIS response (may be < pageSize at end)
 
-    The previous code returned only ``count`` which was always <= limit,
-    so the frontend could not compute proper pagination controls.
+    BE-070 ensures `total` is the REAL filtered count (not just the page
+    size), so the frontend can compute proper pagination controls.
     """
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be in [1, 500]")
@@ -364,6 +384,7 @@ def _rank_impl(
     # Try checkpoint first (production path).
     checkpoint_path = os.environ.get("RL_CHECKPOINT_PATH")
     if checkpoint_path and Path(checkpoint_path).exists():
+        # INT-022: load ALL matching candidates, then slice with offset+limit.
         all_candidates = _load_candidates_from_checkpoint(checkpoint_path, drug, disease, limit=0)
         total = len(all_candidates)
         page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
@@ -392,9 +413,12 @@ def _rank_impl(
             "count": 0,
             "note": "No RL output yet. Run `python run_4phase.py` to generate top_candidates_*.csv.",
         }
-    # INT-022: load ALL matching candidates, then slice with offset+limit.
-    all_candidates = _load_candidates_from_csv(csv_path, drug, disease, limit=0)
-    total = len(all_candidates)
+
+    # BE-070 + INT-022: load ALL matching candidates with total count,
+    # then slice with offset+limit for pagination.
+    result = _load_candidates_from_csv(csv_path, drug, disease, limit=0)
+    all_candidates = result["candidates"]
+    total = result["total"]
     page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
     return {
         "candidates": page_candidates,
