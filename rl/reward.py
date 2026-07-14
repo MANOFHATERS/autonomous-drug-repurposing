@@ -1,16 +1,22 @@
-"""rl.reward — Reward Function & Config (P4-008 modular wrapper).
+"""rl.reward — Reward Function & Config (P4-008/P4-021 modular wrapper).
 
-P4-008 ROOT FIX: modular wrapper around the RewardFunction class,
-RewardConfig dataclass, compute_reward backward-compat wrapper, and
-the per-tenant reward-weights system (P4-005). See rl/env.py for the
-full P4-008 rationale.
+P4-021 ROOT FIX: this module is a RE-EXPORT SHIM. The real
+RewardConfig class (~350 lines) and RewardFunction class (~700 lines)
+are in rl_drug_ranker.py. A full extraction is planned — see
+rl/env.py for the extraction plan.
 
-Callers can now import:
+RewardConfig is relatively self-contained (lines 1138-1483) and can
+be extracted first. RewardFunction depends on RewardConfig, column
+constants, and the withdrawn-drug sets — it should be extracted after
+RewardConfig.
+
+Callers can import:
     from rl.reward import RewardFunction, RewardConfig, compute_reward
     from rl.reward import load_reward_weights_for_tenant, apply_tenant_reward_weights
 """
 from __future__ import annotations
 
+# P4-021: re-export from the monolith (backward compat).
 from .rl_drug_ranker import (
     RewardConfig,
     RewardFunction,
