@@ -201,7 +201,12 @@ async function runPythonInference(
   try {
     await fs.writeFile(reqPath, JSON.stringify({ checkpoint: checkpointPath, mode, ...payload }));
 
-    const repoRoot = process.cwd();
+    // INT-027 ROOT FIX: resolve repoRoot correctly when Next.js runs from
+    // frontend/. process.cwd() returns frontend/ but scripts/ is at repo root.
+    const cwd = process.cwd();
+    const repoRoot = process.env.GT_REPO_ROOT || (
+      cwd.endsWith("frontend") ? path.resolve(cwd, "..") : cwd
+    );
     const scriptPath = path.resolve(repoRoot, "scripts", "gt_inference.py");
 
     // If the helper doesn't exist, fail gracefully — caller surfaces a

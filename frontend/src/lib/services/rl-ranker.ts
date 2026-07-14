@@ -414,12 +414,18 @@ async function proxyToRlService(url: string, queryParams: URLSearchParams): Prom
     throw new Error(`RL service at ${url} returned ${res.status}`);
   }
   const body = await res.json();
+  // INT-022 ROOT FIX: pass through pagination fields from upstream service.
+  // The upstream now returns total/page/pageSize for proper pagination.
+  const candidates = (body?.candidates || []) as RankedHypothesis[];
   return {
-    candidates: (body?.candidates || []) as RankedHypothesis[],
+    candidates,
     source: "rl_service",
     modelVersion: body?.modelVersion,
     generatedAt: body?.generatedAt || new Date().toISOString(),
-    count: (body?.candidates || []).length,
+    total: typeof body?.total === "number" ? body.total : candidates.length,
+    page: typeof body?.page === "number" ? body.page : 0,
+    pageSize: typeof body?.pageSize === "number" ? body.pageSize : 50,
+    count: candidates.length,
   };
 }
 
@@ -682,19 +688,33 @@ export async function syncRlOutputToHypotheses(): Promise<number> {
   return updated;
 }
 
+/**
+ * INT-024 ROOT FIX: weights MUST match the RL agent's reward function.
+ * The previous code used 0.4/0.3/0.3 (gnn/safety/market) which produced
+ * DIFFERENT rankings than the agent learned. The agent uses the weights
+ * from reward_weights.yaml: gnn=0.04, safety=0.25, market=0.12 (capped).
+ *
+ * The overallScore is a HUMAN-READABLE composite for the dashboard.
+ * The ACTUAL ranking is by policyProb (the agent's policy probability).
+ * When policyProb is available, sorting uses that directly.
+ */
 export function computeOverallScore(c: {
   gnnScore?: number;
   safetyScore?: number;
   marketScore?: number;
   policyProb?: number;
 }): number | null {
-  const signals: { value: number; weight: number }[] = [];
-  if (c.gnnScore !== undefined) signals.push({ value: c.gnnScore, weight: 0.4 });
-  if (c.safetyScore !== undefined) signals.push({ value: c.safetyScore, weight: 0.3 });
-  if (c.marketScore !== undefined) signals.push({ value: c.marketScore, weight: 0.3 });
-  if (signals.length === 0 && c.policyProb !== undefined) {
+  // INT-024: if policyProb is available, use it directly — this is what
+  // the RL agent actually uses for ranking. No synthetic score needed.
+  if (c.policyProb !== undefined && c.policyProb !== null) {
     return c.policyProb;
   }
+  // Fallback: compute weighted composite matching reward_weights.yaml.
+  // Weights: gnn=0.04, safety=0.25, market=0.12 (default profile).
+  const signals: { value: number; weight: number }[] = [];
+  if (c.gnnScore !== undefined) signals.push({ value: c.gnnScore, weight: 0.04 });
+  if (c.safetyScore !== undefined) signals.push({ value: c.safetyScore, weight: 0.25 });
+  if (c.marketScore !== undefined) signals.push({ value: c.marketScore, weight: 0.12 });
   if (signals.length === 0) return null;
   const totalWeight = signals.reduce((s, x) => s + x.weight, 0);
   return signals.reduce((s, x) => s + (x.value * x.weight) / totalWeight, 0);

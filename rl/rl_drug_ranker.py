@@ -836,49 +836,70 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
     the data flywheel moat was non-functional. The runtime check makes
     the missing-file case LOUD instead of silent.
 
+    INT-014 ROOT FIX: the canonical path (phase1/processed_data/) is
+    now the FIRST search path so writeback output is found BEFORE any
+    stale module-local copy.
+
+    INT-020 ROOT FIX (CRITICAL — patient safety): only rows with
+    outcome == "validated_positive" are loaded as bonus pairs. Rows
+    with outcome == "validated_toxic" are EXCLUDED from the bonus
+    (and logged as a WARNING). Previously toxic pairs got the SAME
+    +0.1 bonus as positive pairs, INCENTIVIZING the agent to rank
+    toxic pairs HIGH — the opposite of the DOCX §6 safety goal.
+
     Returns:
-        List of (drug, disease) tuples from validated_hypotheses.csv.
-        Empty list if the file doesn't exist or is empty (with a
-        CRITICAL log warning so operators can fix the deployment).
+        List of (drug, disease) tuples from validated_hypotheses.csv
+        WHERE outcome == "validated_positive". Empty list if the file
+        doesn't exist or has no positive rows (with a CRITICAL log).
     """
+    # INT-014 ROOT FIX: import canonical path from shared schema.
+    try:
+        import sys
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        from common.validated_hypotheses_schema import (
+            CANONICAL_VALIDATED_CSV,
+            OUTCOME_COL,
+            OUTCOME_VALIDATED_POSITIVE,
+            OUTCOME_VALIDATED_TOXIC,
+        )
+        canonical_path = CANONICAL_VALIDATED_CSV
+    except Exception:
+        # Fallback if schema module not available (should never happen).
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        canonical_path = os.path.join(
+            os.path.dirname(module_dir), "phase1", "processed_data", "validated_hypotheses.csv"
+        )
+        OUTCOME_COL = "outcome"
+        OUTCOME_VALIDATED_POSITIVE = "validated_positive"
+        OUTCOME_VALIDATED_TOXIC = "validated_toxic"
+
     validated_path = "validated_hypotheses.csv"
-    # v90 ROOT FIX (BUG #65): the previous code iterated candidate_paths
-    # and BREAKED on the first path that yielded ANY result. If the first
-    # path (CWD) had a STALE validated_hypotheses.csv with different pairs,
-    # those were loaded instead of the module-local file. The order of
-    # candidate_paths matters but was not documented.
-    #
-    # The fix: put the MODULE-LOCAL path FIRST (most authoritative — it
-    # ships with the package). Then CWD-relative. Then CWD-absolute.
-    # Merge ALL found files (deduplicating via `seen` set), so a stale
-    # CWD file does not shadow the module-local file — both are loaded
-    # and merged. This is the most robust approach: no file is silently
-    # ignored, and the module-local file (canonical) always contributes.
+    # INT-014 ROOT FIX: CANONICAL PATH FIRST (writeback output).
+    # Then module-local (legacy), then CWD-relative, then CWD-absolute.
     module_dir = os.path.dirname(os.path.abspath(__file__))
     candidate_paths = [
-        os.path.join(module_dir, validated_path),  # MODULE-LOCAL first (canonical)
-        validated_path,                            # CWD-relative
-        os.path.join(os.getcwd(), validated_path), # CWD-absolute
+        canonical_path,                             # CANONICAL (phase1/processed_data/)
+        os.path.join(module_dir, validated_path),   # MODULE-LOCAL (legacy)
+        validated_path,                             # CWD-relative
+        os.path.join(os.getcwd(), validated_path),  # CWD-absolute
     ]
-    # P4-003 ROOT FIX: also allow override via the RL_VALIDATED_HYPOTHESES_PATH
-    # env var. In production (Docker, Kubernetes, systemd), the CWD may be
-    # /app, /opt/drugos, or /, and the module_dir may be
-    # /app/rl/ or /usr/lib/python3/site-packages/rl/. The 3-path search
-    # handles most cases, but a deployment may want to point at a specific
-    # file (e.g., a ConfigMap mount in Kubernetes). The env var takes
-    # PRIORITY over the 3 default paths.
+    # P4-003 ROOT FIX: env var takes PRIORITY over all default paths.
     env_path = os.environ.get("RL_VALIDATED_HYPOTHESES_PATH", "")
     if env_path:
         candidate_paths = [env_path] + candidate_paths
         logger.info(
             f"P4-003 ROOT FIX: RL_VALIDATED_HYPOTHESES_PATH is set to "
             f"'{env_path}'. This path takes PRIORITY over the default "
-            f"3-path search (module_dir, CWD-relative, CWD-absolute)."
+            f"4-path search (canonical, module_dir, CWD-relative, CWD-absolute)."
         )
+
     result: List[Tuple[str, str]] = []
     seen = set()
     files_loaded: List[str] = []
     files_missing: List[str] = []
+    n_toxic_skipped = 0
     for path in candidate_paths:
         if not os.path.exists(path):
             files_missing.append(path)
@@ -892,17 +913,36 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
                 )
                 continue
             n_added_from_this_file = 0
+            n_toxic_from_this_file = 0
             for _, row in df_vh.iterrows():
                 drug = str(row[DRUG_COL]).lower().strip()
                 disease = str(row[DISEASE_COL]).lower().strip()
                 if not drug or not disease:
                     continue
+                # INT-020 ROOT FIX: branch on outcome.
+                outcome = str(row.get(OUTCOME_COL, "")).lower().strip()
+                if outcome == OUTCOME_VALIDATED_TOXIC:
+                    n_toxic_skipped += 1
+                    n_toxic_from_this_file += 1
+                    continue  # SKIP toxic pairs — do NOT reward them.
+                if outcome and outcome != OUTCOME_VALIDATED_POSITIVE:
+                    # Non-positive, non-toxic (e.g., validated_negative,
+                    # invalidated) — also skip.
+                    continue
+                # outcome == "" (legacy file without outcome column) OR
+                # outcome == OUTCOME_VALIDATED_POSITIVE → include for bonus.
                 key = (drug, disease)
                 if key not in seen:
                     seen.add(key)
                     result.append((drug, disease))
                     n_added_from_this_file += 1
             files_loaded.append(f"{path} ({n_added_from_this_file} new pairs)")
+            if n_toxic_from_this_file > 0:
+                logger.warning(
+                    f"INT-020 ROOT FIX: skipped {n_toxic_from_this_file} "
+                    f"TOXIC pair(s) in {path} — these do NOT receive a "
+                    f"reward bonus (patient-safety requirement)."
+                )
         except Exception as e:
             logger.warning(
                 f"V30 ROOT FIX (10.25): failed to load validated_hypotheses.csv "
@@ -910,32 +950,23 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
             )
     if result:
         logger.info(
-            f"v90 ROOT FIX (BUG #65): loaded {len(result)} UNIQUE validated "
+            f"INT-014+INT-020 ROOT FIX: loaded {len(result)} UNIQUE validated "
             f"hypotheses from {len(files_loaded)} file(s): "
-            f"{files_loaded}. Merged from all candidate paths (no file "
-            f"silently ignored). Used for REWARD BONUS ONLY (not in AUC "
-            f"label set — prevents circular leakage)."
+            f"{files_loaded}. Canonical path searched FIRST. "
+            f"Used for REWARD BONUS ONLY (not in AUC label set). "
+            f"{n_toxic_skipped} toxic pair(s) intentionally excluded."
         )
     else:
-        # P4-003 ROOT FIX: CRITICAL log when NO validated_hypotheses.csv is
-        # found in ANY of the candidate paths. The previous code silently
-        # returned an empty list, which broke the data flywheel (DOCX §10):
-        # validated pairs received NO reward bonus, the RL agent had no
-        # incentive to rank them HIGH, and the data flywheel moat was
-        # non-functional. The CRITICAL log makes the missing-file case LOUD
-        # so operators can fix the deployment (install the package properly,
-        # set RL_VALIDATED_HYPOTHESES_PATH, or copy the file to CWD).
         logger.critical(
-            f"P4-003 ROOT FIX: validated_hypotheses.csv NOT FOUND in ANY "
+            f"INT-014 ROOT FIX: validated_hypotheses.csv NOT FOUND in ANY "
             f"of the {len(candidate_paths)} candidate paths: {candidate_paths}. "
             f"The data flywheel (DOCX §10) is NON-FUNCTIONAL — validated "
             f"pairs will receive NO reward bonus, so the RL agent has no "
             f"incentive to rank validated pairs HIGH. To fix: (1) ensure "
-            f"the file ships with the package (MANIFEST.in / package_data "
-            f"in setup.py / pyproject.toml), OR (2) set the "
-            f"RL_VALIDATED_HYPOTHESES_PATH env var to the file's absolute "
-            f"path, OR (3) copy validated_hypotheses.csv to the CWD. The "
-            f"canonical file is at rl/validated_hypotheses.csv in the repo."
+            f"writeback ran (phase4/writeback.py), OR (2) set "
+            f"RL_VALIDATED_HYPOTHESES_PATH env var, OR (3) copy the file "
+            f"to rl/validated_hypotheses.csv. The canonical path is "
+            f"{canonical_path}."
         )
     return result
 

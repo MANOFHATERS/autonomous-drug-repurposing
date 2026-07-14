@@ -213,7 +213,9 @@ async function readLocalRegistry(
 async function proxyToKgService(
   url: string
 ): Promise<KnowledgeGraphStatsResponse> {
-  const fullUrl = `${url.replace(/\/$/, "")}/stats`;
+  // INT-029 ROOT FIX: Python phase2/service.py exposes `/kg/stats`,
+  // NOT `/stats`. The previous code called `/stats` which 404'd.
+  const fullUrl = `${url.replace(/\/$/, "")}/kg/stats`;
   const res = await fetch(fullUrl, {
     headers: { Accept: "application/json" },
     cache: "no-store",

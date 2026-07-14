@@ -130,7 +130,12 @@ async function runWriteback(payload: Record<string, unknown>): Promise<{
   const reqId = randomUUID();
   const reqPath = `/tmp/wb_req_${reqId}.json`;
   const respPath = `/tmp/wb_resp_${reqId}.json`;
-  const repoRoot = process.cwd();
+  // INT-028 ROOT FIX: resolve repoRoot correctly when Next.js runs from
+  // frontend/. process.cwd() returns frontend/ but scripts/ is at repo root.
+  const cwd = process.cwd();
+  const repoRoot = process.env.GT_REPO_ROOT || (
+    cwd.endsWith("frontend") ? path.resolve(cwd, "..") : cwd
+  );
   const scriptPath = path.resolve(repoRoot, "scripts", "hypothesis_writeback.py");
 
   try {
