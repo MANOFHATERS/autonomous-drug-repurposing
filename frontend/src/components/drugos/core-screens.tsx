@@ -788,12 +788,50 @@ function SearchResultsScreen() {
 // 3. CANDIDATE DETAIL SCREEN
 // ═══════════════════════════════════════════
 
+// ISSUE-FE-016 ROOT FIX: Previously, drugCandidates and diseases were imported
+// from @/lib/empty-defaults as EMPTY arrays []. The code did:
+//   const candidate = drugCandidates.find(...) || drugCandidates[0];
+// Both find() and [0] returned undefined. Then candidate.drugName threw:
+//   TypeError: Cannot read properties of undefined (reading 'drugName')
+// This crashed the entire screen on mount, breaking the candidate evaluation
+// workflow. Root fix: add null guards. If no candidate data is available,
+// render an EmptyState instead of crashing. The real fix requires fetching
+// candidate data from a backend endpoint (e.g., /api/hypotheses/[id]).
 function CandidateDetailScreen() {
   const { navigate, currentRoute } = useDrugOSNav();
   const candidateId = currentRoute.id || 'DC001';
+
+  // SAFEGUARD: drugCandidates and diseases are empty arrays from empty-defaults.
+  // The find() returns undefined, and [0] on an empty array is undefined.
+  // We MUST check for undefined before accessing any properties.
   const candidate = drugCandidates.find(c => c.id === candidateId) || drugCandidates[0];
-  const disease = diseases.find(d => d.id === candidate.diseaseId) || diseases[0];
+  const disease = candidate ? (diseases.find(d => d.id === candidate.diseaseId) || diseases[0]) : undefined;
+
   const [activeTab, setActiveTab] = useState('overview');
+
+  // EARLY RETURN: If no candidate data, show honest empty state instead of crashing.
+  // This prevents the TypeError that was breaking the entire candidate evaluation workflow.
+  if (!candidate || !disease) {
+    return (
+      <FadeIn>
+        <PageHeader title="Candidate Not Found" desc="No candidate data available" />
+        <Card className="border-dashed">
+          <CardContent className="p-8 text-center">
+            <AlertCircle className="h-10 w-10 text-muted-foreground/50 mx-auto mb-3" />
+            <p className="text-sm font-medium">Candidate data not available</p>
+            <p className="text-xs text-muted-foreground mt-1 max-w-md mx-auto">
+              Candidate details require real hypothesis data from the backend.
+              The candidate ID &quot;{candidateId}&quot; was not found. Validate a hypothesis
+              or run the RL pipeline to generate candidates.
+            </p>
+            <Button className="mt-4" variant="outline" onClick={() => navigate({ page: 'app', section: 'results' })}>
+              <ArrowLeft className="h-4 w-4 mr-1.5" />Back to Results
+            </Button>
+          </CardContent>
+        </Card>
+      </FadeIn>
+    );
+  }
 
   const relatedTrials = clinicalTrials.filter(t => t.drugName === candidate.drugName);
   const relatedPatents = patents.filter(p => p.drugName === candidate.drugName);

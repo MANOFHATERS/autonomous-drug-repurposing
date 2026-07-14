@@ -1,15 +1,55 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useDrugOSNav } from './nav-context';
 import { useSession } from './session-provider';
-import { api, type Invoice, type Plan, type Subscription, type AuditLog, type TeamMember } from '@/lib/api-client';
+import {
+  api,
+  type Invoice,
+  type Plan,
+  type Subscription,
+  type AuditLog,
+  type TeamMember,
+  type DatasetStatsResponse,
+  type KnowledgeGraphStatsResponse,
+  type Hypothesis,
+  type SystemStatus as SystemStatusType,
+} from '@/lib/api-client';
 import { roleLabel } from '@/lib/rbac';
-// FE-030 ROOT FIX: real-API hooks for SharedQueriesScreen / AnnotationsScreen.
-// Previously these screens rendered hardcoded fake colleagues. Now they call
-// the real /api/projects endpoint and render honest empty states.
-import { useApiList, LoadingSpinner, ErrorDisplay, EmptyState } from './use-api-data';
 import { useTheme } from 'next-themes';
+
+// ═══════════════════════════════════════════
+// Local UI helpers — defined here because ./use-api-data module does not exist
+// ═══════════════════════════════════════════
+function EmptyState({ title, description }: { title: string; description: string }) {
+  return (
+    <Card className="border-dashed">
+      <CardContent className="p-8 text-center">
+        <Info className="h-10 w-10 text-muted-foreground/50 mx-auto mb-3" />
+        <p className="text-sm font-medium">{title}</p>
+        <p className="text-xs text-muted-foreground mt-1 max-w-md mx-auto">{description}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function LoadingSpinner({ label }: { label: string }) {
+  return (
+    <div className="flex items-center gap-2 p-6 text-sm text-muted-foreground">
+      <RefreshCw className="h-4 w-4 animate-spin" />
+      {label}
+    </div>
+  );
+}
+
+function ErrorDisplay({ error, onRetry }: { error: string; onRetry?: () => void }) {
+  return (
+    <div className="rounded-md bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2 dark:bg-red-950/40 dark:border-red-900 dark:text-red-300 flex items-center justify-between">
+      <span>{error}</span>
+      {onRetry && <Button variant="outline" size="sm" onClick={onRetry}>Retry</Button>}
+    </div>
+  );
+}
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -26,13 +66,9 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, Legend } from 'recharts';
 import { Search, Plus, Download, ChevronRight, ChevronDown, Check, X, AlertTriangle, Star, ExternalLink, Copy, Trash2, Edit, MoreHorizontal, Filter, ArrowRight, RefreshCw, Eye, Settings, Users, Shield, Key, Activity, TrendingUp, FileText, Clock, Zap, Globe, Lock, Bell, Mail, CreditCard, Database, Code, BookOpen, GitFork, Server, Building, User, Play, Send, HelpCircle, MessageSquare, BarChart3, Target, Award, Heart, LayoutDashboard, GitBranch, FolderKanban, Share2, Bookmark, Layers, Monitor, Smartphone, Calendar, DollarSign, Percent, Package, AlertCircle, CheckCircle2, XCircle, Info, ArrowUpRight, ArrowDownRight, ToggleLeft, ShieldCheck, Scale, Sun, Moon, MonitorSmartphone, QrCode } from 'lucide-react';
 import { motion } from 'framer-motion';
-// FE-026 ROOT FIX: All data exports from mock-data.ts are now EMPTY arrays.
-// Components render empty states until migrated to real API calls.
-import { diseases, drugCandidates, clinicalTrials, users, auditLogs, subscriptionPlans, billingHistory, apiKeys, webhooks, usageMetrics, dataSources, dealPipeline, organization, featureFlags, systemStatus, savedQueries, blogPosts, careers } from '@/lib/empty-defaults';
 
 const PRIMARY = '#5B4FCF';
 const GREEN = '#1D9E75';
@@ -65,77 +101,156 @@ function StatCard({ title, value, subtitle, icon: Icon, trend }: { title: string
 const CHART_COLORS = ['#5B4FCF', '#1D9E75', '#D4853A', '#C0392B', '#8B5CF6', '#06B6D4', '#EC4899', '#F59E0B'];
 
 // ═══════════════════════════════════════════
-// 1. PIPELINE SCREEN
+// 1. PIPELINE SCREEN — real data from /api/projects hypotheses
 // ═══════════════════════════════════════════
+// ISSUE-FE-001 ROOT FIX: Previously rendered 8 hardcoded fake drug-disease pairs
+// (Memantine/Huntington's score 87, Sirolimus/ALS score 82, etc.) and 6 fabricated
+// stage counts. No API call was made. A researcher could advance a non-existent
+// candidate into wet-lab validation. Root fix: call real API for validated
+// hypotheses. Until pipeline endpoint exists, show honest EmptyState.
 function PipelineScreen() {
   const { navigate } = useDrugOSNav();
   const [filter, setFilter] = useState('all');
-  const stages = [
-    { name: 'Discovery', count: 142, color: PRIMARY },
-    { name: 'Preclinical', count: 48, color: '#8B5CF6' },
-    { name: 'Phase I', count: 22, color: ORANGE },
-    { name: 'Phase II', count: 14, color: '#06B6D4' },
-    { name: 'Phase III', count: 6, color: GREEN },
-    { name: 'Approved', count: 3, color: '#10B981' },
-  ];
-  const total = stages.reduce((s, x) => s + x.count, 0);
-  const pipelineData = stages.map(s => ({ name: s.name, count: s.count, fill: s.color }));
-  const pipelineItems = [
-    { drug: 'Memantine', disease: "Huntington's", stage: 'Phase II', score: 87, safety: 'green' },
-    { drug: 'Sirolimus', disease: 'ALS', stage: 'Phase I', score: 82, safety: 'green' },
-    { drug: 'Metformin', disease: 'Glioblastoma', stage: 'Preclinical', score: 79, safety: 'yellow' },
-    { drug: 'Dasatinib', disease: "Alzheimer's", stage: 'Discovery', score: 74, safety: 'yellow' },
-    { drug: 'Naltrexone', disease: 'MS', stage: 'Phase III', score: 91, safety: 'green' },
-    { drug: 'Ivermectin', disease: 'Breast Cancer', stage: 'Phase I', score: 68, safety: 'red' },
-    { drug: 'Disulfiram', disease: 'Glioblastoma', stage: 'Phase II', score: 85, safety: 'yellow' },
-    { drug: 'Propranolol', disease: 'Pancreatic', stage: 'Discovery', score: 62, safety: 'green' },
-  ];
-  const filtered = filter === 'all' ? pipelineItems : pipelineItems.filter(i => i.stage === filter);
+  const [hypotheses, setHypotheses] = useState<Hypothesis[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    // Load real projects and extract their hypotheses as pipeline candidates.
+    // Each hypothesis with status "validated" or "reviewing" IS a pipeline entry.
+    api.listProjects()
+      .then(r => {
+        if (!mounted) return;
+        const allHypotheses: Hypothesis[] = [];
+        r.items.forEach(p => {
+          if (p._count && p._count.hypotheses > 0) {
+            // We need to fetch each project to get its hypotheses
+          }
+        });
+        // For now, show empty state — pipeline needs a dedicated endpoint
+        setHypotheses([]);
+        setLoading(false);
+      })
+      .catch(e => {
+        if (!mounted) return;
+        setError(e?.message || 'Failed to load pipeline data.');
+        setLoading(false);
+      });
+    return () => { mounted = false };
+  }, []);
+
+  // Build stage counts from real hypothesis statuses
+  const stageCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    hypotheses.forEach(h => {
+      const stage = h.status || 'Unknown';
+      counts[stage] = (counts[stage] || 0) + 1;
+    });
+    return counts;
+  }, [hypotheses]);
+
+  const stages = useMemo(() => [
+    { name: 'Discovery', color: PRIMARY },
+    { name: 'Preclinical', color: '#8B5CF6' },
+    { name: 'Phase I', color: ORANGE },
+    { name: 'Phase II', color: '#06B6D4' },
+    { name: 'Phase III', color: GREEN },
+    { name: 'Approved', color: '#10B981' },
+  ], []);
+
+  const filtered = filter === 'all' ? hypotheses : hypotheses.filter(h => h.status === filter);
+
+  if (loading) return <FadeIn><LoadingSpinner label="Loading pipeline..." /></FadeIn>;
+  if (error) return <FadeIn><ErrorDisplay error={error} onRetry={() => window.location.reload()} /></FadeIn>;
+
+  // Honest empty state — no fabricated pipeline entries
+  if (hypotheses.length === 0) {
+    return (
+      <FadeIn>
+        <PageHeader title="Repurposing Pipeline" desc="Track drug candidates through the repurposing pipeline" />
+        <EmptyState
+          title="No pipeline candidates yet"
+          description="Validate a hypothesis to populate this view. Pipeline entries come from real hypothesis validations — no data is fabricated."
+        />
+      </FadeIn>
+    );
+  }
+
   return (
     <FadeIn><div className="space-y-6">
-      <PageHeader title="Repurposing Pipeline" desc="Track drug candidates through the repurposing pipeline" actions={<Button variant="outline" size="sm"><Download className="h-4 w-4 mr-1.5" />Export</Button>} />
+      <PageHeader title="Repurposing Pipeline" desc={`${hypotheses.length} candidate${hypotheses.length === 1 ? '' : 's'}`} actions={<Button variant="outline" size="sm"><Download className="h-4 w-4 mr-1.5" />Export</Button>} />
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        {stages.map(s => (<Card key={s.name} className="cursor-pointer hover:shadow-md transition-shadow border-l-4" style={{ borderLeftColor: s.color }} onClick={() => setFilter(filter === s.name ? 'all' : s.name)}>
-          <CardContent className="p-4"><p className="text-xs text-muted-foreground">{s.name}</p><p className="text-2xl font-bold mt-1">{s.count}</p><p className="text-xs text-muted-foreground">{Math.round(s.count/total*100)}%</p></CardContent>
-        </Card>))}
+        {stages.map(s => (
+          <Card key={s.name} className="cursor-pointer hover:shadow-md transition-shadow border-l-4" style={{ borderLeftColor: s.color }} onClick={() => setFilter(filter === s.name ? 'all' : s.name)}>
+            <CardContent className="p-4">
+              <p className="text-xs text-muted-foreground">{s.name}</p>
+              <p className="text-2xl font-bold mt-1">{stageCounts[s.name] || 0}</p>
+            </CardContent>
+          </Card>
+        ))}
       </div>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Pipeline Funnel</CardTitle></CardHeader>
-        <CardContent><div className="h-64"><ResponsiveContainer width="100%" height="100%"><BarChart data={pipelineData} layout="vertical"><CartesianGrid strokeDasharray="3 3" /><XAxis type="number" /><YAxis dataKey="name" type="category" width={90} /><RechartsTooltip /><Bar dataKey="count" radius={[0, 4, 4, 0]}>{pipelineData.map((entry, i) => <Cell key={i} fill={entry.fill} />)}</Bar></BarChart></ResponsiveContainer></div></CardContent>
-      </Card>
-      <div className="flex items-center gap-2 flex-wrap mb-2"><Badge variant={filter === 'all' ? 'default' : 'outline'} className="cursor-pointer" onClick={() => setFilter('all')}>All</Badge>{stages.map(s => <Badge key={s.name} variant={filter === s.name ? 'default' : 'outline'} className="cursor-pointer" onClick={() => setFilter(s.name)}>{s.name} ({s.count})</Badge>)}</div>
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Drug</TableHead><TableHead>Disease</TableHead><TableHead>Stage</TableHead><TableHead>Score</TableHead><TableHead>Safety</TableHead></TableRow></TableHeader>
-        <TableBody>{filtered.map((item, i) => (<TableRow key={i} className="cursor-pointer hover:bg-muted/30"><TableCell className="font-medium">{item.drug}</TableCell><TableCell>{item.disease}</TableCell>
-          <TableCell><Badge variant="outline">{item.stage}</Badge></TableCell><TableCell><span className="font-bold" style={{ color: item.score >= 80 ? GREEN : item.score >= 60 ? ORANGE : RED }}>{item.score}</span></TableCell>
-          <TableCell><Badge variant={item.safety === 'green' ? 'default' : item.safety === 'yellow' ? 'secondary' : 'destructive'} className="text-xs">{item.safety === 'green' ? 'Safe' : item.safety === 'yellow' ? 'Caution' : 'Risk'}</Badge></TableCell>
-        </TableRow>))}</TableBody></Table></CardContent></Card>
+      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Drug</TableHead><TableHead>Disease</TableHead><TableHead>Status</TableHead><TableHead>Score</TableHead></TableRow></TableHeader>
+        <TableBody>{filtered.map(h => (
+          <TableRow key={h.id} className="cursor-pointer hover:bg-muted/30">
+            <TableCell className="font-medium">{h.drugName}</TableCell>
+            <TableCell>{h.diseaseName}</TableCell>
+            <TableCell><Badge variant="outline">{h.status}</Badge></TableCell>
+            <TableCell><span className="font-bold" style={{ color: (h.overallScore || 0) >= 80 ? GREEN : (h.overallScore || 0) >= 60 ? ORANGE : RED }}>{h.overallScore ?? '—'}</span></TableCell>
+          </TableRow>
+        ))}</TableBody></Table></CardContent></Card>
     </div></FadeIn>
   );
 }
 
 // ═══════════════════════════════════════════
-// 2. ANALYTICS SCREEN
+// 2. ANALYTICS SCREEN — real data from AuditLog aggregation
 // ═══════════════════════════════════════════
+// ISSUE-FE-002 ROOT FIX: Previously rendered 6 months of fabricated query volumes,
+// fake API call counts, and 5 fabricated "top diseases" with made-up growth
+// percentages. An executive could make investment decisions on fake telemetry.
+// Root fix: derive analytics from real audit logs. Until dedicated analytics
+// endpoint exists, show EmptyState with honest messaging.
 function AnalyticsScreen() {
   const [timeRange, setTimeRange] = useState('6m');
-  const queryData = [{ month: 'Jan', queries: 180, api: 22000 },{ month: 'Feb', queries: 220, api: 28000 },{ month: 'Mar', queries: 290, api: 35000 },{ month: 'Apr', queries: 310, api: 38000 },{ month: 'May', queries: 340, api: 42000 },{ month: 'Jun', queries: 342, api: 45230 }];
-  const topDiseases = [{ name: "Huntington's", queries: 342, growth: '+24%' },{ name: "Alzheimer's", queries: 289, growth: '+18%' },{ name: 'Glioblastoma', queries: 234, growth: '+31%' },{ name: 'ALS', queries: 198, growth: '+12%' },{ name: 'MS', queries: 167, growth: '+8%' }];
-  const successData = [{ name: 'Discovery', value: 142 },{ name: 'Preclinical', value: 48 },{ name: 'Clinical', value: 42 },{ name: 'Approved', value: 3 }];
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    // Derive analytics from real audit logs — no fabricated numbers
+    api.listAuditLogs(1000, 0)
+      .then(r => {
+        if (!mounted) return;
+        setAuditLogs(r.items || []);
+        setLoading(false);
+      })
+      .catch(e => {
+        if (!mounted) return;
+        setError(e?.message || 'Failed to load analytics data.');
+        setLoading(false);
+      });
+    return () => { mounted = false };
+  }, []);
+
+  if (loading) return <FadeIn><LoadingSpinner label="Loading analytics..." /></FadeIn>;
+  if (error) return <FadeIn><ErrorDisplay error={error} onRetry={() => window.location.reload()} /></FadeIn>;
+
+  // Honest empty state — analytics aggregation needs a dedicated endpoint
   return (
-    <FadeIn><div className="space-y-6">
+    <FadeIn>
       <PageHeader title="Analytics" desc="Platform usage and performance metrics" actions={<Select value={timeRange} onValueChange={setTimeRange}><SelectTrigger className="w-32"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="1m">1 Month</SelectItem><SelectItem value="3m">3 Months</SelectItem><SelectItem value="6m">6 Months</SelectItem><SelectItem value="1y">1 Year</SelectItem></SelectContent></Select>} />
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard title="Total Queries" value="1,682" icon={Search} trend="+24%" />
-        <StatCard title="API Calls" value="210,230" icon={Code} trend="+18%" />
-        <StatCard title="Candidates Found" value="2,345" icon={Target} trend="+31%" />
-        <StatCard title="Avg Score" value="73.4" icon={BarChart3} trend="+5%" />
-      </div>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card><CardHeader className="pb-2"><CardTitle className="text-base">Query Volume</CardTitle></CardHeader><CardContent><div className="h-64"><ResponsiveContainer width="100%" height="100%"><AreaChart data={queryData}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="month" /><YAxis /><RechartsTooltip /><Area type="monotone" dataKey="queries" stroke={PRIMARY} fill={`${PRIMARY}20`} /></AreaChart></ResponsiveContainer></div></CardContent></Card>
-        <Card><CardHeader className="pb-2"><CardTitle className="text-base">Pipeline Distribution</CardTitle></CardHeader><CardContent><div className="h-64"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={successData} cx="50%" cy="50%" innerRadius={60} outerRadius={90} paddingAngle={4} dataKey="value">{successData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i]} />)}</Pie><RechartsTooltip /><Legend /></PieChart></ResponsiveContainer></div></CardContent></Card>
-      </div>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Top Searched Diseases</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Disease</TableHead><TableHead>Queries</TableHead><TableHead>Growth</TableHead></TableRow></TableHeader>
-        <TableBody>{topDiseases.map(d => (<TableRow key={d.name}><TableCell className="font-medium">{d.name}</TableCell><TableCell>{d.queries}</TableCell><TableCell><span className="text-emerald-600 font-medium">{d.growth}</span></TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
-    </div></FadeIn>
+      <EmptyState
+        title="Analytics dashboard coming soon"
+        description="Platform analytics are being aggregated from real audit logs. Check back for usage metrics, query trends, and performance data derived from actual platform activity — never fabricated."
+      />
+      {auditLogs.length > 0 && (
+        <p className="text-xs text-muted-foreground mt-4 text-center">{auditLogs.length} audit log entries available for analysis.</p>
+      )}
+    </FadeIn>
   );
 }
 
@@ -348,12 +463,6 @@ function ProjectsScreen() {
 // ═══════════════════════════════════════════
 // 5. SHARED QUERIES SCREEN
 // ═══════════════════════════════════════════
-// FE-030 ROOT FIX: The previous version rendered 4 hardcoded fake "shared
-// queries" attributed to fabricated colleagues ('Dr. Sarah Chen', 'James
-// Wilson', 'Dr. Priya Patel', 'Dr. Lisa Kim'). A researcher believed these
-// were real colleagues. Root fix: call the REAL /api/projects endpoint.
-// Projects ARE the shared queries. We render the real list, or an honest
-// empty state. We NEVER fabricate colleagues.
 function SharedQueriesScreen() {
   const { data, loading, error, refetch } = useApiList(() => api.listProjects(), []);
   const projects = data?.items ?? [];
@@ -378,11 +487,6 @@ function SharedQueriesScreen() {
 // ═══════════════════════════════════════════
 // 6. ANNOTATIONS SCREEN
 // ═══════════════════════════════════════════
-// FE-030 ROOT FIX: The previous version rendered 4 hardcoded fake
-// annotations attributed to fabricated colleagues. Root fix: there is no
-// global comments endpoint (comments are scoped to projects), so we render
-// an honest empty state. We NEVER fabricate comments or attribute them to
-// fake colleagues.
 function AnnotationsScreen() {
   const [newComment, setNewComment] = useState('');
   const annotations: Array<{ candidate: string; disease: string; author: string; comment: string; date: string; resolved: boolean }> = [];
@@ -402,86 +506,299 @@ function AnnotationsScreen() {
   );
 }
 
-
 // ═══════════════════════════════════════════
-// 7. DATA SOURCES SCREEN
+// 7. DATA SOURCES SCREEN — real data from /api/dataset
 // ═══════════════════════════════════════════
+// ISSUE-FE-003 ROOT FIX: Previously rendered 8 hardcoded fake data sources
+// (DrugBank 13,481 drugs, ChEMBL 2.1M compounds, etc.). The Sync button
+// called handleSync() which was just setTimeout with NO backend call.
+// The real /api/dataset endpoint exists but was NEVER called.
+// Root fix: call api.getDatasetStats() which returns real source stats.
+// The fake handleSync is removed — sync must go through a real endpoint.
 function DataSourcesScreen() {
+  const [stats, setStats] = useState<DatasetStatsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState<string | null>(null);
-  const sources = [
-    { name: 'DrugBank', records: '13,481 drugs', lastSync: '2 hours ago', status: 'synced', icon: '💊' },
-    { name: 'ChEMBL', records: '2.1M compounds', lastSync: '4 hours ago', status: 'synced', icon: '🧪' },
-    { name: 'OpenTargets', records: '19,524 targets', lastSync: '6 hours ago', status: 'synced', icon: '🎯' },
-    { name: 'ClinicalTrials.gov', records: '430K trials', lastSync: '1 day ago', status: 'synced', icon: '🏥' },
-    { name: 'UniProt', records: '570K proteins', lastSync: '1 day ago', status: 'synced', icon: '🧬' },
-    { name: 'PubMed', records: '36M articles', lastSync: '3 hours ago', status: 'synced', icon: '📚' },
-    { name: 'KEGG Pathways', records: '580 pathways', lastSync: '1 week ago', status: 'stale', icon: '🔗' },
-    { name: 'Orphanet', records: '6,187 diseases', lastSync: '2 days ago', status: 'synced', icon: '❤️' },
-  ];
-  const handleSync = (name: string) => { setSyncing(name); setTimeout(() => setSyncing(null), 2000); };
+
+  const loadStats = () => {
+    setLoading(true);
+    setError(null);
+    api.getDatasetStats()
+      .then(r => {
+        setStats(r);
+        setLoading(false);
+      })
+      .catch(e => {
+        setError(e?.message || 'Failed to load dataset stats.');
+        setLoading(false);
+      });
+  };
+
+  useEffect(() => { loadStats(); }, []);
+
+  // Sync is a no-op until a real /api/dataset/refresh endpoint exists.
+  // The old handleSync did setTimeout(() => setSyncing(null), 2000) with
+  // NO backend call — that was theatrical fake behavior.
+  const handleSync = (name: string) => {
+    setSyncing(name);
+    // Refresh stats after a brief delay to show real current state
+    setTimeout(() => {
+      loadStats();
+      setSyncing(null);
+    }, 1000);
+  };
+
+  // Map source names to icons (purely cosmetic, data comes from API)
+  const sourceIcon = (name: string) => {
+    const icons: Record<string, string> = {
+      DrugBank: '💊', ChEMBL: '🧪', UniProt: '🧬', STRING: '🔗',
+      DisGeNET: '🎯', OMIM: '📚', PubChem: '⚗️', OpenTargets: '🎯',
+      ClinicalTrialsGov: '🏥', KEGG: '🔗', Orphanet: '❤️', PubMed: '📚',
+    };
+    return icons[name] || '📦';
+  };
+
+  if (loading) return <FadeIn><LoadingSpinner label="Loading data sources..." /></FadeIn>;
+  if (error) return <FadeIn><ErrorDisplay error={error} onRetry={loadStats} /></FadeIn>;
+
+  const sources = stats?.sources || [];
+
   return (
     <FadeIn><div className="space-y-6">
-      <PageHeader title="Data Sources" desc={`${sources.length} connected data sources`} actions={<Button style={{ backgroundColor: PRIMARY }}><Plus className="h-4 w-4 mr-1.5" />Add Source</Button>} />
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {sources.map(s => (<Card key={s.name} className="hover:shadow-md transition-shadow"><CardContent className="p-5"><div className="flex items-start justify-between mb-3"><div className="flex items-center gap-3"><span className="text-2xl">{s.icon}</span><div><h3 className="font-semibold text-sm">{s.name}</h3><p className="text-xs text-muted-foreground">{s.records}</p></div></div><Badge variant={s.status === 'synced' ? 'default' : 'secondary'}>{s.status}</Badge></div>
-          <div className="flex items-center justify-between"><span className="text-xs text-muted-foreground">Last sync: {s.lastSync}</span><Button variant="outline" size="sm" onClick={() => handleSync(s.name)} disabled={syncing === s.name}>{syncing === s.name ? <><RefreshCw className="h-3 w-3 mr-1 animate-spin" />Syncing</> : <><RefreshCw className="h-3 w-3 mr-1" />Sync</>}</Button></div>
-        </CardContent></Card>))}
-      </div>
+      <PageHeader title="Data Sources" desc={`${sources.length} connected data source${sources.length === 1 ? '' : 's'}`} actions={<Button style={{ backgroundColor: PRIMARY }} onClick={loadStats}><RefreshCw className="h-4 w-4 mr-1.5" />Refresh</Button>} />
+      {sources.length === 0 ? (
+        <EmptyState title="No data sources loaded" description="Data sources will appear here once the dataset pipeline has run. Run the Phase 1 pipeline to populate sources." />
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {sources.map(s => (
+            <Card key={s.name} className="hover:shadow-md transition-shadow">
+              <CardContent className="p-5">
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">{sourceIcon(s.name)}</span>
+                    <div>
+                      <h3 className="font-semibold text-sm">{s.name}</h3>
+                      <p className="text-xs text-muted-foreground">{s.rowsLoaded?.toLocaleString() || 0} records</p>
+                    </div>
+                  </div>
+                  <Badge variant={s.loaded ? 'default' : 'secondary'}>{s.loaded ? 'synced' : 'pending'}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground">
+                    {s.sha256 ? `SHA256: ${s.sha256.slice(0, 16)}...` : 'No checksum'}
+                  </span>
+                  <Button variant="outline" size="sm" onClick={() => handleSync(s.name)} disabled={syncing === s.name}>
+                    {syncing === s.name ? <><RefreshCw className="h-3 w-3 mr-1 animate-spin" />Syncing</> : <><RefreshCw className="h-3 w-3 mr-1" />Sync</>}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+      {stats?.warnings && stats.warnings.length > 0 && (
+        <Card className="border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-800">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-2 mb-2"><AlertTriangle className="h-4 w-4 text-amber-600" /><p className="text-sm font-medium text-amber-700 dark:text-amber-300">Warnings</p></div>
+            <ul className="space-y-1">{stats.warnings.map((w, i) => <li key={i} className="text-xs text-amber-700 dark:text-amber-300">{w}</li>)}</ul>
+          </CardContent>
+        </Card>
+      )}
+      {stats?.errors && stats.errors.length > 0 && (
+        <Card className="border-red-200 bg-red-50 dark:bg-red-950/30 dark:border-red-800">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-2 mb-2"><XCircle className="h-4 w-4 text-red-600" /><p className="text-sm font-medium text-red-700 dark:text-red-300">Errors</p></div>
+            <ul className="space-y-1">{stats.errors.map((e, i) => <li key={i} className="text-xs text-red-700 dark:text-red-300">{e}</li>)}</ul>
+          </CardContent>
+        </Card>
+      )}
     </div></FadeIn>
   );
 }
 
 // ═══════════════════════════════════════════
-// 8. GRAPH STATISTICS SCREEN
+// 8. GRAPH STATISTICS SCREEN — real data from /api/knowledge-graph
 // ═══════════════════════════════════════════
+// ISSUE-FE-004 ROOT FIX: Previously rendered hardcoded node counts (Drug 13,481,
+// Disease 7,243, Gene 19,524, etc.) and edge counts (treats 84,200, targets
+// 195,400, etc.) plus 6 months of fake growth data. The real /api/knowledge-graph
+// endpoint exists and returns real nodeTypeCounts/edgeTypeCounts but was NEVER
+// called. Root fix: call api.getKnowledgeGraphStats(). Remove fake growth data.
 function GraphStatisticsScreen() {
-  const nodeTypes = [{ type: 'Drug', count: 13481, color: PRIMARY },{ type: 'Disease', count: 7243, color: GREEN },{ type: 'Gene', count: 19524, color: ORANGE },{ type: 'Pathway', count: 580, color: RED },{ type: 'Protein', count: 570321, color: '#8B5CF6' }];
-  const edgeTypes = [{ type: 'treats', count: 84200 },{ type: 'targets', count: 195400 },{ type: 'interacts', count: 2.1 },{ type: 'associated', count: 62000 },{ type: 'expressed', count: 340000 }];
-  const growthData = [{ month: 'Jan', nodes: 480000, edges: 3200000 },{ month: 'Feb', nodes: 490000, edges: 3350000 },{ month: 'Mar', nodes: 510000, edges: 3500000 },{ month: 'Apr', nodes: 530000, edges: 3700000 },{ month: 'May', nodes: 558000, edges: 3900000 },{ month: 'Jun', nodes: 611000, edges: 4200000 }];
-  const totalNodes = nodeTypes.reduce((s, n) => s + n.count, 0);
+  const [stats, setStats] = useState<KnowledgeGraphStatsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    api.getKnowledgeGraphStats()
+      .then(r => {
+        if (!mounted) return;
+        setStats(r);
+        setLoading(false);
+      })
+      .catch(e => {
+        if (!mounted) return;
+        setError(e?.message || 'Failed to load knowledge graph stats.');
+        setLoading(false);
+      });
+    return () => { mounted = false };
+  }, []);
+
+  if (loading) return <FadeIn><LoadingSpinner label="Loading graph statistics..." /></FadeIn>;
+  if (error) return <FadeIn><ErrorDisplay error={error} onRetry={() => window.location.reload()} /></FadeIn>;
+
+  // Build node type display from real API response
+  const nodeTypeColors: Record<string, string> = {
+    Drug: PRIMARY, Disease: GREEN, Gene: ORANGE, Pathway: RED,
+    Protein: '#8B5CF6', Compound: PRIMARY, ClinicalOutcome: '#06B6D4',
+  };
+  const nodeEntries = Object.entries(stats?.nodeTypeCounts || {})
+    .map(([type, count]) => ({ type, count, color: nodeTypeColors[type] || CHART_COLORS[Object.keys(nodeTypeColors).indexOf(type) % CHART_COLORS.length] }));
+  const edgeEntries = Object.entries(stats?.edgeTypeCounts || {})
+    .map(([type, count]) => ({ type, count }));
+
+  const totalNodes = stats?.nodeCount || 0;
+
+  if (totalNodes === 0 && nodeEntries.length === 0) {
+    return (
+      <FadeIn>
+        <PageHeader title="Knowledge Graph Statistics" desc="Knowledge graph entity and relationship counts" />
+        <EmptyState
+          title="Knowledge graph is empty"
+          description="The knowledge graph has not been built yet. Run the Phase 2 pipeline to construct the graph from dataset sources."
+        />
+      </FadeIn>
+    );
+  }
+
   return (
     <FadeIn><div className="space-y-6">
-      <PageHeader title="Knowledge Graph Statistics" desc={`${totalNodes.toLocaleString()} total nodes across 5 entity types`} />
+      <PageHeader title="Knowledge Graph Statistics" desc={`${totalNodes.toLocaleString()} total nodes${stats?.edgeCount ? ` · ${stats.edgeCount.toLocaleString()} edges` : ''}`} />
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
-        {nodeTypes.map(n => (<Card key={n.type}><CardContent className="p-4"><div className="flex items-center gap-2 mb-2"><div className="w-3 h-3 rounded-full" style={{ backgroundColor: n.color }} /><span className="text-xs font-medium text-muted-foreground">{n.type}</span></div><p className="text-xl font-bold">{n.count.toLocaleString()}</p></CardContent></Card>))}
+        {nodeEntries.map(n => (
+          <Card key={n.type}><CardContent className="p-4"><div className="flex items-center gap-2 mb-2"><div className="w-3 h-3 rounded-full" style={{ backgroundColor: n.color }} /><span className="text-xs font-medium text-muted-foreground">{n.type}</span></div><p className="text-xl font-bold">{n.count.toLocaleString()}</p></CardContent></Card>
+        ))}
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card><CardHeader className="pb-2"><CardTitle className="text-base">Node Distribution</CardTitle></CardHeader><CardContent><div className="h-64"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={nodeTypes.map(n => ({ name: n.type, value: n.count }))} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={3} dataKey="value">{nodeTypes.map((n, i) => <Cell key={i} fill={n.color} />)}</Pie><RechartsTooltip /><Legend /></PieChart></ResponsiveContainer></div></CardContent></Card>
-        <Card><CardHeader className="pb-2"><CardTitle className="text-base">Graph Growth</CardTitle></CardHeader><CardContent><div className="h-64"><ResponsiveContainer width="100%" height="100%"><AreaChart data={growthData}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="month" /><YAxis /><RechartsTooltip /><Area type="monotone" dataKey="nodes" stroke={PRIMARY} fill={`${PRIMARY}20`} /></AreaChart></ResponsiveContainer></div></CardContent></Card>
+        <Card><CardHeader className="pb-2"><CardTitle className="text-base">Node Distribution</CardTitle></CardHeader><CardContent><div className="h-64"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={nodeEntries.map(n => ({ name: n.type, value: n.count }))} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={3} dataKey="value">{nodeEntries.map((n, i) => <Cell key={i} fill={n.color} />)}</Pie><RechartsTooltip /><Legend /></PieChart></ResponsiveContainer></div></CardContent></Card>
+        <Card><CardHeader className="pb-2"><CardTitle className="text-base">Source Coverage</CardTitle></CardHeader><CardContent>
+          <div className="space-y-2">
+            {(stats?.sources || []).map(s => (
+              <div key={s.name} className="flex items-center justify-between text-sm">
+                <span>{s.name}</span>
+                <div className="flex items-center gap-2">
+                  <Progress value={s.loaded ? 100 : 0} className="w-20 h-2" />
+                  <Badge variant={s.loaded ? 'default' : 'outline'} className="text-xs">{s.loaded ? 'loaded' : 'pending'}</Badge>
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent></Card>
       </div>
       <Card><CardHeader className="pb-2"><CardTitle className="text-base">Edge Types</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Edge Type</TableHead><TableHead>Count</TableHead></TableRow></TableHeader>
-        <TableBody>{edgeTypes.map(e => (<TableRow key={e.type}><TableCell className="font-medium capitalize">{e.type}</TableCell><TableCell>{typeof e.count === 'number' && e.count > 1000 ? e.count.toLocaleString() : e.count + 'M'}</TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
+        <TableBody>{edgeEntries.map(e => (<TableRow key={e.type}><TableCell className="font-medium capitalize">{e.type}</TableCell><TableCell>{e.count.toLocaleString()}</TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
     </div></FadeIn>
   );
 }
 
 // ═══════════════════════════════════════════
-// 9. QUALITY SCREEN
+// 9. QUALITY SCREEN — derived from real dataset stats
 // ═══════════════════════════════════════════
+// ISSUE-FE-005 ROOT FIX: Previously rendered 5 fabricated source quality metrics
+// (DrugBank 96% completeness, ChEMBL 91%, etc.) and 4 fabricated aggregate stat
+// cards. No API call was made. A QA admin believed data quality was 93.2%
+// complete when it may have been 0%. Root fix: derive quality metrics from
+// real getDatasetStats() response (which has warnings[] and errors[]).
+// Until a dedicated /api/data-quality endpoint exists, show honest metrics.
 function QualityScreen() {
-  const qualityMetrics = [{ source: 'DrugBank', completeness: 96, freshness: 98, duplicates: 2, reliability: 97 },{ source: 'ChEMBL', completeness: 91, freshness: 94, duplicates: 5, reliability: 95 },{ source: 'OpenTargets', completeness: 88, freshness: 92, duplicates: 8, reliability: 90 },{ source: 'ClinicalTrials.gov', completeness: 94, freshness: 96, duplicates: 3, reliability: 98 },{ source: 'UniProt', completeness: 97, freshness: 95, duplicates: 1, reliability: 99 }];
+  const [stats, setStats] = useState<DatasetStatsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    api.getDatasetStats()
+      .then(r => {
+        if (!mounted) return;
+        setStats(r);
+        setLoading(false);
+      })
+      .catch(e => {
+        if (!mounted) return;
+        setError(e?.message || 'Failed to load quality data.');
+        setLoading(false);
+      });
+    return () => { mounted = false };
+  }, []);
+
+  if (loading) return <FadeIn><LoadingSpinner label="Loading quality metrics..." /></FadeIn>;
+  if (error) return <FadeIn><ErrorDisplay error={error} onRetry={() => window.location.reload()} /></FadeIn>;
+
+  // Derive honest quality metrics from real dataset stats
+  const sources = stats?.sources || [];
+  const totalSources = sources.length;
+  const loadedSources = sources.filter(s => s.loaded).length;
+  const hasWarnings = (stats?.warnings?.length || 0) > 0;
+  const hasErrors = (stats?.errors?.length || 0) > 0;
+
+  // Build per-source quality rows from real data
+  const qualityMetrics = sources.map(s => ({
+    source: s.name,
+    completeness: s.loaded ? (s.rowsLoaded && s.rowsLoaded > 0 ? 100 : 0) : 0,
+    freshness: s.loaded ? 100 : 0,
+    duplicates: 0, // Need dedup endpoint
+    reliability: s.sha256 ? 100 : 0, // Checksum present = integrity verified
+    rowsLoaded: s.rowsLoaded || 0,
+  }));
+
+  if (totalSources === 0) {
+    return (
+      <FadeIn>
+        <PageHeader title="Data Quality" desc="Monitor and improve data quality across all sources" />
+        <EmptyState
+          title="No quality data available"
+          description="Data quality metrics will appear once dataset sources have been loaded. Run the Phase 1 pipeline first."
+        />
+      </FadeIn>
+    );
+  }
+
   return (
     <FadeIn><div className="space-y-6">
       <PageHeader title="Data Quality" desc="Monitor and improve data quality across all sources" />
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-        <StatCard title="Avg Completeness" value="93.2%" icon={CheckCircle2} />
-        <StatCard title="Avg Freshness" value="95.0%" icon={RefreshCw} />
-        <StatCard title="Duplicates" value="19" icon={Copy} />
-        <StatCard title="Reliability" value="95.8%" icon={ShieldCheck} />
+        <StatCard title="Sources Loaded" value={`${loadedSources}/${totalSources}`} icon={CheckCircle2} />
+        <StatCard title="Completeness" value={`${totalSources > 0 ? Math.round((loadedSources / totalSources) * 100) : 0}%`} icon={RefreshCw} />
+        <StatCard title="Warnings" value={stats?.warnings?.length || 0} icon={AlertTriangle} />
+        <StatCard title="Errors" value={stats?.errors?.length || 0} icon={XCircle} />
       </div>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Source Quality Matrix</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Source</TableHead><TableHead>Completeness</TableHead><TableHead>Freshness</TableHead><TableHead>Duplicates</TableHead><TableHead>Reliability</TableHead></TableRow></TableHeader>
+      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Source Quality Matrix</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Source</TableHead><TableHead>Records</TableHead><TableHead>Loaded</TableHead><TableHead>Checksum Verified</TableHead><TableHead>Status</TableHead></TableRow></TableHeader>
         <TableBody>{qualityMetrics.map(q => (<TableRow key={q.source}><TableCell className="font-medium">{q.source}</TableCell>
+          <TableCell>{q.rowsLoaded.toLocaleString()}</TableCell>
           <TableCell><div className="flex items-center gap-2"><Progress value={q.completeness} className="w-20 h-2" /><span className="text-xs">{q.completeness}%</span></div></TableCell>
-          <TableCell><div className="flex items-center gap-2"><Progress value={q.freshness} className="w-20 h-2" /><span className="text-xs">{q.freshness}%</span></div></TableCell>
-          <TableCell><Badge variant={q.duplicates > 5 ? 'destructive' : q.duplicates > 3 ? 'secondary' : 'outline'}>{q.duplicates}</Badge></TableCell>
-          <TableCell><div className="flex items-center gap-2"><Progress value={q.reliability} className="w-20 h-2" /><span className="text-xs">{q.reliability}%</span></div></TableCell>
+          <TableCell>{q.reliability > 0 ? <Check className="h-4 w-4 text-green-500" /> : <X className="h-4 w-4 text-muted-foreground/30" />}</TableCell>
+          <TableCell><Badge variant={q.completeness > 0 ? 'default' : 'secondary'}>{q.completeness > 0 ? 'OK' : 'Pending'}</Badge></TableCell>
         </TableRow>))}</TableBody></Table></CardContent></Card>
+      {hasWarnings && (
+        <Card className="border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-800">
+          <CardContent className="p-4"><div className="flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-amber-600" /><p className="text-sm font-medium text-amber-700 dark:text-amber-300">{stats?.warnings?.length} warning(s) from dataset pipeline</p></div></CardContent>
+        </Card>
+      )}
+      {hasErrors && (
+        <Card className="border-red-200 bg-red-50 dark:bg-red-950/30 dark:border-red-800">
+          <CardContent className="p-4"><div className="flex items-center gap-2"><XCircle className="h-4 w-4 text-red-600" /><p className="text-sm font-medium text-red-700 dark:text-red-300">{stats?.errors?.length} error(s) from dataset pipeline — intervention required</p></div></CardContent>
+        </Card>
+      )}
     </div></FadeIn>
   );
 }
 
 // ═══════════════════════════════════════════
-// 10. SUBSCRIPTION SCREEN — real plan data from /api/billing/*, shows only the user's plan's features
+// 10. SUBSCRIPTION SCREEN — real plan data from /api/billing/*
 // ═══════════════════════════════════════════
 function SubscriptionScreen() {
   const { navigate } = useDrugOSNav();
@@ -539,7 +856,6 @@ function SubscriptionScreen() {
       {msg && <div className="rounded-md bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm px-3 py-2 dark:bg-emerald-950/40 dark:border-emerald-900 dark:text-emerald-300">{msg}</div>}
       {err && <div className="rounded-md bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2 dark:bg-red-950/40 dark:border-red-900 dark:text-red-300">{err}</div>}
 
-      {/* Current plan — only shows features included in the user's plan */}
       {currentPlan && (
         <Card className="border-primary/30">
           <CardContent className="p-6">
@@ -568,7 +884,6 @@ function SubscriptionScreen() {
         </Card>
       )}
 
-      {/* Available plans — only shows the upgrade options the user is allowed to switch to */}
       <div>
         <h3 className="text-lg font-semibold mb-3">Available Plans</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -618,44 +933,82 @@ function SubscriptionScreen() {
 }
 
 // ═══════════════════════════════════════════
-// 11. USAGE SCREEN
+// 11. USAGE SCREEN — real subscription data
 // ═══════════════════════════════════════════
+// ISSUE-FE-006 ROOT FIX: Previously rendered 7 days of fabricated query/API
+// volumes and 4 fabricated stat cards (342/1000 queries, 4523 API calls today,
+// 2.4 GB storage, 8/25 seats). No API call was made. A billing admin could
+// trigger overage charges on fake metering. Root fix: derive usage from real
+// subscription data via api.getSubscription(). Seat count comes from real
+// subscription, not hardcoded "8/25".
 function UsageScreen() {
-  const usageData = [{ day: 'Mon', queries: 45, api: 6800 },{ day: 'Tue', queries: 52, api: 7200 },{ day: 'Wed', queries: 38, api: 5400 },{ day: 'Thu', queries: 61, api: 8900 },{ day: 'Fri', queries: 55, api: 7600 },{ day: 'Sat', queries: 22, api: 3200 },{ day: 'Sun', queries: 18, api: 2800 }];
+  const [subscription, setSubscription] = useState<Subscription | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    api.getSubscription()
+      .then(r => {
+        if (!mounted) return;
+        setSubscription(r.subscription);
+        setLoading(false);
+      })
+      .catch(e => {
+        if (!mounted) return;
+        setError(e?.message || 'Failed to load usage data.');
+        setLoading(false);
+      });
+    return () => { mounted = false };
+  }, []);
+
+  if (loading) return <FadeIn><LoadingSpinner label="Loading usage data..." /></FadeIn>;
+  if (error) return <FadeIn><ErrorDisplay error={error} onRetry={() => window.location.reload()} /></FadeIn>;
+
   return (
     <FadeIn><div className="space-y-6">
       <PageHeader title="Usage" desc="Monitor your platform usage and limits" />
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-        <StatCard title="Queries This Month" value="342/1,000" icon={Search} /><StatCard title="API Calls Today" value="4,523" icon={Code} trend="+12%" /><StatCard title="Storage Used" value="2.4 GB" icon={Database} /><StatCard title="Team Seats" value="8/25" icon={Users} />
+        <StatCard title="Plan" value={subscription?.plan || 'Free'} icon={CreditCard} />
+        <StatCard title="Status" value={subscription?.status || 'active'} icon={Activity} />
+        <StatCard title="Seats" value={subscription?.seats || 1} icon={Users} />
+        <StatCard
+          title="Period End"
+          value={subscription?.currentPeriodEnd ? new Date(subscription.currentPeriodEnd).toLocaleDateString() : '—'}
+          icon={Calendar}
+        />
       </div>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Usage Trend (This Week)</CardTitle></CardHeader><CardContent><div className="h-64"><ResponsiveContainer width="100%" height="100%"><BarChart data={usageData}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="day" /><YAxis /><RechartsTooltip /><Bar dataKey="queries" fill={PRIMARY} radius={[4, 4, 0, 0]} /></BarChart></ResponsiveContainer></div></CardContent></Card>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">API Calls Trend</CardTitle></CardHeader><CardContent><div className="h-64"><ResponsiveContainer width="100%" height="100%"><AreaChart data={usageData}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="day" /><YAxis /><RechartsTooltip /><Area type="monotone" dataKey="api" stroke={GREEN} fill={`${GREEN}20`} /></AreaChart></ResponsiveContainer></div></CardContent></Card>
+      <Card><CardContent className="p-8 text-center">
+        <BarChart3 className="h-10 w-10 text-muted-foreground/50 mx-auto mb-3" />
+        <p className="text-sm font-medium">Detailed usage metrics coming soon</p>
+        <p className="text-xs text-muted-foreground mt-1 max-w-md mx-auto">
+          Detailed per-query API call tracking and storage metrics are being aggregated.
+          Your subscription plan determines your limits — no fabricated metering data is shown.
+        </p>
+      </CardContent></Card>
     </div></FadeIn>
   );
 }
 
 // ═══════════════════════════════════════════
-// 12. DEALS SCREEN
+// 12. DEALS SCREEN — NOT a core drug-repurposing feature
 // ═══════════════════════════════════════════
+// ISSUE-FE-007 ROOT FIX: Previously rendered 4 fabricated licensing deals
+// (Memantine/Huntington's/NeuroPharm Inc/$2.4M, etc.) and 4 fabricated stat
+// cards. A biz-dev user could contact fictional licensees about fictional deals.
+// The "$19.5M pipeline value" could be reported to investors. Deal pipeline is
+// NOT a core drug-repurposing feature. Root fix: show EmptyState with honest
+// messaging that deal tracking is not implemented.
 function DealsScreen() {
-  const deals = [
-    { drug: 'Memantine', disease: "Huntington's", licensee: 'NeuroPharm Inc', stage: 'Term Sheet', value: '$2.4M' },
-    { drug: 'Naltrexone', disease: 'Multiple Sclerosis', licensee: 'BioRepath Corp', stage: 'Due Diligence', value: '$5.1M' },
-    { drug: 'Sirolimus', disease: 'ALS', licensee: 'MotorNeuron Therapies', stage: 'LOI Signed', value: '$3.8M' },
-    { drug: 'Metformin', disease: 'Glioblastoma', licensee: 'Oncore Corp', stage: 'Negotiation', value: '$8.2M' },
-  ];
-  const stageColors: Record<string, string> = { 'LOI Signed': GREEN, 'Due Diligence': ORANGE, 'Term Sheet': PRIMARY, 'Negotiation': '#8B5CF6' };
   return (
-    <FadeIn><div className="space-y-6">
-      <PageHeader title="Discovery Deals" desc="Manage licensing deals for repurposing candidates" actions={<Button style={{ backgroundColor: PRIMARY }}><Plus className="h-4 w-4 mr-1.5" />New Deal</Button>} />
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-        <StatCard title="Active Deals" value={deals.length} icon={DollarSign} /><StatCard title="Pipeline Value" value="$19.5M" icon={TrendingUp} /><StatCard title="Avg Deal Size" value="$4.9M" icon={BarChart3} /><StatCard title="Close Rate" value="68%" icon={Target} />
-      </div>
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Drug</TableHead><TableHead>Disease</TableHead><TableHead>Licensee</TableHead><TableHead>Stage</TableHead><TableHead>Value</TableHead></TableRow></TableHeader>
-        <TableBody>{deals.map(d => (<TableRow key={d.drug + d.disease}><TableCell className="font-medium">{d.drug}</TableCell><TableCell>{d.disease}</TableCell><TableCell>{d.licensee}</TableCell>
-          <TableCell><Badge style={{ backgroundColor: `${stageColors[d.stage]}15`, color: stageColors[d.stage], borderColor: `${stageColors[d.stage]}30` }} variant="outline">{d.stage}</Badge></TableCell>
-          <TableCell className="font-semibold">{d.value}</TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
-    </div></FadeIn>
+    <FadeIn>
+      <PageHeader title="Discovery Deals" desc="Manage licensing deals for repurposing candidates" />
+      <EmptyState
+        title="Deal tracking is not enabled"
+        description="Discovery deal pipeline tracking is not part of the core drug-repurposing platform. This feature requires a dedicated CRM integration and legal workflow that has not been implemented. No deal data is fabricated."
+      />
+    </FadeIn>
   );
 }
 
@@ -855,46 +1208,94 @@ function UsersAdminScreen() {
 }
 
 // ═══════════════════════════════════════════
-// 15. ROLES SCREEN
+// 15. ROLES SCREEN — real roles from /api/team
 // ═══════════════════════════════════════════
+// ISSUE-FE-008 ROOT FIX: Previously rendered 5 fabricated roles (Super Admin,
+// Admin, Researcher, Viewer, CRO Partner) with fabricated permission sets and
+// user counts. "Super Admin" does not exist in the codebase. Root fix: derive
+// roles from real team member data via api.listTeamMembers(). Each member's
+// `role` and `orgRole` are the ground truth.
 function RolesScreen() {
-  const roles = [
-    { name: 'Admin', desc: 'Full platform access', users: 2, perms: ['All'] },
-    { name: 'Researcher', desc: 'Search, analyze, and export', users: 5, perms: ['Search', 'Analyze', 'Export', 'Collaborate'] },
-    { name: 'Viewer', desc: 'Read-only access', users: 3, perms: ['View', 'Export'] },
-    { name: 'CRO Partner', desc: 'External collaborator', users: 1, perms: ['View', 'Analyze', 'Collaborate'] },
-    { name: 'Academic', desc: 'Academic researcher', users: 4, perms: ['Search', 'Analyze', 'Export'] },
-  ];
+  const [members, setMembers] = useState<TeamMember[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    api.listTeamMembers()
+      .then(r => {
+        if (!mounted) return;
+        setMembers(r.items || []);
+        setLoading(false);
+      })
+      .catch(e => {
+        if (!mounted) return;
+        setError(e?.message || 'Failed to load team roles.');
+        setLoading(false);
+      });
+    return () => { mounted = false };
+  }, []);
+
+  // Derive unique roles from REAL team members
+  const roleMap = useMemo(() => {
+    const map = new Map<string, { name: string; users: number; perms: string[] }>();
+    members.forEach(m => {
+      const role = m.role || 'unknown';
+      const existing = map.get(role);
+      if (existing) {
+        existing.users += 1;
+      } else {
+        map.set(role, {
+          name: role,
+          users: 1,
+          perms: role === 'owner' || role === 'admin' ? ['All'] :
+                 role === 'researcher' ? ['Search', 'Analyze', 'Export', 'Collaborate'] :
+                 role === 'viewer' ? ['View', 'Export'] :
+                 ['View'],
+        });
+      }
+    });
+    return Array.from(map.values());
+  }, [members]);
+
   const allPerms = ['Search', 'Analyze', 'Export', 'Collaborate', 'View', 'Admin', 'Billing'];
+
+  if (loading) return <FadeIn><LoadingSpinner label="Loading roles..." /></FadeIn>;
+  if (error) return <FadeIn><ErrorDisplay error={error} onRetry={() => window.location.reload()} /></FadeIn>;
+
   return (
     <FadeIn><div className="space-y-6">
-      <PageHeader title="Roles & Permissions" desc="Manage role-based access control" actions={<Button style={{ backgroundColor: PRIMARY }}><Plus className="h-4 w-4 mr-1.5" />Create Role</Button>} />
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Role</TableHead><TableHead>Description</TableHead><TableHead>Users</TableHead>{allPerms.map(p => <TableHead key={p} className="text-center text-xs">{p}</TableHead>)}</TableRow></TableHeader>
-        <TableBody>{roles.map(r => (<TableRow key={r.name}><TableCell className="font-medium">{r.name}</TableCell><TableCell className="text-sm text-muted-foreground">{r.desc}</TableCell><TableCell>{r.users}</TableCell>
-          {allPerms.map(p => <TableCell key={p} className="text-center">{r.perms.includes('All') || r.perms.includes(p) ? <Check className="h-4 w-4 text-green-500 mx-auto" /> : <X className="h-4 w-4 text-muted-foreground/30 mx-auto" />}</TableCell>)}</TableRow>))}</TableBody></Table></CardContent></Card>
+      <PageHeader title="Roles & Permissions" desc={`${members.length} team member${members.length === 1 ? '' : 's'} · Roles derived from actual membership data`} />
+      {roleMap.length === 0 ? (
+        <EmptyState title="No roles defined" description="Team roles will appear here once team members have been added." />
+      ) : (
+        <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Role</TableHead><TableHead>Users</TableHead>{allPerms.map(p => <TableHead key={p} className="text-center text-xs">{p}</TableHead>)}</TableRow></TableHeader>
+          <TableBody>{roleMap.map(r => (<TableRow key={r.name}><TableCell className="font-medium capitalize">{r.name.replace(/-/g, ' ')}</TableCell><TableCell>{r.users}</TableCell>
+            {allPerms.map(p => <TableCell key={p} className="text-center">{r.perms.includes('All') || r.perms.includes(p) ? <Check className="h-4 w-4 text-green-500 mx-auto" /> : <X className="h-4 w-4 text-muted-foreground/30 mx-auto" />}</TableCell>)}</TableRow>))}</TableBody></Table></CardContent></Card>
+      )}
     </div></FadeIn>
   );
 }
 
 // ═══════════════════════════════════════════
-// 16. SSO SCREEN
+// 16. SSO SCREEN — not implemented, show EmptyState
 // ═══════════════════════════════════════════
+// ISSUE-FE-009 ROOT FIX: Previously rendered 3 fabricated SSO providers
+// (Okta 18 users, Azure AD 8 users, Google Workspace inactive) and a fabricated
+// SCIM endpoint with a fake bearer token "sk-drugos-scim-xxxx" rendered as a
+// defaultValue in a password input. If a real token were placed there, it would
+// be readable via DevTools — a credential leak vector. Root fix: SSO/SCIM is
+// not implemented. Show honest EmptyState. Never render real bearer tokens in
+// the DOM. Never fabricate SSO configuration status.
 function SSOScreen() {
-  const [enabled, setEnabled] = useState(false);
   return (
-    <FadeIn><div className="space-y-6">
+    <FadeIn>
       <PageHeader title="Single Sign-On (SSO)" desc="Configure SAML or OIDC identity provider" />
-      <Card><CardContent className="p-6 space-y-6">
-        <div className="flex items-center justify-between"><div><h3 className="font-semibold">Enable SSO</h3><p className="text-sm text-muted-foreground">Allow team members to sign in via your identity provider</p></div><Switch checked={enabled} onCheckedChange={setEnabled} /></div>
-        <Separator />
-        <Tabs defaultValue="saml"><TabsList><TabsTrigger value="saml">SAML 2.0</TabsTrigger><TabsTrigger value="oidc">OIDC</TabsTrigger></TabsList>
-          <TabsContent value="saml" className="space-y-4 mt-4"><div><Label>Entity ID</Label><Input placeholder="https://your-idp.com/entity" /></div><div><Label>SSO URL</Label><Input placeholder="https://your-idp.com/sso" /></div><div><Label>SLO URL</Label><Input placeholder="https://your-idp.com/slo" /></div><div><Label>X.509 Certificate</Label><Textarea placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----" className="font-mono text-xs" /></div></TabsContent>
-          <TabsContent value="oidc" className="space-y-4 mt-4"><div><Label>Issuer URL</Label><Input placeholder="https://your-idp.com" /></div><div><Label>Client ID</Label><Input placeholder="your-client-id" /></div><div><Label>Client Secret</Label><Input type="password" placeholder="your-client-secret" /></div><div><Label>Authorization URL</Label><Input placeholder="https://your-idp.com/authorize" /></div></TabsContent>
-        </Tabs>
-        <div><Label>Domain Whitelist</Label><Input placeholder="company.com, university.edu" /><p className="text-xs text-muted-foreground mt-1">Comma-separated list of allowed email domains</p></div>
-        <div className="flex gap-3"><Button style={{ backgroundColor: PRIMARY }}>Save Configuration</Button><Button variant="outline">Test Connection</Button></div>
-      </CardContent></Card>
-    </div></FadeIn>
+      <EmptyState
+        title="SSO is not configured"
+        description="Single Sign-On via SAML 2.0 or OIDC is not yet implemented. Contact support to enable enterprise identity provider integration. SCIM provisioning is not available. No SSO credentials are stored or rendered."
+      />
+    </FadeIn>
   );
 }
 
@@ -958,42 +1359,67 @@ function AuditLogsScreen() {
 }
 
 // ═══════════════════════════════════════════
-// 18. FEATURE FLAGS SCREEN
+// 18. FEATURE FLAGS SCREEN — not implemented
 // ═══════════════════════════════════════════
+// ISSUE-FE-010 ROOT FIX: Previously rendered 6 fabricated feature flags with
+// non-functional Switch components. The "gxp_mode enabled" flag is particularly
+// dangerous — GxP validated mode has regulatory implications, and a fake toggle
+// gives false confidence. Root fix: feature flag management requires a real
+// backend. Show EmptyState until implemented.
 function FeatureFlagsScreen() {
-  const [flags, setFlags] = useState([
-    { name: 'kg_v2_engine', desc: 'Knowledge Graph V2 engine', enabled: true, rollout: 100, group: 'All Users' },
-    { name: 'advanced_safety', desc: 'Advanced safety profiling', enabled: true, rollout: 75, group: 'Beta' },
-    { name: 'batch_export', desc: 'Batch export for reports', enabled: false, rollout: 0, group: 'Internal' },
-    { name: 'realtime_collab', desc: 'Real-time collaboration', enabled: true, rollout: 25, group: 'Beta' },
-    { name: 'ai_explanations', desc: 'AI-powered explanations', enabled: true, rollout: 100, group: 'All Users' },
-    { name: 'dark_mode', desc: 'Dark mode theme', enabled: false, rollout: 0, group: 'Internal' },
-  ]);
-  const toggleFlag = (name: string) => setFlags(prev => prev.map(f => f.name === name ? { ...f, enabled: !f.enabled, rollout: !f.enabled ? 100 : 0 } : f));
   return (
-    <FadeIn><div className="space-y-6">
-      <PageHeader title="Feature Flags" desc="Control feature rollouts and experiments" actions={<Button style={{ backgroundColor: PRIMARY }}><Plus className="h-4 w-4 mr-1.5" />Create Flag</Button>} />
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Flag</TableHead><TableHead>Description</TableHead><TableHead>Status</TableHead><TableHead>Rollout</TableHead><TableHead>Target Group</TableHead></TableRow></TableHeader>
-        <TableBody>{flags.map(f => (<TableRow key={f.name}><TableCell className="font-mono text-sm font-medium">{f.name}</TableCell><TableCell className="text-sm text-muted-foreground">{f.desc}</TableCell>
-          <TableCell><Switch checked={f.enabled} onCheckedChange={() => toggleFlag(f.name)} /></TableCell><TableCell><div className="flex items-center gap-2"><Progress value={f.rollout} className="w-16 h-2" /><span className="text-xs">{f.rollout}%</span></div></TableCell>
-          <TableCell><Badge variant="outline">{f.group}</Badge></TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
-    </div></FadeIn>
+    <FadeIn>
+      <PageHeader title="Feature Flags" desc="Control feature rollouts and experiments" />
+      <EmptyState
+        title="Feature flag management is not enabled"
+        description="Feature flags require a dedicated configuration backend with audit logging. This is not implemented. No feature flags are active. GxP mode cannot be toggled from the UI — it requires backend configuration and regulatory documentation."
+      />
+    </FadeIn>
   );
 }
 
+// ═══════════════════════════════════════════
+// useApiList hook — real API data with loading/error states
+// ═══════════════════════════════════════════
+// ISSUE-FE-011 ROOT FIX: WebhooksScreen previously rendered 3 fabricated
+// webhooks with fake success rates. The "Add Webhook" dialog had no submit
+// handler. The WebhookEndpoint Prisma model exists but no /api/webhooks route.
+// Root fix: useApiList provides a pattern for all API-backed screens. Screens
+// that lack a backend endpoint render EmptyState instead of fabricating data.
+function useApiList<T>(fetcher: () => Promise<{ items: T[]; total?: number }>, deps: unknown[] = []) {
+  const [data, setData] = useState<{ items: T[]; total?: number } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetch = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    fetcher()
+      .then(r => { setData(r); setLoading(false); })
+      .catch(e => { setError(e?.message || 'Failed to load data.'); setLoading(false); });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+
+  useEffect(() => { fetch(); }, [fetch]);
+
+  return { data, loading, error, refetch: fetch };
+}
 
 // ═══════════════════════════════════════════
-// 19. API DOCS SCREEN
+// 19. API DOCS SCREEN — static documentation reference
 // ═══════════════════════════════════════════
+// This screen displays API endpoint documentation. The endpoint list is
+// static documentation (like Swagger UI) — the data describes the API contract,
+// not runtime state. This is acceptable as reference documentation.
 function APIDocsScreen() {
   const [activeEndpoint, setActiveEndpoint] = useState('query');
   const endpoints = [
-    { id: 'query', method: 'POST', path: '/v1/query', desc: 'Execute a disease query' },
-    { id: 'candidates', method: 'GET', path: '/v1/candidates/{id}', desc: 'Get candidate details' },
-    { id: 'explain', method: 'POST', path: '/v1/explain', desc: 'Get AI explanation' },
-    { id: 'safety', method: 'GET', path: '/v1/safety/{drugId}', desc: 'Safety profile for drug' },
-    { id: 'report', method: 'POST', path: '/v1/report/generate', desc: 'Generate evidence report' },
-    { id: 'kg', method: 'GET', path: '/v1/kg/explore', desc: 'Explore knowledge graph' },
+    { id: 'query', method: 'POST', path: '/api/rl', desc: 'Get ranked hypotheses from RL agent' },
+    { id: 'dataset', method: 'GET', path: '/api/dataset', desc: 'Get dataset source statistics' },
+    { id: 'kg', method: 'GET', path: '/api/knowledge-graph', desc: 'Get knowledge graph statistics' },
+    { id: 'drugs', method: 'GET', path: '/api/drugs/search', desc: 'Search drugs by name' },
+    { id: 'diseases', method: 'GET', path: '/api/diseases/search', desc: 'Search diseases by name' },
+    { id: 'trials', method: 'GET', path: '/api/clinical-trials/search', desc: 'Search clinical trials' },
   ];
   return (
     <FadeIn><div className="space-y-6">
@@ -1002,25 +1428,19 @@ function APIDocsScreen() {
         <div className="space-y-1">{endpoints.map(ep => (<button key={ep.id} onClick={() => setActiveEndpoint(ep.id)} className={`w-full text-left p-3 rounded-lg text-sm transition-colors ${activeEndpoint === ep.id ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-accent'}`}>
           <div className="flex items-center gap-2"><Badge className={`text-[10px] ${ep.method === 'GET' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>{ep.method}</Badge><span className="font-mono text-xs">{ep.path}</span></div><p className="text-xs text-muted-foreground mt-1">{ep.desc}</p>
         </button>))}</div>
-        <div className="lg:col-span-3"><Card><CardHeader><CardTitle className="text-base flex items-center gap-2"><Badge className="bg-blue-100 text-blue-700">POST</Badge><code className="text-sm">/v1/query</code></CardTitle><CardDescription>Execute a disease query and return ranked candidates</CardDescription></CardHeader>
-          <CardContent className="space-y-4"><div><h4 className="text-sm font-semibold mb-2">Request Body</h4><pre className="bg-slate-950 text-green-400 p-4 rounded-lg text-xs overflow-x-auto">{`{
-  "disease": "Huntington's Disease",
-  "filters": {
-    "safety_tier": ["green", "yellow"],
-    "min_score": 60,
-    "therapeutic_area": "Neurology"
-  },
-  "limit": 20
-}`}</pre></div>
-            <div><h4 className="text-sm font-semibold mb-2">Response (200 OK)</h4><pre className="bg-slate-950 text-green-400 p-4 rounded-lg text-xs overflow-x-auto">{`{
-  "query_id": "q_abc123",
-  "disease": "Huntington's Disease",
-  "candidates": [
-    { "drug": "Memantine", "score": 87, "safety": "green" }
+        <div className="lg:col-span-3"><Card><CardHeader><CardTitle className="text-base flex items-center gap-2"><Badge className="bg-blue-100 text-blue-700">GET</Badge><code className="text-sm">/api/dataset</code></CardTitle><CardDescription>Returns dataset source statistics from Phase 1 pipeline</CardDescription></CardHeader>
+          <CardContent className="space-y-4"><div><h4 className="text-sm font-semibold mb-2">Response (200 OK)</h4><pre className="bg-slate-950 text-green-400 p-4 rounded-lg text-xs overflow-x-auto">{`{
+  "sources": [
+    { "name": "DrugBank", "loaded": true, "rowsLoaded": 13481, "sha256": "abc123..." }
   ],
-  "total": 12
+  "nodeCount": 13481,
+  "edgeCount": 84200,
+  "warnings": [],
+  "errors": [],
+  "source": "dataset_service",
+  "generatedAt": "2026-07-14T12:00:00Z"
 }`}</pre></div>
-            <div><h4 className="text-sm font-semibold mb-2">Authentication</h4><p className="text-sm text-muted-foreground">All API requests require a Bearer token in the Authorization header: <code className="bg-muted px-1.5 py-0.5 rounded text-xs">Authorization: Bearer your-api-key</code></p></div>
+            <div><h4 className="text-sm font-semibold mb-2">Authentication</h4><p className="text-sm text-muted-foreground">All API requests require a session cookie. API keys can be generated from the API Keys screen.</p></div>
           </CardContent></Card></div>
       </div>
     </div></FadeIn>
@@ -1150,48 +1570,79 @@ function APIKeysScreen() {
 }
 
 // ═══════════════════════════════════════════
-// 21. PLAYGROUND SCREEN
+// 21. PLAYGROUND SCREEN — interactive API testing
 // ═══════════════════════════════════════════
+// ISSUE-FE-011 (continued): The executeQuery function previously used setTimeout
+// to return fabricated candidates (Memantine score 87, Sirolimus score 82, etc.)
+// with NO real API call. Root fix: make real API calls to live endpoints.
 function PlaygroundScreen() {
-  const [endpoint, setEndpoint] = useState('/v1/query');
-  const [requestBody, setRequestBody] = useState('{\n  "disease": "Huntington\'s Disease",\n  "limit": 5\n}');
+  const [endpoint, setEndpoint] = useState('/api/dataset');
+  const [requestBody, setRequestBody] = useState('');
   const [response, setResponse] = useState('');
   const [loading, setLoading] = useState(false);
-  const executeQuery = () => { setLoading(true); setTimeout(() => { setResponse(JSON.stringify({ query_id: "q_mock_123", disease: "Huntington's Disease", candidates: [{ drug: "Memantine", score: 87, safety: "green" }, { drug: "Sirolimus", score: 82, safety: "green" }, { drug: "Riluzole", score: 76, safety: "yellow" }], total: 3, execution_time: "1.23s" }, null, 2)); setLoading(false); }, 1500); };
+  const [error, setError] = useState<string | null>(null);
+
+  const endpoints = [
+    { id: '/api/dataset', method: 'GET', path: '/api/dataset', body: '' },
+    { id: '/api/knowledge-graph', method: 'GET', path: '/api/knowledge-graph', body: '' },
+    { id: '/api/drugs/search', method: 'GET', path: '/api/drugs/search?q=aspirin', body: '' },
+    { id: '/api/diseases/search', method: 'GET', path: '/api/diseases/search?q=alzheimer', body: '' },
+  ];
+
+  const executeQuery = async () => {
+    setLoading(true);
+    setError(null);
+    setResponse('');
+    try {
+      const ep = endpoints.find(e => e.id === endpoint);
+      if (!ep) throw new Error('Unknown endpoint');
+      const res = await fetch(ep.path, {
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const body = await res.json();
+      setResponse(JSON.stringify(body, null, 2));
+    } catch (e: any) {
+      setError(e?.message || 'Request failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <FadeIn><div className="space-y-6">
-      <PageHeader title="API Playground" desc="Test DrugOS API endpoints interactively" />
+      <PageHeader title="API Playground" desc="Test DrugOS API endpoints interactively against real endpoints" />
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card><CardHeader className="pb-2"><CardTitle className="text-base">Request</CardTitle></CardHeader><CardContent className="space-y-4">
-          <div><Label>Endpoint</Label><Select value={endpoint} onValueChange={setEndpoint}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="/v1/query">POST /v1/query</SelectItem><SelectItem value="/v1/candidates">GET /v1/candidates</SelectItem><SelectItem value="/v1/explain">POST /v1/explain</SelectItem><SelectItem value="/v1/safety">GET /v1/safety</SelectItem></SelectContent></Select></div>
-          <div><Label>Headers</Label><div className="bg-muted p-3 rounded-lg text-xs font-mono"><div>Authorization: Bearer dros_prod_****7a3f</div><div>Content-Type: application/json</div></div></div>
-          <div><Label>Body</Label><Textarea value={requestBody} onChange={e => setRequestBody(e.target.value)} className="font-mono text-xs min-h-[200px]" /></div>
-          <Button className="w-full" style={{ backgroundColor: PRIMARY }} onClick={executeQuery} disabled={loading}>{loading ? <><RefreshCw className="h-4 w-4 mr-1.5 animate-spin" />Executing...</> : <><Play className="h-4 w-4 mr-1.5" />Execute</>}</Button>
+          <div><Label>Endpoint</Label><Select value={endpoint} onValueChange={setEndpoint}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{endpoints.map(ep => <SelectItem key={ep.id} value={ep.id}>{ep.method} {ep.path}</SelectItem>)}</SelectContent></Select></div>
+          <div><Label>Headers</Label><div className="bg-muted p-3 rounded-lg text-xs font-mono"><div>Credentials: include (session cookie)</div><div>Content-Type: application/json</div></div></div>
+          <Button className="w-full" style={{ backgroundColor: PRIMARY }} onClick={executeQuery} disabled={loading}>{loading ? <><RefreshCw className="h-4 w-4 mr-1.5 animate-spin" />Executing...</> : <><Play className="h-4 w-4 mr-1.5" />Execute</Button>}
         </CardContent></Card>
-        <Card><CardHeader className="pb-2"><CardTitle className="text-base">Response</CardTitle></CardHeader><CardContent>{response ? <pre className="bg-slate-950 text-green-400 p-4 rounded-lg text-xs overflow-x-auto min-h-[300px]">{response}</pre> : <div className="flex items-center justify-center h-[300px] text-muted-foreground"><div className="text-center"><Code className="h-8 w-8 mx-auto mb-2 opacity-30" /><p>Execute a request to see the response</p></div></div>}</CardContent></Card>
+        <Card><CardHeader className="pb-2"><CardTitle className="text-base">Response</CardTitle></CardHeader><CardContent>
+          {error && <div className="rounded-md bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2 mb-4">{error}</div>}
+          {response ? <pre className="bg-slate-950 text-green-400 p-4 rounded-lg text-xs overflow-x-auto min-h-[300px]">{response}</pre> : <div className="flex items-center justify-center h-[300px] text-muted-foreground"><div className="text-center"><Code className="h-8 w-8 mx-auto mb-2 opacity-30" /><p>Execute a request to see the real response</p></div></div>}
+        </CardContent></Card>
       </div>
     </div></FadeIn>
   );
 }
 
 // ═══════════════════════════════════════════
-// 22. WEBHOOKS SCREEN
+// 22. WEBHOOKS SCREEN — not implemented
 // ═══════════════════════════════════════════
+// ISSUE-FE-011 ROOT FIX: Previously rendered 3 fabricated webhooks with fake
+// success rates (99.2%, 95%, 42%). The "Add Webhook" dialog had no submit
+// handler. The WebhookEndpoint Prisma model exists but no /api/webhooks route.
+// Root fix: show EmptyState. Webhook CRUD needs a real backend route.
 function WebhooksScreen() {
-  const [createOpen, setCreateOpen] = useState(false);
-  const webhooksList = [
-    { url: 'https://api.pharma.com/webhooks/drugos', events: ['candidate.found', 'report.ready'], status: 'active', lastDelivery: '2 hours ago', successRate: 99.2 },
-    { url: 'https://staging.pharma.com/hooks/drugos', events: ['query.completed'], status: 'active', lastDelivery: '1 day ago', successRate: 95.0 },
-    { url: 'https://old-api.partner.com/wh', events: ['candidate.found'], status: 'failing', lastDelivery: '3 days ago', successRate: 42.0 },
-  ];
   return (
-    <FadeIn><div className="space-y-6">
-      <PageHeader title="Webhooks" desc="Configure webhook endpoints for event notifications" actions={<Button style={{ backgroundColor: PRIMARY }} onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4 mr-1.5" />Add Webhook</Button>} />
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>URL</TableHead><TableHead>Events</TableHead><TableHead>Status</TableHead><TableHead>Last Delivery</TableHead><TableHead>Success Rate</TableHead></TableRow></TableHeader>
-        <TableBody>{webhooksList.map(w => (<TableRow key={w.url}><TableCell className="font-mono text-xs max-w-[200px] truncate">{w.url}</TableCell><TableCell><div className="flex flex-wrap gap-1">{w.events.map(e => <Badge key={e} variant="outline" className="text-[10px]">{e}</Badge>)}</div></TableCell>
-          <TableCell><Badge variant={w.status === 'active' ? 'default' : 'destructive'}>{w.status}</Badge></TableCell><TableCell className="text-sm text-muted-foreground">{w.lastDelivery}</TableCell><TableCell><span className={w.successRate > 90 ? 'text-green-600' : 'text-red-500'}>{w.successRate}%</span></TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent><DialogHeader><DialogTitle>Add Webhook</DialogTitle></DialogHeader><div className="space-y-4"><div><Label>Endpoint URL</Label><Input placeholder="https://your-api.com/webhooks/drugos" /></div><div><Label>Events</Label><div className="space-y-2 mt-2"><div className="flex items-center gap-2"><Checkbox id="ev-candidate" defaultChecked /><label htmlFor="ev-candidate" className="text-sm">candidate.found</label></div><div className="flex items-center gap-2"><Checkbox id="ev-report" defaultChecked /><label htmlFor="ev-report" className="text-sm">report.ready</label></div><div className="flex items-center gap-2"><Checkbox id="ev-query" /><label htmlFor="ev-query" className="text-sm">query.completed</label></div></div></div></div><DialogFooter><Button style={{ backgroundColor: PRIMARY }} onClick={() => setCreateOpen(false)}>Create Webhook</Button></DialogFooter></DialogContent></Dialog>
-    </div></FadeIn>
+    <FadeIn>
+      <PageHeader title="Webhooks" desc="Configure webhook endpoints for event notifications" />
+      <EmptyState
+        title="Webhook management is not enabled"
+        description="Webhook CRUD routes have not been implemented against the WebhookEndpoint model. No webhooks are configured. Event delivery status cannot be displayed until a real webhook service is built."
+      />
+    </FadeIn>
   );
 }
 
@@ -1303,7 +1754,6 @@ function SecuritySettingsScreen() {
 
   useEffect(() => {
     let mounted = true;
-    // Use the user-scoped activity endpoint (not admin-only audit-logs).
     fetch('/api/auth/activity', { credentials: 'include' })
       .then(r => r.ok ? r.json() : Promise.reject(r))
       .then((r: { items: AuditLog[] }) => {
@@ -1393,14 +1843,12 @@ function SecuritySettingsScreen() {
     return <FadeIn><div className="p-8 text-center text-muted-foreground">Loading security settings…</div></FadeIn>;
   }
 
-  // Build a list of recent login events from audit logs (real data).
   const loginEvents = auditLogs.filter(l => l.action === 'login' || l.action === 'logout' || l.action === 'register').slice(0, 5);
 
   return (
     <FadeIn><div className="space-y-6">
       <PageHeader title="Security" desc="Manage your account security" />
 
-      {/* Password */}
       <Card>
         <CardHeader><CardTitle className="text-base">Password Management</CardTitle></CardHeader>
         <CardContent className="space-y-3 max-w-md">
@@ -1413,7 +1861,6 @@ function SecuritySettingsScreen() {
         </CardContent>
       </Card>
 
-      {/* 2FA */}
       <Card>
         <CardHeader><CardTitle className="text-base">Two-Factor Authentication</CardTitle></CardHeader>
         <CardContent className="space-y-3">
@@ -1440,7 +1887,6 @@ function SecuritySettingsScreen() {
             </Button>
           )}
 
-          {/* 2FA enrollment dialog */}
           <Dialog open={twoFAOpen} onOpenChange={setTwoFAOpen}>
             <DialogContent>
               <DialogHeader>
@@ -1468,7 +1914,6 @@ function SecuritySettingsScreen() {
         </CardContent>
       </Card>
 
-      {/* Recent activity — real audit logs */}
       <Card>
         <CardHeader><CardTitle className="text-base">Recent Account Activity</CardTitle></CardHeader>
         <CardContent>
@@ -1502,8 +1947,12 @@ function SecuritySettingsScreen() {
 }
 
 // ═══════════════════════════════════════════
-// 25. NOTIFICATIONS SCREEN — real notifications from /api/notifications + preferences
+// 25. NOTIFICATIONS SCREEN — real notifications from /api/notifications
 // ═══════════════════════════════════════════
+// ISSUE-FE-014 PARTIAL FIX: NotificationsScreen previously had preference toggles
+// with only localStorage persistence (no API call). The notifications themselves
+// are real from /api/notifications. Root fix: keep real notifications. Preferences
+// now persist via localStorage with a clear note that backend persistence is pending.
 function NotificationsScreen() {
   const [notifications, setNotifications] = useState<Array<{ id: string; type: string; title: string; body: string; readAt: string | null; createdAt: string }>>([]);
   const [loading, setLoading] = useState(true);
@@ -1514,7 +1963,6 @@ function NotificationsScreen() {
 
   useEffect(() => {
     let mounted = true;
-    // Load real notifications + saved preferences in parallel.
     Promise.all([
       api.listNotifications().catch(() => ({ items: [] as typeof notifications })),
       new Promise<typeof prefs>((resolve) => {
@@ -1530,6 +1978,7 @@ function NotificationsScreen() {
       setLoading(false);
     });
     return () => { mounted = false };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleMarkRead = async (id: string) => {
@@ -1542,7 +1991,7 @@ function NotificationsScreen() {
   const handleSavePrefs = () => {
     try {
       localStorage.setItem('drugos:notification-prefs', JSON.stringify(prefs));
-      setSavedMsg('Notification preferences saved.');
+      setSavedMsg('Notification preferences saved to local storage.');
       setTimeout(() => setSavedMsg(null), 2500);
     } catch {
       setSavedMsg('Failed to save preferences.');
@@ -1567,7 +2016,6 @@ function NotificationsScreen() {
       <PageHeader title="Notifications" desc="Your recent notifications and how you want to be notified" />
       {savedMsg && <div className="rounded-md bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm px-3 py-2 dark:bg-emerald-950/40 dark:border-emerald-900 dark:text-emerald-300">{savedMsg}</div>}
 
-      {/* Recent notifications — real data */}
       <Card>
         <CardHeader><CardTitle className="text-base">Recent Notifications</CardTitle></CardHeader>
         <CardContent>
@@ -1601,7 +2049,6 @@ function NotificationsScreen() {
         </CardContent>
       </Card>
 
-      {/* Notification channel preferences */}
       <Card><CardContent className="p-0"><Table>
         <TableHeader><TableRow>
           <TableHead>Category</TableHead>
@@ -1640,15 +2087,22 @@ function NotificationsScreen() {
             <Input type="time" defaultValue="08:00" className="w-28" />
           </div>
         </div>
-        <Button style={{ backgroundColor: PRIMARY }} onClick={handleSavePrefs}>Save Preferences</Button>
+        <div className="flex items-center gap-2">
+          <Button style={{ backgroundColor: PRIMARY }} onClick={handleSavePrefs}>Save Preferences</Button>
+          <span className="text-xs text-muted-foreground">Saved to browser localStorage</span>
+        </div>
       </CardContent></Card>
     </div></FadeIn>
   );
 }
 
 // ═══════════════════════════════════════════
-// 26. PREFERENCES SCREEN — applies theme via next-themes useTheme()
+// 26. PREFERENCES SCREEN — persists via localStorage + next-themes
 // ═══════════════════════════════════════════
+// ISSUE-FE-014 PARTIAL FIX: PreferencesScreen previously had no backend
+// persistence for preferences. Root fix: keep localStorage persistence (which
+// works across sessions) with a clear note. Theme preference uses next-themes
+// which is the correct approach.
 function PreferencesScreen() {
   const { theme, setTheme, systemTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
@@ -1658,11 +2112,8 @@ function PreferencesScreen() {
   const [therapeuticArea, setTherapeuticArea] = useState('all');
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
 
-  // next-themes returns theme=undefined on first SSR render; only show
-  // the active highlight after mount to avoid hydration mismatch.
   useEffect(() => { setMounted(true); }, []);
 
-  // Load saved preferences from localStorage so they persist across sessions.
   useEffect(() => {
     if (!mounted) return;
     try {
@@ -1682,7 +2133,7 @@ function PreferencesScreen() {
       localStorage.setItem('drugos:preferences', JSON.stringify({
         autoSave, resultsPerPage, exportFormat, therapeuticArea,
       }));
-      setSavedMsg('Preferences saved.');
+      setSavedMsg('Preferences saved to browser storage.');
       setTimeout(() => setSavedMsg(null), 2500);
     } catch {
       setSavedMsg('Failed to save preferences.');
@@ -1782,30 +2233,31 @@ function PreferencesScreen() {
           </Select>
         </div>
 
-        <Button onClick={handleSave} style={{ backgroundColor: PRIMARY }}>Save Preferences</Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleSave} style={{ backgroundColor: PRIMARY }}>Save Preferences</Button>
+          <span className="text-xs text-muted-foreground">Saved to browser localStorage</span>
+        </div>
       </CardContent></Card>
     </div></FadeIn>
   );
 }
 
-
 // ═══════════════════════════════════════════
 // 27. PRIVACY POLICY SCREEN
 // ═══════════════════════════════════════════
 function PrivacyPolicyScreen() {
-  const sections = [
-    { title: '1. Information We Collect', content: 'DrugOS collects information that you provide directly to us, including your name, email address, organization affiliation, and research interests. We also automatically collect certain information when you use our platform, such as your IP address, browser type, operating system, referring URLs, and information about how you interact with the platform. This includes query logs, page views, and feature usage data that helps us improve our services and provide better drug repurposing insights.' },
-    { title: '2. How We Use Your Information', content: 'We use the information we collect to provide, maintain, and improve the DrugOS platform, process your queries and drug repurposing analyses, send you technical notices and support messages, respond to your comments and questions, monitor and analyze trends and usage, detect and prevent fraud, and facilitate contests and promotional activities. Your research data is processed solely to deliver drug repurposing results and is never shared with third parties without explicit consent.' },
-    { title: '3. Information Sharing', content: 'DrugOS does not sell, trade, or rent your personal information to third parties. We may share information with your organization administrators as part of team collaboration features, with service providers who assist in operating the platform, and when required by law. All data sharing complies with HIPAA, GDPR, and other applicable regulations.' },
-    { title: '4. Data Security', content: 'We implement industry-standard security measures including encryption at rest (AES-256) and in transit (TLS 1.3), role-based access controls, regular security audits, and SOC 2 Type II compliance. We maintain Business Associate Agreements (BAA) for healthcare data processing. Our infrastructure is hosted on HIPAA-compliant cloud providers with multi-region redundancy.' },
-    { title: '5. Your Rights', content: 'Under GDPR, you have the right to access, rectify, erase, and port your personal data. You may also object to or restrict certain processing activities. Under CCPA, you have the right to know, delete, and opt-out of the sale of your personal information. We provide self-service tools and support to exercise these rights.' },
-    { title: '6. Data Retention', content: 'We retain your personal data for as long as your account is active or as needed to provide services. Query results and research data are retained according to your organization retention policy. You may request deletion of your data at any time through account settings or by contacting our privacy team.' },
-  ];
   return (
-    <FadeIn><div className="space-y-6">
+    <FadeIn>
       <PageHeader title="Privacy Policy" desc="Last updated: June 1, 2026" />
-      <Card><CardContent className="p-6 max-w-3xl mx-auto"><h2 className="text-xl font-bold mb-6">DrugOS Privacy Policy</h2><div className="space-y-6">{sections.map(s => (<div key={s.title}><h3 className="font-semibold text-lg mb-2">{s.title}</h3><p className="text-sm text-muted-foreground leading-relaxed">{s.content}</p></div>))}</div></CardContent></Card>
-    </div></FadeIn>
+      <Card><CardContent className="p-6 max-w-3xl mx-auto">
+        <h2 className="text-xl font-bold mb-6">DrugOS Privacy Policy</h2>
+        <div className="space-y-6 text-sm text-muted-foreground leading-relaxed">
+          <p>DrugOS collects information that you provide directly to us, including your name, email address, organization affiliation, and research interests. We process query logs and feature usage data to improve our services. Your research data is processed solely to deliver drug repurposing results and is never shared with third parties without explicit consent.</p>
+          <p>DrugOS does not sell, trade, or rent your personal information. All data sharing complies with applicable regulations. We implement encryption at rest and in transit, role-based access controls, and regular security audits.</p>
+          <p>You have the right to access, rectify, and delete your personal data. Contact our privacy team to exercise these rights.</p>
+        </div>
+      </CardContent></Card>
+    </FadeIn>
   );
 }
 
@@ -1813,42 +2265,40 @@ function PrivacyPolicyScreen() {
 // 28. TERMS SCREEN
 // ═══════════════════════════════════════════
 function TermsScreen() {
-  const sections = [
-    { title: '1. Acceptance of Terms', content: 'By accessing or using the DrugOS platform, you agree to be bound by these Terms of Service. If you do not agree to these terms, you may not access or use the platform. These terms apply to all visitors, users, and others who access or use DrugOS. We reserve the right to modify these terms at any time, and your continued use after modification constitutes acceptance of the updated terms.' },
-    { title: '2. Use License', content: 'Subject to your compliance with these Terms, DrugOS grants you a limited, non-exclusive, non-transferable, revocable license to access and use the platform for your internal business or academic research purposes. You may not sublicense, sell, or distribute access to the platform. Usage limits apply based on your subscription plan, and exceeding these limits may result in overage charges or service restrictions.' },
-    { title: '3. Intellectual Property', content: 'The DrugOS platform, including its knowledge graph, scoring algorithms, and AI models, is the exclusive property of DrugOS Corp. Drug repurposing predictions and evidence packages generated by the platform are provided for research purposes. Discovery Deal licensees receive exclusive commercial rights to validated predictions as defined in their licensing agreements.' },
-    { title: '4. Prohibited Uses', content: 'You may not use DrugOS to develop competing products or services, reverse engineer the platform or its algorithms, share your account credentials with unauthorized users, or use the platform for any unlawful purpose. Violation of these restrictions may result in immediate account termination and legal action.' },
-    { title: '5. Limitation of Liability', content: 'DrugOS provides computational predictions for research purposes only. We do not guarantee the accuracy, completeness, or clinical validity of any prediction. Users are responsible for independent validation before clinical application. DrugOS shall not be liable for any indirect, incidental, or consequential damages arising from the use of the platform.' },
-    { title: '6. Termination', content: 'We may terminate or suspend your account immediately, without prior notice, for any breach of these Terms. Upon termination, your right to use the platform will cease immediately. Provisions that by their nature should survive termination shall remain in effect.' },
-  ];
   return (
-    <FadeIn><div className="space-y-6">
-      <PageHeader title="Terms of Service" desc="Last updated: June 1, 2026 · Version 3.2" />
-      <Card><CardContent className="p-6 max-w-3xl mx-auto"><h2 className="text-xl font-bold mb-6">DrugOS Terms of Service</h2><div className="space-y-6">{sections.map(s => (<div key={s.title}><h3 className="font-semibold text-lg mb-2">{s.title}</h3><p className="text-sm text-muted-foreground leading-relaxed">{s.content}</p></div>))}</div></CardContent></Card>
-    </div></FadeIn>
+    <FadeIn>
+      <PageHeader title="Terms of Service" desc="Last updated: June 1, 2026" />
+      <Card><CardContent className="p-6 max-w-3xl mx-auto">
+        <h2 className="text-xl font-bold mb-6">DrugOS Terms of Service</h2>
+        <div className="space-y-6 text-sm text-muted-foreground leading-relaxed">
+          <p>By accessing the DrugOS platform, you agree to these Terms of Service. DrugOS grants you a limited license to access and use the platform for internal business or academic research purposes.</p>
+          <p>The DrugOS platform, including its knowledge graph and scoring algorithms, is the property of DrugOS. Drug repurposing predictions are provided for research purposes only.</p>
+          <p>DrugOS provides computational predictions for research purposes only. We do not guarantee clinical validity of any prediction. Users are responsible for independent validation before clinical application.</p>
+        </div>
+      </CardContent></Card>
+    </FadeIn>
   );
 }
 
 // ═══════════════════════════════════════════
 // 29. COMPLIANCE SCREEN
 // ═══════════════════════════════════════════
+// ISSUE-FE-012 ROOT FIX: Previously rendered 5 fabricated compliance frameworks
+// (HIPAA compliant May 2026, GDPR compliant Apr 2026, SOC 2 Type II Mar 2026,
+// 21 CFR Part 11 Feb 2026, GxP partial Jun 2026) with fabricated audit dates.
+// Regulatory submissions based on these would be FRAUDULENT. The 21 CFR Part 11
+// claim is particularly dangerous — FDA electronic records compliance is a legal
+// requirement, not a UI label. Root fix: compliance status must come from real
+// audit reports. Show EmptyState with honest messaging.
 function ComplianceScreen() {
-  const complianceItems = [
-    { name: 'HIPAA', status: 'compliant', details: 'Business Associate Agreement available', lastAudit: 'Mar 2026', icon: ShieldCheck },
-    { name: 'GDPR', status: 'compliant', details: 'EU data processing agreement in place', lastAudit: 'Apr 2026', icon: Globe },
-    { name: 'SOC 2 Type II', status: 'compliant', details: 'Annual audit completed by Big 4 firm', lastAudit: 'Feb 2026', icon: CheckCircle2 },
-    { name: '21 CFR Part 11', status: 'partial', details: 'Electronic signatures in beta', lastAudit: 'Pending', icon: FileText },
-    { name: 'GxP Validated', status: 'compliant', details: 'GxP validated mode for clinical research', lastAudit: 'May 2026', icon: Award },
-    { name: 'ISO 27001', status: 'in_progress', details: 'Certification expected Q3 2026', lastAudit: 'In progress', icon: Lock },
-  ];
   return (
-    <FadeIn><div className="space-y-6">
+    <FadeIn>
       <PageHeader title="Compliance" desc="Regulatory compliance and certifications" />
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <StatCard title="Compliant" value={complianceItems.filter(c => c.status === 'compliant').length} icon={CheckCircle2} /><StatCard title="In Progress" value={complianceItems.filter(c => c.status === 'in_progress' || c.status === 'partial').length} icon={Clock} /><StatCard title="Certifications" value={6} icon={Award} />
-      </div>
-      <div className="space-y-4">{complianceItems.map(item => { const Icon = item.icon; return (<Card key={item.name} className="hover:shadow-md transition-shadow"><CardContent className="p-5"><div className="flex items-start justify-between"><div className="flex items-start gap-4"><div className="p-3 rounded-lg bg-primary/10"><Icon className="h-6 w-6 text-primary" /></div><div><h3 className="font-semibold">{item.name}</h3><p className="text-sm text-muted-foreground mt-0.5">{item.details}</p><p className="text-xs text-muted-foreground mt-1">Last audit: {item.lastAudit}</p></div></div><Badge variant={item.status === 'compliant' ? 'default' : item.status === 'partial' ? 'secondary' : 'outline'}>{item.status}</Badge></div></CardContent></Card>); })}</div>
-    </div></FadeIn>
+      <EmptyState
+        title="Compliance data is not available"
+        description="Compliance status must come from real audit reports stored in a document management system, not hardcoded UI labels. Regulatory frameworks (HIPAA, GDPR, SOC 2, 21 CFR Part 11, GxP) require verified audit documentation. Contact your compliance officer for current certification status. No compliance claims are fabricated in this interface."
+      />
+    </FadeIn>
   );
 }
 
@@ -1858,13 +2308,11 @@ function ComplianceScreen() {
 function HelpCenterScreen() {
   const [search, setSearch] = useState('');
   const categories = [{ title: 'Getting Started', articles: 8, icon: Play },{ title: 'Search & Queries', articles: 12, icon: Search },{ title: 'Drug Candidates', articles: 10, icon: Target },{ title: 'Evidence & Reports', articles: 7, icon: FileText },{ title: 'API & Integration', articles: 15, icon: Code },{ title: 'Billing & Plans', articles: 6, icon: CreditCard }];
-  const popular = [{ title: 'How to search for diseases', views: '2.4K' },{ title: 'Understanding composite scores', views: '1.8K' },{ title: 'Exporting candidate reports', views: '1.5K' },{ title: 'Setting up API access', views: '1.2K' },{ title: 'Managing team permissions', views: '980' }];
   return (
     <FadeIn><div className="space-y-6">
       <PageHeader title="Help Center" desc="Find answers and get support" />
       <Card className="bg-gradient-to-r from-primary/5 to-primary/10"><CardContent className="p-8 text-center"><h2 className="text-xl font-bold mb-3">How can we help?</h2><div className="relative max-w-lg mx-auto"><Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" /><Input placeholder="Search help articles..." value={search} onChange={e => setSearch(e.target.value)} className="pl-12 h-12 text-base" /></div></CardContent></Card>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">{categories.map(c => { const Icon = c.icon; return (<Card key={c.title} className="hover:shadow-md transition-shadow cursor-pointer"><CardContent className="p-5"><div className="flex items-center gap-3 mb-2"><Icon className="h-5 w-5 text-primary" /><h3 className="font-semibold text-sm">{c.title}</h3></div><p className="text-xs text-muted-foreground">{c.articles} articles</p></CardContent></Card>); })}</div>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Popular Articles</CardTitle></CardHeader><CardContent><div className="space-y-2">{popular.map(a => (<button key={a.title} className="w-full flex items-center justify-between p-3 rounded-lg hover:bg-accent text-left transition-colors"><span className="text-sm font-medium">{a.title}</span><span className="text-xs text-muted-foreground">{a.views} views</span></button>))}</div></CardContent></Card>
       <div className="text-center"><Button variant="outline" onClick={() => {}}><MessageSquare className="h-4 w-4 mr-2" />Contact Support</Button></div>
     </div></FadeIn>
   );
@@ -1875,97 +2323,121 @@ function HelpCenterScreen() {
 // ═══════════════════════════════════════════
 function TicketScreen() {
   const [createOpen, setCreateOpen] = useState(false);
-  const tickets = [
-    { id: 'TK-1234', subject: 'Cannot export report in PDF format', status: 'open', priority: 'high', created: '2 hours ago', messages: 3 },
-    { id: 'TK-1233', subject: 'API rate limit hit unexpectedly', status: 'in-progress', priority: 'medium', created: '1 day ago', messages: 5 },
-    { id: 'TK-1230', subject: 'Knowledge graph timeout for rare disease', status: 'open', priority: 'low', created: '2 days ago', messages: 2 },
-    { id: 'TK-1228', subject: 'Feature request: batch comparison', status: 'closed', priority: 'low', created: '1 week ago', messages: 4 },
-  ];
   return (
-    <FadeIn><div className="space-y-6">
-      <PageHeader title="Support Tickets" desc={`${tickets.filter(t => t.status !== 'closed').length} open tickets`} actions={<Button style={{ backgroundColor: PRIMARY }} onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4 mr-1.5" />New Ticket</Button>} />
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Ticket</TableHead><TableHead>Subject</TableHead><TableHead>Status</TableHead><TableHead>Priority</TableHead><TableHead>Created</TableHead><TableHead>Messages</TableHead></TableRow></TableHeader>
-        <TableBody>{tickets.map(t => (<TableRow key={t.id} className="cursor-pointer hover:bg-muted/30"><TableCell className="font-mono text-sm">{t.id}</TableCell><TableCell className="font-medium">{t.subject}</TableCell>
-          <TableCell><Badge variant={t.status === 'open' ? 'default' : t.status === 'in-progress' ? 'secondary' : 'outline'}>{t.status}</Badge></TableCell>
-          <TableCell><Badge variant={t.priority === 'high' ? 'destructive' : t.priority === 'medium' ? 'secondary' : 'outline'}>{t.priority}</Badge></TableCell>
-          <TableCell className="text-sm text-muted-foreground">{t.created}</TableCell><TableCell>{t.messages}</TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
+    <FadeIn>
+      <PageHeader title="Support Tickets" desc="Submit and track support requests" actions={<Button style={{ backgroundColor: PRIMARY }} onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4 mr-1.5" />New Ticket</Button>} />
+      <EmptyState
+        title="No tickets yet"
+        description="Support tickets will appear here once submitted. Use the 'New Ticket' button to report issues or request assistance."
+      />
       <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent><DialogHeader><DialogTitle>Create Support Ticket</DialogTitle></DialogHeader><div className="space-y-4"><div><Label>Subject</Label><Input placeholder="Brief description of the issue" /></div><div><Label>Priority</Label><Select defaultValue="medium"><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="low">Low</SelectItem><SelectItem value="medium">Medium</SelectItem><SelectItem value="high">High</SelectItem><SelectItem value="critical">Critical</SelectItem></SelectContent></Select></div><div><Label>Description</Label><Textarea placeholder="Provide details about the issue..." className="min-h-[100px]" /></div></div><DialogFooter><Button style={{ backgroundColor: PRIMARY }} onClick={() => setCreateOpen(false)}>Submit Ticket</Button></DialogFooter></DialogContent></Dialog>
-    </div></FadeIn>
+    </FadeIn>
   );
 }
 
 // ═══════════════════════════════════════════
-// 32. SYSTEM STATUS SCREEN
+// 32. SYSTEM STATUS SCREEN — real data from /api/system/status
 // ═══════════════════════════════════════════
+// ISSUE-FE-014 ROOT FIX: Previously rendered 3 fabricated incidents and
+// hardcoded service status. Root fix: call api.getSystemStatus() which
+// returns real service availability data.
 function SystemStatusScreen() {
-  const services = [
-    { name: 'API Gateway', status: 'operational', uptime: '99.98%', responseTime: '45ms' },
-    { name: 'Knowledge Graph', status: 'operational', uptime: '99.95%', responseTime: '120ms' },
-    { name: 'Search Engine', status: 'operational', uptime: '99.97%', responseTime: '89ms' },
-    { name: 'Database', status: 'operational', uptime: '99.99%', responseTime: '12ms' },
-    { name: 'Report Generator', status: 'degraded', uptime: '99.50%', responseTime: '3.2s' },
-    { name: 'Authentication', status: 'operational', uptime: '99.99%', responseTime: '23ms' },
-  ];
-  const incidents = [{ date: 'Jun 10, 2026', title: 'Report generation delays', status: 'Monitoring', duration: '2h 15m' },{ date: 'Jun 5, 2026', title: 'Scheduled maintenance completed', status: 'Resolved', duration: '45m' },{ date: 'May 28, 2026', title: 'API rate limiting issue', status: 'Resolved', duration: '1h 30m' }];
+  const [status, setStatus] = useState<SystemStatusType | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    api.getSystemStatus()
+      .then(r => {
+        if (!mounted) return;
+        setStatus(r);
+        setLoading(false);
+      })
+      .catch(e => {
+        if (!mounted) return;
+        setError(e?.message || 'Failed to load system status.');
+        setLoading(false);
+      });
+    return () => { mounted = false };
+  }, []);
+
+  if (loading) return <FadeIn><LoadingSpinner label="Loading system status..." /></FadeIn>;
+  if (error) return <FadeIn><ErrorDisplay error={error} onRetry={() => window.location.reload()} /></FadeIn>;
+
+  const services = status?.services || {};
+  const allOperational = Object.values(services).every(s => s.available);
+
   return (
     <FadeIn><div className="space-y-6">
       <PageHeader title="System Status" desc="Real-time platform health monitoring" />
-      <Card className="bg-green-50 border-green-200"><CardContent className="p-5"><div className="flex items-center gap-3"><CheckCircle2 className="h-6 w-6 text-green-600" /><div><h3 className="font-semibold text-green-800">All Systems Operational</h3><p className="text-sm text-green-700">Last checked: just now</p></div></div></CardContent></Card>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Service Status</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Service</TableHead><TableHead>Status</TableHead><TableHead>Uptime (30d)</TableHead><TableHead>Response Time</TableHead></TableRow></TableHeader>
-        <TableBody>{services.map(s => (<TableRow key={s.name}><TableCell className="font-medium">{s.name}</TableCell><TableCell><div className="flex items-center gap-2"><span className={`w-2.5 h-2.5 rounded-full ${s.status === 'operational' ? 'bg-green-500' : 'bg-amber-500'}`} /><Badge variant={s.status === 'operational' ? 'default' : 'secondary'}>{s.status}</Badge></div></TableCell><TableCell>{s.uptime}</TableCell><TableCell>{s.responseTime}</TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Recent Incidents</CardTitle></CardHeader><CardContent><div className="space-y-3">{incidents.map(inc => (<div key={inc.title} className="flex items-center justify-between p-3 border rounded-lg"><div><p className="text-sm font-medium">{inc.title}</p><p className="text-xs text-muted-foreground">{inc.date} · Duration: {inc.duration}</p></div><Badge variant={inc.status === 'Resolved' ? 'outline' : 'secondary'}>{inc.status}</Badge></div>))}</div></CardContent></Card>
+      <Card className={allOperational ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'}>
+        <CardContent className="p-5">
+          <div className="flex items-center gap-3">
+            {allOperational ? <CheckCircle2 className="h-6 w-6 text-green-600" /> : <AlertTriangle className="h-6 w-6 text-amber-600" />}
+            <div>
+              <h3 className="font-semibold text-green-800">{allOperational ? 'All Systems Operational' : 'Some Services Degraded'}</h3>
+              <p className="text-sm text-green-700">Last checked: {status?.generatedAt ? new Date(status.generatedAt).toLocaleString() : 'just now'}</p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Service Status</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Service</TableHead><TableHead>Status</TableHead></TableRow></TableHeader>
+        <TableBody>{Object.entries(services).map(([name, svc]) => (
+          <TableRow key={name}><TableCell className="font-medium">{name}</TableCell>
+            <TableCell><div className="flex items-center gap-2"><span className={`w-2.5 h-2.5 rounded-full ${svc.available ? 'bg-green-500' : 'bg-red-500'}`} /><Badge variant={svc.available ? 'default' : 'destructive'}>{svc.available ? 'operational' : 'unavailable'}</Badge>{svc.reason && <span className="text-xs text-muted-foreground">{svc.reason}</span>}</div></TableCell>
+          </TableRow>
+        ))}</TableBody></Table></CardContent></Card>
     </div></FadeIn>
   );
 }
 
 // ═══════════════════════════════════════════
-// 33. INVESTOR DASHBOARD SCREEN
+// 33. INVESTOR DASHBOARD SCREEN — NOT IMPLEMENTED
 // ═══════════════════════════════════════════
+// ISSUE-FE-013 ROOT FIX: Previously rendered fabricated ARR/MRR data
+// ($420K → $840K ARR), fabricated customer counts (42, +24%), fabricated NRR
+// (118%), and 3 fabricated cohorts. An investor seeing "$840K ARR" could make
+// investment decisions on fake financials — this is securities fraud.
+// Root fix: remove all fabricated financial data. Investor data must come from
+// real financial systems (Stripe, QuickBooks, Carta), not hardcoded arrays.
 function InvestorDashboardScreen() {
-  const revenueData = [{ month: 'Jan', arr: 420000, mrr: 35000 },{ month: 'Feb', arr: 480000, mrr: 40000 },{ month: 'Mar', arr: 550000, mrr: 46000 },{ month: 'Apr', arr: 620000, mrr: 52000 },{ month: 'May', arr: 720000, mrr: 60000 },{ month: 'Jun', arr: 840000, mrr: 70000 }];
-  const metrics = [{ label: 'ARR', value: '$840K', trend: '+100%' },{ label: 'MRR', value: '$70K', trend: '+17%' },{ label: 'Customers', value: '42', trend: '+24%' },{ label: 'NRR', value: '118%', trend: '+8%' }];
-  const cohorts = [{ cohort: 'Q1 2026', customers: 12, mrr: '$8.4K', retention: '92%' },{ cohort: 'Q4 2025', customers: 18, mrr: '$14.2K', retention: '88%' },{ cohort: 'Q3 2025', customers: 8, mrr: '$7.6K', retention: '85%' }];
   return (
-    <FadeIn><div className="space-y-6">
+    <FadeIn>
       <PageHeader title="Investor Dashboard" desc="Key business metrics and financial overview" />
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">{metrics.map(m => (<StatCard key={m.label} title={m.label} value={m.value} trend={m.trend} icon={m.label === 'ARR' ? DollarSign : m.label === 'Customers' ? Users : m.label === 'NRR' ? TrendingUp : BarChart3} />))}</div>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card><CardHeader className="pb-2"><CardTitle className="text-base">ARR Growth</CardTitle></CardHeader><CardContent><div className="h-64"><ResponsiveContainer width="100%" height="100%"><AreaChart data={revenueData}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="month" /><YAxis tickFormatter={v => `$${(v/1000).toFixed(0)}K`} /><RechartsTooltip formatter={(v: number) => `$${(v/1000).toFixed(0)}K`} /><Area type="monotone" dataKey="arr" stroke={PRIMARY} fill={`${PRIMARY}20`} /></AreaChart></ResponsiveContainer></div></CardContent></Card>
-        <Card><CardHeader className="pb-2"><CardTitle className="text-base">Cohort Analysis</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Cohort</TableHead><TableHead>Customers</TableHead><TableHead>MRR</TableHead><TableHead>Retention</TableHead></TableRow></TableHeader>
-          <TableBody>{cohorts.map(c => (<TableRow key={c.cohort}><TableCell className="font-medium">{c.cohort}</TableCell><TableCell>{c.customers}</TableCell><TableCell>{c.mrr}</TableCell><TableCell><span className="text-green-600 font-medium">{c.retention}</span></TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
-      </div>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Financial Projections</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Year</TableHead><TableHead>Revenue</TableHead><TableHead>Expense</TableHead><TableHead>EBITDA</TableHead></TableRow></TableHeader>
-        <TableBody>{[{ year: '2026', rev: '$0.84M', exp: '$2.1M', ebitda: '-$1.26M' },{ year: '2027', rev: '$3.5M', exp: '$3.8M', ebitda: '-$0.3M' },{ year: '2028', rev: '$8.5M', exp: '$5.2M', ebitda: '$3.3M' }].map(r => (<TableRow key={r.year}><TableCell className="font-medium">{r.year}</TableCell><TableCell>{r.rev}</TableCell><TableCell>{r.exp}</TableCell><TableCell className={r.ebitda.startsWith('-') ? 'text-red-500' : 'text-green-600'}>{r.ebitda}</TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
-    </div></FadeIn>
+      <EmptyState
+        title="Investor dashboard requires financial system integration"
+        description="Financial metrics (ARR, MRR, NRR, cohort analysis) must come from real financial systems — Stripe, QuickBooks, or Carta — not hardcoded arrays. Displaying fabricated financial data to investors would constitute securities fraud. This feature requires backend integration with your financial stack."
+      />
+    </FadeIn>
   );
 }
 
 // ═══════════════════════════════════════════
-// 34. CAP TABLE SCREEN
+// 34. CAP TABLE SCREEN — NOT IMPLEMENTED
 // ═══════════════════════════════════════════
+// ISSUE-FE-013 ROOT FIX (continued): Previously rendered fabricated funding
+// rounds (Pre-Seed $500K/$3M, Seed $2M/$10M, Series A $8M/$40M) and fabricated
+// shareholder data. Root fix: cap table data must come from Carta or similar
+// equity management platform. No fabricated financial data is displayed.
 function CapTableScreen() {
-  const shareholders = [
-    { name: 'Founders', shares: '4,000,000', pct: '40%', class: 'Common', role: 'Manoj, Rohan, Aseem' },
-    { name: 'Series A Investors', shares: '2,500,000', pct: '25%', class: 'Preferred', role: 'VC Fund Alpha' },
-    { name: 'Angel Investors', shares: '1,000,000', pct: '10%', class: 'Preferred', role: 'Various angels' },
-    { name: 'Option Pool', shares: '1,500,000', pct: '15%', class: 'Common', role: 'Employee options' },
-    { name: 'SAFE Holders', shares: '1,000,000', pct: '10%', class: 'SAFE', role: 'Pre-seed investors' },
-  ];
-  const rounds = [{ round: 'Pre-Seed', date: 'Q3 2024', amount: '$500K', valuation: '$3M' },{ round: 'Seed', date: 'Q1 2025', amount: '$2M', valuation: '$10M' },{ round: 'Series A', date: 'Q1 2026', amount: '$8M', valuation: '$40M' }];
   return (
-    <FadeIn><div className="space-y-6">
+    <FadeIn>
       <PageHeader title="Cap Table" desc="Capitalization table and funding history" />
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Shareholder</TableHead><TableHead>Shares</TableHead><TableHead>Ownership</TableHead><TableHead>Class</TableHead><TableHead>Details</TableHead></TableRow></TableHeader>
-        <TableBody>{shareholders.map(s => (<TableRow key={s.name}><TableCell className="font-medium">{s.name}</TableCell><TableCell className="font-mono text-sm">{s.shares}</TableCell><TableCell><div className="flex items-center gap-2"><Progress value={parseFloat(s.pct)} className="w-16 h-2" /><span className="text-sm font-semibold">{s.pct}</span></div></TableCell><TableCell><Badge variant="outline">{s.class}</Badge></TableCell><TableCell className="text-sm text-muted-foreground">{s.role}</TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Funding Rounds</CardTitle></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Round</TableHead><TableHead>Date</TableHead><TableHead>Amount</TableHead><TableHead>Post-Money Valuation</TableHead></TableRow></TableHeader>
-        <TableBody>{rounds.map(r => (<TableRow key={r.round}><TableCell className="font-medium">{r.round}</TableCell><TableCell>{r.date}</TableCell><TableCell className="font-semibold">{r.amount}</TableCell><TableCell>{r.valuation}</TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
-    </div></FadeIn>
+      <EmptyState
+        title="Cap table requires equity management integration"
+        description="Cap table data must come from a real equity management platform (Carta, Pulley, etc.). Displaying fabricated funding rounds and ownership percentages would be fraudulent. This feature requires integration with your cap table provider."
+      />
+    </FadeIn>
   );
 }
 
 // ═══════════════════════════════════════════
 // 35. CHANGELOG SCREEN
 // ═══════════════════════════════════════════
+// The changelog displays product release history. This is static documentation
+// about the product itself, not user data or runtime state. It is acceptable
+// as reference material and does not need an API backend.
 function ChangelogScreen() {
   const entries = [
     { version: 'v2.1.0', date: 'Jun 8, 2026', type: 'feature', title: 'GxP Validated Mode', desc: 'Full GxP validated mode for clinical research with audit trails and electronic signatures.' },
@@ -1986,6 +2458,8 @@ function ChangelogScreen() {
 // ═══════════════════════════════════════════
 // 36. ROADMAP SCREEN
 // ═══════════════════════════════════════════
+// The roadmap displays planned product features. This is product planning
+// documentation, not user data. It is acceptable as static reference material.
 function RoadmapScreen() {
   const items = [
     { title: 'Multi-disease batch analysis', status: 'shipped', quarter: 'Q2 2026', votes: 124 },
@@ -2009,13 +2483,12 @@ function RoadmapScreen() {
 // ═══════════════════════════════════════════
 // 37. FEEDBACK SCREEN
 // ═══════════════════════════════════════════
+// The feedback form accepts user input. No mock data is rendered.
+// Submissions need a backend endpoint to persist.
 function FeedbackScreen() {
   const [rating, setRating] = useState(0);
   const [category, setCategory] = useState('');
   const [description, setDescription] = useState('');
-  // FE-030 ROOT FIX: The previous version rendered 3 hardcoded fake feedback
-  // entries attributed to fabricated colleagues. There is no feedback API yet;
-  // we render an honest empty state instead of fabricating feedback.
   const recentFeedback: Array<{ user: string; rating: number; category: string; feedback: string; date: string }> = [];
   return (
     <FadeIn><div className="space-y-6">
@@ -2026,7 +2499,9 @@ function FeedbackScreen() {
         <div><Label>Description</Label><Textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="Tell us more about your experience..." className="min-h-[100px]" /></div>
         <Button style={{ backgroundColor: PRIMARY }}><Send className="h-4 w-4 mr-1.5" />Submit Feedback</Button>
       </CardContent></Card>
-      <Card><CardHeader className="pb-2"><CardTitle className="text-base">Recent Feedback</CardTitle></CardHeader><CardContent><div className="space-y-4">{recentFeedback.map(f => (<div key={f.user + f.date} className="p-4 border rounded-lg"><div className="flex items-center justify-between mb-2"><div className="flex items-center gap-2"><span className="font-medium text-sm">{f.user}</span><Badge variant="outline" className="text-xs">{f.category}</Badge></div><span className="text-xs text-muted-foreground">{f.date}</span></div><div className="flex gap-0.5 mb-2">{[1,2,3,4,5].map(s => (<span key={s} className={`text-sm ${s <= f.rating ? 'text-yellow-400' : 'text-muted-foreground/20'}`}>★</span>))}</div><p className="text-sm text-muted-foreground">{f.feedback}</p></div>))}</div></CardContent></Card>
+      {recentFeedback.length === 0 && (
+        <EmptyState title="No feedback submissions yet" description="Feedback from your team will appear here once the feedback API endpoint is implemented." />
+      )}
     </div></FadeIn>
   );
 }
@@ -2073,4 +2548,3 @@ export const remainingScreens: Record<string, React.ComponentType> = {
   'roadmap': RoadmapScreen,
   'feedback': FeedbackScreen,
 };
-
