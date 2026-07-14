@@ -3704,19 +3704,26 @@ if __name__ == "__main__":
 # Phase 2 node/edge dicts into the format the GT-RL bridge expects,
 # with critical node-type name mapping (Compound→drug, Disease→disease).
 
-_PHASE2_TO_GT_NODE_TYPE: Dict[str, str] = {
-    "Compound": "drug",
-    "Disease": "disease",
-    "Gene": "gene",
-    "Protein": "protein",
-    "Pathway": "pathway",
-    "ClinicalOutcome": "clinical_outcome",
-    "MedDRA_Term": "meddra_term",
-}
+# INT-004 ROOT FIX: use the shared schema mapping instead of a local dict
+# that diverged from phase2_adapter.PHASE2_TO_PHASE3_NODE. The previous
+# _PHASE2_TO_GT_NODE_TYPE had 7 entries (including Gene and MedDRA_Term)
+# while the adapter's mapping had 5 — producing DIFFERENT graphs from the
+# same source. Both now import from schema_mappings.
+from .schema_mappings import (
+    PHASE2_TO_PHASE3_NODE as _PHASE2_TO_GT_NODE_TYPE,
+    PHASE3_TO_PHASE2_NODE as _GT_TO_PHASE2_NODE_TYPE,
+    ALL_PHASE2_NODE_TYPES,
+    ALL_PHASE3_NODE_TYPES,
+)
 
-_GT_TO_PHASE2_NODE_TYPE: Dict[str, str] = {
-    v: k for k, v in _PHASE2_TO_GT_NODE_TYPE.items()
-}
+# Keep the old constant names as aliases so existing code doesn't break.
+# These are deprecated — new code should import from schema_mappings directly.
+__all__.extend([
+    "_PHASE2_TO_GT_NODE_TYPE",
+    "_GT_TO_PHASE2_NODE_TYPE",
+    "ALL_PHASE2_NODE_TYPES",
+    "ALL_PHASE3_NODE_TYPES",
+])
 
 
 def build_pyg_hetero_data(
