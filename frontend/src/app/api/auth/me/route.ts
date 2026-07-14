@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUser, signAccessToken, setAuthCookies } from "@/lib/auth/server";
 import { db } from "@/lib/db";
 import { badRequest, writeAuditLog } from "@/lib/api-helpers";
+// BE-029 ROOT FIX (Team Member 12): Zod-validated PATCH body.
+import { validateBody, AuthMePatchBody } from "@/lib/zod-schemas";
 
 /**
  * GET /api/auth/me — return the current user's profile + organization
@@ -27,6 +29,17 @@ export async function GET() {
   if (!authUser) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
+  // BE-039 ROOT FIX (Team Member 12): the previous code did TWO DB
+  // queries — `db.user.findUnique(...)` + `db.organizationMember.findMany(...)`.
+  // For 1000 researchers doing 100 page views/day, that's 200K extra
+  // queries/day just for /api/auth/me. We collapse them into ONE query
+  // using Prisma's `include` to eager-load the user's org memberships.
+  // The `include` performs a single JOIN on the server side, halving
+  // the DB round-trips for every authenticated page load.
+  //
+  // FE-060 preservation: we still use `select` on the nested
+  // `organization` to fetch only id/name/slug/plan (not the entire
+  // Organization record).
   const user = await db.user.findUnique({
     where: { id: authUser.userId },
     select: {
@@ -42,6 +55,16 @@ export async function GET() {
       mfaEnabled: true,
       lastLoginAt: true,
       createdAt: true,
+      // BE-039: eager-load memberships in the SAME query. The nested
+      // `select` mirrors the previous separate findMany's select.
+      organizationMemberships: {
+        select: {
+          role: true,
+          organization: {
+            select: { id: true, name: true, slug: true, plan: true },
+          },
+        },
+      },
     },
   });
   if (!user) {
@@ -53,21 +76,27 @@ export async function GET() {
     // about whether the user ever existed.
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-  // FE-060 ROOT FIX: Use `select` (not `include`) so we fetch only the
-  // fields actually used in the response (id, name, slug, plan) — not the
-  // entire Organization record (which also includes status, seats, createdAt,
-  // updatedAt). Reduces payload + DB load for users in many orgs.
-  const memberships = await db.organizationMember.findMany({
-    where: { userId: user.id },
-    select: {
-      role: true,
-      organization: {
-        select: { id: true, name: true, slug: true, plan: true },
-      },
-    },
-  });
+  // BE-039: the memberships are now nested under `organizationMemberships`
+  // (the implicit relation name from the User → OrganizationMember back-relation).
+  // Defensive: if the Prisma client doesn't return the relation (e.g. an
+  // older client version, or a test mock that doesn't populate it), fall
+  // back to an empty array rather than throwing on `.map()`.
+  const memberships = user.organizationMemberships ?? [];
   const body = {
-    user,
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      title: user.title,
+      bio: user.bio,
+      status: user.status,
+      emailVerified: user.emailVerified,
+      academicVerified: user.academicVerified,
+      mfaEnabled: user.mfaEnabled,
+      lastLoginAt: user.lastLoginAt,
+      createdAt: user.createdAt,
+    },
     organizations: memberships.map((m) => ({
       id: m.organization.id,
       name: m.organization.name,
@@ -141,6 +170,16 @@ export async function PATCH(req: NextRequest) {
     return badRequest("Invalid JSON body");
   }
 
+  // BE-029 ROOT FIX: schema-validate the body. The AuthMePatchBody schema
+  // enforces: name (1..200 chars if present), title (≤200), bio (≤2000),
+  // activeOrganizationId (non-empty string OR null). The previous code's
+  // `typeof body.name === "string"` check accepted ANY string length — a
+  // 1MB name would have been written to the DB. The schema caps lengths
+  // at parse time.
+  const parsed = validateBody(AuthMePatchBody, body);
+  if (!parsed.ok) return parsed.response;
+  body = parsed.data as { name?: string; title?: string; bio?: string; activeOrganizationId?: string };
+
   // BE-079: If activeOrganizationId is provided, validate it BEFORE
   // updating any profile fields. The user must be a member of the
   // target org. Invalid orgId → 400 (don't partially update).
@@ -163,9 +202,10 @@ export async function PATCH(req: NextRequest) {
 
   const data: { name?: string; title?: string | null; bio?: string | null } = {};
   if (typeof body.name === "string") {
+    // BE-029: schema already enforces 1..200 chars, but we still trim
+    // and re-check post-trim in case the trimmed result is empty.
     const trimmed = body.name.trim();
     if (trimmed.length < 1) return badRequest("Name cannot be empty");
-    if (trimmed.length > 200) return badRequest("Name is too long (max 200 chars)");
     data.name = trimmed;
   }
   if (typeof body.title === "string") {

@@ -1222,3 +1222,67 @@ Stage Summary:
 - 0 new test failures introduced
 - Phase 1 data pipeline integrity restored: silent data-loss paths closed, cross-checks now log failures, process-wide side effects scoped, dead code activated, contract violations fixed
 - Production-ready: all fixes are defense-in-depth, patient-safe, and verified by real code execution
+
+---
+Task ID: BE-021-to-BE-040
+Agent: Super Z (Team Member 12 — Backend API Routes: Predict, RL, KG, Dataset)
+Task: Fix 20 assigned backend API issues (BE-021 to BE-040) for the autonomous-drug-repurposing frontend. Each fix must be root-cause, not surface-level. Code must build, lint, typecheck, and pass non-DB unit tests.
+
+Work Log:
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx) to understand the platform: Phase 1 data ingestion (7 sources, Airflow ETL), Phase 2 Neo4j knowledge graph, Phase 3 PyTorch+PyG graph transformer, Phase 4 RL ranker, Phase 5 FastAPI + React dashboard.
+- Cloned repo via PAT, created branch `fix/be-021-to-040-team12-forensic-root-fix`.
+- Read each affected file LINE-BY-LINE (not grep, not test files — real code) before touching anything.
+- Verified 3 issues were ALREADY fixed on main by other teams (BE-021 /cypher endpoint exists in phase2/service.py; BE-023 GT_SERVICE_URL proxy exists in gt-inference.ts; BE-025 DEFAULT_CHECKPOINT_PATH points to phase1 not phase2).
+- Fixed 17 issues at root cause:
+
+CRITICAL (1):
+- BE-022: gt-inference.ts CHECKPOINT_CANDIDATE_DIRS now includes `<repo_root>/output_v100` etc. Added `_resolveRepoRoot()` helper that derives repo root from `process.cwd()` when running from frontend/ (or honors `GT_REPO_ROOT`). Refactored `runPythonInference` to use the SAME `_REPO_ROOT` (single source of truth — previously the checkpoint search and script search could disagree). Verified with a standalone test that the checkpoint at `<repo_root>/output_v100/gt_checkpoint.pt` is now found when running from `frontend/`.
+
+HIGH (3):
+- BE-021: Verified phase2/service.py HAS `/cypher` endpoint (already fixed by another team). No code change needed.
+- BE-024: Added `GET /stats` endpoint to phase1/service.py returning the DatasetStatsResponse shape the frontend expects (sources, nodesLoaded, edgesLoaded, edgeTypesPresent, etc.). Updated dataset-stats.ts `proxyToDatasetService` to surface 404 as a hard error (was silent fallback to local checkpoint — operators had no signal that the deployed Phase 1 service was missing /stats).
+- BE-029: Created `frontend/src/lib/zod-schemas.ts` with one Zod schema per route body shape + a `validateBody()` helper. Applied Zod validation to all 9 routes I own: predict, rl, knowledge-graph POST, auth/2fa/disable, auth/2fa/login-verify, auth/me PATCH, auth/password, auth/verify-email, billing/subscription. Schemas enforce types, lengths, and enum values — eliminating type-confusion bugs (e.g. `body.limit = "abc"` → NaN → empty response).
+
+MEDIUM (12):
+- BE-025: Verified already fixed (DEFAULT_CHECKPOINT_PATH points to phase1/data/checkpoints/step_01.json).
+- BE-026: rl-ranker.ts `getRankedHypotheses` proxy path was doing `total: upstream.count` (page size) — overrode the correct `upstream.total` (filtered count) returned by the Python service. Fixed to use `upstream.total` when present, fall back to `upstream.count` only for non-conforming upstreams. Pagination now shows "Showing 1-50 of 100000" instead of "Showing 1-50 of 50".
+- BE-027: Deleted `frontend/src/lib/services/rl-csv-cache.ts` entirely (dead code — no production route imported its `readRlCsvCached`). Exposed production-safe `clearRlRankerCsvCache` + `getRlRankerCsvCacheState` from rl-ranker.ts (the SINGLE source of truth). Rewrote `/api/rl/refresh/route.ts` to import from rl-ranker only. The operator's "Refresh" button now actually clears the cache that `/api/rl` reads from.
+- BE-028: Added `@@unique([projectId, drugName, diseaseName])` to Hypothesis in Prisma schema. Rewrote `persistRlCandidates` to use a SINGLE `db.$transaction` with `tx.hypothesis.upsert` (composite key) + a pre-fetch `findMany` (1 query instead of 50 findFirst). Collapsed 100 DB round-trips → 2 round-trips per request. Preserved FE-010 semantics (no downgrade of validated/rejected).
+- BE-031: 2fa/disable invalid password → 401 (was 403). Invalid TOTP → 401 (was 403).
+- BE-032: auth/password invalid current password → 401 (was 403).
+- BE-033: billing/subscription invalid password → 401, invalid MFA → 401 (both were 403).
+- BE-034: 2fa/login-verify invalid TOTP → 401 (was 400). Zod schema rejects NON-6-digit codes with 400 at parse time; ONLY 6-digit codes that fail TOTP verification reach the 401 branch.
+- BE-036: 2fa/disable now wraps `tx.user.update` + `tx.auditLog.create` in `db.$transaction` — atomic disable + audit. If the audit write fails, the user.update rolls back (mfaSecret preserved, mfaEnabled stays true). Replaced the broken "rollback" that set mfaEnabled:false after secret was already cleared (impossible to restore).
+- BE-038: Added `@@index([organizationId, joinedAt])` to OrganizationMember in Prisma schema. The /api/team `findMany({ orderBy: { joinedAt: "asc" } })` can now use an index-range scan instead of a full in-memory sort.
+- BE-040: api-client.ts `SafetyReport` type updated to match openfda.ts `DrugSafetySummary`: `brandName` + `genericName` (was `drug`). Consumers reading `safetyData.drug` would have gotten `undefined`.
+
+LOW (4):
+- BE-030: predict/route.ts limit validation — Zod schema (`z.number().int().positive().max(5000).optional()`) rejects non-number limits at parse time. The NaN bug (`Math.min("abc", 5000)` → NaN → `slice(0, NaN)` → empty array) is now impossible.
+- BE-035: verify-email now calls `checkIpRateLimit` + `recordIpAttempt` BEFORE any work. Defense in depth for the state-mutating email-verification endpoint (JWT signature is computationally infeasible to brute-force, but every state-mutating endpoint should be rate-limited per OWASP).
+- BE-037: verify-email now wraps `tx.user.update` + `tx.auditLog.create` in `db.$transaction` — atomic email verification + audit. If the audit write fails, the emailVerified update rolls back (user must re-verify). Replaced the broken "log to stderr and return 200" pattern that left a FDA 21 CFR Part 11 compliance gap.
+- BE-039: /api/auth/me GET collapsed from 2 queries (`db.user.findUnique` + `db.organizationMember.findMany`) into 1 query using Prisma's nested `select` with `organizationMemberships`. Halves DB round-trips for every authenticated page load. Added defensive `?? []` fallback for older Prisma clients / test mocks.
+
+Tests:
+- Wrote 34 unit tests in `frontend/src/lib/services/__tests__/be-021-to-040-team12.test.ts` — one or more per fix. All 34 pass. Tests are DB-free (they verify Zod schemas, source-code patterns, path resolution logic, and module exports).
+- Updated `fe-012-to-fe-019-team14-frontend-auth.test.ts` to expect the new 401 status codes (was 403) for invalid credentials, and added `$transaction` mock to the dbMock so BE-036's atomic transaction pattern works with the test harness.
+- Updated `fe-069-rl-cache-ratelimit.test.ts` to remove tests for the deleted rl-csv-cache.ts module (kept the rate-limit tests, which are independent).
+- Updated `fe-020-to-028-team15-regression.test.ts` to remove the FE-022 test block that tested the deleted rl-csv-cache.ts module.
+- Updated `fe-team13-fixes.test.ts` FE-010 test to look for `tx.hypothesis.upsert` (was `db.hypothesis.create`) since BE-028 changed the persistence pattern.
+
+Verification:
+- `npx tsc --noEmit`: 0 errors in my files (7 pre-existing errors in all-screens.tsx — owned by FE-017-031 team, NOT touched by me).
+- `npx eslint` on my 15 touched files: 0 errors, 12 warnings (mostly pre-existing `any` patterns I preserved for backward compat).
+- `npx jest` for non-DB test suites: 397 pass, 9 fail. All 9 failures are PRE-EXISTING on main (verified by `git stash` + re-run + `git stash pop`): FE-010 schema comment, FE-017 project visibility, FE-019 computeOverallScore weights, FE-033 response shape, FE-017 webhook secret, FE-001 dataset checkpoint path, FE-001 REAL dataset, FE-003 REAL rl-ranker. My changes introduced ZERO new test failures.
+- `npx next build`: fails on a PRE-EXISTING type error in `admin/users/route.ts` (BE-067 Prisma enum change by another team — admin/users still passes plain strings to the now-enum `role` field). Verified this fails identically on main. My files compile cleanly.
+- Python `phase1/service.py` imports cleanly and exposes `/stats` endpoint (verified with `python3 -c "from phase1.service import app; ..."`).
+- BE-022 checkpoint resolution verified with a standalone Node.js test: checkpoint at `<repo_root>/output_v100/gt_checkpoint.pt` is now found when running from `frontend/`.
+
+Stage Summary:
+- 20 issues addressed (3 already fixed by other teams, 17 fixed by me at root cause).
+- Files changed: 18 (15 modified, 1 created, 1 deleted, plus 3 test files updated).
+- New shared module: `frontend/src/lib/zod-schemas.ts` (Zod schemas for all owned routes).
+- New test file: `frontend/src/lib/services/__tests__/be-021-to-040-team12.test.ts` (34 tests, all passing).
+- Prisma schema: added `@@unique([projectId, drugName, diseaseName])` on Hypothesis + `@@index([organizationId, joinedAt])` on OrganizationMember. Migration required.
+- Python: added `GET /stats` endpoint to `phase1/service.py`.
+- Deleted: `frontend/src/lib/services/rl-csv-cache.ts` (dead code — duplicate cache).
+- Zero new test failures introduced. Zero new TypeScript errors introduced. Zero new lint errors introduced.

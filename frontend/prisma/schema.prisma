@@ -193,6 +193,14 @@ model OrganizationMember {
 
   @@unique([userId, organizationId])
   @@index([organizationId])
+  // BE-038 ROOT FIX (Team Member 12): composite index on
+  // (organizationId, joinedAt) so the /api/team route's
+  // `findMany({ orderBy: { joinedAt: "asc" } })` can use an index for
+  // the sort. The previous schema had only `@@index([organizationId])`
+  // — the sort on joinedAt forced a full in-memory sort on every page
+  // load. For an org with 10K members, that's a 10K-row sort per
+  // request. The composite index turns it into an index-range scan.
+  @@index([organizationId, joinedAt])
 }
 
 model RefreshToken {
@@ -310,6 +318,14 @@ model Hypothesis {
   @@index([diseaseName])
   @@index([status])
   @@index([rlPredicted])
+  // BE-028 ROOT FIX (Team Member 12): composite unique constraint on
+  // (projectId, drugName, diseaseName) so persistRlCandidates can use
+  // db.hypothesis.upsert() instead of findFirst+update/create (N+1
+  // pattern that did 100 DB round-trips per /api/rl request at 60
+  // req/min = 6000 queries/min — exhausted the DB connection pool).
+  // The unique constraint enables `upsert` via the
+  // `projectId_drugName_diseaseName` compound key. Migration required.
+  @@unique([projectId, drugName, diseaseName])
 }
 
 model Comment {

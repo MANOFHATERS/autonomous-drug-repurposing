@@ -62,16 +62,61 @@ export interface GtInferenceResponse {
 // Checkpoint resolution
 // ---------------------------------------------------------------------------
 
-const CHECKPOINT_CANDIDATE_DIRS = [
-  process.env.GT_CHECKPOINT_DIR,
-  // RT-006: the bridge writes gt_checkpoint.pt directly to <output_dir>
-  // (not to <output_dir>/checkpoints/). Check both locations for safety.
-  path.resolve(process.cwd(), "output_v100"),
-  path.resolve(process.cwd(), "output_v100", "checkpoints"),
-  path.resolve(process.cwd(), "output"),
-  path.resolve(process.cwd(), "output", "checkpoints"),
-  path.resolve(process.cwd(), "graph_transformer", "checkpoints"),
-].filter(Boolean) as string[];
+// BE-022 ROOT FIX (Team Member 12): the previous search list ONLY looked
+// under process.cwd(). When Next.js runs from `frontend/`, process.cwd()
+// returns `.../frontend/` — so none of the candidate dirs existed. The
+// REAL checkpoint is at `<repo_root>/output_v100/gt_checkpoint.pt`, written
+// by `python run_4phase.py` (invoked from the repo root). The fix mirrors
+// the script-path resolution pattern below: derive `repoRoot` once and
+// search both `cwd` and `repoRoot` (and their common sub-dirs). We also
+// honor `GT_REPO_ROOT` for non-standard layouts.
+//
+// Search order (first hit wins, canonical filename preferred):
+//   1. $GT_CHECKPOINT_DIR                (operator override)
+//   2. <repo_root>/output_v100           (run_4phase.py default)
+//   3. <repo_root>/output_v100/checkpoints
+//   4. <repo_root>/output
+//   5. <repo_root>/output/checkpoints
+//   6. <repo_root>/graph_transformer/checkpoints
+//   7. <cwd>/output_v100                  (when running from repo root)
+//   8. <cwd>/output_v100/checkpoints
+//   9. <cwd>/output
+//  10. <cwd>/output/checkpoints
+//  11. <cwd>/graph_transformer/checkpoints
+//
+// Note: duplicates are filtered via Set so we never stat the same dir twice.
+function _resolveRepoRoot(): string {
+  const cwd = process.cwd();
+  if (process.env.GT_REPO_ROOT) return path.resolve(process.env.GT_REPO_ROOT);
+  // When Next.js runs from frontend/, parent is the repo root.
+  if (cwd.endsWith(path.sep + "frontend") || cwd.endsWith("/frontend")) {
+    return path.resolve(cwd, "..");
+  }
+  return cwd;
+}
+
+const _REPO_ROOT = _resolveRepoRoot();
+
+const CHECKPOINT_CANDIDATE_DIRS = Array.from(
+  new Set(
+    [
+      process.env.GT_CHECKPOINT_DIR,
+      // Repo-root-relative (the canonical run_4phase.py output paths)
+      path.resolve(_REPO_ROOT, "output_v100"),
+      path.resolve(_REPO_ROOT, "output_v100", "checkpoints"),
+      path.resolve(_REPO_ROOT, "output"),
+      path.resolve(_REPO_ROOT, "output", "checkpoints"),
+      path.resolve(_REPO_ROOT, "graph_transformer", "checkpoints"),
+      // cwd-relative (when running from repo root, these duplicate the
+      // repo-root paths above; Set de-dupes them so we still stat once)
+      path.resolve(process.cwd(), "output_v100"),
+      path.resolve(process.cwd(), "output_v100", "checkpoints"),
+      path.resolve(process.cwd(), "output"),
+      path.resolve(process.cwd(), "output", "checkpoints"),
+      path.resolve(process.cwd(), "graph_transformer", "checkpoints"),
+    ].filter(Boolean) as string[]
+  )
+);
 
 /**
  * Find the latest trained GT checkpoint. The bridge writes
@@ -201,12 +246,12 @@ async function runPythonInference(
   try {
     await fs.writeFile(reqPath, JSON.stringify({ checkpoint: checkpointPath, mode, ...payload }));
 
-    // INT-027 ROOT FIX: resolve repoRoot correctly when Next.js runs from
-    // frontend/. process.cwd() returns frontend/ but scripts/ is at repo root.
-    const cwd = process.cwd();
-    const repoRoot = process.env.GT_REPO_ROOT || (
-      cwd.endsWith("frontend") ? path.resolve(cwd, "..") : cwd
-    );
+    // BE-022 ROOT FIX: reuse the module-level _REPO_ROOT computed above.
+    // The previous inline logic computed `repoRoot` independently of the
+    // checkpoint search path — they could disagree if `GT_REPO_ROOT` was
+    // set, causing the script to be looked for in one place and the
+    // checkpoint in another. Single source of truth = same repoRoot.
+    const repoRoot = _REPO_ROOT;
     const scriptPath = path.resolve(repoRoot, "scripts", "gt_inference.py");
 
     // If the helper doesn't exist, fail gracefully — caller surfaces a

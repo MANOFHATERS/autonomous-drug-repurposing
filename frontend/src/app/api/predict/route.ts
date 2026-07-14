@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, internalError, writeAuditLog } from "@/lib/api-helpers";
 import { predictPairs, type DrugDiseasePair } from "@/lib/services/gt-inference";
+// BE-029 ROOT FIX (Team Member 12): Zod-validated request body.
+// BE-030 ROOT FIX (Team Member 12): the previous `Math.min(body.limit
+// ?? 1000, 5000)` returned NaN when body.limit was a non-numeric string
+// ("abc"), causing `pairs.slice(0, NaN)` to silently return [] — the
+// route returned count:0 with no error. The Zod schema rejects
+// non-number limits at parse time, so the NaN path is impossible.
+import { validateBody, PredictBody } from "@/lib/zod-schemas";
 
 /**
  * POST /api/predict
@@ -35,27 +42,21 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  if (!Array.isArray(body.pairs) || body.pairs.length === 0) {
-    return NextResponse.json(
-      { error: "bad_request", message: "pairs (array of {drug, disease}) is required" },
-      { status: 400 }
-    );
-  }
+  // BE-029 ROOT FIX: schema-validate the body BEFORE touching it. The
+  // schema (PredictBody) enforces:
+  //   - pairs is a non-empty array (max 5000) of {drug, disease} objects
+  //   - each drug/disease is a non-empty string ≤200 chars
+  //   - limit, if present, is a positive integer ≤5000
+  // This eliminates the BE-030 NaN bug (limit:"abc" → Math.min returns
+  // NaN → slice(0, NaN) → empty array returned silently) because Zod
+  // rejects non-number limits at parse time with a 400.
+  const parsed = validateBody(PredictBody, body);
+  if (!parsed.ok) return parsed.response;
 
-  // Cap to prevent abuse — the GT model can score 100K pairs in seconds
-  // on CPU, but a malicious caller could submit millions.
-  const limit = Math.min(body.limit ?? 1000, 5000);
-  const pairs = body.pairs.slice(0, limit);
-
-  // Validate each pair
-  for (const p of pairs) {
-    if (typeof p.drug !== "string" || typeof p.disease !== "string" || !p.drug || !p.disease) {
-      return NextResponse.json(
-        { error: "bad_request", message: "Each pair must have non-empty string drug and disease" },
-        { status: 400 }
-      );
-    }
-  }
+  // BE-030 ROOT FIX: the schema guarantees limit is a positive integer
+  // ≤5000 (or undefined). We still cap at 5000 as defense-in-depth.
+  const limit = Math.min(parsed.data.limit ?? 1000, 5000);
+  const pairs = parsed.data.pairs.slice(0, limit);
 
   try {
     const result = await predictPairs(pairs);

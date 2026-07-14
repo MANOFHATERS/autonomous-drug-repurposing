@@ -248,7 +248,14 @@ export interface PubMedArticle {
 }
 
 export interface SafetyReport {
-  drug: string;
+  // BE-040 ROOT FIX (Team Member 12): the previous type had `drug: string`
+  // — but the actual `DrugSafetySummary` returned by /api/safety/[drug]
+  // (from frontend/src/lib/services/openfda.ts) has `brandName` and
+  // `genericName`, NOT `drug`. Any consumer that read `safetyData.drug`
+  // got `undefined`. We align the api-client type with the actual route
+  // response shape so consumers can rely on the typed contract.
+  brandName: string;
+  genericName: string;
   totalReports: number;
   seriousReports: number;
   seriousReportsWithDeath?: number;

@@ -73,6 +73,57 @@ export function __clearRlRankerCsvCacheForTests(): void {
   watchedPaths.clear();
 }
 
+// BE-027 ROOT FIX (Team Member 12): the previous code had TWO independent
+// CSV caches — this one inside rl-ranker.ts AND a separate one inside
+// rl-csv-cache.ts. The /api/rl/refresh route cleared only rl-csv-cache.ts's
+// cache, leaving THIS cache stale. The operator's "Refresh" click was a
+// no-op for the actual /api/rl route that serves RL data (which uses
+// rl-ranker.ts's cache via readLocalCsv).
+//
+// Root fix: delete rl-csv-cache.ts entirely (it was dead code — no
+// production route imported its `readRlCsvCached`). Expose PRODUCTION-SAFE
+// clear + inspect functions here so /api/rl/refresh can evict the cache
+// that the /api/rl route actually uses. The `__clearRlRankerCsvCacheForTests`
+// alias above is kept for backward-compat with existing test imports.
+
+/**
+ * Production-safe cache clear. Evicts ALL parsed-CSV entries from the
+ * rl-ranker cache. Called by POST /api/rl/refresh when an operator clicks
+ * the "Refresh" button on the dashboard.
+ *
+ * Multi-node note: this clears the cache ONLY on the receiving node. For
+ * a horizontally-scaled deployment, the refresh endpoint should broadcast
+ * a Redis pub/sub message so all nodes clear their caches. For the
+ * documented single-instance deployment, in-memory clear is sufficient.
+ */
+export function clearRlRankerCsvCache(): void {
+  csvCache.clear();
+}
+
+/**
+ * Inspect the cache state for observability / debugging. Returns the list
+ * of cached paths and their parsedAt timestamps. Used by /api/rl/refresh
+ * to report `clearedEntries` in the audit log.
+ */
+export function getRlRankerCsvCacheState(): Array<{
+  path: string;
+  parsedAt: number;
+  mtimeMs: number;
+  candidateCount: number;
+  ageMs: number;
+  ttlRemainingMs: number;
+}> {
+  const now = Date.now();
+  return Array.from(csvCache.entries()).map(([p, entry]) => ({
+    path: p,
+    parsedAt: entry.parsedAt,
+    mtimeMs: entry.mtimeMs,
+    candidateCount: entry.candidates.length,
+    ageMs: now - entry.parsedAt,
+    ttlRemainingMs: Math.max(0, TTL_MS - (now - entry.parsedAt)),
+  }));
+}
+
 export interface RankedHypothesis {
   drug: string;
   disease: string;
@@ -523,14 +574,31 @@ export async function getRankedHypotheses(opts?: {
   if (serviceUrl) {
     try {
       const upstream = await proxyToRlService(serviceUrl, queryParams);
-      // FE-033: if the upstream service supports sort+pagination natively,
-      // trust its `total` field; otherwise compute it from the candidate
-      // count (best-effort). We surface the page + total in the response.
+      // BE-026 ROOT FIX (Team Member 12): the previous code did
+      //   `total: upstream.count` — OVERRIDING the correct `upstream.total`
+      //   (which proxyToRlService reads from the Python service's
+      //   response body) with `upstream.count` (the page size — length of
+      //   the candidates array on the CURRENT page). At 100K total
+      //   candidates with pageSize=50, the dashboard showed "Showing 1-50
+      //   of 50" instead of "Showing 1-50 of 100000" — pagination was
+      //   broken because the client thought there was only one page.
+      //
+      // Root fix: use `upstream.total` when the upstream service returned
+      // it (the Python rl/service.py:_rank_impl does — see BE-070 fix).
+      // Fall back to `upstream.count` only as a last resort for
+      // non-conforming upstreams. The Python service has returned `total`
+      // since the BE-070 fix, so the fallback is dead code in production
+      // — but we keep it for graceful degradation against an older
+      // service image.
+      const upstreamTotal =
+        typeof upstream.total === "number" && upstream.total > 0
+          ? upstream.total
+          : upstream.count;
       return {
         ...upstream,
         page: Math.floor(offset / pageSize),
         pageSize,
-        total: upstream.count,
+        total: upstreamTotal,
       } as RlRankerResponse & { page: number; pageSize: number; total: number };
     } catch (e) {
       console.warn("RL service proxy failed, falling back to local CSV:", e);

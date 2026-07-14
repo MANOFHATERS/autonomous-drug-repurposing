@@ -8,6 +8,10 @@ import {
   recordFailedTotp,
   clearTotpAttempts,
 } from "@/lib/auth/rate-limit";
+// BE-029 ROOT FIX (Team Member 12): Zod-validated request body. Replaces
+// the ad-hoc `typeof body.field === "string"` checks with a single
+// schema-enforced parse. See frontend/src/lib/zod-schemas.ts.
+import { validateBody, TwoFaDisableBody } from "@/lib/zod-schemas";
 
 /**
  * POST /api/auth/2fa/disable
@@ -78,10 +82,14 @@ export async function POST(req: NextRequest) {
     return badRequest("Invalid JSON body");
   }
 
-  const currentPassword = body.currentPassword || "";
-  const totpCode = (body.totpCode || "").trim();
-  if (!currentPassword) return badRequest("currentPassword is required to disable 2FA");
-  if (!/^\d{6}$/.test(totpCode)) return badRequest("A 6-digit TOTP code is required");
+  // BE-029 ROOT FIX: schema-validate the body before any business logic.
+  // The schema rejects: missing currentPassword, non-6-digit totpCode,
+  // non-string fields, oversize values. We then read the parsed (typed)
+  // values from `parsed.data` for the rest of the handler.
+  const parsed = validateBody(TwoFaDisableBody, body);
+  if (!parsed.ok) return parsed.response;
+  const currentPassword = parsed.data.currentPassword;
+  const totpCode = parsed.data.totpCode ?? "";
 
   try {
     const dbUser = await db.user.findUnique({
@@ -106,9 +114,15 @@ export async function POST(req: NextRequest) {
     // Verify current password.
     const passwordOk = await verifyPassword(currentPassword, dbUser.passwordHash);
     if (!passwordOk) {
+      // BE-031 ROOT FIX (Team Member 12): return 401 (authentication
+      // failure) — NOT 403. 403 means "authenticated but forbidden",
+      // but a wrong password is an authentication failure. API clients
+      // that distinguish 401 (re-authenticate) from 403 (forbidden) rely
+      // on this to know whether to prompt for re-auth. The previous 403
+      // broke that contract.
       return NextResponse.json(
         { error: "invalid_password", message: "Current password is incorrect." },
-        { status: 403 }
+        { status: 401 }
       );
     }
 
@@ -177,13 +191,17 @@ export async function POST(req: NextRequest) {
         totpResult.reason === "replayed"
           ? "This code has already been used. Wait for the next 30-second window."
           : `Invalid 6-digit code. ${afterFail.attemptsRemaining} attempt(s) remaining before 2FA is locked.`;
+      // BE-031 ROOT FIX (Team Member 12): 401 (authentication failure),
+      // not 403. A wrong TOTP code is an authentication failure — the
+      // user has not proven they possess the second factor. 403 is for
+      // authorization failures (authenticated but not allowed).
       return NextResponse.json(
         {
           error: totpResult.reason === "replayed" ? "code_replayed" : "invalid_code",
           message,
           attemptsRemaining: afterFail.attemptsRemaining,
         },
-        { status: 403 }
+        { status: 401 }
       );
     }
 
@@ -211,26 +229,74 @@ export async function POST(req: NextRequest) {
     clearTotpAttempts(user.userId);
 
     // Both factors verified — safe to disable.
-    await db.user.update({
-      where: { id: user.userId },
-      data: { mfaSecret: null, mfaEnabled: false, lastTotpCounter: null },
-    });
-    // FE-034: 2FA disable is security-critical — must be auditable.
-    const audit = await writeAuditLog({
-      user,
-      action: "2fa_disable",
-      resource: user.userId,
-      critical: true,
-    });
-    if (!audit.ok) {
-      // The 2FA WAS disabled, but the audit log failed. This is a
-      // security incident — re-enable 2FA (forcing the user to set it
-      // up again) and return an error.
-      await db.user.update({
-        where: { id: user.userId },
-        data: { mfaEnabled: false }, // secret already cleared; user must re-enroll
+    //
+    // BE-036 ROOT FIX (Team Member 12): disable 2FA + write the audit log
+    // ATOMICALLY via db.$transaction. The previous code did two separate
+    // writes: first `db.user.update({ mfaSecret: null, mfaEnabled: false })`,
+    // then `writeAuditLog({ critical: true })`. If the audit write failed
+    // (DB connection blip, disk full, etc.), 2FA was already disabled but
+    // there was NO audit trail — a FDA 21 CFR Part 11 compliance gap. The
+    // "rollback" attempt was broken: it set `mfaEnabled: false` (already
+    // false) but could NOT restore `mfaSecret` (already nulled) — so the
+    // user had to re-enroll 2FA from scratch AND the compliance gap
+    // remained.
+    //
+    // Root fix: wrap BOTH writes in a Prisma transaction. If the audit
+    // write throws, the transaction rolls back the user update too —
+    // mfaSecret is preserved, mfaEnabled stays true, and the user is NOT
+    // inconvenienced. The audit trail gap is impossible by construction.
+    //
+    // Note: writeAuditLog calls `db.auditLog.create` internally. Prisma's
+    // interactive transactions support nested writes via the same `tx`
+    // handle, but writeAuditLog uses the global `db` client. To keep the
+    // atomicity guarantee, we inline the audit log creation here using
+    // the transaction client. If the audit row cannot be created, the
+    // entire transaction aborts and 2FA remains enabled.
+    try {
+      await db.$transaction(async (tx) => {
+        await tx.user.update({
+          where: { id: user.userId },
+          data: {
+            mfaSecret: null,
+            mfaEnabled: false,
+            lastTotpCounter: null,
+          },
+        });
+        // Inline the critical audit log write so it shares the
+        // transaction. If this throws, the user.update above is rolled
+        // back — 2FA stays enabled, mfaSecret is preserved.
+        //
+        // AuditLog schema requires: actorName (string), metadata (JSON
+        // string). `critical` is a runtime concept in writeAuditLog, NOT
+        // a DB column — by inlining the write inside the transaction we
+        // get stronger atomicity than writeAuditLog's `critical: true`
+        // flag could provide.
+        await tx.auditLog.create({
+          data: {
+            userId: user.userId,
+            actorName: user.email,
+            action: "2fa_disable",
+            resource: user.userId,
+            // BE-036: organizationId populated so /api/audit-logs can
+            // scope by org (multi-tenant compliance).
+            ...(user.orgId ? { organizationId: user.orgId } : {}),
+            metadata: JSON.stringify({
+              critical: true,
+              timestamp: new Date().toISOString(),
+            }),
+          } as any,
+        });
       });
-      return internalError("2FA disabled but audit log failed. Please re-enable 2FA from your security settings.");
+    } catch (e: unknown) {
+      // Transaction failed — 2FA was NOT disabled (rollback). Inform the
+      // user with a clear error. They can retry; mfaSecret is intact.
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[2fa/disable] atomic disable+audit transaction failed:", msg);
+      return internalError(
+        "Failed to disable 2FA — the audit log could not be written. " +
+          "2FA is still enabled. Please try again; if the problem persists, " +
+          "contact your administrator."
+      );
     }
     return NextResponse.json({ ok: true, enabled: false });
   } catch (e) {

@@ -135,6 +135,22 @@ async function proxyToDatasetService(url: string): Promise<DatasetStatsResponse>
     headers: { Accept: "application/json" },
     cache: "no-store",
   });
+  // BE-024 ROOT FIX (Team Member 12): surface 404 as a hard error so
+  // operators notice immediately that the Phase 1 service is missing the
+  // /stats endpoint. Previously a 404 fell through to the local
+  // checkpoint silently — operators believed they were fetching live
+  // stats when they were not. The /stats endpoint is now implemented in
+  // phase1/service.py (BE-024 fix), so a 404 here means the deployment
+  // is running an older service image.
+  if (res.status === 404) {
+    throw new Error(
+      `Dataset service at ${url} returned 404 for /stats. The Phase 1 ` +
+        `service is either unavailable or running an older version that ` +
+        `does not expose /stats. Update phase1/service.py to the latest ` +
+        `version (BE-024 fix) or unset DATASET_SERVICE_URL to use the ` +
+        `local checkpoint.`
+    );
+  }
   if (!res.ok) {
     throw new Error(`Dataset service at ${url} returned ${res.status}`);
   }
