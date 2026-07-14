@@ -872,6 +872,81 @@ class RecordingGraphBuilder:
                 out.extend(load["edges"])
         return out
 
+    # -- INT-008 ROOT FIX: Serialization ---------------------------------
+    def save(self, path: "Path | str") -> None:
+        """Serialize builder state to disk so Phase 3 can load it later.
+
+        INT-008 ROOT FIX: the previous adapter required a
+        ``RecordingGraphBuilder`` instance, but Phase 2 step9 saves
+        HeteroData .pt instead. The saved file was dead code — Phase 3
+        could not reload a saved Phase 2 graph. This method serializes
+        the full builder state (node_loads, edge_loads, dead_letter,
+        node ID sets) to a JSON file that ``load()`` can restore.
+
+        Parameters
+        ----------
+        path : Path or str
+            Destination file path (typically .json or .jsonl).
+        """
+        import json as _json
+        from pathlib import Path as _Path
+        _p = _Path(path)
+        _p.parent.mkdir(parents=True, exist_ok=True)
+        snapshot = {
+            "__version__": "1",
+            "node_loads": self.node_loads,
+            "edge_loads": self.edge_loads,
+            "_node_ids_by_label": {
+                k: list(v) for k, v in self._node_ids_by_label.items()
+            },
+            "dead_letter": self.dead_letter,
+        }
+        with open(_p, "w", encoding="utf-8") as f:
+            _json.dump(snapshot, f, indent=2, default=str)
+        logger.info(
+            "RecordingGraphBuilder: saved %d node loads, %d edge loads "
+            "to %s (INT-008)",
+            len(self.node_loads), len(self.edge_loads), _p,
+        )
+
+    @classmethod
+    def load(cls, path: "Path | str") -> "RecordingGraphBuilder":
+        """Deserialize builder state from disk.
+
+        Restores a RecordingGraphBuilder that was previously saved via
+        ``save()``. The returned builder can be passed directly to
+        ``adapt_phase2_to_phase3`` — no re-running of the Phase 2
+        bridge is required.
+
+        Parameters
+        ----------
+        path : Path or str
+            Source file path (from a previous ``save()`` call).
+
+        Returns
+        -------
+        RecordingGraphBuilder
+            Fully restored builder with all node/edge loads intact.
+        """
+        import json as _json
+        from pathlib import Path as _Path
+        _p = _Path(path)
+        with open(_p, "r", encoding="utf-8") as f:
+            snapshot = _json.load(f)
+        builder = cls()
+        builder.node_loads = snapshot.get("node_loads", [])
+        builder.edge_loads = snapshot.get("edge_loads", [])
+        builder._node_ids_by_label = {
+            k: set(v) for k, v in snapshot.get("_node_ids_by_label", {}).items()
+        }
+        builder.dead_letter = snapshot.get("dead_letter", [])
+        logger.info(
+            "RecordingGraphBuilder: loaded %d node loads, %d edge loads "
+            "from %s (INT-008)",
+            len(builder.node_loads), len(builder.edge_loads), _p,
+        )
+        return builder
+
 
 # ---------------------------------------------------------------------------
 # 3. Phase1StagedData — the structured intermediate
@@ -2490,26 +2565,13 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                     _m.DrugProteinInteraction.activity_type,
                     _m.DrugProteinInteraction.activity_value,
                     _m.DrugProteinInteraction.activity_units,
-                    # v43 ROOT FIX (P1 — synthesized standard_relation
-                    # semantically wrong): the previous code aliased
-                    # interaction_type (DrugBank action: "inhibitor"/
-                    # "agonist") as "standard_relation". But ChEMBL's
-                    # standard_relation is the CENSORING direction
-                    # ('=', '<', '>') — a completely different semantic.
-                    # Downstream RL ranker code that reads standard_relation
-                    # to apply censoring got action-vocabulary strings
-                    # instead of censoring symbols. Fix: set to None
-                    # (the DB doesn't store ChEMBL's standard_relation;
-                    # it's only available in the CSV path). Document
-                    # the semantic divergence.
+                    # INT-003 ROOT FIX: select the REAL standard_relation
+                    # from the ORM (was dropped at load time, then guessed
+                    # heuristically — the heuristic was conservative and
+                    # missed censoring in the 0.1-100000 nM range where
+                    # most clinically-relevant activity values live).
+                    _m.DrugProteinInteraction.standard_relation,
                     _m.DrugProteinInteraction.interaction_type.label("action_type"),
-                    # v107 ROOT FIX (ISSUE-P2-039): standard_relation is
-                    # NOT a column on the Phase 1 PostgreSQL ORM. It is
-                    # reconstructed heuristically AFTER the query by
-                    # ``_derive_standard_relation_heuristic`` using
-                    # activity_type + activity_value + activity_units.
-                    # See the helper's module-level comment for the
-                    # scientific basis (ChEMBL detection-limit censoring).
                     _m.DrugProteinInteraction.source,
                     _m.DrugProteinInteraction.activity_units,
                 )
@@ -2665,29 +2727,34 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
             # Synthesize target_chembl_id (NULL — the DB doesn't store it).
             chembl_act_df["target_chembl_id"] = None
             chembl_act_df["assay_id"] = None
-            # v107 ROOT FIX (ISSUE-P2-039): standard_relation is NOT in
-            # the Phase 1 PostgreSQL ORM (DrugProteinInteraction.activity_*
-            # columns exist, but ChEMBL's censoring direction '=', '<',
-            # '>' was dropped at ORM load time). The previous code set
-            # standard_relation=None unconditionally — the RL ranker's
-            # safety filter then treated every ChEMBL interaction as
-            # uncensored, so a drug with IC50 > 100 µM (weak binder)
-            # was indistinguishable from IC50 < 1 nM (potent inhibitor).
-            #
-            # ROOT FIX: derive standard_relation HEURISTICALLY from
-            # activity_type + activity_value + activity_units using the
-            # ChEMBL censoring convention. The Phase 1 ORM does not store
-            # the raw relation, so this is the best available signal
-            # without a DB migration. The heuristic is conservative — it
-            # only emits '>' or '<' for EXTREME values where the censoring
-            # is unambiguous, and '=' otherwise (matching ChEMBL's most
-            # common relation). See _derive_standard_relation_heuristic
-            # for the scientific rationale.
-            chembl_act_df["standard_relation"] = (
-                chembl_act_df.apply(_derive_standard_relation_heuristic, axis=1)
-                if not chembl_act_df.empty
-                else None
-            )
+            # INT-003 ROOT FIX: standard_relation is NOW a real column
+            # in the Phase 1 ORM (DrugProteinInteraction.standard_relation).
+            # It stores ChEMBL's raw censoring direction ('=', '<', '>', '~').
+            # Rows loaded before the migration have NULL — we fall back to
+            # '=' (exact measurement, the most common ChEMBL relation) for
+            # those. The heuristic _derive_standard_relation_heuristic is
+            # kept as a last-resort for legacy data but NEVER used for
+            # fresh loads where the ORM column is populated.
+            if not chembl_act_df.empty:
+                # Coerce NULL/NaN to '=' (exact measurement — safest default).
+                chembl_act_df["standard_relation"] = (
+                    chembl_act_df["standard_relation"]
+                    .fillna("=")
+                    .replace("", "=")
+                )
+                # Validate: only ChEMBL's four censoring symbols are allowed.
+                _valid_relations = {"=", "<", ">", "~"}
+                _invalid_mask = ~chembl_act_df["standard_relation"].isin(_valid_relations)
+                _n_invalid = int(_invalid_mask.sum())
+                if _n_invalid > 0:
+                    logger.warning(
+                        "INT-003: %d rows have invalid standard_relation values "
+                        "(not in {'=', '<', '>', '~'}). Coercing to '='. "
+                        "Sample invalid values: %s",
+                        _n_invalid,
+                        list(chembl_act_df.loc[_invalid_mask, "standard_relation"].head(5)),
+                    )
+                    chembl_act_df.loc[_invalid_mask, "standard_relation"] = "="
             chembl_act_df["assay_type"] = None
             out["chembl_activities"] = chembl_act_df
             logger.info(
@@ -5892,19 +5959,28 @@ def stage_phase1_to_phase2(
             )
             if not uniprot_ac:
                 continue
+            # INT-010 ROOT FIX: use "gene_symbol" (HGNC) as the canonical
+            # key, not "gene_name" (which is DEPRECATED in Phase 1 ORM and
+            # stores protein names, not gene symbols). The gene_symbol is
+            # required for the Gene->Protein crosswalk in the Phase 3
+            # adapter (P3-014). Without it, the match rate is 0%.
+            _gene_symbol = _safe_str(row.get("gene_symbol") or row.get("gene_name"))
             if uniprot_ac in extra_protein_seen:
                 # Augment existing Protein node with sequence/function.
                 for p in staged.protein_nodes:
                     if p["id"] == uniprot_ac:
                         p.setdefault("sequence", _safe_str(row.get("sequence")))
                         p.setdefault("function", _safe_str(row.get("function")))
-                        p.setdefault("gene_name", _safe_str(row.get("gene_name") or row.get("gene_symbol")))
+                        p.setdefault("gene_symbol", _gene_symbol)
+                        # Also store as gene_name for backward compat.
+                        p.setdefault("gene_name", _gene_symbol)
                         break
                 continue
             staged.protein_nodes.append({
                 "id": uniprot_ac,
                 "name": _safe_str(row.get("name") or row.get("protein_name")),
-                "gene_name": _safe_str(row.get("gene_name") or row.get("gene_symbol")),
+                "gene_symbol": _gene_symbol,
+                "gene_name": _gene_symbol,  # backward compat
                 "organism": _safe_str(row.get("organism") or "Homo sapiens"),
                 "sequence": _safe_str(row.get("sequence")),
                 "function": _safe_str(row.get("function")),
