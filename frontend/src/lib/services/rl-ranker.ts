@@ -64,12 +64,52 @@ const csvCache = new Map<string, CsvCacheEntry>();
 const watchedPaths = new Set<string>();
 
 /**
+ * BE-073 ROOT FIX: Production-safe cache-clear function. The /api/rl/refresh
+ * endpoint calls this to invalidate the rl-ranker.ts cache (the cache that
+ * ACTUALLY serves /api/rl). The previous code cleared rl-csv-cache.ts's
+ * cache, which is a DIFFERENT cache that no route uses — the "Refresh"
+ * button was a no-op.
+ *
+ * @param path Optional CSV path. If omitted, clears ALL cached paths.
+ */
+export function clearRlRankerCache(path?: string): void {
+  if (path) {
+    csvCache.delete(path);
+  } else {
+    csvCache.clear();
+  }
+}
+
+/**
+ * BE-073: Inspect the rl-ranker cache state for observability. Mirrors
+ * getRlCsvCacheState from rl-csv-cache.ts but targets the ACTUAL cache.
+ */
+export function getRlRankerCacheState(): Array<{
+  path: string;
+  parsedAt: number;
+  mtimeMs: number;
+  candidateCount: number;
+  ageMs: number;
+  ttlRemainingMs: number;
+}> {
+  const now = Date.now();
+  return Array.from(csvCache.entries()).map(([p, entry]) => ({
+    path: p,
+    parsedAt: entry.parsedAt,
+    mtimeMs: entry.mtimeMs,
+    candidateCount: entry.candidates.length,
+    ageMs: now - entry.parsedAt,
+    ttlRemainingMs: Math.max(0, TTL_MS - (now - entry.parsedAt)),
+  }));
+}
+
+/**
  * Test-only helper: clear the CSV cache and file watchers. Never call from
  * production code. Exported so the FE-069 wiring test can verify the cache
  * is actually used.
  */
 export function __clearRlRankerCsvCacheForTests(): void {
-  csvCache.clear();
+  clearRlRankerCache();
   watchedPaths.clear();
 }
 
@@ -350,7 +390,18 @@ async function readLocalCsv(csvPath: string): Promise<RankedHypothesis[]> {
     const admeScore = parseNumber(row["adme_score"]);
     const litNum = parseNumber(row["literature_support"]);
     const isKnownPositive = parseBool(row["is_known_positive"]);
-    const overallRaw = computeOverallScore({ gnnScore: gnn, safetyScore: safety, marketScore: market, policyProb });
+    // BE-072 ROOT FIX: Use the Python-computed overall_score from the CSV
+    // if present. The previous code ALWAYS called computeOverallScore() in
+    // TypeScript, which uses hardcoded weights (0.4*gnn + 0.3*safety +
+    // 0.3*market). If the Python ranker (rl_drug_ranker.py) uses different
+    // weights, the TS-computed score would overwrite the Python-computed
+    // one — causing the displayed score to differ from what the ranker
+    // actually computed. The fix: prefer the CSV's overall_score column;
+    // only compute in TS if the CSV doesn't have it.
+    const csvOverall = parseNumber(row["overall_score"]);
+    const overallRaw =
+      csvOverall ??
+      computeOverallScore({ gnnScore: gnn, safetyScore: safety, marketScore: market, policyProb });
     const overall = overallRaw ?? undefined;
     out.push({
       drug,
@@ -405,7 +456,12 @@ async function readLocalCsv(csvPath: string): Promise<RankedHypothesis[]> {
 }
 
 async function proxyToRlService(url: string, queryParams: URLSearchParams): Promise<RlRankerResponse> {
-  const fullUrl = `${url.replace(/\/$/, "")}/rank?${queryParams.toString()}`;
+  // BE-070: Pass `needTotal=true` so the upstream service knows to include
+  // the total count (after filtering, before pagination) in the response.
+  // If the upstream doesn't support this, the fallback below uses count.
+  const qp = new URLSearchParams(queryParams);
+  qp.set("needTotal", "true");
+  const fullUrl = `${url.replace(/\/$/, "")}/rank?${qp.toString()}`;
   const res = await fetch(fullUrl, {
     headers: { Accept: "application/json" },
     cache: "no-store",
@@ -414,12 +470,23 @@ async function proxyToRlService(url: string, queryParams: URLSearchParams): Prom
     throw new Error(`RL service at ${url} returned ${res.status}`);
   }
   const body = await res.json();
+  // BE-070 ROOT FIX: The upstream response may include `total` (count after
+  // filtering, before pagination). If it does, we use it. If not, we fall
+  // back to `count` (the number of candidates in this page). The `total`
+  // field is what the caller uses to render "Showing X-Y of Z" and
+  // pagination controls — without it, the user cannot navigate beyond
+  // page 1 because total says there are only `pageSize` candidates.
+  const candidateList = (body?.candidates || []) as RankedHypothesis[];
+  const upstreamTotal = body?.total;
   return {
-    candidates: (body?.candidates || []) as RankedHypothesis[],
+    candidates: candidateList,
     source: "rl_service",
     modelVersion: body?.modelVersion,
     generatedAt: body?.generatedAt || new Date().toISOString(),
-    count: (body?.candidates || []).length,
+    count: candidateList.length,
+    // BE-070: Use the upstream's total if provided; otherwise undefined
+    // so the caller can fall back to count.
+    total: typeof upstreamTotal === "number" ? upstreamTotal : undefined,
   };
 }
 
@@ -501,14 +568,15 @@ export async function getRankedHypotheses(opts?: {
   if (serviceUrl) {
     try {
       const upstream = await proxyToRlService(serviceUrl, queryParams);
-      // FE-033: if the upstream service supports sort+pagination natively,
-      // trust its `total` field; otherwise compute it from the candidate
-      // count (best-effort). We surface the page + total in the response.
+      // FE-033 + BE-070: Trust the upstream's `total` field if provided
+      // (count after filtering, before pagination). If not provided, fall
+      // back to `count` (the page size) — pagination will be limited but
+      // the UI still works for single-page results.
       return {
         ...upstream,
         page: Math.floor(offset / pageSize),
         pageSize,
-        total: upstream.count,
+        total: upstream.total ?? upstream.count,
       } as RlRankerResponse & { page: number; pageSize: number; total: number };
     } catch (e) {
       console.warn("RL service proxy failed, falling back to local CSV:", e);
@@ -635,52 +703,20 @@ export async function getRankedHypotheses(opts?: {
 }
 
 /**
- * Sync the RL ranker's output into the Hypothesis table.
- *
- * FE-010 ROOT FIX: hypotheses touched by this sync are marked
- * rlPredicted=true. Their `status` is set to "predicted" if it was "draft"
- * (we do NOT downgrade a "validated" or "rejected" hypothesis).
+ * BE-071 ROOT FIX: syncRlOutputToHypotheses has been REMOVED. It was dead
+ * code — exported but NEVER called by any route. It performed 200 findMany
+ * queries (one per candidate), each with a non-indexed OR clause on
+ * drugName + diseaseName (lowercase variants) that would never match
+ * because the DB stores original case (unless the collation is
+ * case-insensitive). If ever needed, re-implement with:
+ *   1. A composite index on (drugName, diseaseName)
+ *   2. A single batch query instead of 200 individual queries
+ *   3. Proper case handling (LOWER() function or citext)
+ *   4. A cron job or admin route trigger
  */
-export async function syncRlOutputToHypotheses(): Promise<number> {
-  const { db } = await import("@/lib/db");
-  const { candidates } = await getRankedHypotheses({ limit: 200 });
-  if (candidates.length === 0) return 0;
 
-  let updated = 0;
-  for (const c of candidates) {
-    const matches = await db.hypothesis.findMany({
-      where: {
-        OR: [
-          { drugName: c.drug, diseaseName: c.disease },
-          { drugName: c.drug.toLowerCase(), diseaseName: c.disease.toLowerCase() },
-        ],
-      },
-    });
-    for (const h of matches) {
-      const nextStatus = h.status === "draft" ? "predicted" : h.status;
-      await db.hypothesis.update({
-        where: { id: h.id },
-        data: {
-          status: nextStatus,
-          rlPredicted: true,
-          rank: c.rank ?? null,
-          policyProb: c.policyProb ?? null,
-          reward: c.reward ?? null,
-          gnnScore: c.gnnScore ?? null,
-          safetyScore: c.safetyScore ?? null,
-          marketScore: c.marketScore ?? null,
-          plausibilityScore: c.plausibilityScore ?? null,
-          overallScore: c.overallScore ?? computeOverallScore(c),
-          literatureSupport: c.literatureSupportBool ?? (c.literatureSupport !== undefined ? c.literatureSupport > 0 : null),
-          rlModelVersion: "rl_drug_ranker.py-v101",
-          rlUpdatedAt: new Date(),
-        } as any,
-      });
-      updated++;
-    }
-  }
-  return updated;
-}
+// NOTE: The old syncRlOutputToHypotheses function was here. Deleted as
+// part of BE-071. If you need the functionality, see the comment above.
 
 export function computeOverallScore(c: {
   gnnScore?: number;

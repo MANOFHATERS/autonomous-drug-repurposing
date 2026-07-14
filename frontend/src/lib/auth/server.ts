@@ -140,6 +140,12 @@ export interface AccessTokenPayload {
   email: string;
   role: string;
   orgId?: string;
+  // BE-062: orgMembershipVersion — a Unix timestamp (seconds) of when the
+  // user's org membership was last revoked. Included in the JWT so that
+  // if the user is removed from an org AFTER the token was issued, the
+  // token can be rejected at the API boundary without a DB round-trip.
+  // The value is `orgMembershipRevokedAt?.getTime() / 1000 || 0`.
+  omv?: number;
   type: "access";
 }
 
@@ -148,6 +154,10 @@ export interface AuthenticatedUser {
   email: string;
   role: string;
   orgId?: string;
+  // BE-062: orgMembershipVersion — Unix timestamp of last org revocation.
+  // Passed through from the JWT claim; the API boundary uses it to reject
+  // tokens issued before a removal event.
+  omv?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +231,10 @@ export function signAccessToken(payload: AuthenticatedUser): string {
     email: payload.email,
     role: payload.role,
     orgId: payload.orgId,
+    // BE-062: propagate the orgMembershipVersion into the JWT. When the user
+    // is removed from an org, this value changes and existing tokens become
+    // invalid — closing the 15-minute access window.
+    omv: payload.omv,
     type: "access",
   };
   // FE-041: resolve secret per-call to support hot-rotation.
@@ -248,6 +262,9 @@ export function verifyAccessToken(token: string): AuthenticatedUser | null {
         email: decoded.email,
         role: decoded.role,
         orgId: decoded.orgId,
+        // BE-062: propagate the orgMembershipVersion so API routes can
+        // reject tokens issued before a removal event.
+        omv: decoded.omv,
       };
     } catch {
       // try next candidate
@@ -298,7 +315,18 @@ export async function rotateRefreshToken(userId: string): Promise<{ refresh: str
 
   const { token, expiresAt } = issueRefreshToken();
   await db.refreshToken.create({ data: { userId, token, expiresAt } });
-  const access = signAccessToken({ userId: user.id, email: user.email, role: user.role });
+  // BE-062: include the orgMembershipRevokedAt timestamp in the access token
+  // so that if the user is removed from an org after this token is issued,
+  // the token can be rejected at the API boundary.
+  const omv = user.orgMembershipRevokedAt
+    ? Math.floor(user.orgMembershipRevokedAt.getTime() / 1000)
+    : 0;
+  const access = signAccessToken({
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+    omv: omv || undefined,
+  });
   return { refresh: token, access };
 }
 
@@ -438,7 +466,44 @@ export async function getAuthenticatedUser(): Promise<AuthenticatedUser | null> 
   const access = store.get(ACCESS_COOKIE)?.value;
   if (access) {
     const user = verifyAccessToken(access);
-    if (user) return user;
+    if (user) {
+      // BE-062 ROOT FIX: Verify the user is still a member of their claimed
+      // org. If orgMembershipRevokedAt is set and is newer than the token's
+      // omv claim, the token was issued BEFORE the removal and is invalid.
+      // This closes the 15-minute window where a removed user retains access.
+      if (user.orgId) {
+        const revokedAt = await db.user
+          .findUnique({
+            where: { id: user.userId },
+            select: { orgMembershipRevokedAt: true },
+          })
+          .then((u) => u?.orgMembershipRevokedAt);
+        if (revokedAt) {
+          const revokedTs = Math.floor(revokedAt.getTime() / 1000);
+          const tokenTs = user.omv ?? 0;
+          if (revokedTs > tokenTs) {
+            // Token was issued before the removal — reject it.
+            console.warn(
+              `[AUTH] Token rejected for user ${user.userId}: orgMembershipRevokedAt=${revokedTs} > token omv=${tokenTs}`
+            );
+            return null;
+          }
+        }
+        // Also verify the membership row still exists (catches removals
+        // that don't set orgMembershipRevokedAt — defense in depth).
+        const membership = await db.organizationMember.findFirst({
+          where: { userId: user.userId, organizationId: user.orgId },
+          select: { id: true },
+        });
+        if (!membership) {
+          console.warn(
+            `[AUTH] Token rejected for user ${user.userId}: no membership found for org ${user.orgId}`
+          );
+          return null;
+        }
+      }
+      return user;
+    }
   }
   // Try refresh
   const refresh = store.get(REFRESH_COOKIE)?.value;
@@ -481,6 +546,16 @@ export async function authenticateApiKey(rawKey: string): Promise<AuthenticatedU
     include: { user: true },
   });
   if (!key) return null;
+  // BE-076 ROOT FIX: Check if the user is suspended BEFORE returning the
+  // authenticated user. Previously a suspended user's API key remained valid
+  // — they could continue calling the API programmatically even after an
+  // admin suspended their account. This closes that hole.
+  if (key.user.status !== "active") {
+    console.warn(
+      `[AUTH] API key rejected for user ${key.user.id}: account status is "${key.user.status}" (not active).`
+    );
+    return null;
+  }
   await db.apiKey.update({ where: { id: key.id }, data: { lastUsedAt: new Date() } });
   return {
     userId: key.user.id,

@@ -1,27 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, internalError, writeAuditLog } from "@/lib/api-helpers";
 import { requireCsrfOrSend } from "@/lib/api-helpers";
+// BE-073 ROOT FIX: Import from rl-ranker.ts (the ACTUAL cache used by
+// /api/rl), NOT from rl-csv-cache.ts (a different cache that no route
+// uses). The previous import was:
+//   import { clearRlCsvCache, getRlCsvCacheState } from "@/lib/services/rl-csv-cache";
+// This cleared a cache that was never read — the "Refresh" button was
+// a no-op. Now we clear the rl-ranker.ts cache that /api/rl actually
+// hits.
 import {
-  clearRlCsvCache,
-  getRlCsvCacheState,
-} from "@/lib/services/rl-csv-cache";
+  clearRlRankerCache,
+  getRlRankerCacheState,
+} from "@/lib/services/rl-ranker";
 
 /**
  * POST /api/rl/refresh
  *
- * FE-022 ROOT FIX (Team Member 15):
+ * BE-073 ROOT FIX (replaces FE-022):
  *
- * ROOT CAUSE: `rl-csv-cache.ts` relies on `fs.watch()` to invalidate
- * the cache when the underlying RL output CSV changes. `fs.watch()` is
- * unreliable on NFS, Samba, and some Linux filesystems — the change
- * event may not fire, leaving the cache stale until the 60s TTL
- * expires. For a pharma partner demo, 60 seconds of stale RL data is
- * noticeable.
+ * ROOT CAUSE: `/api/rl/refresh` was calling `clearRlCsvCache()` from
+ * `rl-csv-cache.ts`. But `/api/rl` uses `rl-ranker.ts`'s `readLocalCsv`
+ * which has its OWN cache. Clearing `rl-csv-cache.ts` did NOT clear
+ * `rl-ranker.ts`'s cache. The "Refresh" button was a no-op.
  *
- * ROOT FIX: expose a manual refresh endpoint. The dashboard renders a
- * "Refresh" button; clicking it POSTs to this route, which calls
- * `clearRlCsvCache()` to evict all cached entries. The next
- * `GET /api/rl` re-reads the CSV from disk.
+ * ROOT FIX: Import `clearRlRankerCache` and `getRlRankerCacheState` from
+ * `rl-ranker.ts` (the module that ACTUALLY serves /api/rl). The cache
+ * clear now targets the correct cache, so the next GET /api/rl re-reads
+ * the CSV from disk.
  *
  * Auth: any authenticated user may refresh (the cache is per-process,
  * not per-user — refreshing for one user refreshes for all). We log
@@ -38,9 +43,9 @@ export async function POST(req: NextRequest) {
   if (auth.user === null) return auth.response;
 
   try {
-    const stateBefore = getRlCsvCacheState();
-    clearRlCsvCache();
-    const stateAfter = getRlCsvCacheState();
+    const stateBefore = getRlRankerCacheState();
+    clearRlRankerCache();
+    const stateAfter = getRlRankerCacheState();
 
     await writeAuditLog({
       user: auth.user,

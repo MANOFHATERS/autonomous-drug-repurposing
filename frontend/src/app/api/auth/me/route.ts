@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAuthenticatedUser } from "@/lib/auth/server";
+import { getAuthenticatedUser, signAccessToken, setAuthCookies } from "@/lib/auth/server";
 import { db } from "@/lib/db";
-import { badRequest, writeAuditLog } from "@/lib/api-helpers";
+import { badRequest, writeAuditLog, requireCsrfOrSend } from "@/lib/api-helpers";
 
 /**
  * GET /api/auth/me — return the current user's profile + organization
@@ -196,4 +196,91 @@ export async function PATCH(req: NextRequest) {
   });
 
   return NextResponse.json({ user: updated });
+}
+
+/**
+ * PATCH /api/auth/me/active-org — switch the user's active organization.
+ *
+ * BE-079 ROOT FIX: The GET handler above sets activeOrganizationId from
+ * authUser.orgId (the JWT claim) with a fallback to memberships[0]. But
+ * there was no way for a user with multiple org memberships to SWITCH
+ * their active org — all queries were permanently scoped to the first org.
+ *
+ * This endpoint accepts { activeOrganizationId: string } and, if the user
+ * is a member of that org, issues a new access token with the updated orgId
+ * claim. The caller must then use the new token for subsequent requests.
+ *
+ * CSRF: required (this is a state-changing POST-semantics operation).
+ */
+export async function PUT(req: NextRequest) {
+  // Use PUT for idempotent update (switching to the same org is a no-op).
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
+  const authUser = await getAuthenticatedUser();
+  if (!authUser) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+
+  let body: { activeOrganizationId?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return badRequest("Invalid JSON body");
+  }
+  const targetOrgId = body.activeOrganizationId?.trim();
+  if (!targetOrgId) {
+    return badRequest("activeOrganizationId is required");
+  }
+
+  // Verify the user is actually a member of the target org.
+  const membership = await db.organizationMember.findFirst({
+    where: { userId: authUser.userId, organizationId: targetOrgId },
+    select: { role: true },
+  });
+  if (!membership) {
+    return NextResponse.json(
+      { error: "forbidden", message: "You are not a member of the specified organization." },
+      { status: 403 }
+    );
+  }
+
+  // Issue a new access token with the updated orgId.
+  const user = await db.user.findUnique({
+    where: { id: authUser.userId },
+    select: { email: true, role: true, orgMembershipRevokedAt: true },
+  });
+  if (!user) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+
+  const omv = user.orgMembershipRevokedAt
+    ? Math.floor(user.orgMembershipRevokedAt.getTime() / 1000)
+    : undefined;
+  const newAccess = signAccessToken({
+    userId: authUser.userId,
+    email: user.email,
+    role: user.role,
+    orgId: targetOrgId,
+    omv,
+  });
+
+  // Rotate the refresh token too so the session is fully re-bound.
+  const { refresh: newRefresh } = await import("@/lib/auth/server").then((m) =>
+    m.rotateRefreshToken(authUser.userId)
+  );
+  await setAuthCookies(newAccess, newRefresh);
+
+  await writeAuditLog({
+    user: { ...authUser, orgId: targetOrgId },
+    action: "active_org_switched",
+    resource: `user:${authUser.userId}`,
+    metadata: { previousOrgId: authUser.orgId, newOrgId: targetOrgId },
+  });
+
+  return NextResponse.json({
+    ok: true,
+    activeOrganizationId: targetOrgId,
+    message: "Active organization switched successfully.",
+  });
 }

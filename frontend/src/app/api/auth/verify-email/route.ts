@@ -43,11 +43,16 @@ export async function POST(req: NextRequest) {
   if (!token) return badRequest("token is required");
 
   const secret = process.env.JWT_SECRET;
+  // BE-063 ROOT FIX: Default to PRODUCTION behavior when NODE_ENV is unset.
+  // A misconfigured production deploy (missing NODE_ENV) must NOT use the
+  // dev fallback secret.
+  const isProd =
+    process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test";
   if (!secret || secret.length < 32) {
-    if (process.env.NODE_ENV === "production") {
+    if (isProd) {
       return internalError("JWT_SECRET not configured.");
     }
-    // Dev fallback — same secret as auth/server.ts.
+    // Dev fallback — same secret as auth/server.ts. ONLY used in dev/test.
   }
   const actualSecret = secret && secret.length >= 32
     ? secret
@@ -75,16 +80,19 @@ export async function POST(req: NextRequest) {
 
   try {
     const user = await db.user.findUnique({ where: { id: decoded.sub } });
-    if (!user) {
+    // BE-064 ROOT FIX: Return the SAME "invalid_or_expired_token" error for
+    // both "user not found" AND "email mismatch". The previous code returned
+    // "not_found" (404) for missing users and "email_mismatch" (400) for
+    // email mismatches. An attacker who steals a verification token for
+    // email A and tries to use it for email B would see "email_mismatch" —
+    // confirming that email A's user exists. By collapsing both cases into
+    // the same generic error, we eliminate this enumeration channel.
+    if (!user || user.email !== decoded.email) {
       return NextResponse.json(
-        { error: "not_found", message: "User not found." },
-        { status: 404 }
-      );
-    }
-    if (user.email !== decoded.email) {
-      // The token was issued for a different email — possible tampering.
-      return NextResponse.json(
-        { error: "email_mismatch", message: "Token does not match this account." },
+        {
+          error: "invalid_or_expired_token",
+          message: "The verification link is invalid or has expired. Please request a new one.",
+        },
         { status: 400 }
       );
     }

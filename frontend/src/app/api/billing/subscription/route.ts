@@ -121,6 +121,18 @@ export async function POST(req: NextRequest) {
   // FE-039 STEP 2: if the user has 2FA enabled, require a fresh TOTP code
   // OR a fresh mfaTicket. This is the "2FA challenge" for the financial action.
   if (userRecord.mfaEnabled) {
+    // BE-075 ROOT FIX: Reject requests that provide BOTH totpCode and
+    // mfaTicket. The previous code took the totpCode branch when both were
+    // present, silently ignoring the mfaTicket. This is fragile — a client
+    // that sends both (e.g., a bug or a confused-deputy attack) gets
+    // unpredictable behavior. We now explicitly reject with 400, forcing
+    // the caller to choose one authentication method.
+    if (body.totpCode && body.mfaTicket) {
+      return NextResponse.json(
+        { error: "ambiguous_mfa", message: "Provide either totpCode or mfaTicket, not both." },
+        { status: 400 }
+      );
+    }
     // FE-014 ROOT FIX: If the caller supplied a totpCode (rather than an
     // mfaTicket), enforce the per-user TOTP brute-force gate. The
     // mfaTicket path is exempt because the ticket is already one-time-use

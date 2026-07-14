@@ -398,13 +398,31 @@ export async function requireCsrfOrSend(req: NextRequest): Promise<{
   ok: boolean;
   response: null;
 } | { ok: false; response: Response }> {
-  // Exemption 1: API-key auth (Bearer drugos_…). Programmatic clients are
-  // not vulnerable to CSRF.
+  // BE-078 ROOT FIX: The previous CSRF exemption checked ONLY that the
+  // Authorization header started with "Bearer drugos_" — ANY string after
+  // that prefix would skip CSRF. An attacker with the victim's session
+  // cookie could send `Authorization: Bearer drugos_fake_key` to bypass
+  // CSRF, then the cookie auth would succeed. The fix: validate the API
+  // key BEFORE exempting CSRF. Only a VALID, ACTIVE key exempts the
+  // request. Invalid keys fall through to normal CSRF validation.
   const authHeader = req.headers.get("authorization") || req.headers.get("Authorization");
   if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
     const rawKey = authHeader.slice(7).trim();
     if (rawKey.startsWith("drugos_")) {
-      return { ok: true, response: null };
+      // Validate the key is real — hash it and check the DB.
+      const { createHash } = await import("crypto");
+      const hash = createHash("sha256").update(rawKey).digest("hex");
+      const { db } = await import("@/lib/db");
+      const key = await db.apiKey.findFirst({
+        where: { hashedKey: hash, revokedAt: null },
+        select: { id: true },
+      });
+      if (key) {
+        // Valid API key — programmatic clients are not vulnerable to CSRF.
+        return { ok: true, response: null };
+      }
+      // Invalid key — do NOT exempt. Fall through to CSRF check so that
+      // a request with a fake key + valid session cookie still needs CSRF.
     }
   }
 

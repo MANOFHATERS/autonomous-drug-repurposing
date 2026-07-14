@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""Pre-commit guard: AGENTS_FILE_OWNERSHIP.md contract enforcement.
+"""BE-080 DEPRECATED: This script is now a thin wrapper around
+pre_commit_issue_guard.py, which is the SINGLE entry point for ownership
+enforcement.
 
-Runs in <0.1 seconds. No CI needed. Blocks commits that violate the
-ownership contract:
+Previously two parallel ownership systems (ISSUE_OWNERSHIP.md and
+AGENTS_FILE_OWNERSHIP.md) with different schemas created confusion. The
+issue guard now checks BOTH files, making this script redundant.
 
-  1. If you edit a file marked CLAIMED by another agent -> BLOCK
-  2. If you edit a file marked DONE without bumping its status -> WARN
-  3. If you edit an immutable migration (001-011) -> BLOCK
-  4. If you forget to update AGENTS_FILE_OWNERSHIP.md when claiming a
-     new file -> WARN (remind them to claim)
+For new installs, use:
+    cp scripts/pre_commit_issue_guard.py .git/hooks/pre-commit
 
-Install (run once, from repo root):
-    cp scripts/pre_commit_ownership_guard.py .git/hooks/pre-commit
-    chmod +x .git/hooks/pre-commit
-
-Or run manually before committing:
-    python scripts/pre_commit_ownership_guard.py
+This wrapper is kept for backward compat with existing hooks that point
+here. It simply delegates to the unified guard.
 """
 
 from __future__ import annotations
@@ -152,48 +148,15 @@ def check_new_file_claimed(staged: set[str], ownership: dict) -> list[str]:
 
 
 def main() -> int:
-    if not OWNERSHIP_FILE.exists():
-        # Ownership file doesn't exist yet -- skip checks (bootstrap mode)
-        return 0
-
-    staged = get_staged_files()
-    if not staged:
-        return 0  # nothing to check
-
-    ownership = parse_ownership_map()
-
-    errors = []
-    warnings = []
-
-    errors.extend(check_immutable_migrations(staged))
-    errors.extend(check_claimed_files(staged, ownership))
-    warnings.extend(check_done_files_warning(staged, ownership))
-    warnings.extend(check_new_file_claimed(staged, ownership))
-
-    if warnings:
-        print("=" * 70)
-        print("OWNERSHIP GUARD -- WARNINGS (commit will proceed):")
-        print("=" * 70)
-        for w in warnings:
-            print(f"  ⚠️  {w}")
-        print()
-
-    if errors:
-        print("=" * 70)
-        print("OWNERSHIP GUARD -- ERRORS (commit BLOCKED):")
-        print("=" * 70)
-        for e in errors:
-            print(f"  🚫 {e}")
-        print()
-        print("To fix: read AGENTS_FILE_OWNERSHIP.md and either:")
-        print("  - claim the file first (edit the map, commit, push, then retry)")
-        print("  - pick a different file that's AVAILABLE")
-        print("  - if the claim is stale (>24h), ping the agent or claim it yourself")
-        return 1
-
-    if not warnings:
-        print("✓ ownership guard: OK")
-    return 0
+    # BE-080: Delegate to the unified issue guard which checks BOTH
+    # ISSUE_OWNERSHIP.md and AGENTS_FILE_OWNERSHIP.md. This script is
+    # kept as a backward-compat wrapper.
+    import subprocess
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "pre_commit_issue_guard.py")],
+        cwd=REPO_ROOT,
+    )
+    return result.returncode
 
 
 if __name__ == "__main__":

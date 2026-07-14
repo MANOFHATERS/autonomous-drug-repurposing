@@ -45,9 +45,14 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   if (!project) return notFound("Project not found");
 
   // FE-017: visibility enforcement.
-  if (project.visibility === "public") {
-    return NextResponse.json(project);
-  }
+  // BE-061 ROOT FIX: Removed the "public" early-return that bypassed the
+  // org-membership check. A "public" project in a pharma research platform
+  // means "visible to all members of the organization" — NOT "cross-org
+  // readable". The previous code let any authenticated user in any org read
+  // any "public" project, which leaks research data between competing pharma
+  // consortia. Now ALL projects require org membership; visibility only
+  // controls intra-org access (private = owner-only, org = all org members,
+  // public = all org members + explicit cross-org sharing flag).
   if (project.organizationId !== auth.user.orgId) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }

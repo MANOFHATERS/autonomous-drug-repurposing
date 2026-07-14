@@ -82,10 +82,7 @@ import {
   recordFailedTotp,
   TOTP_MAX_ATTEMPTS,
 } from "@/lib/auth/rate-limit";
-import {
-  computeHmac,
-  verifyHmac,
-} from "@/lib/crypto";
+// BE-069: crypto.ts removed — webhook code was dead. These imports removed.
 import {
   checkUserRateLimitDistributed,
   __createIsolatedInMemoryBackendForTests,
@@ -365,71 +362,9 @@ describe("[FE-014] /api/billing/subscription enforces TOTP rate limit + replay p
 });
 
 // ===========================================================================
-// FE-015: crypto.verifyHmac — constant-time comparison.
+// BE-069: crypto.ts (FE-015 verifyHmac tests) removed — webhook code was
+// dead. The WebhookEndpoint model and lib/crypto.ts module are gone.
 // ===========================================================================
-
-describe("[FE-015] crypto.verifyHmac uses constant-time comparison", () => {
-  const KEY = "webhook-secret-key-not-for-production";
-  const MESSAGE = "payload-body-here";
-
-  test("verifyHmac returns true for the correct HMAC", () => {
-    const expected = computeHmac(KEY, MESSAGE, "sha256");
-    expect(verifyHmac(KEY, MESSAGE, expected, "sha256")).toBe(true);
-  });
-
-  test("verifyHmac returns false for a wrong HMAC", () => {
-    const wrong = "0".repeat(64); // 64 hex chars = 32 bytes, correct length
-    expect(verifyHmac(KEY, MESSAGE, wrong, "sha256")).toBe(false);
-  });
-
-  test("verifyHmac returns false for an empty expected value (fail closed)", () => {
-    expect(verifyHmac(KEY, MESSAGE, "", "sha256")).toBe(false);
-  });
-
-  test("verifyHmac returns false for a length-mismatched expected value", () => {
-    // sha256 produces 64 hex chars; 63 chars is the wrong length.
-    const wrong = "0".repeat(63);
-    expect(verifyHmac(KEY, MESSAGE, wrong, "sha256")).toBe(false);
-  });
-
-  test("verifyHmac supports sha1 (40 hex chars)", () => {
-    const expected = computeHmac(KEY, MESSAGE, "sha1");
-    expect(expected.length).toBe(40); // sanity
-    expect(verifyHmac(KEY, MESSAGE, expected, "sha1")).toBe(true);
-  });
-
-  test("verifyHmac is NOT vulnerable to timing attacks (no early-exit on content)", () => {
-    // This is a statistical test: run verifyHmac against many wrong HMACs
-    // that differ from the correct one at different positions. If the
-    // function short-circuits, the first-differing-byte cases will be
-    // faster than the all-same-except-last-byte cases. We assert that the
-    // min and max timings are within 3x of each other (constant-time
-    // should be ~equal; === would show a clear gradient).
-    const correct = computeHmac(KEY, MESSAGE, "sha256");
-    const samples: number[] = [];
-    for (let bytePos = 0; bytePos < 32; bytePos++) {
-      // Build a wrong HMAC that differs from `correct` ONLY at bytePos.
-      const wrongBytes = Buffer.from(correct, "utf8");
-      const flippedByte = (wrongBytes[bytePos] + 1) % 256;
-      wrongBytes[bytePos] = flippedByte;
-      const wrongHex = wrongBytes.toString("utf8");
-      // Time many iterations to amplify any timing difference.
-      const start = process.hrtime.bigint();
-      for (let i = 0; i < 1000; i++) {
-        verifyHmac(KEY, MESSAGE, wrongHex, "sha256");
-      }
-      const end = process.hrtime.bigint();
-      samples.push(Number(end - start));
-    }
-    const min = Math.min(...samples);
-    const max = Math.max(...samples);
-    // Constant-time: max should be at most 3x the min. === would show
-    // a much wider spread (first-byte-diff is ~10x faster than last-byte-diff).
-    // This is a heuristic — in CI, jitter can be high, so we use 5x as a
-    // generous upper bound. The POINT is to catch a regression to `===`.
-    expect(max / min).toBeLessThan(5);
-  });
-});
 
 // ===========================================================================
 // FE-016: /api/admin/users — org-scoping for non-owner admins.

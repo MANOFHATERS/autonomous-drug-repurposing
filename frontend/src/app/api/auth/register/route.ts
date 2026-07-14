@@ -90,11 +90,20 @@ export function isValidUserStatus(status: unknown): status is AllowedUserStatus 
  */
 function signEmailVerificationToken(userId: string, email: string): string {
   const secret = process.env.JWT_SECRET;
+  // BE-063 ROOT FIX: Default to PRODUCTION behavior when NODE_ENV is unset.
+  // The previous code checked `process.env.NODE_ENV === "production"` and
+  // fell through to the dev secret when NODE_ENV was undefined. A
+  // misconfigured production deployment (missing NODE_ENV) would therefore
+  // use the publicly-known dev secret — anyone who reads the repo can forge
+  // email verification tokens. The fix: treat any non-dev, non-test
+  // environment as production.
+  const isProd =
+    process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test";
   if (!secret || secret.length < 32) {
-    if (process.env.NODE_ENV === "production") {
+    if (isProd) {
       throw new Error("JWT_SECRET must be set in production.");
     }
-    // Dev fallback — same as auth/server.ts.
+    // Dev fallback — same as auth/server.ts. ONLY used in development/test.
     return jwt.sign(
       { sub: userId, email, type: "email_verify" },
       "dev-only-insecure-secret-change-me-MINIMUM-32-CHARS-FOR-HS256!!",
@@ -232,78 +241,107 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // BE-068 ROOT FIX: Helper to generate a unique slug with collision retry.
+  // We retry up to 3 times on P2002 (unique constraint) for the slug field.
+  // The slug uses 12 hex chars (16^12 = 2.8e14 possibilities) making
+  // collisions astronomically unlikely, but we handle them gracefully.
+  const slugBase = (organizationName || name || "workspace")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 30);
+  function makeSlug(): string {
+    return `${slugBase}-${randomBytes(6).toString("hex")}`;
+  }
+
   // Create the user, an organization, and link them as owner.
   // We use a transaction so partial-failures don't leave dangling rows.
   // FE-036: the transaction is wrapped in try/catch to handle the race
   // where another request inserts the same email between our findUnique
   // and the create. In that case, Prisma throws P2002 — we catch it
   // and return 409.
-  let user: { user: { id: string; email: string; name: string | null; role: string; title: string | null; bio: string | null }; orgId: string };
-  try {
-    user = await db.$transaction(async (tx) => {
-      const u = await tx.user.create({
-        data: {
-          email,
-          passwordHash,
-          name,
-          role,
-          title,
-          bio,
-          // FE-035: emailVerified starts false. The user must click the
-          // verification link before they can log in. See /api/auth/verify-email.
-          emailVerified: false,
-        },
+  // BE-068: Added retry loop for slug collisions (up to 3 attempts).
+  let user: { user: { id: string; email: string; name: string | null; role: string; title: string | null; bio: string | null }; orgId: string } | null = null;
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const slug = attempt === 0 ? makeSlug() : makeSlug(); // new slug each attempt
+    try {
+      user = await db.$transaction(async (tx) => {
+        const u = await tx.user.create({
+          data: {
+            email,
+            passwordHash,
+            name,
+            role,
+            title,
+            bio,
+            // FE-035: emailVerified starts false. The user must click the
+            // verification link before they can log in. See /api/auth/verify-email.
+            emailVerified: false,
+          },
+        });
+        const org = await tx.organization.create({
+          data: {
+            name: organizationName || `${name}'s Workspace`,
+            slug,
+            plan: "free",
+            seats: 1,
+          },
+        });
+        await tx.organizationMember.create({
+          data: {
+            userId: u.id,
+            organizationId: org.id,
+            role: "owner",
+          },
+        });
+        await tx.subscription.create({
+          data: {
+            organizationId: org.id,
+            plan: "free",
+            status: "active",
+            seats: 1,
+            currentPeriodStart: new Date(),
+            currentPeriodEnd: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+          },
+        });
+        return { user: u, orgId: org.id };
       });
-      const slugBase = (organizationName || name || "workspace").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 30);
-      const slug = `${slugBase}-${randomBytes(3).toString("hex")}`;
-      const org = await tx.organization.create({
-        data: {
-          name: organizationName || `${name}'s Workspace`,
-          slug,
-          plan: "free",
-          seats: 1,
-        },
-      });
-      await tx.organizationMember.create({
-        data: {
-          userId: u.id,
-          organizationId: org.id,
-          role: "owner",
-        },
-      });
-      await tx.subscription.create({
-        data: {
-          organizationId: org.id,
-          plan: "free",
-          status: "active",
-          seats: 1,
-          currentPeriodStart: new Date(),
-          currentPeriodEnd: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
-        },
-      });
-      return { user: u, orgId: org.id };
-    });
-  } catch (e) {
-    // FE-036: Catch Prisma unique-constraint violation (P2002) on the
-    // email field. This is the race we couldn't prevent with the
-    // findUnique pre-check.
-    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
-      const target = (e.meta as { target?: string[] } | undefined)?.target?.join(", ") || "email";
-      if (target.includes("email")) {
+      lastError = null;
+      break; // Success — exit retry loop.
+    } catch (e) {
+      lastError = e;
+      // FE-036: Catch Prisma unique-constraint violation (P2002).
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+        const target = (e.meta as { target?: string[] } | undefined)?.target?.join(", ") || "email";
+        if (target.includes("email")) {
+          // Email collision is NOT retryable — return immediately.
+          return NextResponse.json(
+            { error: "email_taken", message: "An account with this email already exists" },
+            { status: 409 }
+          );
+        }
+        if (target.includes("slug")) {
+          // BE-068: Slug collision — retry with a new slug (up to 3 attempts).
+          console.warn(`[REGISTER] Slug collision on attempt ${attempt + 1}, retrying...`);
+          continue;
+        }
+        // Some other unique constraint — not retryable.
         return NextResponse.json(
-          { error: "email_taken", message: "An account with this email already exists" },
+          { error: "conflict", message: `A record with this ${target} already exists.` },
           { status: 409 }
         );
       }
-      // Some other unique constraint (e.g. org slug collision). The slug
-      // has a random suffix so this is extremely unlikely, but handle it.
-      return NextResponse.json(
-        { error: "conflict", message: `A record with this ${target} already exists.` },
-        { status: 409 }
-      );
+      // Unexpected error — rethrow to be caught by the outer catch.
+      throw e;
     }
-    // Unexpected error — rethrow to be caught by the outer catch.
-    throw e;
+  }
+  if (!user) {
+    // All 3 slug attempts failed.
+    return NextResponse.json(
+      { error: "conflict", message: "Unable to generate a unique organization slug after 3 attempts. Please try again." },
+      { status: 409 }
+    );
   }
 
   // FE-035: Issue a verification token and "send" the email (in dev mode

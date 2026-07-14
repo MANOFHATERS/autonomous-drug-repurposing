@@ -64,10 +64,16 @@ export interface DatasetStatsResponse {
   note?: string;
 }
 
+// BE-074 ROOT FIX: The default checkpoint path pointed to
+// `../phase2/data/checkpoints/step_01.json` — a Phase 2 artifact. This
+// route is labeled "Phase 1 handoff" and should read Phase 1's output,
+// not Phase 2's view. The correct path is `../phase1/data/checkpoints/
+// step_01.json` (the bridge summary that Phase 1 produces after entity
+// resolution).
 const DEFAULT_CHECKPOINT_PATH = path.resolve(
   process.cwd(),
   "..",
-  "phase2",
+  "phase1",
   "data",
   "checkpoints",
   "step_01.json"

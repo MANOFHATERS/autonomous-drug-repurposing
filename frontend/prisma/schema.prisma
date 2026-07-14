@@ -1,4 +1,11 @@
 // DrugOS Backend Schema
+// BE-066 + BE-067 ROOT FIX: All role/status/visibility fields converted from
+// free-form String to Prisma enums. Previously a raw SQL insert or a
+// migration gone wrong could set role="superuser" — the application would
+// treat it as a non-admin role (requireAdmin checks role === "admin" ||
+// role === "owner"), but the user would have a role that doesn't match any
+// allowlist. Enums enforce valid values at the DATABASE level, closing the
+// SQL-injection / DBA-mistake hole completely.
 // PostgreSQL-backed persistence for users, organizations, projects, billing,
 // collaboration, evidence packages, audit logs, notifications, and API keys.
 //
@@ -27,6 +34,78 @@ datasource db {
 }
 
 // ---------------------------------------------------------------------------
+// ENUMS — BE-066 + BE-067: DB-level enforcement of allowed values.
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  researcher
+  admin
+  owner
+  billing
+  viewer
+  data_scientist
+  pi
+  business_dev
+  developer
+}
+
+enum UserStatus {
+  active
+  suspended
+  pending_approval
+}
+
+enum OrgMemberRole {
+  owner
+  admin
+  member
+  viewer
+  billing
+}
+
+enum ProjectStatus {
+  active
+  archived
+  completed
+  on_hold
+}
+
+enum ProjectVisibility {
+  private
+  org
+  public
+}
+
+enum HypothesisStatus {
+  draft
+  predicted
+  reviewing
+  validated
+  rejected
+  archived
+}
+
+enum SubscriptionStatus {
+  active
+  canceled
+  past_due
+  trialing
+}
+
+enum InvoiceStatus {
+  open
+  paid
+  void
+  uncollectible
+}
+
+enum EvidencePackageStatus {
+  draft
+  generated
+  published
+}
+
+// ---------------------------------------------------------------------------
 // AUTH & USERS
 // ---------------------------------------------------------------------------
 
@@ -35,14 +114,25 @@ model User {
   email             String        @unique
   passwordHash      String
   name              String?
-  role              String        @default("researcher") // researcher | admin | owner | billing | viewer | data-scientist | pi | business-dev | developer
+  // BE-066 ROOT FIX: role is now a Prisma enum (UserRole), not a free-form
+  // String. A raw SQL insert with an invalid role will fail at the DB level.
+  role              UserRole      @default(researcher)
   title             String?       // e.g. "Principal Scientist"
   bio               String?
-  status            String        @default("active")     // active | suspended | pending_approval
+  // BE-066 ROOT FIX: status is now a Prisma enum (UserStatus).
+  status            UserStatus    @default(active)
   mfaSecret         String?
   mfaEnabled        Boolean       @default(false)
   emailVerified     Boolean       @default(false)
   academicVerified  Boolean       @default(false)
+  // BE-062 ROOT FIX: When a user is removed from an organization, this
+  // timestamp is set to the current time. It is included in the JWT as the
+  // `omv` claim (orgMembershipVersion). On every authenticated request,
+  // getAuthenticatedUser checks that the user's claimed orgId still matches
+  // their active membership. If this timestamp is newer than the JWT's iat
+  // (issued at), the token is treated as invalid — forcing re-authentication.
+  // This closes the 15-minute window where a removed user retains access.
+  orgMembershipRevokedAt DateTime?
   // FE-009 ROOT FIX: Brute-force protection. After 5 failed logins within
   // the lockout window, the account is locked until `lockedUntil`. The
   // `failedLoginCount` resets on successful login or when the lockout
@@ -82,7 +172,9 @@ model Organization {
   name        String
   slug        String   @unique
   plan        String   @default("free") // free | researcher | team | enterprise
-  status      String   @default("active")
+  // BE-067 ROOT FIX: status is now a Prisma enum (ProjectStatus pattern).
+  // Organization status uses the same values as Project for simplicity.
+  status      ProjectStatus @default(active)
   seats       Int      @default(1)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -101,7 +193,8 @@ model OrganizationMember {
   id              String       @id @default(cuid())
   userId          String
   organizationId  String
-  role            String       @default("member") // owner | admin | member | viewer | billing
+  // BE-067 ROOT FIX: role is now a Prisma enum (OrgMemberRole).
+  role            OrgMemberRole @default(member)
   invitedBy       String?
   joinedAt        DateTime     @default(now())
 
@@ -151,8 +244,10 @@ model Project {
   id              String       @id @default(cuid())
   name            String
   description     String?
-  status          String       @default("active") // active | archived | completed | on_hold
-  visibility      String       @default("private") // private | org | public
+  // BE-067 ROOT FIX: status is now a Prisma enum (ProjectStatus).
+  status          ProjectStatus    @default(active)
+  // BE-067 ROOT FIX: visibility is now a Prisma enum (ProjectVisibility).
+  visibility      ProjectVisibility @default(private)
   ownerId         String
   organizationId  String
   tags            String       @default("") // comma-separated
@@ -184,7 +279,8 @@ model Hypothesis {
   // pharma means wet-lab or clinical confirmation, which a model output is
   // NOT). The rlPredicted boolean below distinguishes RL-sourced hypotheses
   // from human-created ones at query time.
-  status        String   @default("draft") // draft | predicted | reviewing | validated | rejected | archived
+  // BE-067 ROOT FIX: status is now a Prisma enum (HypothesisStatus).
+  status        HypothesisStatus @default(draft)
   // FE-010 ROOT FIX: true when this hypothesis was created or last updated
   // by the RL ranker (via /api/rl persistRlCandidates). Lets researchers
   // filter "RL predictions" vs "human-curated hypotheses" vs "validated by
@@ -260,7 +356,8 @@ model Subscription {
   id              String       @id @default(cuid())
   organizationId  String       @unique
   plan            String       @default("free")
-  status          String       @default("active") // active | canceled | past_due | trialing
+  // BE-067 ROOT FIX: status is now a Prisma enum (SubscriptionStatus).
+  status          SubscriptionStatus @default(active)
   seats           Int          @default(1)
   currentPeriodStart DateTime
   currentPeriodEnd   DateTime
@@ -278,7 +375,8 @@ model BillingInvoice {
   number          String   @unique
   amountCents     Int
   currency        String   @default("usd")
-  status          String   @default("open") // open | paid | void | uncollectible
+  // BE-067 ROOT FIX: status is now a Prisma enum (InvoiceStatus).
+  status          InvoiceStatus @default(open)
   periodStart     DateTime
   periodEnd       DateTime
   dueDate         DateTime
@@ -308,7 +406,8 @@ model EvidencePackage {
   summary       String
   payloadJson   String   // serialized bundle: literature, trials, safety signals
   pdfPath       String?
-  status        String   @default("draft") // draft | generated | published
+  // BE-067 ROOT FIX: status is now a Prisma enum (EvidencePackageStatus).
+  status        EvidencePackageStatus @default(draft)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -402,22 +501,12 @@ model AuditLog {
 // WEBHOOKS
 // ---------------------------------------------------------------------------
 
-model WebhookEndpoint {
-  id              String   @id @default(cuid())
-  organizationId  String
-  url             String
-  // FE-017 ROOT FIX: Webhook signing secrets are now stored as AES-256-GCM
-  // ciphertext (format: "v1:<base64 iv>:<base64 ciphertext>:<base64 tag>").
-  // The plaintext secret is NEVER persisted. Encryption/decryption is handled
-  // by lib/crypto.ts using WEBHOOK_SECRET_KEY (32-byte key, env var). This
-  // means a DB backup leak does NOT expose signing secrets — an attacker
-  // would also need the KMS/env var to forge webhook deliveries.
-  secretEncrypted String
-  events          String   @default("*") // comma-separated event types
-  enabled         Boolean  @default(true)
-  lastTriggeredAt DateTime?
-  createdAt       DateTime @default(now())
-
-  @@index([organizationId])
-  @@index([enabled])
-}
+// BE-069 ROOT FIX: The WebhookEndpoint model and the lib/crypto.ts module
+// have been REMOVED. There was NO /api/webhooks route — the model was dead
+// code. The WebhooksScreen UI rendered hardcoded fake webhooks (ISSUE-FE-011).
+// The crypto module (AES-256-GCM encryption for webhook secrets) was never
+// called. Removing them eliminates confusion and reduces attack surface.
+//
+// If webhooks become a near-term roadmap item, re-add the model with proper
+// CRUD routes and a delivery service. Until then, they are intentionally
+// absent.

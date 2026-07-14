@@ -73,6 +73,9 @@ export async function POST(req: NextRequest) {
       mfaSecret: true,
       failedLoginCount: true,
       lockedUntil: true,
+      // BE-062: include orgMembershipRevokedAt so the access token can carry
+      // the version claim — enables token rejection when user is removed.
+      orgMembershipRevokedAt: true,
       // FE-055 ROOT FIX: include deletedAt so we can refuse login for
       // soft-deleted accounts. They should appear as "invalid credentials"
       // to the caller (no enumeration leak) but we record an IP attempt.
@@ -195,11 +198,18 @@ export async function POST(req: NextRequest) {
     // compat with non-browser API clients.
     const { cookies: loginCookies } = await import("next/headers");
     const loginStore = await loginCookies();
+    // BE-077 ROOT FIX: Use a broader cookie path ("/api/auth/2fa") so the
+    // MFA challenge cookie survives endpoint reorganization. The previous
+    // path "/api/auth/2fa/login-verify" was too specific — if the verify
+    // endpoint were ever moved (e.g., to "/api/auth/2fa/verify"), the
+    // cookie would not be sent, silently breaking 2FA login. The broader
+    // path covers all 2FA sub-routes while still restricting the cookie
+    // to the 2FA auth namespace (not the entire site).
     loginStore.set("drugos_mfa_challenge", mfaToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
-      path: "/api/auth/2fa/login-verify",
+      path: "/api/auth/2fa",
       maxAge: 5 * 60, // 5 minutes — matches MFA_CHALLENGE_TTL_SECONDS
     });
     await writeAuditLog({
@@ -226,11 +236,18 @@ export async function POST(req: NextRequest) {
   await recordSuccessfulLogin(user.id);
 
   const tokens = await rotateRefreshToken(user.id);
+  // BE-062: Include the orgMembershipVersion in the access token so that
+  // if the user is removed from this org after login, the token can be
+  // rejected at the API boundary.
+  const omv = user.orgMembershipRevokedAt
+    ? Math.floor(user.orgMembershipRevokedAt.getTime() / 1000)
+    : undefined;
   const access = signAccessToken({
     userId: user.id,
     email: user.email,
     role: user.role,
     orgId: membership?.organizationId,
+    omv,
   });
   await setAuthCookies(access, tokens.refresh);
   // FE-011: issue the CSRF token cookie on successful login. The browser

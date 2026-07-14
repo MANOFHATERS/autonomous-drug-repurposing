@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Pre-commit guard: ISSUE_OWNERSHIP.md contract enforcement.
+"""Pre-commit guard: unified ownership contract enforcement.
 
-Runs in <0.1 seconds locally. No CI needed. Blocks commits that violate
-the issue-ownership contract:
+BE-080 ROOT FIX: Consolidates ISSUE_OWNERSHIP.md and AGENTS_FILE_OWNERSHIP.md
+into a single check. Previously two parallel ownership systems (issue-based
+and file-based) with different schemas created confusion — an agent claiming
+a file in one system might not be tracked in the other. Pre-commit guards
+gave inconsistent signals.
 
-  1. If you edit a file owned by an issue CLAIMED by another agent -> BLOCK
-  2. If you edit an immutable file (migration 001-011) -> BLOCK
-  3. If you edit a file owned by an issue marked DONE -> WARN (did you
-     mean to reopen the issue? claim it first)
-  4. If you add a new code file not in the FILE->ISSUE map -> REMIND
-     (add it to the map so others know who owns it)
+This script is now the SINGLE entry point. It checks BOTH:
+  1. ISSUE_OWNERSHIP.md — issue-level ownership (which agent owns which issue)
+  2. AGENTS_FILE_OWNERSHIP.md — file-level ownership (which agent owns which file)
 
-HOW IT WORKS:
-  - Reads ISSUE_OWNERSHIP.md (the single source of truth)
-  - Builds FILE -> ISSUE_ID -> (STATUS, AGENT_ID) mapping
-  - For each staged file, checks who owns it
-  - If owned by a CLAIMED issue and the claimer is NOT you -> BLOCK
+Rules enforced (from BOTH files):
+  - If you edit a file CLAIMED by another agent -> BLOCK
+  - If you edit an immutable file (migration 001-011) -> BLOCK
+  - If you edit a file marked DONE -> WARN
+  - If you add a new code file not in any map -> REMIND
 
 INSTALL (run once per clone, from repo root):
     cp scripts/pre_commit_issue_guard.py .git/hooks/pre-commit
@@ -124,6 +124,82 @@ def parse_ownership_map() -> tuple[dict[str, dict], dict[str, str]]:
                 file_to_issues.setdefault(file_path, []).append(issue_id)
 
     return issues, file_to_issues
+
+
+# BE-080: AGENTS_FILE_OWNERSHIP.md parser and checker.
+AGENTS_OWNERSHIP_FILE = REPO_ROOT / "AGENTS_FILE_OWNERSHIP.md"
+
+
+def parse_agents_ownership_map() -> dict[str, dict]:
+    """Parse AGENTS_FILE_OWNERSHIP.md into {file_path: {status, agent, ...}}."""
+    if not AGENTS_OWNERSHIP_FILE.exists():
+        return {}
+    content = AGENTS_OWNERSHIP_FILE.read_text()
+    ownership = {}
+    pattern = re.compile(
+        r"^(\S+)\s*\|\s*([^|]+?)\s*\|\s*(\S+)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*(.*)$",
+        re.MULTILINE,
+    )
+    for m in pattern.finditer(content):
+        path, bug_ids, status, agent, branch, timestamp, note = m.groups()
+        if path.startswith("#") or path.startswith("---") or path.startswith("<"):
+            continue
+        if path in ("file_or_dir", "--"):
+            continue
+        ownership[path] = {
+            "bug_ids": bug_ids.strip(),
+            "status": status.strip(),
+            "agent": agent.strip(),
+            "branch": branch.strip(),
+            "timestamp": timestamp.strip(),
+            "note": note.strip(),
+        }
+    return ownership
+
+
+def check_agents_claimed_files(staged: set[str], ownership: dict, current_agent: str) -> list[str]:
+    """Block edits to files CLAIMED by another agent in AGENTS_FILE_OWNERSHIP.md."""
+    errors = []
+    for f in staged:
+        if f == "AGENTS_FILE_OWNERSHIP.md":
+            continue
+        entry = ownership.get(f)
+        if not entry:
+            # Try parent directory match
+            for p, e in ownership.items():
+                if f.startswith(p + "/") or f == p:
+                    entry = e
+                    break
+        if entry and entry["status"] == "CLAIMED":
+            claimer = entry["agent"]
+            if claimer and claimer != current_agent and claimer != "--":
+                errors.append(
+                    f"BLOCKED: {f} is CLAIMED by {claimer} (since {entry['timestamp']}) "
+                    f"in AGENTS_FILE_OWNERSHIP.md. "
+                    f"DO NOT TOUCH -- pick another file or wait for {claimer} to finish."
+                )
+    return errors
+
+
+def check_agents_done_warning(staged: set[str], ownership: dict) -> list[str]:
+    """Warn when editing a file marked DONE in AGENTS_FILE_OWNERSHIP.md."""
+    warnings = []
+    for f in staged:
+        if f == "AGENTS_FILE_OWNERSHIP.md":
+            continue
+        entry = ownership.get(f)
+        if not entry:
+            for p, e in ownership.items():
+                if f.startswith(p + "/") or f == p:
+                    entry = e
+                    break
+        if entry and entry["status"] == "DONE":
+            warnings.append(
+                f"WARNING: {f} is marked DONE in AGENTS_FILE_OWNERSHIP.md "
+                f"(merged in {entry.get('note', 'unknown')}). "
+                f"If you're fixing a NEW bug, claim it first."
+            )
+    return warnings
 
 
 def check_immutable_files(staged: set[str], file_to_issues: dict) -> list[str]:
@@ -249,29 +325,38 @@ def main() -> int:
 
 
 def run_pre_commit_hook() -> int:
-    if not OWNERSHIP_FILE.exists():
-        print("⚠ ISSUE_OWNERSHIP.md not found -- skipping ownership guard (bootstrap mode)")
+    # BE-080: Check both ownership files. Either one can block.
+    has_issue_file = OWNERSHIP_FILE.exists()
+    has_agents_file = AGENTS_OWNERSHIP_FILE.exists()
+    if not has_issue_file and not has_agents_file:
+        print("⚠ No ownership files found -- skipping ownership guard (bootstrap mode)")
         return 0
 
     staged = get_staged_files()
     if not staged:
         return 0
 
-    issues, file_to_issues = parse_ownership_map()
+    issues, file_to_issues = parse_ownership_map() if has_issue_file else ({}, {})
+    agents_ownership = parse_agents_ownership_map() if has_agents_file else {}
     current_agent = get_current_agent()
 
     errors = []
     warnings = []
 
+    # ISSUE_OWNERSHIP.md checks
     errors.extend(check_immutable_files(staged, file_to_issues))
     errors.extend(check_claimed_by_other(staged, issues, file_to_issues, current_agent))
     warnings.extend(check_done_files_warning(staged, issues, file_to_issues))
     warnings.extend(check_unmapped_files(staged, file_to_issues))
     warnings.extend(check_deprecated_files(staged, file_to_issues))
 
+    # BE-080: AGENTS_FILE_OWNERSHIP.md checks (consolidated into the same hook)
+    errors.extend(check_agents_claimed_files(staged, agents_ownership, current_agent))
+    warnings.extend(check_agents_done_warning(staged, agents_ownership))
+
     if warnings:
         print("=" * 70)
-        print("ISSUE OWNERSHIP GUARD -- WARNINGS (commit will proceed):")
+        print("UNIFIED OWNERSHIP GUARD -- WARNINGS (commit will proceed):")
         print("=" * 70)
         for w in warnings:
             print(f"  ⚠️  {w}")
@@ -279,20 +364,20 @@ def run_pre_commit_hook() -> int:
 
     if errors:
         print("=" * 70)
-        print("ISSUE OWNERSHIP GUARD -- ERRORS (commit BLOCKED):")
+        print("UNIFIED OWNERSHIP GUARD -- ERRORS (commit BLOCKED):")
         print("=" * 70)
         for e in errors:
             print(f"  🚫 {e}")
         print()
-        print("To fix: read ISSUE_OWNERSHIP.md and either:")
-        print("  - claim the issue first (edit the table, commit, push, then retry)")
-        print("  - pick a different issue that's AVAILABLE")
+        print("To fix: read ISSUE_OWNERSHIP.md and AGENTS_FILE_OWNERSHIP.md:")
+        print("  - claim the issue/file first (edit the table, commit, push, then retry)")
+        print("  - pick a different issue/file that's AVAILABLE")
         print("  - if the claim is stale (>24h), ping the agent or claim it yourself")
         print(f"\nCurrent agent: {current_agent}")
         return 1
 
     if not warnings:
-        print(f"✓ issue ownership guard: OK (agent={current_agent})")
+        print(f"✓ unified ownership guard: OK (agent={current_agent})")
     return 0
 
 

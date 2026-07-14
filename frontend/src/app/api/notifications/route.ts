@@ -15,15 +15,32 @@ export async function GET(req: NextRequest) {
   if (auth.user === null) return auth.response;
   const page = parsePagination(req.nextUrl.searchParams);
   const where = { userId: auth.user.userId };
-  const [items, total, unread] = await Promise.all([
+  // BE-065 ROOT FIX: Collapse 3 DB queries into 2. The previous code did
+  // findMany + count (total) + count (unread) = 3 round-trips. With 1000
+  // researchers polling every 60s, that's 3000 queries/min just for
+  // notifications. The fix: use a single groupBy to get both total and
+  // unread in one query. The unread count is derived from the group where
+  // readAt is null.
+  const [items, counts] = await Promise.all([
     db.notification.findMany({
       where,
       orderBy: { createdAt: "desc" },
       take: page.limit,
       skip: page.offset,
     }),
-    db.notification.count({ where }),
-    db.notification.count({ where: { userId: auth.user.userId, readAt: null } }),
+    // Single aggregation query: count grouped by readAt null/not-null.
+    db.notification.groupBy({
+      by: ["readAt"],
+      where,
+      _count: { readAt: true },
+    }),
   ]);
+  let total = 0;
+  let unread = 0;
+  for (const row of counts) {
+    const c = row._count.readAt ?? 0;
+    total += c;
+    if (row.readAt === null) unread += c;
+  }
   return NextResponse.json({ ...buildPaginatedResponse(items, total, page), unread });
 }
