@@ -1467,6 +1467,31 @@ class RewardConfig:
                 f"Beyond 5.0, the agent becomes too terrified of missing a "
                 f"good pair and collapses to always-HIGH."
             )
+        # P4-040 ROOT FIX: bad_high_penalty_scale upper bound. A user could
+        # set bad_high_penalty_scale=100.0, making the bad-pair HIGH penalty
+        # -100.0 — overwhelming all other signals. The agent collapses to
+        # "always LOW" (never says HIGH on any pair) because the downside is
+        # too large. No validation caught this, so the collapse was silent.
+        # The fix: cap at 5.0 (the same cap as low_action_penalty). At 5.0,
+        # the bad-pair HIGH penalty is -5.0, which is already a strong
+        # discouragement without making HIGH catastrophically risky.
+        if self.bad_high_penalty_scale > 5.0:
+            raise ValueError(
+                f"P4-040: bad_high_penalty_scale must be <= 5.0 (got "
+                f"{self.bad_high_penalty_scale}). Beyond 5.0, the bad-pair "
+                f"HIGH penalty overwhelms all other signals and the agent "
+                f"collapses to 'always LOW' (never says HIGH on any pair) "
+                f"because the downside is too large. This collapse is SILENT "
+                f"— no error message indicates the cause. Use a smaller "
+                f"scale and more timesteps instead."
+            )
+        if self.bad_high_penalty_scale < 0:
+            raise ValueError(
+                f"P4-040: bad_high_penalty_scale must be >= 0 (got "
+                f"{self.bad_high_penalty_scale}). A negative scale inverts "
+                f"the bad-pair HIGH penalty into a REWARD, causing the agent "
+                f"to seek out bad pairs and rank them HIGH."
+            )
         # validated_bonus must be >= 0 (a negative bonus would penalize
         # the agent for ranking validated pairs HIGH — inverted incentive).
         if self.validated_bonus < 0:
@@ -1510,6 +1535,33 @@ class RewardConfig:
                 f"Beyond 0.5, the agent defaults to LOW on everything "
                 f"(always-LOW collapse) because rejecting bad pairs pays more "
                 f"than the risk of ranking a good pair HIGH."
+            )
+        # P4-041 ROOT FIX: cross-field validation. correct_rejection_reward
+        # must be SIGNIFICANTLY less than high_action_bonus * typical_reward.
+        # If correct_rejection_reward >= high_action_bonus * 0.1, the agent
+        # defaults to LOW (always-LOW collapse) because rejecting bad pairs
+        # pays more than the risk of ranking a good pair HIGH.
+        #
+        # Example: correct_rejection_reward=0.5, high_action_bonus=0.1 (low).
+        #   - Rejecting a bad pair pays 0.5.
+        #   - Ranking a good pair HIGH pays 0.1 * reward ≈ 0.05.
+        #   The agent defaults to LOW on everything — always-LOW collapse
+        #   with NO error message indicating the cause.
+        #
+        # The threshold high_action_bonus * 0.1 represents the MINIMUM
+        # ratio where the HIGH action is still worth the risk. Below this,
+        # the EV of always-LOW exceeds the EV of perfect play.
+        _crr_threshold = self.high_action_bonus * 0.1
+        if self.correct_rejection_reward >= _crr_threshold and self.high_action_bonus > 0:
+            logger.warning(
+                f"P4-041: correct_rejection_reward ({self.correct_rejection_reward}) "
+                f">= high_action_bonus * 0.1 ({_crr_threshold:.4f}). The agent "
+                f"may collapse to 'always LOW' because rejecting bad pairs "
+                f"pays more than the risk of ranking a good pair HIGH. "
+                f"Consider increasing high_action_bonus or decreasing "
+                f"correct_rejection_reward. (This is a WARNING, not an error — "
+                f"the configuration is technically valid but may produce "
+                f"degenerate behavior.)"
             )
         # v90 ROOT FIX (BUG #35): warn when gnn_hard_reject is set but
         # adaptive is on (the config value is only a fallback).
@@ -1687,6 +1739,11 @@ class PipelineConfig:
     # False / empty (real bridge data is the normal case).
     _standalone_mode: bool = False
     _standalone_mode_reason: str = ""
+    # P4-029 ROOT FIX: explicit flag to allow fake-data runs (debugging
+    # only). When False (default), run_pipeline REFUSES to start without
+    # a real input CSV, preventing wasted compute on fake-data training.
+    # Set to True (or RL_ALLOW_FAKE_DATA=1 env var) for debugging.
+    allow_fake_data: bool = False
     # v90 P0 ROOT FIX (BUG #8): PPO hyperparams were NOT actually
     # configurable. getattr(cfg, 'ppo_gamma', 0.0) always returned the
     # default because PipelineConfig did not define these fields. A user
@@ -3335,7 +3392,42 @@ def validate_input_schema(data: pd.DataFrame, config: Optional[RewardConfig] = N
         )
 
     # Type coercion to numeric
+    # P4-044 ROOT FIX: detect non-numeric values BEFORE silent coercion.
+    # The previous code used pd.to_numeric(errors='coerce') which silently
+    # converts non-numeric strings (e.g., "N/A", "null", "missing") to NaN.
+    # The user then sees "all pairs rejected by gnn gate" with NO indication
+    # that the input had non-numeric values — the coercion was invisible.
+    #
+    # The fix: for each feature column, attempt strict numeric conversion
+    # FIRST (errors='raise'). If that fails, identify the specific rows with
+    # non-numeric values and report them with row numbers and values, so the
+    # user can fix the input data at the source. Only after this explicit
+    # check do we proceed with coercion (for legitimate NaN/empty values).
     for col in cfg.feature_cols:
+        if col not in data.columns:
+            continue
+        # Check if the column already has NaN values (legitimate missing data)
+        _had_nan_before = data[col].isna()
+        # Try strict conversion — raises ValueError if ANY non-numeric value
+        try:
+            pd.to_numeric(data[col], errors='raise')
+        except (ValueError, TypeError) as exc:
+            # Identify the specific rows with non-numeric values
+            _coerced = pd.to_numeric(data[col], errors='coerce')
+            _bad_mask = _coerced.isna() & ~_had_nan_before
+            _n_bad = int(_bad_mask.sum())
+            if _n_bad > 0:
+                _bad_rows = data[_bad_mask][[DRUG_COL, DISEASE_COL, col]].head(10)
+                raise ValueError(
+                    f"P4-044: Column '{col}' has {_n_bad} non-numeric values "
+                    f"that would be SILENTLY coerced to NaN by pd.to_numeric. "
+                    f"This causes 'all pairs rejected by {col} gate' with no "
+                    f"indication that the input was non-numeric. First 10 bad rows:\n"
+                    f"{_bad_rows.to_string()}\n"
+                    f"Fix the input CSV: ensure all values in '{col}' are "
+                    f"numeric (float or int). Original error: {exc}"
+                ) from exc
+        # Now safe to coerce (only legitimate NaN/empty values remain)
         data[col] = pd.to_numeric(data[col], errors='coerce')
 
     # Range check
@@ -4311,6 +4403,27 @@ class DrugRankingEnv(gym.Env):
         # rejection counts and the critical alert can fire.
         self.n_safety_rejected: int = 0
         self.n_gnn_rejected: int = 0
+        # P4-034 ROOT FIX: separate counter for WITHDRAWN-drug rejections.
+        # The previous code counted withdrawn drugs under n_safety_rejected,
+        # CONFLATING two different rejection reasons (withdrawn vs low safety
+        # score) into one counter. The safety_reject_rate > 0.5 alert fires
+        # when >50% of pairs are rejected, but the operator can't tell from
+        # the alert whether the issue is "too many withdrawn drugs in the
+        # input" (data quality) or "safety scores too low" (model/threshold).
+        # The fix: use a SEPARATE counter for withdrawn-drug rejections.
+        # Both are reported in metrics so the operator can distinguish.
+        # n_safety_rejected now ONLY counts low-safety-score rejections.
+        # n_withdrawn_rejected counts Gate-0 (withdrawn drug) rejections.
+        self.n_withdrawn_rejected: int = 0
+        # P4-049 ROOT FIX: initialize _shuffle_rng in __init__ from
+        # config.seed (NOT hardcoded 42). The previous code initialized
+        # _shuffle_rng in reset() with a fallback to np.random.default_rng(42)
+        # when neither seed nor _shuffle_rng was set. Two envs with different
+        # config.seed values but no explicit reset(seed=) used the SAME
+        # shuffle order (42), breaking reproducibility. The fix initializes
+        # _shuffle_rng ONCE in __init__ from config.seed, so the fallback in
+        # reset() always uses the env's OWN config seed (not 42).
+        self._shuffle_rng = np.random.default_rng(self.config.seed)
         # V4 B-F2 fix: the caller (evaluate_agent, compute_auc) sets
         # this BEFORE calling step(). It holds the agent's policy
         # probability for action HIGH on the current observation. The
@@ -4405,8 +4518,18 @@ class DrugRankingEnv(gym.Env):
         if shuffle:
             if seed is not None:
                 self._shuffle_rng = np.random.default_rng(seed)
+            # P4-049 ROOT FIX: _shuffle_rng is now ALWAYS initialized in
+            # __init__ from config.seed. The previous fallback to
+            # np.random.default_rng(42) is REMOVED — it broke reproducibility
+            # for envs with different config.seed values but no explicit
+            # reset(seed=). Now the fallback always uses self._shuffle_rng
+            # (initialized from config.seed in __init__), so two envs with
+            # different config.seed values get DIFFERENT shuffle orders
+            # even without an explicit reset(seed=) call.
             elif not hasattr(self, '_shuffle_rng'):
-                self._shuffle_rng = np.random.default_rng(42)
+                # Defensive: if __init__ was bypassed (e.g., test harness),
+                # initialize from config.seed (NOT hardcoded 42).
+                self._shuffle_rng = np.random.default_rng(self.config.seed)
             shuffle_order = self._shuffle_rng.permutation(self.n_pairs)
             self.data = self.data.iloc[shuffle_order].reset_index(drop=True)
             # Rebuild the features array after shuffle (the data changed)
@@ -4440,6 +4563,10 @@ class DrugRankingEnv(gym.Env):
         self.high_ranked = []
         # v90 BUG #19: reset all_ranked buffer too
         self.all_ranked = []
+        # P4-034: reset the withdrawn-drug rejection counter too
+        self.n_withdrawn_rejected = 0
+        self.n_safety_rejected = 0
+        self.n_gnn_rejected = 0
         # ROOT FIX (FORENSIC-AUDIT-I23): reset _current_policy_prob to
         # prevent stale values from the previous episode leaking into
         # the first step of the new episode.
@@ -4548,15 +4675,22 @@ class DrugRankingEnv(gym.Env):
             # (it's a data-quality rejection, not a safety rejection)
             elif any(pd.isna(row.get(col, np.nan)) for col in _cfg.feature_cols):
                 self.n_gnn_rejected += 1
-            # Gate 0 (withdrawn drug) — attribute to safety (patient-safety
-            # rejection). This is conservative: withdrawn drugs ARE a
-            # safety concern, so counting them under n_safety_rejected
-            # makes check_alert_conditions' safety_reject_rate meaningful.
+            # Gate 0 (withdrawn drug) — P4-034 ROOT FIX: use a SEPARATE
+            # counter (n_withdrawn_rejected), NOT n_safety_rejected. The
+            # previous code counted withdrawn drugs under n_safety_rejected,
+            # CONFLATING two different rejection reasons (withdrawn vs low
+            # safety score) into one counter. The safety_reject_rate > 0.5
+            # alert fires when >50% of pairs are rejected, but the operator
+            # can't tell whether the issue is "too many withdrawn drugs in
+            # the input" (data quality) or "safety scores too low"
+            # (model/threshold). The fix separates them: withdrawn-drug
+            # rejections go to n_withdrawn_rejected, low-safety rejections
+            # go to n_safety_rejected. Both are reported in metrics.
             elif (
                 _drug_name in WITHDRAWN_DRUGS
                 or _drug_name in INDICATION_WITHDRAWN_DRUGS
             ):
-                self.n_safety_rejected += 1
+                self.n_withdrawn_rejected += 1
             else:
                 # Defensive: reward was -1.0 but no gate matched. This
                 # shouldn't happen, but if it does, attribute to safety
@@ -4682,6 +4816,21 @@ class DrugRankingEnv(gym.Env):
         )
 
         return obs, float(final_reward), bool(done), False, info
+        # P4-032 ROOT FIX (documentation): the 4th element (truncated) is
+        # HARDCODED to False. For gamma=0 (contextual bandit, the current
+        # config), truncation doesn't matter — PPO doesn't bootstrap.
+        # For gamma>0 (sequential MDP), PPO uses the truncated flag to
+        # decide whether to bootstrap from the final obs (truncated=True)
+        # or use the terminal value (truncated=False).
+        #
+        # This env ALWAYS ends naturally at n_pairs (no time limit), so
+        # truncated is ALWAYS False — the episode is NEVER cut off by a
+        # time limit. If a future caller sets gamma>0 for sequential MDP,
+        # they should be aware that this env does NOT support truncation
+        # (there is no max_episode_steps). To add truncation, set a time
+        # limit in reset() and return truncated=True when it's exceeded.
+        # Until then, the hardcoded False is CORRECT for this env's
+        # semantics (contextual bandit, no time limit).
 
     def _append_to_high_ranked(self, entry: Dict[str, Any]) -> None:
         """Append to high_ranked with buffer cap warning."""
@@ -6345,6 +6494,43 @@ def compute_auc(
     #      change re-enables shuffle, the label stays aligned with the
     #      prediction. This is the defensive invariant.
     obs, _ = env_test.reset(options={"shuffle": False})
+    # P4-036 ROOT FIX: assert that shuffle is actually False. The fix above
+    # passes options={"shuffle": False} to reset(), but this is FRAGILE —
+    # it depends on a non-default parameter. If a future caller forgets to
+    # pass shuffle=False (or a code change resets the env without options),
+    # the label/prediction misalignment returns: env_test.data is shuffled,
+    # but labels are read from env_test.data.iloc[current_row_idx] which
+    # would be a SHUFFLED row, decoupling the label from the prediction.
+    # The assert makes the invariant EXPLICIT and enforced — if shuffle
+    # is ever re-enabled, the assert fires IMMEDIATELY with a clear message,
+    # preventing silent AUC corruption.
+    _shuffle_was_enabled = (
+        hasattr(env_test, 'data')
+        and getattr(env_test, '_shuffle_rng', None) is not None
+        # The shuffle_rng is always set in __init__, so we can't check
+        # whether shuffling actually happened via the rng. Instead, we
+        # verify the data order matches the original test_data order
+        # (if shuffle had occurred, the order would differ).
+    )
+    # Defensive: verify env_test.data has the same rows in the same order
+    # as test_data (shuffle=False should preserve order). If the orders
+    # differ, shuffle was enabled — raise immediately.
+    if (
+        hasattr(env_test, 'data')
+        and len(env_test.data) == len(test_data)
+        and DRUG_COL in env_test.data.columns
+        and DRUG_COL in test_data.columns
+    ):
+        _env_drugs = env_test.data[DRUG_COL].tolist()
+        _test_drugs = test_data[DRUG_COL].tolist()
+        if _env_drugs != _test_drugs:
+            raise RuntimeError(
+                f"P4-036: env_test.data order does NOT match test_data order. "
+                f"This means shuffle was NOT disabled (or was re-enabled). "
+                f"Label/prediction misalignment will corrupt the AUC. "
+                f"Ensure compute_auc passes options={{'shuffle': False}} "
+                f"to env_test.reset()."
+            )
     done = False
     # V4 B-F1 fix: store CONTINUOUS policy probabilities, not binary actions.
     predictions: List[float] = []
@@ -6532,7 +6718,36 @@ def literature_crosscheck(
     # ROOT FIX (FORENSIC-AUDIT-I25): import time for rate limiting
     import time as _time
 
-    Entrez.email = os.environ.get("NCBI_EMAIL", "team-cosmic@example.com")
+    # P4-030 ROOT FIX: require a REAL NCBI email, not a fake default.
+    # The previous code defaulted Entrez.email to "team-cosmic@example.com"
+    # — a FAKE email. NCBI requires a real email for API access; repeated
+    # requests with a fake email may get the IP rate-limited or BLOCKED.
+    # All subsequent literature crosschecks then fail silently (caught by
+    # except Exception, sets literature_support=False), and the V1 launch
+    # criterion "≥5 literature-supported predictions" fails silently.
+    #
+    # The fix: require NCBI_EMAIL env var. If unset, raise RuntimeError
+    # (unless RL_SKIP_LITERATURE is set, which was already checked above).
+    # This makes the missing-email case LOUD instead of silent.
+    _ncbi_email = os.environ.get("NCBI_EMAIL", "")
+    if not _ncbi_email:
+        logger.error(
+            f"P4-030 ROOT FIX: NCBI_EMAIL environment variable is not set. "
+            f"The previous code defaulted to a FAKE email "
+            f"('team-cosmic@example.com') which may get the IP rate-limited "
+            f"or BLOCKED by NCBI. All literature crosschecks would then "
+            f"fail silently (caught by except Exception), and the V1 "
+            f"launch criterion '≥5 literature-supported predictions' would "
+            f"fail silently. Set NCBI_EMAIL to a real email address (yours) "
+            f"or set RL_SKIP_LITERATURE=1 to explicitly bypass (debugging only)."
+        )
+        raise RuntimeError(
+            f"P4-030: NCBI_EMAIL environment variable is not set. NCBI "
+            f"requires a real email for API access. The previous fake "
+            f"default ('team-cosmic@example.com') may get the IP blocked. "
+            f"Set NCBI_EMAIL=<your_email> or RL_SKIP_LITERATURE=1 to bypass."
+        )
+    Entrez.email = _ncbi_email
     if api_key:
         Entrez.api_key = api_key
 
@@ -6613,6 +6828,21 @@ def literature_crosscheck(
             # is a no-op filter — every candidate passes. The v89 fix requires
             # ≥3 hits, which is a meaningful discriminating threshold: only
             # pairs with actual published co-mention evidence pass.
+            #
+            # P4-031 ROOT FIX (threshold clarification): the individual-pair
+            # threshold is 3 PubMed hits (per-pair support). This is DIFFERENT
+            # from the V1 launch criterion (DOCX §8) of "≥5 literature-
+            # supported predictions" (cohort-level). The two thresholds
+            # measure DIFFERENT things:
+            #   - Individual threshold (3 hits): does THIS pair have enough
+            #     published co-mention evidence to be "supported"?
+            #   - Launch criterion (5 supported pairs): does the COHORT of
+            #     top-N predictions contain at least 5 supported pairs?
+            # A pair with 3 hits is "supported" individually. The launch
+            # criterion requires at least 5 such supported pairs in the
+            # top-N. The two numbers (3 and 5) are NOT inconsistent — they
+            # measure different things but use the same word "support."
+            # This comment clarifies the distinction for maintainers.
             c.literature_support = count >= 3
             if hasattr(c, 'literature_count'):
                 c.literature_count = count
@@ -6638,6 +6868,7 @@ def literature_crosscheck(
 def check_known_positive_recovery(
     top_candidates: List[RankedCandidate],
     test_data: Optional[pd.DataFrame] = None,
+    all_ranked: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Check how many known drug-disease pairs appear in top candidates.
 
@@ -6664,12 +6895,35 @@ def check_known_positive_recovery(
     denominator (all KPs) made the recovery rate meaningless — it could
     never reach 100% by construction.
 
+    P4-026 ROOT FIX (CRITICAL — recovery biased by max_per_drug diversity):
+    The previous code checked KPs in ``top_candidates``, which comes from
+    get_top_candidates with max_per_drug=1 diversity enforcement. If 3 KPs
+    share the same drug (e.g., 3 KPs for "aspirin" → 3 different diseases),
+    only 1 can appear in top_candidates — recovery rate is capped at 1/3 =
+    33% by construction, even if the agent correctly ranked ALL 3 aspirin
+    KPs HIGH. The recovery test was BIASED against multi-KP drugs.
+
+    The fix: when ``all_ranked`` is provided (all pairs ranked by
+    policy_prob, NO diversity filter), compute recovery against
+    ``all_ranked`` instead of the diversity-limited ``top_candidates``.
+    A KP is "recovered" if it appears ANYWHERE in all_ranked with
+    action==1 (the agent ranked it HIGH). This gives the TRUE recovery
+    rate — the agent gets credit for ranking a KP HIGH even if a
+    same-drug different-disease pair was selected for the diverse top-N.
+
     Args:
-        top_candidates: List of RankedCandidate from the test env.
+        top_candidates: List of RankedCandidate from the test env (kept
+            for backward compatibility — used as fallback when all_ranked
+            is None).
         test_data: Optional test DataFrame. When provided, only KPs
             present in the test set are counted in the denominator.
             When None (legacy/standalone mode), all KPs are counted
             (backward compatibility).
+        all_ranked: Optional list of ALL ranked pairs (Dict with drug,
+            disease, action keys) from the eval env. When provided,
+            recovery is computed against ALL pairs (no diversity filter),
+            fixing the P4-026 bias. When None, falls back to top_candidates
+            (legacy behavior, biased by max_per_drug).
 
     Returns:
         Dict with recovery_rate, recovered, total, per_pair.
@@ -6703,12 +6957,41 @@ def check_known_positive_recovery(
         kps_to_check = list(KNOWN_POSITIVES)
 
     results: Dict[Tuple[str, str], bool] = {}
-    for drug, disease in kps_to_check:
-        match = any(
-            c.drug.lower() == drug.lower() and c.disease.lower() == disease.lower()
-            for c in top_candidates
+    # P4-026 ROOT FIX: when all_ranked is provided, compute recovery against
+    # ALL ranked pairs (no diversity filter), not the diversity-limited
+    # top_candidates. This fixes the bias where multi-KP drugs (e.g., 3 KPs
+    # for aspirin) could only have 1 KP in top_candidates (max_per_drug=1),
+    # capping recovery at 33% even when the agent ranked ALL 3 HIGH.
+    if all_ranked is not None and len(all_ranked) > 0:
+        # Build a set of (drug_lower, disease_lower) for pairs the agent
+        # ranked HIGH (action==1) in all_ranked. This is the TRUE recovery
+        # pool — no diversity filter, no cap.
+        high_ranked_pairs = set()
+        for entry in all_ranked:
+            if entry.get("action") == 1:
+                d = str(entry.get(DRUG_COL, "")).lower().strip()
+                v = str(entry.get(DISEASE_COL, "")).lower().strip()
+                if d and v:
+                    high_ranked_pairs.add((d, v))
+        logger.info(
+            f"P4-026 ROOT FIX: computing recovery against all_ranked "
+            f"({len(high_ranked_pairs)} HIGH-ranked pairs, NO diversity "
+            f"filter). Previous code used top_candidates (max_per_drug=1) "
+            f"which capped multi-KP drug recovery at 33%."
         )
-        results[(drug, disease)] = match
+        for drug, disease in kps_to_check:
+            match = (drug.lower().strip(), disease.lower().strip()) in high_ranked_pairs
+            results[(drug, disease)] = match
+        recovery_basis = "all_ranked_no_diversity_filter"
+    else:
+        # Legacy fallback: check against top_candidates (diversity-limited)
+        for drug, disease in kps_to_check:
+            match = any(
+                c.drug.lower() == drug.lower() and c.disease.lower() == disease.lower()
+                for c in top_candidates
+            )
+            results[(drug, disease)] = match
+        recovery_basis = "top_candidates_diversity_limited"
 
     recovered = sum(1 for v in results.values() if v)
     total = len(results)
@@ -6725,6 +7008,8 @@ def check_known_positive_recovery(
         "total": total,
         # ROOT FIX (C-3): expose the denominator basis for auditability
         "denominator_basis": "test_set" if test_data is not None else "all_kps",
+        # P4-026: expose the recovery pool basis for auditability
+        "recovery_pool_basis": recovery_basis,
         "n_kps_in_test": total,
         "n_kps_total": len(KNOWN_POSITIVES),
     }
@@ -7193,19 +7478,64 @@ def save_results(
         hmac_hex, hmac_verified = compute_output_hmac(filename)
         # v89: hmac_hex is ALWAYS non-None now (project-default key when
         # RL_HMAC_KEY not set). Store the HMAC and verification flag.
-        meta["output_hmac_sha256"] = hmac_hex
+        # P4-043 ROOT FIX: when is_verified=False, prefix the HMAC value
+        # with "UNVERIFIED:" so consumers CANNOT miss the fact that the HMAC
+        # was NOT computed with a secret key. The previous code stored the
+        # raw hex string in output_hmac_sha256 and put is_verified=False in
+        # a SEPARATE field (output_hmac_verified). A regulator or downstream
+        # consumer that reads output_hmac_sha256 but NOT output_hmac_verified
+        # would assume the HMAC is cryptographically secure — a false sense
+        # of tamper protection. The fix embeds the verification status IN
+        # the HMAC value itself: "UNVERIFIED:{hex}" when not verified, just
+        # "{hex}" when verified. A simple string check ("starts with
+        # UNVERIFIED:") now suffices to detect non-cryptographic HMACs.
+        if hmac_verified:
+            meta["output_hmac_sha256"] = hmac_hex
+        else:
+            meta["output_hmac_sha256"] = f"UNVERIFIED:{hmac_hex}"
         meta["output_hmac_verified"] = bool(hmac_verified)
         if hmac_verified:
             logger.info(f"Output HMAC (cryptographically verified): {hmac_hex[:16]}...")
         else:
             logger.info(
                 f"Output HMAC (corruption detection, NOT cryptographic): "
-                f"{hmac_hex[:16]}... Set RL_HMAC_KEY env var for full tamper detection."
+                f"{hmac_hex[:16]}... Set RL_HMAC_KEY env var for full tamper detection. "
+                f"P4-043: metadata stores 'UNVERIFIED:{{hex}}' so consumers can't miss it."
             )
         # Re-save metadata with HMAC fields included
         save_provenance_metadata(filename, meta)
     except Exception as e:
-        logger.warning(f"Could not compute HMAC: {e}")
+        # P4-033 ROOT FIX: log at ERROR level (not WARNING) and re-raise in
+        # strict mode (default). The previous code caught the exception and
+        # logged at WARNING level, which could be missed in production. The
+        # CSV was written but the metadata had NO HMAC field — a regulator
+        # auditing the output sees no HMAC and cannot verify integrity. The
+        # fix: (1) log at ERROR so it's visible in production monitoring,
+        # (2) set metadata["output_hmac_failed"] = True so consumers can
+        # detect the failure, (3) re-raise in strict mode (RL_STRICT_HMAC=1,
+        # default) so the pipeline FAILS instead of shipping an unprotected
+        # CSV. In non-strict mode, the CSV ships but the failure is VISIBLE.
+        logger.error(
+            f"P4-033 ROOT FIX: Could not compute HMAC for {filename}: {e}. "
+            f"The CSV was written but has NO tamper-protection HMAC. "
+            f"A regulator auditing this output cannot verify integrity. "
+            f"Set RL_STRICT_HMAC=0 to allow shipping without HMAC (not recommended)."
+        )
+        meta["output_hmac_failed"] = True
+        meta["output_hmac_sha256"] = None
+        meta["output_hmac_verified"] = False
+        # Re-save metadata with the failure flag so consumers can detect it
+        try:
+            save_provenance_metadata(filename, meta)
+        except Exception:
+            pass
+        strict_hmac = os.environ.get("RL_STRICT_HMAC", "1") == "1"
+        if strict_hmac:
+            raise RuntimeError(
+                f"P4-033: HMAC computation failed for {filename}: {e}. "
+                f"The CSV was written but has NO tamper-protection. "
+                f"Set RL_STRICT_HMAC=0 to allow shipping without HMAC."
+            ) from e
 
     return filename
 
@@ -7400,18 +7730,41 @@ def safe_load_input(filepath: str) -> Tuple[pd.DataFrame, str]:
 
     # Check parent directory for symlinks — but only REJECT in strict mode.
     # In default mode, just log a warning (production-friendly).
+    # P4-046 ROOT FIX: the previous code only checked the IMMEDIATE parent
+    # directory. A symlinked GRANDPARENT directory (e.g., /data → /mnt/real
+    # where filepath is /data/sub/file.csv) was NOT detected. The fix walks
+    # ALL parent directories and checks each for symlinks. This catches
+    # symlinked ancestors at any depth in the path.
     parent_dir = os.path.dirname(os.path.abspath(filepath))
-    if os.path.islink(parent_dir):
+    # P4-046: walk ALL parent directories, not just the immediate parent
+    _symlinked_parents = []
+    _check_dir = parent_dir
+    _seen = set()
+    while _check_dir and _check_dir not in _seen and _check_dir != "/":
+        _seen.add(_check_dir)
+        if os.path.islink(_check_dir):
+            try:
+                _target = os.readlink(_check_dir)
+                _symlinked_parents.append((_check_dir, _target))
+            except OSError:
+                pass
+        _check_dir = os.path.dirname(_check_dir)
+    if _symlinked_parents:
+        _links_str = "; ".join(
+            f"{p} -> {t}" for p, t in _symlinked_parents
+        )
         msg = (
-            f"Parent directory of input file is a symlink: "
-            f"{parent_dir} -> {os.readlink(parent_dir)}."
+            f"Parent directory (or ancestor) of input file contains symlinks: "
+            f"{_links_str}."
         )
         if strict_mode:
             raise ValueError(f"{msg} Refusing to load (strict mode).")
         else:
             logger.warning(
                 f"{msg} This is common in production (NAS/shared filesystem). "
-                f"Proceeding. Set RL_STRICT_SYMLINK_CHECK=1 to reject."
+                f"Proceeding. Set RL_STRICT_SYMLINK_CHECK=1 to reject. "
+                f"(P4-046: now checks ALL ancestor directories, not just "
+                f"the immediate parent.)"
             )
 
     # Now resolve to a normalized absolute path.
@@ -7438,29 +7791,53 @@ def safe_load_input(filepath: str) -> Tuple[pd.DataFrame, str]:
         raise ValueError(f"Input must be a .csv file. Got: {resolved}")
     file_hash = compute_file_hash(resolved)
     logger.info(f"Loading input from {resolved} (SHA-256: {file_hash[:16]}...)")
-    # v90 ROOT FIX (BUG #58): the previous code used pd.read_csv(resolved)
-    # with no encoding parameter. If the CSV is UTF-16 or Latin-1, pandas
-    # silently produced garbled drug/disease names (mojibake). The pipeline
-    # then trained on garbage identifiers, producing garbage rankings with
-    # no error. The fix: explicitly try UTF-8 first (the standard), then
-    # fall back to Latin-1 (which never fails — it maps every byte to a
-    # character). If UTF-8 fails, log a WARNING so the user knows the CSV
-    # is not UTF-8 and may have encoding issues. Latin-1 is the safest
-    # fallback because it accepts any byte sequence without raising.
+    # P4-027 ROOT FIX (CRITICAL — Latin-1 fallback produces garbled names):
+    # The previous code tried UTF-8, then fell back to Latin-1. Latin-1
+    # NEVER fails (it maps every byte to a character), so if the CSV is
+    # actually UTF-16 or has a BOM, the fallback produces garbled drug/
+    # disease names (e.g., "m\x00e\x00t\x00f\x00o\x00r\x00m\x00i\x00n"
+    # for UTF-16 "metformin"). KP recovery fails (garbled names don't match
+    # KNOWN_POSITIVES). Literature crosscheck fails (PubMed returns 0 hits
+    # for garbled queries). ALL SILENT.
+    #
+    # The fix: try UTF-8 with BOM detection (utf-8-sig) first, then UTF-16
+    # (with BOM detection), then RAISE (do NOT fall back to Latin-1
+    # silently). If the user has a Latin-1 CSV, they must explicitly
+    # convert it to UTF-8 first — the pipeline refuses to silently train
+    # on potentially-garbled data.
     try:
-        df = pd.read_csv(resolved, encoding="utf-8")
+        df = pd.read_csv(resolved, encoding="utf-8-sig")
     except UnicodeDecodeError:
-        logger.warning(
-            f"v90 ROOT FIX (BUG #58): input CSV {resolved} is not valid "
-            f"UTF-8. Falling back to Latin-1 encoding. Drug/disease names "
-            f"may be garbled if the file is actually UTF-16 or another "
-            f"encoding. Please re-encode the CSV as UTF-8 for correct "
-            f"processing. (The previous code used pd.read_csv with no "
-            f"encoding parameter, which silently produced mojibake on "
-            f"non-UTF-8 files, causing the pipeline to train on garbage "
-            f"identifiers with no error.)"
-        )
-        df = pd.read_csv(resolved, encoding="latin-1")
+        # Try UTF-16 (with BOM detection) — common for Windows Excel exports
+        try:
+            df = pd.read_csv(resolved, encoding="utf-16")
+            logger.warning(
+                f"P4-027: input CSV {resolved} is UTF-16 encoded (not UTF-8). "
+                f"Loaded successfully with utf-16 decoder. For best "
+                f"compatibility, re-encode as UTF-8 with BOM. (The previous "
+                f"code fell back to Latin-1 which produced garbled names.)"
+            )
+        except UnicodeDecodeError:
+            # Neither UTF-8 nor UTF-16 worked. Do NOT fall back to Latin-1
+            # silently — RAISE with a clear error.
+            logger.error(
+                f"P4-027 ROOT FIX: input CSV {resolved} is neither valid "
+                f"UTF-8 nor UTF-16. The previous code fell back to Latin-1 "
+                f"(which never fails but produces garbled drug/disease "
+                f"names for non-Latin-1 files). The pipeline would then "
+                f"train on garbage identifiers (e.g., UTF-16 'metformin' "
+                f"becomes 'm\\x00e\\x00t\\x00f\\x00o\\x00r\\x00m\\x00i\\x00n') "
+                f"with NO error — KP recovery and literature crosscheck "
+                f"silently fail. Re-encode the CSV as UTF-8 (with or without "
+                f"BOM) and retry."
+            )
+            raise ValueError(
+                f"P4-027: Input CSV {resolved} is neither valid UTF-8 nor "
+                f"UTF-16. The pipeline refuses to fall back to Latin-1 "
+                f"(which would produce garbled drug/disease names and cause "
+                f"silent failures in KP recovery and literature crosscheck). "
+                f"Re-encode the CSV as UTF-8 and retry."
+            )
     return df, file_hash
 
 
@@ -7596,7 +7973,11 @@ class PipelineMetrics:
 
     Attributes:
         n_pairs_processed: Total pairs evaluated.
-        n_safety_rejected: Pairs rejected by safety gate.
+        n_safety_rejected: Pairs rejected by safety gate (low safety score).
+        n_withdrawn_rejected: Pairs rejected because the drug is WITHDRAWN
+            (Gate 0). P4-034: separated from n_safety_rejected so operators
+            can distinguish "too many withdrawn drugs in input" from
+            "safety scores too low".
         n_gnn_rejected: Pairs rejected by GNN gate.
         n_ranked_high: Pairs the agent ranked HIGH.
         n_ranked_low: Pairs the agent ranked LOW.
@@ -7611,6 +7992,8 @@ class PipelineMetrics:
         self.run_id = run_id or str(uuid.uuid4())[:8]
         self.n_pairs_processed: int = 0
         self.n_safety_rejected: int = 0
+        # P4-034: separate withdrawn-drug rejection counter
+        self.n_withdrawn_rejected: int = 0
         self.n_gnn_rejected: int = 0
         self.n_ranked_high: int = 0
         self.n_ranked_low: int = 0
@@ -7624,6 +8007,8 @@ class PipelineMetrics:
             "run_id": self.run_id,
             "pairs_processed": self.n_pairs_processed,
             "safety_rejected": self.n_safety_rejected,
+            # P4-034: report withdrawn rejections separately
+            "withdrawn_rejected": self.n_withdrawn_rejected,
             "gnn_rejected": self.n_gnn_rejected,
             "ranked_high": self.n_ranked_high,
             "ranked_low": self.n_ranked_low,
@@ -7678,10 +8063,52 @@ def _run_env_check(env: "DrugRankingEnv") -> None:
 
 
 def validate_environment(config: PipelineConfig) -> bool:
-    """Validate the runtime environment before starting the pipeline."""
+    """Validate the runtime environment before starting the pipeline.
+
+    P4-039 ROOT FIX: the previous code only checked that config.input_path
+    EXISTS. It did NOT check that the input CSV has the required columns
+    (REQUIRED_COLUMNS). The actual column validation happened later in
+    validate_input_schema, AFTER the full CSV was loaded into memory. For
+    a large CSV (100M rows), the user waited for the full load before
+    seeing the "missing required columns" error — wasted I/O and time.
+
+    The fix: peek at the CSV header (first line only) and check for
+    required columns BEFORE loading the full CSV. If columns are missing,
+    return False immediately with a clear error. This catches schema
+    mismatches in milliseconds instead of minutes.
+    """
     if config.input_path and not os.path.exists(config.input_path):
         logger.error(f"Input file not found: {config.input_path}")
         return False
+    # P4-039: peek at CSV header and check for required columns early
+    if config.input_path:
+        try:
+            with open(config.input_path, "r", encoding="utf-8-sig") as f:
+                header_line = f.readline().strip()
+            if header_line:
+                header_cols = set(
+                    col.strip().strip('"').strip("'")
+                    for col in header_line.split(",")
+                )
+                missing = [c for c in REQUIRED_COLUMNS if c not in header_cols]
+                if missing:
+                    logger.error(
+                        f"P4-039: Input CSV is missing required columns: "
+                        f"{missing}. Expected: {REQUIRED_COLUMNS}. "
+                        f"Found in header: {sorted(header_cols)}. "
+                        f"Fix the input CSV before retrying. (This check "
+                        f"peeks at the header ONLY — no full CSV load needed.)"
+                    )
+                    return False
+                logger.info(
+                    f"P4-039: CSV header check passed — all "
+                    f"{len(REQUIRED_COLUMNS)} required columns present."
+                )
+        except Exception as e:
+            logger.warning(
+                f"P4-039: Could not peek at CSV header ({e}). "
+                f"Full validation will happen in validate_input_schema."
+            )
     os.makedirs(config.output_dir, exist_ok=True)
     os.makedirs(config.checkpoint_dir, exist_ok=True)
     logger.info(
@@ -7790,6 +8217,37 @@ def run_pipeline(
         environment.
     """
     import time as _time
+
+    # P4-029 ROOT FIX (CRITICAL — wasted compute on fake data):
+    # The previous code checked config.input_path ONLY when deciding whether
+    # to load real data or generate fake data. If input_path was None, it
+    # generated fake data, trained the agent for 50000 timesteps (5-30 min
+    # of CPU), THEN save_results raised RuntimeError (P4-003 fix refuses to
+    # write standalone CSVs). The user wasted ~5-30 minutes of compute
+    # training on fake data, only to get an error at the end.
+    #
+    # The fix: check config.input_path at the VERY START of run_pipeline.
+    # If None and not explicitly allowed (RL_ALLOW_FAKE_DATA=1 env var or
+    # config.allow_fake_data flag), raise immediately with a clear message.
+    # This prevents the wasted training cycle.
+    _allow_fake = (
+        os.environ.get("RL_ALLOW_FAKE_DATA", "0") == "1"
+        or getattr(config, "allow_fake_data", False)
+    )
+    if not config.input_path and not _allow_fake:
+        raise RuntimeError(
+            f"P4-029 ROOT FIX: config.input_path is None (no input CSV "
+            f"provided). The previous code generated fake data, trained the "
+            f"agent for {config.timesteps} timesteps (5-30 min of CPU), THEN "
+            f"save_results raised RuntimeError (P4-003 refuses to write "
+            f"standalone CSVs). This wasted compute. To prevent this, "
+            f"run_pipeline now REFUSES to start without a real input CSV. "
+            f"To run with fake data (debugging only), set RL_ALLOW_FAKE_DATA=1 "
+            f"or config.allow_fake_data=True. To run the real pipeline, "
+            f"provide --input <path_to_gnn_output.csv> or set "
+            f"config.input_path. The bridge (run_4phase.py / "
+            f"run_full_platform.py) provides real graph-derived features."
+        )
 
     # P4-015 ROOT FIX: if an explicit seed is provided, override
     # config.seed and re-seed all RNGs. This makes the seed propagation
@@ -8195,7 +8653,20 @@ def run_pipeline(
     # ranked HIGH but top_n=10, the metric said 10. Fix: use the actual
     # high_ranked buffer size from the eval env.
     _eval_env = test_env if len(test_df) > 0 else train_env
-    metrics.n_ranked_high = len(_eval_env.high_ranked)
+    # P4-035 ROOT FIX: use all_ranked (NO cap) instead of high_ranked
+    # (capped at MAX_HIGH_RANKED_BUFFER=100000). The previous code used
+    # len(_eval_env.high_ranked), which is capped at 100K. If the agent
+    # ranked >100K pairs HIGH, the extra pairs were silently dropped from
+    # high_ranked (by _append_to_high_ranked's cap), and the metric
+    # undercounted. The fix counts action==1 pairs in all_ranked (which
+    # has NO cap — every pair is stored), giving the TRUE count.
+    if hasattr(_eval_env, 'all_ranked') and _eval_env.all_ranked:
+        metrics.n_ranked_high = sum(
+            1 for entry in _eval_env.all_ranked if entry.get("action") == 1
+        )
+    else:
+        # Fallback for backward compat (envs that don't have all_ranked)
+        metrics.n_ranked_high = len(_eval_env.high_ranked)
 
     # P4-005 ROOT FIX: copy per-env rejection counters to PipelineMetrics.
     # The original PipelineMetrics.n_safety_rejected and n_gnn_rejected
@@ -8218,6 +8689,8 @@ def run_pipeline(
     # is processed exactly once during evaluation). The n_pairs_processed
     # is also adjusted to be the test pair count for the rate computation.
     metrics.n_safety_rejected = int(getattr(_eval_env, 'n_safety_rejected', 0))
+    # P4-034: copy withdrawn-drug rejections separately
+    metrics.n_withdrawn_rejected = int(getattr(_eval_env, 'n_withdrawn_rejected', 0))
     metrics.n_gnn_rejected = int(getattr(_eval_env, 'n_gnn_rejected', 0))
     # P4-005 v2: n_pairs_processed for alert purposes is the TEST pair
     # count (each test pair processed once during evaluation). The
@@ -8227,8 +8700,9 @@ def run_pipeline(
     metrics._n_test_pairs_for_alert = int(len(test_df)) if len(test_df) > 0 else int(len(train_env.data))
     logger.info(
         f"P4-005: rejection counters (TEST env only) — safety_rejected="
-        f"{metrics.n_safety_rejected}, gnn_rejected="
-        f"{metrics.n_gnn_rejected}, test_pairs_for_alert="
+        f"{metrics.n_safety_rejected}, withdrawn_rejected="
+        f"{metrics.n_withdrawn_rejected} (P4-034: separate from safety), "
+        f"gnn_rejected={metrics.n_gnn_rejected}, test_pairs_for_alert="
         f"{metrics._n_test_pairs_for_alert}. check_alert_conditions will now "
         f"see the ACTUAL rejection counts (was always 0 before the fix)."
     )
@@ -8401,7 +8875,17 @@ def run_pipeline(
     # test env, so only test-split KPs can be recovered. The previous
     # denominator (all 5 KPs) capped recovery at 2/5 = 40% even when the
     # agent recovered ALL test KPs.
-    recovery = check_known_positive_recovery(candidates, test_data=test_df)
+    # P4-026 ROOT FIX: pass all_ranked from the eval env so recovery is
+    # computed against ALL ranked pairs (no diversity filter), not the
+    # diversity-limited top_candidates. This fixes the bias where multi-KP
+    # drugs (3 KPs for aspirin) could only have 1 KP in top_candidates
+    # (max_per_drug=1), capping recovery at 33%.
+    _recovery_all_ranked = getattr(_eval_env, 'all_ranked', None)
+    recovery = check_known_positive_recovery(
+        candidates,
+        test_data=test_df,
+        all_ranked=_recovery_all_ranked,
+    )
     logger.info(f"Known-positive recovery rate: {recovery['recovery_rate']:.1%}")
 
     # Build metadata
@@ -9222,6 +9706,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # __post_init__ raises ValueError with a descriptive message that
     # tells the user exactly which field is invalid and why.
     config.__post_init__()
+    # P4-042 ROOT FIX: also re-run RewardConfig.__post_init__. The previous
+    # fix only re-validated PipelineConfig fields (timesteps, top_n, etc.),
+    # NOT RewardConfig fields (high_action_bonus, correct_rejection_reward,
+    # bad_high_penalty_scale, etc.). If a user mutated config.reward fields
+    # via Python API (or via a future CLI flag like --high-action-bonus),
+    # the RewardConfig.__post_init__ was NOT re-run, so invalid reward
+    # configs were silently accepted. Example: a user sets
+    # config.reward.high_action_bonus=-1.0 (inverted incentive) — no error.
+    # The fix calls config.reward.__post_init__() after config.__post_init__()
+    # so ALL nested config validation is re-run after mutation.
+    config.reward.__post_init__()
 
     if args.skip_literature:
         os.environ["RL_SKIP_LITERATURE"] = "1"
@@ -9318,10 +9813,57 @@ def retrain_on_validated(
     # at reward-function construction time, so it picks up the new set.
     VALIDATED_HYPOTHESES = list(merged)
 
+    # P4-047 ROOT FIX: write the updated VALIDATED_HYPOTHESES to DISK so
+    # subsequent process starts pick it up. The previous code only updated
+    # the IN-PROCESS module-level constant. A subsequent train_agent() call
+    # in the SAME process picked up the new pairs. But the GT trainer runs
+    # in a SEPARATE process (typically an Airflow task), which re-imports
+    # the rl module from scratch and gets the OLD VALIDATED_HYPOTHESES
+    # (hardcoded in the source). The "data flywheel" only worked within a
+    # single process — cross-process (the actual production deployment
+    # pattern) did NOT propagate validated pairs.
+    #
+    # The fix: write the updated set to rl/validated_hypotheses.csv (the
+    # canonical path from common.validated_hypotheses_schema). On module
+    # import, VALIDATED_HYPOTHESES is loaded from this file (if it exists),
+    # falling back to the hardcoded defaults. This makes the data flywheel
+    # work cross-process: the Airflow task that calls retrain_on_validated
+    # writes the file, and the next Airflow task that calls train_agent
+    # reads it.
+    try:
+        _wb_csv_path = _Path(validated_csv_path)
+        _wb_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        # P4-048-style atomic write: write to temp then rename
+        _tmp_path = _wb_csv_path.with_suffix(".csv.tmp")
+        with open(_tmp_path, "w", newline="", encoding="utf-8") as f:
+            _writer = _csv.writer(f)
+            _writer.writerow(["drug", "disease", "validated"])
+            for drug, disease in VALIDATED_HYPOTHESES:
+                _writer.writerow([drug, disease, "true"])
+            f.flush()
+            _os.fsync(f.fileno())
+        _os.replace(str(_tmp_path), str(_wb_csv_path))
+        logger.info(
+            "P4-047 ROOT FIX: wrote %d validated hypotheses to %s (ATOMIC "
+            "write). Subsequent process starts (Airflow tasks, separate "
+            "train_agent runs) will load this file and use the extended "
+            "reward bonus set. The data flywheel now works CROSS-PROCESS.",
+            len(VALIDATED_HYPOTHESES), _wb_csv_path,
+        )
+    except Exception as _write_exc:
+        logger.error(
+            "P4-047: failed to write validated hypotheses to disk (%s). "
+            "The in-process VALIDATED_HYPOTHESES was updated, but "
+            "cross-process propagation will NOT work until the write "
+            "succeeds. Check permissions on %s.",
+            _write_exc, validated_csv_path,
+        )
+
     logger.info(
         "retrain_on_validated: loaded %d validated pairs (%d new since last call). "
         "VALIDATED_HYPOTHESES now has %d entries. Next train_agent() call "
-        "will use the extended reward bonus set.",
+        "will use the extended reward bonus set. "
+        "(P4-047: written to disk for cross-process propagation.)",
         len(new_pairs), len(added), len(VALIDATED_HYPOTHESES),
     )
 

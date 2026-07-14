@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -390,9 +391,18 @@ def _rank_impl(
         page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
         return {
             "candidates": page_candidates,
-            "source": "rl_service",
+            # P4-028 ROOT FIX: use timezone-aware UTC datetime (not deprecated
+            # utcnow() which returns naive datetime). 21 CFR Part 11 requires
+            # unambiguous timestamps; naive datetime is interpreted as LOCAL
+            # time by the frontend's new Date(), causing audit log mismatches.
+            # P4-045 ROOT FIX: source is "service" (not "rl_service") to
+            # match the frontend's rl-ranker.ts type contract
+            # ("csv" | "service" | "none"). The frontend's availability
+            # check gates on result.source === "none"; "rl_service" was
+            # unrecognized and could trigger a false "RL not available" state.
+            "source": "service",
             "modelVersion": "rl_drug_ranker.py-v105",
-            "generatedAt": __import__("datetime").datetime.utcnow().isoformat(),
+            "generatedAt": datetime.now(timezone.utc).isoformat(),
             "total": total,
             "page": offset // limit if limit > 0 else 0,
             "pageSize": limit,
@@ -406,7 +416,8 @@ def _rank_impl(
         return {
             "candidates": [],
             "source": "none",
-            "generatedAt": __import__("datetime").datetime.utcnow().isoformat(),
+            # P4-028: timezone-aware UTC
+            "generatedAt": datetime.now(timezone.utc).isoformat(),
             "total": 0,
             "page": 0,
             "pageSize": limit,
@@ -422,9 +433,11 @@ def _rank_impl(
     page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
     return {
         "candidates": page_candidates,
-        "source": "rl_service",
+        # P4-045: "service" matches frontend contract (not "rl_service")
+        "source": "service",
         "modelVersion": "rl_drug_ranker.py-v105",
-        "generatedAt": __import__("datetime").datetime.utcnow().isoformat(),
+        # P4-028: timezone-aware UTC (not deprecated utcnow)
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
         "total": total,
         "page": offset // limit if limit > 0 else 0,
         "pageSize": limit,

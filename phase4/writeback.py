@@ -398,12 +398,44 @@ def writeback_to_phase3(vh: ValidatedHypothesis) -> bool:
     }
     existing.append(new_entry)
 
-    with open(trigger_path, "w") as f:
-        json.dump(existing, f, indent=2, default=str)
+    # P4-048 ROOT FIX: ATOMIC WRITE. The previous code did:
+    #     with open(trigger_path, "w") as f:
+    #         json.dump(existing, f, ...)
+    # If the process crashed mid-write (OOM, signal, power loss), the JSON
+    # file was left TRUNCATED — the GT trainer would fail to parse it, or
+    # worse, parse a partial JSON and silently miss entries. A regulator
+    # auditing the retrain trigger would see a corrupt file with no way to
+    # recover the lost validated hypotheses (21 CFR Part 11 data integrity
+    # violation).
+    #
+    # The fix: write to a temp file in the SAME directory (so os.rename is
+    # atomic on POSIX — a single inode operation), then atomically rename
+    # over the target. On POSIX, os.rename is atomic: either the old file
+    # or the new file is fully visible, never a partial write. On Windows,
+    # os.replace is used (atomic since Python 3.3).
+    tmp_path = trigger_path.with_suffix(".json.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, default=str)
+            # Ensure data is flushed to disk before rename (fsync for
+            # durability on power loss). Without this, the rename could
+            # succeed but the file content could be lost on crash.
+            f.flush()
+            os.fsync(f.fileno())
+        # Atomic rename (POSIX) / replace (Windows)
+        os.replace(str(tmp_path), str(trigger_path))
+    except Exception:
+        # Clean up the temp file if anything went wrong
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
 
     logger.info(
         "RT-010 Phase 3 writeback: appended validated hypothesis to "
-        "retrain trigger at %s. The next GT training run will include "
+        "retrain trigger at %s (ATOMIC write via tmp+rename, P4-048). "
+        "The next GT training run will include "
         "(%s, %s, outcome=%s) in its known_pairs.",
         trigger_path, vh.drug, vh.disease, vh.outcome,
     )
