@@ -2295,3 +2295,84 @@ def load_validated_for_retraining(
             _os.unlink(tmp_csv.name)
         except Exception:
             pass
+
+
+def get_validated_pairs_for_retraining(
+    retrain_trigger_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """P4-009 ROOT FIX (Team Member 9): Read retrain_triggered.json and return
+    the validated pairs split by outcome, WITHOUT requiring a checkpoint.
+
+    This is the SIMPLE reader that matches the issue's intent: "merges the
+    pairs into known_pairs (positive for validated_positive, negative for
+    validated_negative/validated_toxic)". The existing
+    ``load_validated_for_retraining`` function does MORE (it fine-tunes the
+    model), which requires a checkpoint_path — making it unusable at the
+    START of training when we just want to merge validated pairs into
+    known_pairs.
+
+    This function is called by the trainer at the start of each training
+    run to merge validated pairs into known_pairs:
+        pairs = get_validated_pairs_for_retraining()
+        known_pairs.extend(pairs["positive_pairs"])
+        # negative_pairs are added to the negative label set
+
+    Args:
+        retrain_trigger_path: Path to retrain_triggered.json. If None,
+            defaults to <repo>/graph_transformer/retrain_triggered.json.
+
+    Returns:
+        Dict with:
+        - positive_pairs: List[Tuple[str, str]] — validated_positive pairs
+        - negative_pairs: List[Tuple[str, str]] — validated_negative/toxic pairs
+        - trigger_entries_read: int — total entries in the JSON
+        - trigger_path: str — the path that was read (for logging)
+    """
+    import json as _json
+    import os as _os
+    from pathlib import Path as _Path
+
+    if retrain_trigger_path is None:
+        _repo_root = _Path(__file__).resolve().parents[2]
+        retrain_trigger_path = str(_repo_root / "graph_transformer" / "retrain_triggered.json")
+
+    positive_pairs: List[Tuple[str, str]] = []
+    negative_pairs: List[Tuple[str, str]] = []
+    trigger_entries_read = 0
+
+    if _os.path.exists(retrain_trigger_path):
+        try:
+            with open(retrain_trigger_path, "r", encoding="utf-8") as f:
+                entries = _json.load(f)
+            if isinstance(entries, list):
+                trigger_entries_read = len(entries)
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    drug = (entry.get("drug") or "").strip()
+                    disease = (entry.get("disease") or "").strip()
+                    outcome = (entry.get("outcome") or "").strip().lower()
+                    if not drug or not disease:
+                        continue
+                    if outcome == "validated_positive":
+                        positive_pairs.append((drug, disease))
+                    elif outcome in ("validated_negative", "validated_toxic"):
+                        negative_pairs.append((drug, disease))
+        except Exception as exc:
+            logger.warning(
+                "P4-009: failed to read retrain trigger JSON (%s): %s",
+                retrain_trigger_path, exc,
+            )
+    else:
+        logger.info(
+            "P4-009: no retrain trigger file at %s — no validated pairs to merge. "
+            "This is normal for a first run (no pharma validations yet).",
+            retrain_trigger_path,
+        )
+
+    return {
+        "positive_pairs": positive_pairs,
+        "negative_pairs": negative_pairs,
+        "trigger_entries_read": trigger_entries_read,
+        "trigger_path": retrain_trigger_path,
+    }

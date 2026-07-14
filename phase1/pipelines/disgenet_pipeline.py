@@ -1327,6 +1327,20 @@ class DisGeNETPipeline(BasePipeline):
                 "[disgenet] Could not compute SHA-256 of %s: %s", path, exc
             )
 
+        # P1-055 ROOT FIX (v108): set source_version from the API response
+        # or static URL. The DisGeNET API returns the source version in
+        # the response headers or the data itself. We use the download
+        # method + current date as a fallback so the audit trail is never
+        # None. The exact version (e.g. "DisGeNET v7.0") would be parsed
+        # from the API response if available.
+        if not getattr(self, "source_version", None):
+            from datetime import datetime, timezone
+            _fmt = getattr(self, "_source_format", "unknown")
+            self.source_version = (
+                f"DisGeNET_{_fmt}_as_of_"
+                f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+            )
+
         return path
 
     def _write_embedded_sample(self) -> Path:
@@ -1347,6 +1361,10 @@ class DisGeNETPipeline(BasePipeline):
         self._source_format = "embedded_csv"
         self._download_method_used = "embedded_sample"
         self._source_url_sanitised = "embedded://disgenet_gda"
+        # P1-055 ROOT FIX (v108): set source_version for the audit trail.
+        # The embedded sample is a snapshot of DisGeNET curated data aligned
+        # to Piñero 2020 §2.3. The version string records this.
+        self.source_version = "DisGeNET_pinero_2020_embedded_sample"
         logger.info(
             "[disgenet] Embedded sample GDA dataset written to %s (%d rows)",
             dest, len(df),

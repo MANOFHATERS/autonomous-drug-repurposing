@@ -2462,8 +2462,19 @@ def fill_missing_drug_fields(
         #   now deterministic (no heuristic).
         try:
             out.loc[_null_mask_before_fillna, lineage_col] = True
-        except Exception:  # noqa: BLE001
-            pass
+        except (KeyError, ValueError, TypeError) as exc:  # P1-053 ROOT FIX (v108): narrowed from broad except Exception
+            # Lineage tracking is best-effort — a failure here means the
+            # lineage column couldn't be set (dtype mismatch, missing
+            # column, etc.). Log at DEBUG so operators can detect it,
+            # but don't crash the fill operation (the data fill itself
+            # already succeeded above).
+            logger.debug(
+                "fill_missing_drug_fields: could not set lineage column "
+                "'%s' for %d rows (%s: %s) — data fill succeeded but "
+                "lineage tracking failed for this column",
+                lineage_col, int(_null_mask_before_fillna.sum()),
+                type(exc).__name__, exc,
+            )
 
         after_null = int(is_nullish(out[col], column_context="general").sum())
         filled_count = before_null - after_null
@@ -2504,8 +2515,12 @@ def fill_missing_drug_fields(
                         len(unknown_types),
                         unknown_types[:5],
                     )
-        except Exception:  # noqa: BLE001
-            pass
+        except (AttributeError, TypeError, ValueError) as exc:  # P1-053 ROOT FIX (v108): narrowed from broad except Exception
+            logger.debug(
+                "fill_missing_drug_fields: drug_type validation failed "
+                "(%s: %s) — non-fatal, validation skipped",
+                type(exc).__name__, exc,
+            )
 
     duration = time.monotonic() - start_time
     _set_cleaning_metadata(
@@ -2691,7 +2706,12 @@ def handle_missing_protein_fields(
                     dropped_rows_df = pd.DataFrame(
                         [dl["row"] for dl in recent_drops]
                     )
-                except Exception:  # noqa: BLE001
+                except (KeyError, ValueError, TypeError) as exc:  # P1-053 ROOT FIX (v108): narrowed from broad except Exception
+                    logger.debug(
+                        "handle_missing_protein_fields: could not build "
+                        "dropped_rows_df from dead letters (%s: %s)",
+                        type(exc).__name__, exc,
+                    )
                     dropped_rows_df = pd.DataFrame()
 
         # DQ-5: warn on duplicate uniprot_ids.
@@ -2707,8 +2727,12 @@ def handle_missing_protein_fields(
                     dups.head(5).to_dict(),
                 )
                 _increment_metric("duplicate_uniprot_ids", len(dups))
-        except Exception:  # noqa: BLE001
-            pass
+        except (AttributeError, TypeError, ValueError, KeyError) as exc:  # P1-053 ROOT FIX (v108): narrowed from broad except Exception
+            logger.debug(
+                "handle_missing_protein_fields: duplicate uniprot_id "
+                "detection failed (%s: %s) — non-fatal",
+                type(exc).__name__, exc,
+            )
     else:
         msg = (
             f"handle_missing_protein_fields: 'uniprot_id' column not found "

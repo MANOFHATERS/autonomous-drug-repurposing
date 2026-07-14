@@ -100,6 +100,40 @@ from typing import (
 
 logger = logging.getLogger(__name__)
 
+# ─── v108 ROOT FIX (ISSUE-P2-056): REAL config monolith split ────────────────
+# The previous v107 "fix" only DOCUMENTED the intended split and explicitly
+# deferred execution to "v2.1.0" — a surface-level fix. This block DOES the
+# split: path constants are MOVED to ``config_paths.py`` and schema constants
+# are MOVED to ``config_schema.py``. This file imports them back so
+# ``from .config import RAW_DIR, CORE_NODE_TYPES`` continues to work
+# (backward compat for the 38+ files that import from config).
+#
+# New consumers should prefer importing from the submodules directly:
+#     from .config_paths import RAW_DIR, PROCESSED_DIR
+#     from .config_schema import CORE_NODE_TYPES, CORE_EDGE_TYPES
+#
+# Future PRs can extract config_neo4j.py, config_pyg.py, config_transe.py,
+# config_validation.py following the same pattern.
+from .config_paths import (  # noqa: F401 — re-exported for backward compat
+    _PROJECT_ROOT,
+    PROJECT_ROOT,
+    DATA_DIR,
+    RAW_DIR,
+    PROCESSED_DIR,
+    PHASE1_PROCESSED_DIR,
+    RESULTS_PERSIST_PATH,
+    KG_EXPORT_DIR,
+    KG_DIR,
+    EMBEDDINGS_DIR,
+    LOGS_DIR,
+)
+from .config_schema import (  # noqa: F401 — re-exported for backward compat
+    CORE_NODE_TYPES,
+    DRKG_NODE_TYPES,
+    CORE_EDGE_TYPES,
+    CORE_EDGE_TYPES_SET,
+)
+
 # ─── A.1 Version Constants ────────────────────────────────────────────────────
 # Fixes audit issue 7.3 — version constants for reproducibility
 # Fixes audit issue 16.1 — lineage metadata requires version tracking
@@ -877,66 +911,15 @@ CONFIG_HASH: str = ""  # Computed at end of module after all config is loaded
 # Fixes audit issue 4.4 — DRUGOS_PROJECT_ROOT env var override
 # Fixes audit issue 12.4 — env-based root for deployment flexibility
 
-_DRUGOS_ROOT_ENV = os.environ.get("DRUGOS_PROJECT_ROOT", "")
-if _DRUGOS_ROOT_ENV:
-    _PROJECT_ROOT = Path(_DRUGOS_ROOT_ENV).resolve()
-else:
-    # For development: use parent of package dir
-    # For installed packages: use current working directory
-    _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-    if not (_PROJECT_ROOT / "data").exists():
-        # Likely installed via pip — use cwd
-        _PROJECT_ROOT = Path.cwd()
-
-# Fixes audit issue 1.1 — backward-compat alias
-# Deprecated: use _PROJECT_ROOT for internal derivation; PROJECT_ROOT kept for backward compat
-PROJECT_ROOT: Path = _PROJECT_ROOT
-
-DATA_DIR = _PROJECT_ROOT / "data"
-RAW_DIR = DATA_DIR / "raw"
-PROCESSED_DIR = DATA_DIR / "processed"
-
-# FIX TOP-12: Phase 2's ``PROCESSED_DIR`` (phase2/data/processed/) is for
-# Phase 2's OWN outputs — PyG HeteroData, TransE checkpoints, pipeline
-# results JSON, etc. Phase 2 READS Phase 1's outputs via the bridge from
-# ``PHASE1_PROCESSED_DIR`` (phase1/processed_data/) — the read-only Phase 1
-# directory. The two paths must NOT be conflated: Phase 1 CSVs are an
-# immutable upstream artifact for Phase 2, never written to by Phase 2.
-# ``PHASE1_PROCESSED_DIR`` defaults to the sibling ``phase1/processed_data``
-# directory relative to this package; override via
-# ``DRUGOS_PHASE1_PROCESSED_DIR`` env var (used by run_unified.py to wire
-# the two phases together). Synchronized with
-# phase1/config/settings.py — DO NOT diverge (audit TOP-12).
-PHASE1_PROCESSED_DIR: Path = Path(
-    os.environ.get(
-        "DRUGOS_PHASE1_PROCESSED_DIR",
-        str(_PROJECT_ROOT.parent / "phase1" / "processed_data"),
-    )
-)
-
-# FIX TOP-3: ``RESULTS_PERSIST_PATH`` is the on-disk JSON file where
-# ``run_full_pipeline`` writes its full results dict (see run_pipeline.py
-# ``PROCESSED_DIR / "pipeline_results.json"``). ``__main__`` reads this
-# path to re-run the V1 launch criteria check after the pipeline exits,
-# so ``python -m drugos_graph`` can emit the documented exit code 4 when
-# the model is not launch-ready. The previous code referenced
-# ``RESULTS_PERSIST_PATH`` without defining it (ImportError was caught by
-# a broad ``except Exception`` and silently swallowed), so the V1 launch
-# criteria check was SKIPPED when invoked via ``python -m drugos_graph`` —
-# defeating the entire ML-honesty audit fix. Synchronized with
-# run_pipeline.py:run_full_pipeline — DO NOT diverge (audit TOP-3).
-RESULTS_PERSIST_PATH: Path = PROCESSED_DIR / "pipeline_results.json"
-
-# Fixes audit issue 1.2 — KG_DIR renamed to KG_EXPORT_DIR (clearer intent)
-# KG_EXPORT_DIR is for KG exports/snapshots, NOT the live Neo4j KG
-KG_EXPORT_DIR = DATA_DIR / "kg_exports"
-
-# Backward-compat alias — KG_DIR still importable
-# Deprecated: use KG_EXPORT_DIR; KG_DIR kept for backward compat
-KG_DIR: Path = KG_EXPORT_DIR
-
-EMBEDDINGS_DIR = DATA_DIR / "embeddings"
-LOGS_DIR = _PROJECT_ROOT / "logs"
+# v108 ROOT FIX (ISSUE-P2-056): the path constants (_PROJECT_ROOT, DATA_DIR,
+# RAW_DIR, PROCESSED_DIR, PHASE1_PROCESSED_DIR, RESULTS_PERSIST_PATH,
+# KG_EXPORT_DIR, KG_DIR, EMBEDDINGS_DIR, LOGS_DIR) have been MOVED to
+# ``config_paths.py`` and are imported at the top of this file. The original
+# inline definitions (60+ lines) were REMOVED to avoid shadowing the imports.
+# See ``config_paths.py`` for the canonical definitions and full docstrings.
+# The ``MODEL_DIR``, ``DEAD_LETTER_DIR``, ``CHECKPOINT_DIR``, etc. below
+# remain here (they depend on the imported constants and will be extracted
+# in a follow-up PR).
 MODEL_DIR = _PROJECT_ROOT / "models"
 
 # Fixes audit issue 6.6 — DEAD_LETTER_DIR for quarantining bad records
@@ -3817,194 +3800,12 @@ EVALUATION_FALLBACK_STRATEGY: str = "warn"
 #     exist; the Gene node stands in for both gene and its protein product
 #     (DRKG's convention). When UniProt is also loaded, the
 #     Gene-encodes-Protein edge bridges the two.
-CORE_NODE_TYPES = ["Compound", "Disease", "Gene", "Protein", "Pathway",
-                   # FIX-F / C-16: DOCX Phase 2 spec mandates 5 node types
-                   # (Drugs, Proteins, Pathways, Diseases, Clinical Outcomes).
-                   # The bridge previously emitted only 4 (Compound, Protein,
-                   # Gene, Disease) — ClinicalOutcome was missing entirely.
-                   # phase1_bridge._load_clinical_outcomes() now derives
-                   # ClinicalOutcome nodes from drugbank_indications.csv.
-                   "ClinicalOutcome",
-                   # Phase 0.3 (master_prompt D2.9 / D14.12) — SIDER uses
-                   # MedDRA vocabulary for adverse events.
-                   # v38 ROOT FIX (Phase 2 Issue #12): the previous code
-                   # shipped BOTH "MedDRA_Term" (canonical, underscore) AND
-                   # "Side Effect" (legacy, space) as "migration-period
-                   # dual-write". Neo4j labels with spaces require backtick
-                   # quoting (``:``Side Effect````) which is fragile and
-                   # error-prone. Adverse-event queries had to UNION across
-                   # both labels to be complete — any query hitting only
-                   # one silently missed half the data. The fix: standardize
-                   # on "MedDRA_Term" (the canonical, backtick-free form)
-                   # and DEPRECATE "Side Effect". The SIDER loader has been
-                   # updated to emit only "MedDRA_Term" nodes. Existing
-                   # Neo4j databases with "Side Effect" nodes should run a
-                   # one-time migration: ``MATCH (n:`Side Effect`) SET
-                   # n:MedDRA_Term REMOVE n:`Side Effect` ``. The
-                   # "Side Effect" entry is kept in the list for backward
-                   # detection (so the kg_builder doesn't dead-letter
-                   # legacy nodes during re-load), but NEW writes use
-                   # "MedDRA_Term" exclusively.
-                   "MedDRA_Term"]  # "Side Effect" deprecated — see v38 fix
-
-# Extended node types from DRKG (13 entity types)
-# NOTE: 'Protein' is NOT in DRKG; DRKG uses 'Gene' for both gene and protein
-# product. Protein nodes are added only when UniProt data is loaded.
-# Fixes audit issue 3.2 — Added "Atc" and "Tax" DRKG node types
-# RATIONALE: DRKG v2 includes ATC classification codes ("Atc") and
-# taxonomy entries ("Tax") as separate entity types. These were present
-# in the real DRKG data but were missing from the config, causing
-# DRKG rows with these types to be silently dropped.
-DRKG_NODE_TYPES = [
-    "Compound", "Disease", "Gene", "Anatomy",
-    "Pharmacologic Class", "Side Effect", "Symptom",
-    "Pathway", "Biological Process", "Molecular Function",
-    "Cellular Component", "Taxonomy", "Gene Expression",
-    "Atc", "Tax",
-    # Fixes audit issue 3.10 — MedDRA_Term for SIDER adverse events
-    "MedDRA_Term",
-]
-
-# ─── Core Edge Types ─────────────────────────────────────────────────────────
-#
-# The core edge types in DrugOS (spec + Gene-encodes-Protein bridge)
-#
-# SCIENTIFIC CORRECTNESS FIXES (highest priority):
-#   - Added ("Gene", "encodes", "Protein") — the biological bridge
-#     between gene and protein product. Without this edge, the graph
-#     is disconnected between Gene-side and Protein-side data.
-#   - Added ("Compound", "targets", "Protein") — drug-target edges
-#     from UniProt/ChEMBL/STITCH/STRING all use the Protein endpoint.
-#   - Added ("Protein", "participates_in", "Pathway") — protein (not
-#     gene) participates in pathways per Reactome / KEGG convention.
-#   - Added ("Compound", "inhibits", "Protein") — issue 3.1: many
-#     ChEMBL/DrugBank inhibition targets are proteins (not genes).
-#   - Added ("Compound", "activates", "Protein") — issue 3.1: many
-#     activation targets are proteins.
-#   - Added ("Compound", "tested_for", "Disease") — issue 3.8:
-#     clinical trial records use "tested for" rather than "treats"
-#     for unapproved indications.
-#   - Added ("Protein", "associated_with", "Disease") — issue 3.3:
-#     GWAS and PheWAS associate PROTEINS (gene products) with diseases,
-#     not genes directly.
-#   - Added ("Compound", "causes_adverse_event", "MedDRA_Term") —
-#     issue 3.10: SIDER uses MedDRA terms, not "Side Effect" generic.
-#   - Added ("Protein", "expressed_in", "Anatomy") — issue 3.11:
-#     protein expression (from HPA) is distinct from gene expression.
-#   - Added ("Pathway", "associated_with", "Disease") — issue 3.9:
-#     pathway-disease associations (e.g., from KEGG Disease).
-
-CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
-    # ── Original edges (backward compat) ──
-    ("Compound", "treats", "Disease"),
-    ("Compound", "inhibits", "Gene"),          # DRKG drug-gene inhibition
-    ("Compound", "activates", "Gene"),          # DRKG drug-gene activation
-    ("Compound", "targets", "Protein"),         # cross-database drug-protein
-    ("Compound", "binds", "Protein"),           # physical binding (ChEMBL/STITCH)
-    ("Gene", "encodes", "Protein"),             # gene -> protein product bridge
-    ("Gene", "associated_with", "Disease"),     # DRKG gene-disease
-    ("Gene", "interacts_with", "Gene"),         # PPI (DRKG uses Gene for both ends)
-    ("Protein", "interacts_with", "Protein"),   # STRING PPI (UniProt accession IDs)
-    ("Compound", "causes_side_effect", "Side Effect"),  # SIDER legacy
-    ("Gene", "expressed_in", "Anatomy"),
-    ("Gene", "participates_in", "Pathway"),
-    ("Protein", "participates_in", "Pathway"),  # Reactome uses protein participants
-    ("Pathway", "disrupted_in", "Disease"),     # spec edge from Phase 2 doc
-    # ── New edges from scientific correctness audit ──
-    # Fixes audit issue 3.1 — drug-protein inhibition/activation
-    ("Compound", "inhibits", "Protein"),        # ChEMBL/DrugBank protein targets
-    ("Compound", "activates", "Protein"),       # ChEMBL/DrugBank protein targets
-    # Fixes audit issue 3.8 — clinical trial "tested_for" edge
-    # RATIONALE: ClinicalTrials.gov records drugs being TESTED for
-    # diseases (not yet approved). Using "treats" for these would be
-    # scientifically incorrect — the drug has not been proven to treat.
-    ("Compound", "tested_for", "Disease"),
-    # v102 ROOT FIX (P2-042): "failed_for" edge for clinical trials that
-    # completed but FAILED their primary endpoint (drug proven INEFFECTIVE
-    # in Phase 3). The previous pipeline emitted these as "tested_for" —
-    # a WEAK POSITIVE signal in the RL ranker — so known-failed drugs
-    # got a small positive bump in repurposing score, OPPOSITE of correct.
-    # The new "failed_for" edge is an explicit NEGATIVE signal:
-    # downstream training can filter out "failed_for" drug-disease pairs
-    # from positive labels AND use them as hard negatives for contrastive
-    # training. See clinicaltrials_loader.py:_classify_trial_status for
-    # the canonical status classifier that drives this rel_type.
-    ("Compound", "failed_for", "Disease"),
-    # Fixes audit issue 3.3 — protein-disease associations (GWAS/PheWAS)
-    # RATIONALE: GWAS associate gene PRODUCTS (proteins) with disease
-    # risk. The Gene-associated_with-Disease edge captures the genetic
-    # association; this edge captures the protein-level association.
-    ("Protein", "associated_with", "Disease"),
-    # Fixes audit issue 3.10 — adverse events use MedDRA terms
-    # RATIONALE: SIDER uses MedDRA vocabulary for adverse events.
-    # "Side Effect" is a generic term; MedDRA_Term is the specific
-    # entity type that SIDER exports. The legacy "causes_side_effect"
-    # edge is kept for backward compat.
-    ("Compound", "causes_adverse_event", "MedDRA_Term"),
-    # Fixes audit issue 3.11 — protein expression in anatomy
-    # RATIONALE: The Human Protein Atlas (HPA) measures PROTEIN
-    # expression levels in tissues, which is distinct from GENE
-    # expression (measured by RNA-seq in GEO).
-    ("Protein", "expressed_in", "Anatomy"),
-    # Fixes audit issue 3.9 — pathway-disease associations
-    # RATIONALE: KEGG Disease and Reactome associate pathways
-    # (not just genes) with disease states. "associated_with" is
-    # used (not "disrupted_in") because not all pathway-disease
-    # links involve disruption (e.g., protective pathways).
-    ("Pathway", "associated_with", "Disease"),
-    # ── DrugBank v2.0 audit-fix edge types (drugbank_parser_fix_prompt.md) ──
-    # Fixes FIX[(3.3)] — biologically correct relation semantics for
-    # enzymes/carriers/transporters. The drug is the SUBJECT of the
-    # relation in passive voice: drug → metabolized_by → enzyme
-    # (biologically the enzyme metabolises the drug, not the other way
-    # around). Same for carriers and transporters.
-    ("Compound", "metabolized_by", "Protein"),
-    ("Compound", "carried_by", "Protein"),
-    ("Compound", "transported_by", "Protein"),
-    # Fixes FIX[(3.4)] — new relation vocabulary introduced by the
-    # canonical action→relation map. "induces" for inducers,
-    # "allosterically_modulates" for PAMs/NAMs, "unknown" for actions
-    # not in the canonical map (fail-closed).
-    ("Compound", "induces", "Protein"),
-    ("Compound", "allosterically_modulates", "Protein"),
-    ("Compound", "unknown", "Protein"),
-    # Fixes FIX[(3.9)] — drug-drug interactions are a critical safety
-    # signal for the RL ranker (scope §6 "Safety Signal"). The edge
-    # connects two Compound nodes; severity is stored as a property.
-    ("Compound", "interacts_with", "Compound"),
-    # ── v15 ROOT FIX (REM-12): OMIM susceptibility vs causative GDA ──
-    # OMIM partitions gene-phenotype associations into causative
-    # (Mendelian, fully penetrant — mapping_key=3 with no
-    # association_modifier) and susceptibility (polygenic, partial
-    # penetrance — association_modifier=susceptibility/modifier/probable).
-    # v14 only had `associated_with` and conflated both, corrupting the
-    # TransE embedding geometry (FGFR3+achondroplasia became equivalent
-    # to BRCA1+breast_cancer). Fix: distinct `susceptible_to` relation
-    # preserves the scientific distinction in the graph schema.
-    ("Gene", "susceptible_to", "Disease"),
-    # ── FIX-F / C-16: ClinicalOutcome node + Compound->ClinicalOutcome edge ──
-    # DOCX Phase 2 spec mandates 5 node types: Drugs, Proteins, Pathways,
-    # Diseases, Clinical Outcomes. The bridge previously emitted only 4
-    # (Compound, Protein, Gene, Disease). This edge connects each Compound
-    # to the ClinicalOutcome nodes derived from its drugbank_indications.csv
-    # rows. ClinicalOutcome nodes themselves carry (disease_id,
-    # indication_type, source_drug_id).
-    ("Compound", "has_clinical_outcome", "ClinicalOutcome"),
-    # v107 ROOT FIX (ISSUE-P2-040): "validated_treats" was missing from
-    # CORE_EDGE_TYPES — the data flywheel (Phase 4 writeback) creates
-    # Drug-validated_treats-Disease edges when a pharma partner validates
-    # a hypothesis in wet lab. The --dedup CLI flag iterates rel_types
-    # returned by get_graph_stats and looks up the (src, rel, dst) triple
-    # from CORE_EDGE_TYPES. Without this entry, validated_treats edges
-    # were SKIPPED during dedup with a warning, accumulating duplicate
-    # edges over time as the flywheel turned. This unbounded growth
-    # corrupted KG density metrics and bloated Neo4j storage. Adding the
-    # triple here makes the dedup CLI cover the flywheel edge type.
-    ("Drug", "validated_treats", "Disease"),
-]
-
-# Fixes audit issue 2.1 — CORE_EDGE_TYPES_SET for O(1) lookup
-CORE_EDGE_TYPES_SET: frozenset[Tuple[str, str, str]] = frozenset(CORE_EDGE_TYPES)
+# v108 ROOT FIX (ISSUE-P2-056): the schema constants (CORE_NODE_TYPES,
+# DRKG_NODE_TYPES, CORE_EDGE_TYPES, CORE_EDGE_TYPES_SET) have been MOVED
+# to ``config_schema.py`` and are imported at the top of this file.
+# The original inline definitions (188 lines) were REMOVED to avoid
+# shadowing the imports. See ``config_schema.py`` for the canonical
+# definitions and full scientific-correctness docstrings.
 
 
 # P2-011 ROOT FIX (symmetric / biologically-undirected relations):

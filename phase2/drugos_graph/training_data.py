@@ -466,7 +466,7 @@ def _build_drug_disease_map(
     return drug_disease_map
 
 
-def _build_disease_atc_map(
+def _build_disease_to_drug_atc_map(
     drkg_df: Any,
     positive_pairs: List[Dict],
 ) -> Dict[str, List[Tuple[str, int]]]:
@@ -507,7 +507,7 @@ def _build_disease_atc_map(
         sorted by count descending then by ATC class for deterministic
         tie-breaking. (IDE-004)
     """
-    _validate_drkg_df(drkg_df, "_build_disease_atc_map")
+    _validate_drkg_df(drkg_df, "_build_disease_to_drug_atc_map")
 
     # Build compound -> list of ATC first-letter codes from DRKG Compound-x-atc-Atc
     comp_to_atc: Dict[str, List[str]] = defaultdict(list)
@@ -537,17 +537,46 @@ def _build_disease_atc_map(
                 disease_atc_votes[disease_id][atc] += 1
 
     # Store all classes with counts, sorted deterministically (IDE-004)
-    disease_atc_map: Dict[str, List[Tuple[str, int]]] = {}
+    disease_to_drug_atc_map: Dict[str, List[Tuple[str, int]]] = {}
     for disease_id, votes in disease_atc_votes.items():
         sorted_votes = sorted(votes.items(), key=lambda x: (-x[1], x[0]))
-        disease_atc_map[disease_id] = sorted_votes
+        disease_to_drug_atc_map[disease_id] = sorted_votes
 
     logger.info(
-        "Auto-built disease_atc_map: %d diseases linked to ATC classes "
+        "Auto-built disease_to_drug_atc_map: %d diseases linked to ATC classes "
         "(storing all classes with vote counts, not just majority)",
-        len(disease_atc_map),
+        len(disease_to_drug_atc_map),
     )
-    return disease_atc_map
+    return disease_to_drug_atc_map
+
+
+# v108 ROOT FIX (ISSUE-P2-050): backward-compat alias for the old name.
+# The function was renamed from ``_build_disease_atc_map`` to
+# ``_build_disease_to_drug_atc_map`` to reflect its ACTUAL semantics:
+# it maps a disease_id to the ATC codes of the DRUGS that treat it
+# (ATC = Anatomical Therapeutic Chemical, a DRUG classification system,
+# NOT a disease classification system). The old name ``disease_atc_map``
+# was misleading — it sounded like "disease → disease ATC code", which
+# is meaningless because diseases don't have ATC codes. The alias keeps
+# any external importer working, but emits a DeprecationWarning so
+# callers know to migrate.
+import warnings as _warnings_p2_050
+
+
+def _build_disease_atc_map(*args, **kwargs):  # noqa: D401 — backward-compat
+    """Deprecated alias for :func:`_build_disease_to_drug_atc_map`.
+
+    Kept for backward compatibility. Will be removed in v2.0.
+    """
+    _warnings_p2_050.warn(
+        "_build_disease_atc_map is deprecated — use "
+        "_build_disease_to_drug_atc_map instead. The old name was "
+        "misleading (ATC is a drug classification, not a disease "
+        "classification). v108 ISSUE-P2-050 root fix.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _build_disease_to_drug_atc_map(*args, **kwargs)
 
 
 def _compute_strategy_breakdown(negatives: List[Dict]) -> Dict[str, int]:
@@ -1019,7 +1048,7 @@ def build_training_data(
     positive_pairs: List[Dict],
     positive_pair_set: Set[Tuple[str, str]],
     drug_disease_map: Optional[Dict[str, List[str]]] = None,
-    disease_atc_map: Optional[Dict[str, Any]] = None,
+    disease_to_drug_atc_map: Optional[Dict[str, Any]] = None,
     failed_trials: Optional[List[Dict]] = None,
     neg_ratio: float = DEFAULT_NEG_RATIO,
     auxiliary_pairs: Optional[Dict[str, List[Dict]]] = None,
@@ -1030,7 +1059,7 @@ def build_training_data(
     """Build complete training dataset with positive and negative examples.
 
     SCIENTIFIC CORRECTNESS FIX:
-    The original code accepted drug_disease_map and disease_atc_map as
+    The original code accepted drug_disease_map and disease_to_drug_atc_map as
     optional arguments but never auto-built them -- so combined_sampling
     silently fell back to random-only negatives (verified: 100% of
     negatives had strategy='random' in the prior pipeline run).
@@ -1038,7 +1067,7 @@ def build_training_data(
     This fix auto-builds both maps from the DRKG DataFrame when not
     explicitly provided:
       - drug_disease_map: {drug_id: [disease_id, ...]} from positive_pairs
-      - disease_atc_map: {disease_id: [(atc_class, count), ...]} from
+      - disease_to_drug_atc_map: {disease_id: [(atc_class, count), ...]} from
                           DRKG Compound-x-atc-Atc edges joined with
                           Compound-treats-Disease edges
 
@@ -1071,7 +1100,7 @@ def build_training_data(
             MUST be the FULL set across train/val/test so the sampler
             does not produce false negatives for held-out positives.
         drug_disease_map: For wrong-class negative sampling. Auto-built if None.
-        disease_atc_map: For wrong-class negative sampling. Auto-built if None.
+        disease_to_drug_atc_map: For wrong-class negative sampling. Auto-built if None.
             If auto-built, returns Dict[str, List[Tuple[str, int]]] format
             (all classes with counts). If caller-provided, any format accepted.
         failed_trials: For failed-trial negative sampling.
@@ -1095,7 +1124,7 @@ def build_training_data(
           - num_positives, num_negatives (ints)
           - ratio (float)
           - strategy_breakdown (dict)
-          - drug_disease_map_size, disease_atc_map_size (ints)
+          - drug_disease_map_size, disease_to_drug_atc_map_size (ints)
           - auxiliary_pairs (dict or None)
           - _schema_version (str)
           - _provenance (dict)
@@ -1260,14 +1289,14 @@ def build_training_data(
         )
     if drug_disease_map is None:
         drug_disease_map = _build_drug_disease_map(_positive_pairs_for_sampling)
-        if disease_atc_map is None:
-            disease_atc_map_auto = _build_disease_atc_map(
+        if disease_to_drug_atc_map is None:
+            disease_to_drug_atc_map_auto = _build_disease_to_drug_atc_map(
                 drkg_df, _positive_pairs_for_sampling
             )
             # v35 ROOT FIX (H-6): pass the FULL List[Tuple[str, int]]
             # structure to the NegativeSampler instead of collapsing to
             # a majority-class-only string. The previous code did:
-            #     disease_atc_map_sampler = {d: classes[0][0] for ...}
+            #     disease_to_drug_atc_map_sampler = {d: classes[0][0] for ...}
             # which threw away the per-class vote counts. The sampler
             # then could not distinguish "disease D has 9 votes for A
             # and 1 vote for C" from "disease D has 1 vote for A and
@@ -1280,13 +1309,13 @@ def build_training_data(
             # through to the sampler. The sampler (also fixed in v35,
             # M-4) now uses the full set of known classes for each
             # disease, not just the majority class.
-            disease_atc_map_sampler = disease_atc_map_auto  # Dict[str, List[Tuple[str, int]]]
+            disease_to_drug_atc_map_sampler = disease_to_drug_atc_map_auto  # Dict[str, List[Tuple[str, int]]]
         else:
-            disease_atc_map_sampler = disease_atc_map
-            disease_atc_map_auto = None
+            disease_to_drug_atc_map_sampler = disease_to_drug_atc_map
+            disease_to_drug_atc_map_auto = None
     else:
-        disease_atc_map_sampler = disease_atc_map
-        disease_atc_map_auto = None
+        disease_to_drug_atc_map_sampler = disease_to_drug_atc_map
+        disease_to_drug_atc_map_auto = None
 
     # ─── Generate negatives ─────────────────────────────────────────────
     # FIX-P1-D-6 (root): ``num_negatives`` is computed against the
@@ -1307,7 +1336,7 @@ def build_training_data(
                               held_out_pairs=held_out_pairs)
     negatives = sampler.combined_sampling(
         drug_disease_map=drug_disease_map,
-        disease_atc_map=disease_atc_map_sampler,
+        disease_to_drug_atc_map=disease_to_drug_atc_map_sampler,
         failed_trials=failed_trials,
         total_negatives=num_negatives,
     )
@@ -1350,7 +1379,7 @@ def build_training_data(
         "ratio": actual_ratio,
         "strategy_breakdown": strategy_breakdown,
         "drug_disease_map_size": len(drug_disease_map) if drug_disease_map else 0,
-        "disease_atc_map_size": len(disease_atc_map_sampler) if disease_atc_map_sampler else 0,
+        "disease_to_drug_atc_map_size": len(disease_to_drug_atc_map_sampler) if disease_to_drug_atc_map_sampler else 0,
         # ARCH-001: Store auxiliary pairs for downstream multi-relational training
         "auxiliary_pairs": auxiliary_pairs,
         # CMP-002: Schema version for downstream consumers

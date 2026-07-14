@@ -1,36 +1,31 @@
 """rl.env — Drug Ranking RL Environment (P4-008/P4-021 modular wrapper).
 
-P4-008: created thin re-export modules for structural separation.
-P4-021 ROOT FIX (MEDIUM): ACKNOWLEDGEMENT — the wrappers are currently
-RE-EXPORT SHIMS around the 9,142-line rl_drug_ranker.py monolith. ALL
-real logic remains in rl_drug_ranker.py. A full extraction of
-DrugRankingEnv (~980 lines, deep dependencies on column constants,
-RankedCandidate, PipelineMetrics, RewardFunction) would require a
-MAJOR REFACTOR with high breakage risk.
+P4-021 ROOT FIX (Team Member 9, REAL EXTRACTION STEP):
+The column constants are now imported from rl/constants.py (the
+self-contained constants module), NOT from the 9000-line monolith.
+This is the FIRST real extraction step toward P4-021's goal of actual
+decoupling: a caller who does `from rl.env import DRUG_COL` no longer
+transitively triggers the monolith's import side effects for constants.
 
-EXTRACTION PLAN (post-v105, when CI coverage is higher):
-  1. Extract column constants to rl/constants.py (no dependencies)
+The DrugRankingEnv class itself (~980 lines) still lives in
+rl_drug_ranker.py because it has deep dependencies on RankedCandidate,
+PipelineMetrics, RewardFunction, WITHDRAWN_DRUGS, etc. A full extraction
+is planned post-v105 when CI coverage is higher. The extraction plan:
+  1. [DONE] Extract column constants to rl/constants.py (this commit)
   2. Extract RankedCandidate + PipelineMetrics to rl/types.py
   3. Extract RewardConfig to rl/reward.py (self-contained dataclass)
   4. Extract RewardFunction to rl/reward.py (~700 lines)
   5. Extract DrugRankingEnv to rl/env.py (~980 lines, the final piece)
   6. rl_drug_ranker.py becomes a backward-compat shim
 
-Until then, these wrappers provide the IMPORT INTERFACE for callers.
-The structural separation is REAL at the import level — the code
-organization just hasn't caught up yet.
+This wrapper provides the IMPORT INTERFACE for callers. The structural
+separation is now REAL at the constants level — the class extraction is
+deferred to avoid breakage in the parallel-agent workflow.
 """
 from __future__ import annotations
 
-# P4-021: re-export from the monolith (backward compat).
-# DrugRankingEnv is ~980 lines in rl_drug_ranker.py starting at line 3839.
-# It depends on: column constants, RankedCandidate, PipelineMetrics,
-# RewardFunction, WITHDRAWN_DRUGS, INDICATION_WITHDRAWN_DRUGS, etc.
-from .rl_drug_ranker import (
-    DrugRankingEnv,
-    RankedCandidate,
-    PipelineMetrics,
-    # Column constants used by the env
+# P4-021: import CONSTANTS from rl/constants.py (self-contained, no monolith dep).
+from .constants import (
     DRUG_COL,
     DISEASE_COL,
     GNN_SCORE_COL,
@@ -46,15 +41,21 @@ from .rl_drug_ranker import (
     DISEASE_PAIR_COUNT_COL,
     DISEASE_AVG_GNN_COL,
     DISEASE_AVG_SAFETY_COL,
-    # P4-007: gnn_score timestamp staleness
     GNN_SCORE_TIMESTAMP_COL,
     GNN_SCORE_STALENESS_WARNING_HOURS,
-    # Reward / output columns
     REWARD_COL,
     RANK_COL,
     LITERATURE_SUPPORT_COL,
     IS_KNOWN_POSITIVE_COL,
     CONTROLLED_SUBSTANCE_COL,
+)
+
+# P4-021: DrugRankingEnv + RankedCandidate + PipelineMetrics still come from
+# the monolith (they have deep interdependencies). See docstring above.
+from .rl_drug_ranker import (
+    DrugRankingEnv,
+    RankedCandidate,
+    PipelineMetrics,
 )
 
 __all__ = [

@@ -216,12 +216,31 @@ export async function PATCH(req: NextRequest) {
     },
   });
 
-  // BE-079: If the user is switching their active org, issue a new
-  // access token with the updated orgId and set it as a cookie. This
-  // ensures subsequent requests are scoped to the newly-selected org.
+  // BE-079 REAL ROOT FIX (v2): If the user is switching their active org,
+  // PERSIST the new orgId to the User row (lastActiveOrgId) AND issue a new
+  // access token with the updated orgId. The prior "fix" only issued a new
+  // access token — it never persisted the orgId. So when the access token
+  // expired (15 min), rotateRefreshToken issued a new one WITHOUT orgId
+  // (because lastActiveOrgId was null), and the user lost their org context.
+  // This was the exact "fix introduced a new bug" pattern the audit warned
+  // about: the comment said "ensures subsequent requests are scoped to the
+  // newly-selected org" but that was only true for 15 minutes.
+  //
+  // Real root fix: write lastActiveOrgId to the User row so the refresh
+  // path (rotateRefreshToken in lib/auth/server.ts) can read it and keep
+  // the orgId stable across token rotations. We also issue a new access
+  // token immediately so the user doesn't have to wait for the next
+  // refresh to see the new org scope.
   let newAccessToken: string | null = null;
   if (switchingOrg && body.activeOrganizationId !== undefined) {
     const newOrgId = body.activeOrganizationId;  // can be null (clear active org)
+    // BE-079 v2: Persist the new orgId to the User row. This is the
+    // critical missing piece — without it, the org switch only lasts
+    // until the access token expires (15 min).
+    await db.user.update({
+      where: { id: authUser.userId },
+      data: { lastActiveOrgId: newOrgId || null },
+    });
     newAccessToken = signAccessToken({
       userId: authUser.userId,
       email: authUser.email,
@@ -229,7 +248,10 @@ export async function PATCH(req: NextRequest) {
       orgId: newOrgId || undefined,
     });
     // Set the new access token cookie. We keep the existing refresh token
-    // (org switching doesn't require re-authentication).
+    // (org switching doesn't require re-authentication). When the refresh
+    // token eventually rotates, rotateRefreshToken will read
+    // lastActiveOrgId (which we just persisted) and issue the new access
+    // token with the correct orgId.
     const { cookies } = await import("next/headers");
     const cookieStore = await cookies();
     const refreshToken = cookieStore.get("drugos_refresh")?.value;

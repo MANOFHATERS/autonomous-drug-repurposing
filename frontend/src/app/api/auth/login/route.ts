@@ -298,6 +298,24 @@ export async function POST(req: NextRequest) {
     orderBy: { joinedAt: "asc" },
   });
 
+  // BE-079 REAL ROOT FIX (v2): Persist lastActiveOrgId on the User row.
+  // The prior code only put orgId in the access-token JWT — it never
+  // persisted it to the DB. When rotateRefreshToken fired (15 min later),
+  // it had no orgId to put in the refreshed access token, so the user
+  // lost their org context. By persisting lastActiveOrgId here, the
+  // refresh path can read it and keep the orgId stable across token
+  // rotations. We update unconditionally on login (even if the value is
+  // the same) so a user whose membership was REMOVED from the previous
+  // active org and re-added to a different one gets the correct active
+  // org after re-login. The BE-062 org-membership check in
+  // getAuthenticatedUser guards against stale orgIds in still-valid tokens.
+  if (membership?.organizationId) {
+    await db.user.update({
+      where: { id: user.id },
+      data: { lastActiveOrgId: membership.organizationId },
+    });
+  }
+
   // FE-009: Reset failed counter on successful login.
   // FE-056: recordIpAttempt was already called up-front at line 49.
   await recordSuccessfulLogin(user.id);

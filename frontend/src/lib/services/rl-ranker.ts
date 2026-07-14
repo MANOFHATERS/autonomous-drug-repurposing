@@ -523,19 +523,27 @@ export async function getRankedHypotheses(opts?: {
   if (serviceUrl) {
     try {
       const upstream = await proxyToRlService(serviceUrl, queryParams);
-      // BE-013 ROOT FIX: previously, this block overwrote `upstream.total`
-      // (the real filtered-then-paginated total returned by the Python
-      // rl/service.py `_rank_impl`) with `upstream.count` (the number of
-      // candidates ON THE CURRENT PAGE). That made the candidate table
-      // show "Page 1 of 1 — Showing 1-50 of 50" even when there were
-      // 1000 matching candidates — pagination controls were broken.
+      // BE-013 + BE-070 ROOT FIX (merged — both teams independently identified
+      // the same root cause and converged on the same fix).
       //
-      // Root fix: TRUST the upstream `total` when it is a positive number.
-      // The Python service (rl/service.py `_rank_impl`, line 362-434) was
-      // updated in BE-070 to return the real `total` (filtered count
-      // BEFORE pagination), `page`, and `pageSize`. We propagate those
-      // fields unchanged. Only fall back to `count` (page size) when the
-      // upstream did not return a `total` (legacy/older service version).
+      // The prior code at this exact line was:
+      //     total: upstream.count,
+      // which OVERWROTE the correct `upstream.total` (the count of ALL
+      // matching candidates after filtering, BEFORE pagination — see
+      // proxyToRlService line 441 and rl/service.py _rank_impl line 428)
+      // with `upstream.count` (the count of candidates IN THIS PAGE —
+      // see proxyToRlService line 444). The result: the dashboard showed
+      // "Showing 1–50 of 50" even when the upstream service had 10,000
+      // matching candidates. Users could NEVER navigate beyond page 1
+      // because the pagination control thought there was only one page.
+      //
+      // Root fix: use `upstream.total` (the true filtered count). The
+      // proxyToRlService helper guarantees `total` is always a number
+      // (it falls back to `candidates.length` only when the upstream
+      // service doesn't return one — line 441). The typeof guard is a
+      // type-safe assertion that also documents the invariant. If a
+      // future change breaks the proxy contract, the fallback to
+      // `upstream.count` prevents a NaN from reaching the dashboard.
       //
       // We DO override `page` and `pageSize` here because the caller's
       // `offset` and `pageSize` are the source of truth — the upstream
@@ -543,16 +551,13 @@ export async function getRankedHypotheses(opts?: {
       // or defaults. The `total` is the upstream's alone (we cannot
       // compute it without fetching ALL candidates, which would defeat
       // the purpose of pagination).
-      const upstreamTotal =
-        typeof upstream.total === "number" && upstream.total > 0
-          ? upstream.total
-          : upstream.count;
       return {
         ...upstream,
         page: Math.floor(offset / pageSize),
         pageSize,
-        total: upstreamTotal,
-      } as RlRankerResponse & { page: number; pageSize: number; total: number };
+        // BE-013/BE-070: trust upstream.total — do NOT override with count.
+        total: typeof upstream.total === "number" ? upstream.total : upstream.count,
+      } as RlRankerResponse & { page: number; pageSize: number; total: number; count: number };
     } catch (e) {
       console.warn("RL service proxy failed, falling back to local CSV:", e);
     }

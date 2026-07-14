@@ -2173,9 +2173,18 @@ class PubChemPipeline(BasePipeline):
         # Record the access timestamp for source_version (ARCH-6).
         if self._access_timestamp is None:
             self._access_timestamp = datetime.now(timezone.utc)
-        # Set self.source_version so the base class's _write_run_context
-        # picks it up.
-        self.source_version = self.get_source_version()
+        # P1-055 ROOT FIX (v108): set source_version DIRECTLY from the
+        # access timestamp, NOT via get_source_version() (which is
+        # circular — it returns the fallback when source_version is None).
+        # The previous code set self.source_version = self.get_source_version()
+        # which called the fallback generator (logging a WARNING every time
+        # and returning "pubchem_as_of_<date>"). ROOT FIX: set the version
+        # string directly so no WARNING is logged and the version is
+        # explicit about being a PubChem snapshot.
+        self.source_version = (
+            f"PubChem_PUG_REST_as_of_"
+            f"{self._access_timestamp.strftime('%Y-%m-%d')}"
+        )
 
         # LOG-8: summary.
         if self._api_call_count > 0:

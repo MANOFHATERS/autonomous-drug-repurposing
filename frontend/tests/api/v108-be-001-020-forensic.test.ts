@@ -274,11 +274,13 @@ describe("BE-013: rl-ranker total override bug", () => {
       path.resolve(__dirname, "..", "..", "src", "lib", "services", "rl-ranker.ts"),
       "utf8"
     );
-    // The BUGGY pattern `total: upstream.count` should be GONE.
-    expect(src).not.toMatch(/total: upstream\.count,?\s*$/m);
-    // The FIXED pattern should be present.
-    expect(src).toMatch(/upstreamTotal/);
-    expect(src).toMatch(/typeof upstream\.total === "number" && upstream\.total > 0/);
+    // The BUGGY pattern `total: upstream.count` (as a standalone assignment,
+    // not as a fallback in a typeof guard) should be GONE.
+    expect(src).not.toMatch(/total: upstream\.count,?\s*\}/m);
+    // The FIXED pattern should be present: a typeof guard that trusts
+    // upstream.total and falls back to upstream.count only when total is
+    // not a number. This is the BE-013 + BE-070 merged fix.
+    expect(src).toMatch(/typeof upstream\.total === "number" \? upstream\.total : upstream\.count/);
   });
 
   it("rl/service.py _rank_impl returns total, page, pageSize", () => {

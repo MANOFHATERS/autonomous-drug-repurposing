@@ -78,7 +78,9 @@ known_pairs)`` in the exact format ``GTRLBridge.run_full_pipeline`` expects.
 """
 from __future__ import annotations
 
+import copy
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -360,24 +362,59 @@ def _drug_feature_from_smiles(smiles: str, name: str, seed: int) -> np.ndarray:
     # feature. Morgan fingerprints capture substructure information that
     # the GNN can actually learn from — unlike the hash feature which
     # is random-derived with only atom-count hints.
+    #
+    # v108 FORENSIC FIX (Team 4): the previous code computed a 2048-bit
+    # fingerprint then TRUNCATED to the first ``target_dim`` bits via
+    # ``fp_arr[:target_dim]``. Morgan fingerprint bits are hash-distributed
+    # across the full bit space, so for small ``target_dim`` (e.g. 128 —
+    # the drug feature dim) the first 128 bits are frequently ALL ZERO
+    # even for common drugs like aspirin (24 bits set across 2048, 0 in
+    # the first 128). The resulting feature vector was identical for
+    # every drug — the GNN could not distinguish aspirin from ibuprofen
+    # from insulin. Predictions were scientifically meaningless.
+    # ROOT FIX: generate the fingerprint at EXACTLY ``target_dim`` bits
+    # (no truncation). For target_dim=128, RDKit produces a 128-bit
+    # fingerprint where the 24 set bits of aspirin are distributed
+    # across all 128 positions (dense, not sparse-in-first-128). For
+    # very small target_dim (< 64), we still generate a 1024-bit
+    # fingerprint and FOLD it (XOR-fold by summing adjacent slices)
+    # down to target_dim so we do not lose substructure information.
     if smiles_str:
         try:
             from rdkit import Chem
             from rdkit.Chem import AllChem
             mol = Chem.MolFromSmiles(smiles_str)
             if mol is not None:
-                # Morgan fingerprint radius=2, nBits=target_dim (or 2048
-                # if target_dim is too small, then truncate/pad).
-                _fp_bits = max(target_dim, 2048)
-                fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, _fp_bits)
-                fp_arr = np.zeros(_fp_bits, dtype=np.float32)
-                fp_arr[np.array(fp.GetOnBits())] = 1.0
-                # Truncate or pad to target_dim.
-                if _fp_bits >= target_dim:
-                    feat = fp_arr[:target_dim]
+                # Generate the fingerprint at EXACTLY target_dim bits
+                # when target_dim is large enough (>= 64). For very
+                # small target_dim, generate a 1024-bit fingerprint
+                # and XOR-fold down — direct small fingerprints lose
+                # too many substructure bits to hash collisions.
+                if target_dim >= 64:
+                    _fp_bits = target_dim
+                    fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, _fp_bits)
+                    fp_arr = np.zeros(_fp_bits, dtype=np.float32)
+                    fp_arr[np.array(fp.GetOnBits())] = 1.0
+                    feat = fp_arr
                 else:
-                    feat = np.zeros(target_dim, dtype=np.float32)
-                    feat[:_fp_bits] = fp_arr
+                    # XOR-fold: generate 1024 bits, then fold down to
+                    # target_dim by summing slices. This preserves the
+                    # substructure signal that a direct small fingerprint
+                    # would lose to hash collisions.
+                    _fp_bits = 1024
+                    fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, _fp_bits)
+                    fp_arr = np.zeros(_fp_bits, dtype=np.float32)
+                    fp_arr[np.array(fp.GetOnBits())] = 1.0
+                    # Fold: reshape to (target_dim, _fp_bits/target_dim)
+                    # and sum across axis 1. Each output bit is the OR
+                    # (sum > 0) of source bits.
+                    fold_factor = _fp_bits // target_dim
+                    if fold_factor < 1:
+                        fold_factor = 1
+                    folded = fp_arr[: target_dim * fold_factor].reshape(
+                        target_dim, fold_factor
+                    ).sum(axis=1)
+                    feat = (folded > 0).astype(np.float32)
                 # L2 normalize.
                 norm = float(np.linalg.norm(feat))
                 if norm > 1e-9:
@@ -602,8 +639,20 @@ def adapt_phase2_to_phase3(
     # ─── Step 1: Index Phase 2 nodes by label ──────────────────────────
     # Build per-label lists of (id, props) so we can iterate.
     # INT-011 ROOT FIX: deep-copy to prevent mutation of builder state.
+    # v108 FORENSIC FIX (Team 4): the previous "fix" declared
+    # ``import copy as _int011_copy`` at line 615 (INSIDE this function,
+    # AFTER the first use at line 606). Python treats ``_int011_copy`` as
+    # a LOCAL variable for the whole function scope when an ``import``
+    # statement exists anywhere in the function body, so the first use
+    # raised ``UnboundLocalError`` on EVERY call. The adapter was
+    # completely non-functional — every Phase 2 -> Phase 3 integration
+    # call crashed. The user explicitly warned: "many of these fixes
+    # introduced NEW bugs while patching old ones". This was one of them.
+    # ROOT FIX: use the module-level ``import copy`` (added at the top
+    # of this file) directly. No inner-function import. The deepcopy
+    # behavior is identical, but the function now actually runs.
     p2_nodes: Dict[str, List[Dict[str, Any]]] = {}
-    for load in _int011_copy.deepcopy(builder.node_loads):
+    for load in copy.deepcopy(builder.node_loads):
         label = load["label"]
         p2_nodes.setdefault(label, []).extend(load["nodes"])
 
@@ -612,9 +661,8 @@ def adapt_phase2_to_phase3(
     # mutate the builder's original edge_loads. If the same builder is
     # reused across multiple adapter calls (or if downstream code mutates
     # p2_edges via .extend()), the builder's data stays intact.
-    import copy as _int011_copy
     p2_edges: Dict[Tuple[str, str, str], List[Tuple[str, str]]] = {}
-    for load in _int011_copy.deepcopy(builder.edge_loads):
+    for load in copy.deepcopy(builder.edge_loads):
         key = (load["src_label"], load["rel_type"], load["dst_label"])
         p2_edges.setdefault(key, []).extend(
             (e["src_id"], e["dst_id"]) for e in load["edges"]

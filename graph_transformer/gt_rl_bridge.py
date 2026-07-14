@@ -1848,6 +1848,12 @@ class GTRLBridge:
             # ``gnn_score`` for ranking signals.
             "gnn_score_calibrated": gnn_calibrated_flat,
             "confidence": conf_flat,
+            # P3-011 ROOT FIX: add gnn_score_timestamp for RL staleness
+            # detection (P4-007). The RL env checks this column to warn
+            # if the GT model's predictions are stale (older than
+            # GNN_SCORE_STALENESS_WARNING_HOURS). All rows share the same
+            # timestamp (the model was encoded once for this call).
+            "gnn_score_timestamp": pd.Timestamp.now(tz="UTC").isoformat(),
         })
 
         # C1 fix: compute REAL supplementary features from graph topology
@@ -1994,10 +2000,24 @@ class GTRLBridge:
         os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
         # Define the column order (must match generate_rl_input's output)
         # P3-047 ROOT FIX (v107): added gnn_score_calibrated column.
+        # P3-011 ROOT FIX: added gnn_score_timestamp column. The RL env
+        # (rl_drug_ranker.py) checks this column to detect stale predictions
+        # (P4-007). If the timestamp is older than
+        # GNN_SCORE_STALENESS_WARNING_HOURS, the env logs a WARNING. Without
+        # this column, the env silently skips the staleness check, and a
+        # stale GT model's predictions could be served indefinitely without
+        # the operator knowing the model needs retraining.
+        # The timestamp is the ISO 8601 UTC time when the GT model generated
+        # this batch of predictions. All rows in a single generate_rl_input
+        # call share the same timestamp (the model is encoded ONCE, then all
+        # pairs are scored from the same encoding).
+        from datetime import datetime, timezone
+        _gnn_score_timestamp = datetime.now(timezone.utc).isoformat()
         columns = [
             "drug", "disease", "gnn_score", "gnn_score_calibrated", "confidence",
             "safety_score", "market_score", "pathway_score", "patent_score",
             "rare_disease_flag", "unmet_need_score", "efficacy_score", "adme_score",
+            "gnn_score_timestamp",  # P3-011: for RL staleness detection (P4-007)
         ]
 
         with open(output_path, "w", newline="", encoding="utf-8") as f:
@@ -2135,6 +2155,10 @@ class GTRLBridge:
                     "gnn_score": batch_gnn,
                     "gnn_score_calibrated": batch_gnn_calibrated,
                     "confidence": batch_conf,
+                    # P3-011 ROOT FIX: add gnn_score_timestamp to every row.
+                    # All rows in this batch share the same timestamp (the
+                    # model was encoded once for this generate_rl_input call).
+                    "gnn_score_timestamp": _gnn_score_timestamp,
                 })
 
                 # ROOT FIX (D-02): call the SHARED _compute_supplementary_features
@@ -4221,7 +4245,12 @@ class GTRLBridge:
         # is achievable when the GT model has real multi-hop signal
         # (W-02 fix) and the trainer selects the checkpoint by val loss
         # instead of noisy val AUC (W-01 fix).
-        from .data import V1_AUC_THRESHOLD
+        # P3-TM8 v108: removed the duplicate `from .data import V1_AUC_THRESHOLD`
+        # here (it was redefining the same name imported at line 4308 below,
+        # triggering ruff F811). The import at line 4308 is the canonical one
+        # (it also imports get_auc_threshold_for_scale, which is what this
+        # code block actually uses). Removing this redundant import has no
+        # runtime effect — Python rebinds the name to the same value.
         # V90 ROOT FIX (BUG #31): raise the KP recovery threshold from 0.2
         # to 0.5. The previous 0.2 threshold was trivially satisfied:
         #   - With 5 KPs split 60/40 (FORENSIC-AUDIT-I14), the test set
