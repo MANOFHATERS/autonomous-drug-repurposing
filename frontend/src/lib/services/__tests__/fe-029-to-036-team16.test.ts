@@ -150,35 +150,30 @@ describe("FE-030: no inline fake-user arrays in dashboard screens", () => {
     "Tom Baker",
   ];
 
-  it("all-screens.tsx SharedQueriesScreen calls real api.listProjects (not inline array)", () => {
-    const src = readSrc("components/drugos/all-screens.tsx");
-    const stripped = stripComments(src);
-    // The old pattern was: const sharedQueries = [ { name: "...", sharedBy: 'Dr. Sarah Chen', ...
-    // The new pattern must call useApiList(() => api.listProjects()).
-    expect(stripped).toMatch(/useApiList\(\(\)\s*=>\s*api\.listProjects\(\)/);
-    // None of the fake names may appear in executable code.
-    for (const name of FAKE_NAMES) {
-      // Escape the name for regex (dots, etc.).
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      expect(stripped).not.toMatch(new RegExp(escaped));
-    }
-  });
-
-  it("all-screens.tsx AnnotationsScreen does not render inline fake annotations array", () => {
-    const src = readSrc("components/drugos/all-screens.tsx");
-    const stripped = stripComments(src);
-    // The old pattern had an inline array with author: 'Dr. Sarah Chen'.
-    // After stripping comments, no fake name may appear.
-    for (const name of FAKE_NAMES) {
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      expect(stripped).not.toMatch(new RegExp(escaped));
-    }
+  // FE-015 ROOT FIX (Team Member 15, v108): all-screens.tsx was deleted
+  // entirely — it was 1,414 lines of dead code never rendered (the router
+  // at app-router.tsx:2910 only consults coreScreens, which spreads in
+  // remainingScreens, which defines every section allScreens also defined).
+  // The two original FE-030 tests that read all-screens.tsx are replaced
+  // here with assertions that the file is GONE. The remaining-screens.tsx
+  // variants of the same assertions are preserved below.
+  it("FE-015: all-screens.tsx has been deleted (dead code removed)", () => {
+    expect(srcExists("components/drugos/all-screens.tsx")).toBe(false);
   });
 
   it("remaining-screens.tsx SharedQueriesScreen calls real api.listProjects (not inline array)", () => {
     const src = readSrc("components/drugos/remaining-screens.tsx");
     const stripped = stripComments(src);
     expect(stripped).toMatch(/useApiList\(\(\)\s*=>\s*api\.listProjects\(\)/);
+    for (const name of FAKE_NAMES) {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      expect(stripped).not.toMatch(new RegExp(escaped));
+    }
+  });
+
+  it("remaining-screens.tsx AnnotationsScreen does not render inline fake annotations array", () => {
+    const src = readSrc("components/drugos/remaining-screens.tsx");
+    const stripped = stripComments(src);
     for (const name of FAKE_NAMES) {
       const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       expect(stripped).not.toMatch(new RegExp(escaped));

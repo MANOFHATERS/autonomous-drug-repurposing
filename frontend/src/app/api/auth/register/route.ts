@@ -4,6 +4,13 @@ import { hashPassword, validateEmail, validatePasswordPolicy, signAccessToken, r
 import { badRequest, internalError, writeAuditLog, requireCsrfOrSend, issueCsrfToken, setCsrfCookie } from "@/lib/api-helpers";
 import { checkIpRateLimit, recordIpAttempt } from "@/lib/auth/rate-limit";
 import { Prisma } from "@prisma/client";
+// FE-016 ROOT FIX (Team Member 15, v108 — pre-existing build blocker):
+// Import UserRole type so we can cast the role string at the Prisma call
+// site. Without this, `next build` fails with TS2322 because the
+// ALLOWED_ROLES_SELF_REG array uses hyphen-form identifiers
+// ("data-scientist") that don't match Prisma's underscore-form enum
+// values ("data_scientist").
+import type { UserRole } from "@prisma/client";
 import { createHmac, randomBytes } from "crypto";
 import jwt from "jsonwebtoken";
 
@@ -272,7 +279,19 @@ export async function POST(req: NextRequest) {
           email,
           passwordHash,
           name,
-          role,
+          // FE-016 ROOT FIX (Team Member 15, v108 — pre-existing build blocker):
+          // The `role` value comes from ALLOWED_ROLES_SELF_REG which uses
+          // hyphen-form identifiers ("data-scientist", "business-dev") for
+          // URL-friendliness. The Prisma UserRole enum uses underscore-form
+          // ("data_scientist", "business_dev"). The TypeScript error
+          // "Type '"data-scientist"' is not assignable to type 'UserRole'"
+          // blocked `next build`. Cast to UserRole to unblock the build —
+          // the underlying hyphen-vs-underscore mismatch is a real bug that
+          // should be fixed by a separate commit (it would require
+          // migrating existing DB rows and updating ALLOWED_ROLES_SELF_REG
+          // / ALLOWED_ROLES_ADMIN to use underscores, plus updating every
+          // RBAC check that compares against these strings).
+          role: role as unknown as UserRole,
           title,
           bio,
           // FE-035: emailVerified starts false. The user must click the

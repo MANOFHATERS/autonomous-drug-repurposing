@@ -1,7 +1,7 @@
 'use client';
 
 import { remainingScreens } from './remaining-screens';
-import { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import {
   Search, Download, ChevronDown, ChevronUp, Star, ArrowLeft,
   ShieldCheck, AlertTriangle, FlaskConical, FileBarChart, Package,
@@ -798,10 +798,88 @@ function SearchResultsScreen() {
 
 function CandidateDetailScreen() {
   const { navigate, currentRoute } = useDrugOSNav();
-  const candidateId = currentRoute.id || 'DC001';
-  const candidate = drugCandidates.find(c => c.id === candidateId) || drugCandidates[0];
-  const disease = diseases.find(d => d.id === candidate.diseaseId) || diseases[0];
+  // FE-016 ROOT FIX (Team Member 15, v108): The previous code did:
+  //   const candidateId = currentRoute.id || 'DC001';
+  //   const candidate = drugCandidates.find(c => c.id === candidateId) || drugCandidates[0];
+  //   const disease = diseases.find(d => d.id === candidate.diseaseId) || diseases[0];
+  // `drugCandidates` and `diseases` are imported from @/lib/empty-defaults
+  // and are EMPTY arrays (`[]`). `find()` returns undefined, `drugCandidates[0]`
+  // is undefined, then line 803 accesses `candidate.diseaseId` →
+  // TypeError: Cannot read properties of undefined (reading 'diseaseId').
+  // The screen crashed on every mount — the entire candidate evaluation
+  // workflow was unreachable. The 'DC001' fallback was a fabricated mock id
+  // that masked the bug only when currentRoute.id was unset; with empty
+  // arrays the crash still happened.
+  //
+  // ROOT FIX: there is no /api/hypothesis/[id] endpoint yet, so we cannot
+  // hydrate a real candidate by id. We treat the empty-defaults lookup as
+  // what it is — a fallback that yields nothing — and render an honest
+  // EmptyState that tells the researcher exactly what to do next
+  // (navigate back to search results and pick a real candidate produced
+  // by the RL ranker via /api/rl). This eliminates the TypeError at the
+  // root cause: no property access on undefined, no fabricated fallback.
+  const candidateId = currentRoute.id || '';
+  const candidate = drugCandidates.find(c => c.id === candidateId) || null;
+  const disease = candidate ? (diseases.find(d => d.id === candidate.diseaseId) || null) : null;
   const [activeTab, setActiveTab] = useState('overview');
+
+  // FE-016: Honest empty state when no candidate is available. This is
+  // the production-grade pattern — researchers see a clear, actionable
+  // message instead of a white-screen TypeError.
+  if (!candidate) {
+    return (
+      <FadeIn>
+        <PageHeader
+          title="Candidate Detail"
+          description="Drug repurposing candidate detail view"
+          onBack={() => navigate({ page: 'app', section: 'search' })}
+        />
+        <Card>
+          <CardContent className="py-16 text-center text-muted-foreground">
+            <Search className="h-10 w-10 mx-auto mb-3 opacity-40" />
+            <p className="text-base font-medium text-foreground">No candidate selected</p>
+            <p className="text-sm mt-2 max-w-md mx-auto">
+              Run a disease search and pick a ranked candidate from the results to view its
+              full detail page (scores, safety profile, pathway diagram, clinical trials,
+              IP status, and evidence items).
+            </p>
+            <Button
+              className="mt-5"
+              onClick={() => navigate({ page: 'app', section: 'search' })}
+            >
+              <Search className="h-4 w-4 mr-1.5" /> Go to Disease Search
+            </Button>
+          </CardContent>
+        </Card>
+      </FadeIn>
+    );
+  }
+
+  // FE-016: Defensive guard — if the candidate was found but the disease
+  // wasn't (e.g. orphaned drugCandidates entry), don't crash on
+  // `disease.name` access in PathwayDiagram. Render a clear message.
+  if (!disease) {
+    return (
+      <FadeIn>
+        <PageHeader
+          title={candidate.drugName}
+          description="Drug repurposing candidate detail view"
+          onBack={() => navigate({ page: 'app', section: 'search' })}
+        />
+        <Card>
+          <CardContent className="py-16 text-center text-muted-foreground">
+            <AlertCircle className="h-10 w-10 mx-auto mb-3 opacity-40" />
+            <p className="text-base font-medium text-foreground">Disease record not found</p>
+            <p className="text-sm mt-2 max-w-md mx-auto">
+              The candidate &ldquo;{candidate.drugName}&rdquo; references a disease that
+              is not in the database. This is likely a data integrity issue — please
+              report it to your administrator.
+            </p>
+          </CardContent>
+        </Card>
+      </FadeIn>
+    );
+  }
 
   const relatedTrials = clinicalTrials.filter(t => t.drugName === candidate.drugName);
   const relatedPatents = patents.filter(p => p.drugName === candidate.drugName);

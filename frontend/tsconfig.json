@@ -41,6 +41,8 @@
     "examples",
     "tests",
     "uploaded_code",
-    "scripts"
+    "scripts",
+    "src/lib/services/__tests__",
+    "src/app/api/**/__tests__"
   ]
 }

@@ -601,14 +601,15 @@ export const api = {
   // instead of rendering mock data. The endpoints serve real data from the
   // Phase 1/2/4 Python pipeline artifacts.
   //
-  // FE-025 ROOT FIX: Removed dead methods:
-  //   - getRankedHypotheses: replaced by inline fetch in useRlCandidates hook.
-  //   - syncRlOutput: no-op semantic (POST {sync: true} but route ignores
-  //     `sync` param). A future developer calling it would expect a sync
-  //     to happen — nothing would. Removed to prevent confusion.
-  //   - getDatasetStats: never called by any component. DataSourcesScreen
-  //     uses hardcoded data instead. If wired in the future, the method
-  //     should be re-added with a real consumer.
-  // Kept: getKnowledgeGraphStats (used by admin dashboard).
+  // FE-003 ROOT FIX (Team Member 15, v108): re-added getDatasetStats().
+  // The previous FE-025 "ROOT FIX" removed this method as "dead code" —
+  // but that decision was itself a bug, because DataSourcesScreen NEEDS
+  // this method to replace its hardcoded fake source list (FE-003).
+  // Removing the method made it impossible to wire DataSourcesScreen to
+  // real data without re-adding the method. The /api/dataset endpoint
+  // exists and returns real source stats (loaded/rowsLoaded/sha256)
+  // from the Phase 1 dataset-stats service. This method is now CALLED
+  // by DataSourcesScreen — it is no longer dead code.
+  getDatasetStats: () => request<DatasetStatsResponse>("/api/dataset"),
   getKnowledgeGraphStats: () => request<KnowledgeGraphStatsResponse>("/api/knowledge-graph"),
 };

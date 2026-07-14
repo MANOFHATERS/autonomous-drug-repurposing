@@ -284,7 +284,14 @@ export async function writeAuditLog(params: {
           actorName: params.user?.email || "anonymous",
           metadata: JSON.stringify(params.metadata || {}),
           error: errMsg,
-          critical: params.critical === true,
+          // FE-016 ROOT FIX (Team Member 15, v108 — pre-existing build blocker):
+          // We already returned early at line 260 if params.critical === true,
+          // so by the time we reach this dead-letter write, params.critical is
+          // guaranteed to be `false | undefined`. TypeScript narrows the type
+          // accordingly and flags `params.critical === true` as an unintentional
+          // comparison. Use `false` directly — semantically identical to the
+          // narrowed expression.
+          critical: false,
           ...(effectiveOrgId ? { organizationId: effectiveOrgId } : {}),
         },
       });
