@@ -1303,7 +1303,7 @@ class NegativeSampler:
     def wrong_disease_class_sampling(
         self,
         drug_disease_map: Dict[str, List[str]],
-        disease_atc_map: Dict[str, Any],
+        disease_to_drug_atc_map: Dict[str, Any],
         num_negatives: int = 0,
         rng: Optional[np.random.Generator] = None,
     ) -> List[Dict]:
@@ -1313,13 +1313,13 @@ class NegativeSampler:
         classes than its known indications.
 
         v107 ROOT FIX (ISSUE-P2-050): DOCUMENT the misleading parameter
-        name. ``disease_atc_map`` sounds like "disease → disease ATC
+        name. ``disease_to_drug_atc_map`` sounds like "disease → disease ATC
         classification", but ATC (Anatomical Therapeutic Chemical) is a
         DRUG classification system, NOT a disease classification system.
         There is no such thing as a "disease ATC code". The map actually
         contains: for each disease_id, the ATC codes of the DRUGS that
         are known to treat that disease (built by
-        ``training_data._build_disease_atc_map`` from DRKG
+        ``training_data._build_disease_to_drug_atc_map`` from DRKG
         Compound-treats-Disease edges joined to DrugBank ATC codes).
 
         The variable name is kept for backward compat (it's a public
@@ -1336,9 +1336,9 @@ class NegativeSampler:
 
         v35 ROOT FIX (M-4): use the FULL set of known ATC classes per
         disease (not just the first / majority class). The previous
-        code collapsed ``disease_atc_map[d_id]`` to a single string via
+        code collapsed ``disease_to_drug_atc_map[d_id]`` to a single string via
         ``atc.strip()[0].upper()`` when ``atc`` was a string — but the
-        H-6 fix in ``training_data._build_disease_atc_map`` now passes
+        H-6 fix in ``training_data._build_disease_to_drug_atc_map`` now passes
         the full ``Dict[str, List[Tuple[str, int]]]`` (per-disease class
         distribution with vote counts). The fix detects both the legacy
         ``Dict[str, str]`` format and the new ``Dict[str, List[Tuple]]``
@@ -1359,7 +1359,7 @@ class NegativeSampler:
 
         Args:
             drug_disease_map: {drug_id: [disease_ids]} known indications.
-            disease_atc_map: {disease_id: atc_class OR
+            disease_to_drug_atc_map: {disease_id: atc_class OR
                 List[(atc_class, count)]} disease classification.
                 Accepts both the legacy single-string format and the
                 v35 full-distribution format.
@@ -1397,7 +1397,7 @@ class NegativeSampler:
         # Pre-compute disease class groupings with ATC validation (Fix 5.5)
         class_to_diseases: Dict[str, List[str]] = defaultdict(list)
         n_invalid_atc = 0
-        for disease_id, atc in disease_atc_map.items():
+        for disease_id, atc in disease_to_drug_atc_map.items():
             if atc:
                 # M-4: use the full class set, not just first class.
                 classes_for_disease = _extract_atc_classes(atc)
@@ -1414,7 +1414,7 @@ class NegativeSampler:
 
         if n_invalid_atc > 0:
             logger.warning(
-                "Skipped %d diseases with invalid ATC codes in disease_atc_map",
+                "Skipped %d diseases with invalid ATC codes in disease_to_drug_atc_map",
                 n_invalid_atc,
             )
 
@@ -1475,7 +1475,7 @@ class NegativeSampler:
             # drug's known diseases (not just the majority class).
             known_classes: Set[str] = set()
             for d_id in known_diseases:
-                atc = disease_atc_map.get(d_id, "")
+                atc = disease_to_drug_atc_map.get(d_id, "")
                 known_classes |= _extract_atc_classes(atc)
 
             candidate_diseases: List[str] = []
@@ -1735,7 +1735,7 @@ class NegativeSampler:
         # relied on the default) and misled callers about whether they
         # must pass a non-None value. Corrected to Optional[...].
         drug_disease_map: Optional[Dict[str, List[str]]] = None,
-        disease_atc_map: Optional[Dict[str, Any]] = None,
+        disease_to_drug_atc_map: Optional[Dict[str, Any]] = None,
         failed_trials: Optional[List[Dict]] = None,
         total_negatives: int = MIN_NEGATIVE_PAIRS,
         strategy_weights: Optional[Dict[str, float]] = None,
@@ -1777,7 +1777,7 @@ class NegativeSampler:
 
         Args:
             drug_disease_map: For strategy (b).
-            disease_atc_map: For strategy (b).
+            disease_to_drug_atc_map: For strategy (b).
             failed_trials: For strategy (c).
             total_negatives: Target total. Default: config.MIN_NEGATIVE_PAIRS.
             strategy_weights: {strategy_name: weight}.
@@ -1896,18 +1896,18 @@ class NegativeSampler:
 
         # Strategy (b): Wrong disease class
         wrong_weight = strategy_weights.get("wrong_class", 0.3)
-        if drug_disease_map and disease_atc_map and wrong_weight > 0:
+        if drug_disease_map and disease_to_drug_atc_map and wrong_weight > 0:
             # L-33: round() instead of int().
             n_wrong = round(total_negatives * wrong_weight)
             logger.info("Strategy allocation: wrong_class=%d", n_wrong)
             wrong_negs = self.wrong_disease_class_sampling(
-                drug_disease_map, disease_atc_map, n_wrong, rng=self._rng
+                drug_disease_map, disease_to_drug_atc_map, n_wrong, rng=self._rng
             )
             all_negatives.extend(wrong_negs)
         else:
             logger.info(
-                "Skipping wrong_class: drug_disease_map=%s, disease_atc_map=%s, weight=%.2f",
-                drug_disease_map is not None, disease_atc_map is not None,
+                "Skipping wrong_class: drug_disease_map=%s, disease_to_drug_atc_map=%s, weight=%.2f",
+                drug_disease_map is not None, disease_to_drug_atc_map is not None,
                 wrong_weight,
             )
 
@@ -2103,7 +2103,7 @@ class NegativeSampler:
 #   1. Its constructor takes ``all_drug_ids: List[str]`` and
 #      ``all_disease_ids: List[str]`` — not integer entity indices.
 #   2. Its ``combined_sampling`` method requires ``drug_disease_map``,
-#      ``disease_atc_map``, ``failed_trials`` kwargs — domain-specific
+#      ``disease_to_drug_atc_map``, ``failed_trials`` kwargs — domain-specific
 #      objects that don't exist in the TransE training path.
 #   3. Its ``to_negative_indices`` returns string-ID pairs, not the
 #      ``(head_indices, tail_indices)`` tuple of ints that

@@ -45,7 +45,7 @@ Data Dictionary (StatsReport fields):
     avg_out_degree         : float -- Average out-degree (0.0 if empty)
     max_out_degree         : int  -- Maximum out-degree (0 if empty)
     min_out_degree         : int  -- Minimum out-degree (0 if empty)
-    isolated_nodes         : int  -- Nodes with zero edges (-1 if query failed)
+    isolated_nodes         : Optional[int] -- Nodes with zero edges (None if query failed)
     density_homogeneous_naive : float -- Naive density (for reference only)
     density_per_edge_type  : dict[str, float] -- Per-type density [0, 1]
     compound_name_coverage : float -- Fraction of Compounds with non-null name
@@ -357,15 +357,20 @@ class StatsReport(TypedDict, total=False):
     min_out_degree: int
 
     # Connectivity
-    isolated_nodes: int  # -1 if query timed out (Fixes 4.7: no 'N/A')
-    # v107 ROOT FIX (ISSUE-P2-051): flag indicating whether
-    # isolated_nodes is a REAL measurement (True) or the -1 sentinel
-    # for unknown (False). Downstream threshold checks MUST consult
-    # this flag before comparing isolated_nodes to any threshold —
-    # otherwise -1 (unknown) is treated as "very few isolated nodes"
-    # (since -1 < any positive threshold), causing the check to PASS
-    # when it should FAIL.
-    isolated_nodes_known: bool
+    # v108 ROOT FIX (ISSUE-P2-051): use Optional[int] with None for
+    # unknown, instead of the -1 sentinel. The previous -1 sentinel
+    # was a CORRECTNESS bug: downstream code that did
+    # ``if stats["isolated_nodes"] > threshold:`` treated -1 as "very
+    # few isolated nodes" (since -1 < any positive threshold), causing
+    # the check to PASS when it should have FAILED. None is the
+    # Pythonic sentinel for unknown — it cannot be accidentally
+    # compared with ``>`` (Python 3 raises TypeError on `None > int`),
+    # so downstream code is FORCED to handle the unknown case
+    # explicitly via ``if stats["isolated_nodes"] is not None:``.
+    # The ``isolated_nodes_known`` flag is kept for backward compat
+    # with v107 consumers, but new code should prefer the None check.
+    isolated_nodes: Optional[int]  # None if query timed out (v108 root fix)
+    isolated_nodes_known: bool  # DEPRECATED: prefer `isolated_nodes is not None`
 
     # Density (Fixes 3.4, 13.6: naive renamed, per-type added)
     density_homogeneous_naive: float
@@ -1035,35 +1040,36 @@ class GraphStats:
                     stats["isolated_nodes"] = _safe_int(
                         records[0]["isolated"],
                     )
-                    # v107 ROOT FIX (ISSUE-P2-051): record whether the
-                    # isolated_nodes value is a REAL measurement or the
-                    # -1 sentinel. Downstream code that does
-                    # ``if stats["isolated_nodes"] > threshold:`` was
-                    # treating -1 as "very few isolated nodes" (since
-                    # -1 < any positive threshold), so the check PASSED
-                    # when it should have FAILED. The new
-                    # ``isolated_nodes_known`` flag lets downstream code
-                    # skip the comparison when the value is unknown.
+                    # v108 ROOT FIX (ISSUE-P2-051): real measurement —
+                    # isolated_nodes is a valid int, isolated_nodes_known
+                    # is True (backward compat with v107 consumers).
                     stats["isolated_nodes_known"] = True
                 else:
-                    # v107 ROOT FIX (ISSUE-P2-051): keep -1 sentinel for
-                    # backward compat (TypedDict declares isolated_nodes
-                    # as int, and tests assert == -1), BUT add the
-                    # ``isolated_nodes_known`` flag so downstream code
-                    # can detect the unknown state and skip the
-                    # comparison. A future major-version bump can change
-                    # -1 to None and make isolated_nodes Optional[int].
-                    stats["isolated_nodes"] = -1
+                    # v108 ROOT FIX (ISSUE-P2-051): use None instead of
+                    # the -1 sentinel. The -1 sentinel was a CORRECTNESS
+                    # bug: ``if stats["isolated_nodes"] > threshold:``
+                    # treated -1 as "very few isolated nodes" (since
+                    # -1 < any positive threshold), causing sanity checks
+                    # to PASS when the isolated-node count was UNKNOWN.
+                    # None is the Pythonic sentinel — Python 3 raises
+                    # TypeError on ``None > int``, forcing downstream
+                    # code to handle the unknown case explicitly via
+                    # ``if stats["isolated_nodes"] is not None:``.
+                    # The ``isolated_nodes_known`` flag is kept for
+                    # backward compat with v107 consumers, but new code
+                    # should prefer the None check.
+                    stats["isolated_nodes"] = None
                     stats["isolated_nodes_known"] = False
                     warnings.append(
                         "Isolated-nodes query failed or timed out. "
-                        "Value set to -1 (unknown) and "
+                        "Value set to None (unknown) and "
                         "isolated_nodes_known=False. Downstream "
-                        "threshold checks MUST consult "
-                        "isolated_nodes_known before comparing. This "
-                        "is non-critical -- isolated nodes are "
+                        "threshold checks MUST check "
+                        "``isolated_nodes is not None`` before "
+                        "comparing (or check isolated_nodes_known). "
+                        "This is non-critical -- isolated nodes are "
                         "cosmetic, not a data-quality issue. "
-                        "v107 ISSUE-P2-051 root fix."
+                        "v108 ISSUE-P2-051 root fix."
                     )
 
                 # ── Naive homogeneous density (Fix 13.6: renamed) ──

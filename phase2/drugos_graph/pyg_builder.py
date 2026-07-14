@@ -3718,6 +3718,18 @@ from .schema_mappings import (
 
 # Keep the old constant names as aliases so existing code doesn't break.
 # These are deprecated — new code should import from schema_mappings directly.
+# v108 ROOT FIX: __all__ was never defined, so __all__.extend() raised
+# NameError at import time. This made pyg_builder.py UNIMPORTABLE —
+# any module that did ``from .pyg_builder import build_pyg_hetero_data``
+# would crash. The fix defines __all__ before extending it.
+__all__: list = [
+    "SecurityError",
+    "GraphBuilderProtocol",
+    "LinkPredictionSplit",
+    "HeteroDataSummary",
+    "PyGBuilder",
+    "build_pyg_hetero_data",
+]
 __all__.extend([
     "_PHASE2_TO_GT_NODE_TYPE",
     "_GT_TO_PHASE2_NODE_TYPE",

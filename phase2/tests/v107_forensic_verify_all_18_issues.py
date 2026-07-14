@@ -304,9 +304,12 @@ class TestP2_040_ValidatedTreatsDedup:
 
     def test_validated_treats_in_core_edge_types(self):
         """validated_treats must be in CORE_EDGE_TYPES."""
-        source = _read_source("phase2/drugos_graph/config.py")
+        # v108 UPDATE: CORE_EDGE_TYPES was MOVED to config_schema.py (ISSUE-P2-056).
+        # Check config_schema.py source first; fall back to config.py for
+        # backward compat (config.py re-exports from config_schema.py).
+        source = _read_source("phase2/drugos_graph/config_schema.py")
         assert '("Drug", "validated_treats", "Disease")' in source, \
-            'validated_treats NOT in CORE_EDGE_TYPES'
+            'validated_treats NOT in CORE_EDGE_TYPES (config_schema.py)'
 
     def test_db_introspection_method_exists(self):
         """discover_edge_triples_for_rel_type must exist for non-CORE types."""
@@ -442,7 +445,7 @@ class TestP2_048_SHA256Fallback:
 
 
 class TestP2_050_DiseaseATCMapDocumentation:
-    """ISSUE-P2-050: misleading variable name disease_atc_map.
+    """ISSUE-P2-050: misleading variable name disease_to_drug_atc_map.
 
     The v107 fix documents the indirection clearly.
     """
