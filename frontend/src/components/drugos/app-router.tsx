@@ -152,7 +152,11 @@ const careers: Array<{
 
 import { cn } from '@/lib/utils'
 import { coreScreens } from './core-screens'
-import { allScreens } from './all-screens'
+// ISSUE-FE-015 ROOT FIX: all-screens.tsx was 1,414 lines of DEAD CODE.
+// The active router did coreScreens[section] || allScreens[section], but
+// coreScreens already spreads remainingScreens which defines EVERY section.
+// allScreens was never rendered. Deleted to eliminate the maintenance burden
+// and prevent future engineers from accidentally modifying dead code.
 import { DrugOSNavContext } from './nav-context'
 import { useSession } from './session-provider'
 import { api, type ApiError, type TeamMember } from '@/lib/api-client'
@@ -2901,7 +2905,9 @@ function CoreScreenBridge({ section, sub, id }: { section: string; sub?: string;
     currentRoute: { page: 'app', section: section, sub: sub, id: id },
   }), [routerNavigate, section, sub, id])
 
-  const ScreenComponent = coreScreens[section] || allScreens[section]
+  // ISSUE-FE-015: Removed dead allScreens fallback. coreScreens already
+  // includes all sections via remainingScreens spread.
+  const ScreenComponent = coreScreens[section]
 
   if (!ScreenComponent) {
     return <AppPlaceholderSection section={section} />
