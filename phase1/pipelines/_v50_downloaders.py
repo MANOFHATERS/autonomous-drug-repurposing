@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 from urllib.parse import urljoin
 
+import pandas as pd
 import requests
 
 logger = logging.getLogger(__name__)
