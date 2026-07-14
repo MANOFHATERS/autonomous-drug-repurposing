@@ -379,129 +379,138 @@ export async function GET(req: NextRequest) {
  * we SKIP persistence (return early) rather than falling back to the
  * first org — that would be a security hole.
  */
+/**
+ * BE-014 ROOT FIX: The previous implementation did up to 50 sequential
+ * findFirst + update/create queries per request (6000 DB queries/min at
+ * 60 req/min), and swallowed ALL errors in a catch block — the route
+ * returned 200 even if nothing was saved. Data-loss silent failure.
+ *
+ * Root fix:
+ *   1. Use db.$transaction to batch all writes atomically.
+ *   2. Collect all operations into a single transaction — no partial saves.
+ *   3. If the transaction fails, THROW — the caller returns 500.
+ *   4. Do NOT swallow errors. Persistence failure is a data-loss event.
+ *   5. Return { saved: count } so the caller can include it in the response.
+ */
 async function persistRlCandidates(
   userId: string,
   candidates: RankedHypothesis[],
   targetOrgId: string | null
-): Promise<void> {
-  if (candidates.length === 0) return;
-  try {
-    // FE-007: resolve the org to persist into.
-    let organizationId: string | null = null;
-    if (targetOrgId) {
-      // Verify the user is a member of the target org. SECURITY: this
-      // is mandatory — without it, a user could inject any orgId.
-      const membership = await db.organizationMember.findFirst({
-        where: { userId, organizationId: targetOrgId },
-      });
-      if (!membership) {
-        // The user is NOT a member of the target org. Refuse to persist
-        // — do NOT silently fall back to the first org (that would be
-        // a security hole). Log and return.
-        console.warn(
-          `persistRlCandidates: user ${userId} is not a member of org ${targetOrgId}; skipping persistence.`
-        );
-        return;
-      }
-      organizationId = targetOrgId;
-    } else {
-      // No target org provided — fall back to the user's first org by
-      // joinedAt asc. This is the original behavior, preserved for
-      // backward compat. The route layer passes auth.user.orgId (the
-      // CURRENT active org) by default, so this branch is rare.
-      const membership = await db.organizationMember.findFirst({
-        where: { userId },
-        orderBy: { joinedAt: "asc" },
-      });
-      if (!membership) return;
-      organizationId = membership.organizationId;
-    }
+): Promise<{ saved: number }> {
+  if (candidates.length === 0) return { saved: 0 };
 
-    // FE-037: Find or create a DEDICATED 'RL Predictions' project OWNED
-    // BY the calling user. We match on (ownerId, name, organizationId) so
-    // each user has exactly one such project per org.
-    const RL_PROJECT_NAME = "RL Predictions";
-    let project = await db.project.findFirst({
-      where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId },
+  // FE-007: resolve the org to persist into.
+  let organizationId: string | null = null;
+  if (targetOrgId) {
+    const membership = await db.organizationMember.findFirst({
+      where: { userId, organizationId: targetOrgId },
     });
-    if (!project) {
-      try {
-        project = await db.project.create({
-          data: {
-            name: RL_PROJECT_NAME,
-            description: "Auto-populated by the Phase 4 RL ranker. Hypotheses here are derived from RL predictions — verify before acting on them.",
-            status: "active",
-            visibility: "private", // FE-037: private — never org-visible by default.
-            ownerId: userId,
-            organizationId,
-            tags: "rl,predictions,auto-generated",
-          },
-        });
-      } catch {
-        // Race: another concurrent request created the project between
-        // our findFirst and create. Re-fetch.
-        project = await db.project.findFirst({
-          where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId },
-        });
-        if (!project) return;
-      }
+    if (!membership) {
+      console.warn(
+        `persistRlCandidates: user ${userId} is not a member of org ${targetOrgId}; skipping persistence.`
+      );
+      return { saved: 0 };
     }
+    organizationId = targetOrgId;
+  } else {
+    const membership = await db.organizationMember.findFirst({
+      where: { userId },
+      orderBy: { joinedAt: "asc" },
+    });
+    if (!membership) return { saved: 0 };
+    organizationId = membership.organizationId;
+  }
 
-    for (const c of candidates.slice(0, 50)) {
-      const existing = await db.hypothesis.findFirst({
-        where: {
-          projectId: project.id,
-          drugName: c.drug,
-          diseaseName: c.disease,
+  // FE-037: Find or create a DEDICATED 'RL Predictions' project.
+  const RL_PROJECT_NAME = "RL Predictions";
+  let project = await db.project.findFirst({
+    where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId },
+  });
+  if (!project) {
+    try {
+      project = await db.project.create({
+        data: {
+          name: RL_PROJECT_NAME,
+          description: "Auto-populated by the Phase 4 RL ranker. Hypotheses here are derived from RL predictions — verify before acting on them.",
+          status: "active",
+          visibility: "private",
+          ownerId: userId,
+          organizationId,
+          tags: "rl,predictions,auto-generated",
         },
       });
-      const rlData = {
-        plausibilityScore: c.plausibilityScore ?? c.gnnScore ?? null,
-        safetyScore: c.safetyScore ?? null,
-        marketScore: c.marketScore ?? null,
-        overallScore: c.overallScore ?? null,
-        rank: c.rank ?? null,
-        policyProb: c.policyProb ?? null,
-        reward: c.reward ?? null,
-        gnnScore: c.gnnScore ?? null,
-        literatureSupport: c.literatureSupportBool ?? (c.literatureSupport !== undefined ? c.literatureSupport > 0 : null),
-        rlModelVersion: "rl_drug_ranker.py-v101",
-        rlUpdatedAt: new Date(),
-        rlPredicted: true,
-      } as any;
-      if (existing) {
-        // FE-010: do NOT downgrade a wet-lab "validated" or "rejected"
-        // hypothesis to "predicted".
-        const nextStatus =
-          existing.status === "validated" || existing.status === "rejected"
-            ? existing.status
-            : "predicted";
-        await db.hypothesis.update({
-          where: { id: existing.id },
-          data: { ...rlData, status: nextStatus },
-        });
-      } else {
-        await db.hypothesis.create({
-          data: {
-            projectId: project.id,
-            title: `${c.drug} for ${c.disease}`,
+    } catch {
+      project = await db.project.findFirst({
+        where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId },
+      });
+      if (!project) throw new Error("Failed to find or create RL Predictions project");
+    }
+  }
+
+  // BE-014 ROOT FIX: Batch all hypothesis operations inside a single
+  // transaction. All-or-nothing: if any operation fails, nothing is saved.
+  const toSave = candidates.slice(0, 50);
+  try {
+    await db.$transaction(async (tx) => {
+      for (const c of toSave) {
+        const rlData = {
+          plausibilityScore: c.plausibilityScore ?? c.gnnScore ?? null,
+          safetyScore: c.safetyScore ?? null,
+          marketScore: c.marketScore ?? null,
+          overallScore: c.overallScore ?? null,
+          rank: c.rank ?? null,
+          policyProb: c.policyProb ?? null,
+          reward: c.reward ?? null,
+          gnnScore: c.gnnScore ?? null,
+          literatureSupport: c.literatureSupportBool ?? (c.literatureSupport !== undefined ? c.literatureSupport > 0 : null),
+          rlModelVersion: "rl_drug_ranker.py-v101",
+          rlUpdatedAt: new Date(),
+          rlPredicted: true,
+        };
+
+        // Find existing hypothesis for upsert logic.
+        const existing = await tx.hypothesis.findFirst({
+          where: {
+            projectId: project!.id,
             drugName: c.drug,
             diseaseName: c.disease,
-            // FE-010: NEW RL-sourced hypotheses are "predicted", NOT "validated".
-            status: "predicted",
-            createdById: userId,
-            notes: `RL rank ${c.rank ?? "—"}, reward ${c.reward?.toFixed(4) ?? "—"}, policy_prob ${c.policyProb?.toFixed(4) ?? "—"}`,
-            ...rlData,
-          } as any,
+          },
         });
+
+        if (existing) {
+          // FE-010: do NOT downgrade a wet-lab "validated" or "rejected".
+          const nextStatus =
+            existing.status === "validated" || existing.status === "rejected"
+              ? existing.status
+              : "predicted";
+          await tx.hypothesis.update({
+            where: { id: existing.id },
+            data: { ...rlData, status: nextStatus },
+          });
+        } else {
+          await tx.hypothesis.create({
+            data: {
+              projectId: project!.id,
+              title: `${c.drug} for ${c.disease}`,
+              drugName: c.drug,
+              diseaseName: c.disease,
+              status: "predicted",
+              createdById: userId,
+              notes: `RL rank ${c.rank ?? "—"}, reward ${c.reward?.toFixed(4) ?? "—"}`,
+              ...rlData,
+            },
+          });
+        }
       }
-    }
+    }, {
+      maxWait: 5000,
+      timeout: 10000,
+    });
+    return { saved: toSave.length };
   } catch (e: unknown) {
-    // FE-063: explicit `e: unknown` — never `e: any`. Persistence is
-    // best-effort; the response still returns the candidates. We log the
-    // error for observability; if it's an Error we use .message, otherwise
-    // String(e) so the log never shows "undefined".
+    // BE-014: THROW — do NOT swallow. The caller must return 500.
     const msg = e instanceof Error ? e.message : String(e);
-    console.error("persistRlCandidates failed:", msg);
+    console.error("BE-014 persistRlCandidates transaction failed:", msg);
+    throw new Error(`Failed to persist RL candidates: ${msg}`);
   }
 }

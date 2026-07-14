@@ -17,13 +17,56 @@ export async function requireAuth(): Promise<{ user: AuthenticatedUser; response
   return { user, response: null };
 }
 
+/**
+ * BE-002 ROOT FIX: The previous `requireAdmin()` granted admin access to
+ * `role === "admin" || role === "owner"`. The `owner` role is set by the
+ * registration route when a user creates an org — they become the org's owner.
+ * This made ANY org creator a platform superuser who could:
+ *   - Enumerate ALL users system-wide (GET /api/admin/users)
+ *   - PATCH ANY user in ANY org (admin/users PATCH)
+ *   - Read ALL audit logs across all tenants (audit-logs)
+ *
+ * There was NO concept of "platform owner" vs "org owner".
+ *
+ * Root fix: introduce `isPlatformAdmin` flag on AuthenticatedUser (set by
+ * getAuthenticatedUser from a dedicated `platformOwner` role or an
+ * `isPlatformAdmin` column). The `requireAdmin()` helper now checks for
+ * `platformOwner` (system-wide access) OR `admin` (org-scoped access).
+ * The `owner` role is treated as a regular org-scoped role — org owners
+ * see only their own org's data, same as admins.
+ *
+ * Contract:
+ *   - platformOwner: full system access (cross-tenant) — for SaaS operators.
+ *   - admin: org-scoped admin access — can manage users in their org.
+ *   - owner: org creator — same scope as admin, NOT a superuser.
+ */
 export async function requireAdmin(): Promise<{ user: AuthenticatedUser; response: null } | { user: null; response: Response }> {
   const auth = await requireAuth();
   if (auth.user === null) return auth;
-  if (auth.user.role !== "admin" && auth.user.role !== "owner") {
+  // BE-002: Only "admin" and "platformOwner" roles pass requireAdmin().
+  // The "owner" role (org creator) is EXPLICITLY excluded — org owners
+  // are scoped to their own org like regular admins, NOT platform superusers.
+  if (auth.user.role !== "admin" && auth.user.role !== "platformOwner") {
     return {
       user: null,
       response: NextResponse.json({ error: "forbidden", message: "Admin access required" }, { status: 403 }),
+    };
+  }
+  return auth;
+}
+
+/**
+ * BE-002: requirePlatformOwner — for routes that need TRUE cross-tenant
+ * superuser access (user enumeration across all orgs, audit log review,
+ * system-wide operations). Returns 403 for admin and owner roles.
+ */
+export async function requirePlatformOwner(): Promise<{ user: AuthenticatedUser; response: null } | { user: null; response: Response }> {
+  const auth = await requireAuth();
+  if (auth.user === null) return auth;
+  if (auth.user.role !== "platformOwner") {
+    return {
+      user: null,
+      response: NextResponse.json({ error: "forbidden", message: "Platform owner access required" }, { status: 403 }),
     };
   }
   return auth;
@@ -225,36 +268,29 @@ export async function writeAuditLog(params: {
       return { ok: false, error: errMsg };
     }
 
-    // Non-critical: try to write to a fallback mechanism. If the DB
-    // itself is down, this also fails — but at least we tried.
+    // BE-003 ROOT FIX: Non-critical fallback uses the Prisma-modeled
+    // AuditLogDeadLetter table. Previously this used $executeRaw with
+    // CREATE TABLE IF NOT EXISTS (DDL on every failure!) and raw INSERT
+    // into a table invisible to Prisma. Now it's type-safe, queryable,
+    // and requires zero DDL.
     try {
-      // Best-effort fallback: write to a separate "audit_log_dead_letter"
-      // table if it exists. We don't model it in Prisma because adding
-      // a model would require a migration; instead we use $executeRaw
-      // with a CREATE TABLE IF NOT EXISTS so it's idempotent.
-      // For SQLite/Postgres compatible DDL.
-      await db.$executeRaw`CREATE TABLE IF NOT EXISTS audit_log_dead_letter (
-        id SERIAL PRIMARY KEY,
-        action TEXT NOT NULL,
-        resource TEXT,
-        user_id TEXT,
-        actor_name TEXT,
-        metadata TEXT,
-        error TEXT,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-      )`;
-      await db.$executeRaw`INSERT INTO audit_log_dead_letter
-        (action, resource, user_id, actor_name, metadata, error)
-        VALUES (${params.action}, ${params.resource || null},
-                ${params.user?.userId || null},
-                ${params.user?.email || "anonymous"},
-                ${JSON.stringify(params.metadata || {})},
-                ${errMsg})`;
+      await db.auditLogDeadLetter.create({
+        data: {
+          action: params.action,
+          resource: params.resource || null,
+          userId: params.user?.userId || null,
+          actorName: params.user?.email || "anonymous",
+          metadata: JSON.stringify(params.metadata || {}),
+          error: errMsg,
+        },
+      });
     } catch (fallbackErr) {
       // Both primary and fallback failed — the DB is likely down.
       // The stderr log above is the only record. Operators must
-      // monitor for [AUDIT-LOG-FAILURE] entries.
-      console.error("[AUDIT-LOG-FAILURE] Fallback also failed:", fallbackErr);
+      // monitor for [AUDIT-LOG-FAILURE] entries and query
+      // AuditLogDeadLetter when the DB recovers.
+      const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+      console.error("[AUDIT-LOG-FAILURE] Dead-letter fallback also failed:", fallbackMsg);
     }
     return { ok: false, error: errMsg };
   }

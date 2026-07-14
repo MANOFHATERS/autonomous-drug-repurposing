@@ -223,7 +223,19 @@ export async function POST(req: NextRequest) {
         kgValidationSkipped: skipKgValidation,
       },
     });
-    return NextResponse.json({ id: record.id, package: pkg, markdown });
+    // BE-006 ROOT FIX: When KG validation is skipped (admin override),
+    // include kgValidationSkipped: true in the response so the UI can
+    // display a prominent warning. Previously the researcher had no
+    // indication that the package was built for entities not in the KG.
+    return NextResponse.json({
+      id: record.id,
+      package: pkg,
+      markdown,
+      kgValidationSkipped: skipKgValidation === true,
+      warning: skipKgValidation
+        ? "KG validation was skipped for this evidence package. The drug and/or disease may not exist in the knowledge graph. Verify entities before acting on this data."
+        : undefined,
+    });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     return internalError(`Evidence package build failed: ${msg}`);

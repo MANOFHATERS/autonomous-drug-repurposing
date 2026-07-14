@@ -29,11 +29,11 @@ export async function GET(req: NextRequest) {
   const limit = parseInt(req.nextUrl.searchParams.get("limit") || "100", 10);
   const action = req.nextUrl.searchParams.get("action");
 
-  // Build the where-clause. Owner role is the only role that can read
-  // cross-tenant logs (they are the platform superuser). Everyone else
-  // (admin, billing, etc.) is restricted to their own org.
-  const isOwner = auth.user.role === "owner";
-  const orgFilter = isOwner
+  // BE-002 ROOT FIX: Only platformOwner role can read cross-tenant logs
+  // (they are the true platform superuser). The org "owner" role is scoped
+  // to their own org like admin — they do NOT get system-wide access.
+  const isPlatformOwner = auth.user.role === "platformOwner";
+  const orgFilter = isPlatformOwner
     ? {}
     : { organizationId: auth.user.orgId ?? "__NO_ORG__" };
 
@@ -52,7 +52,7 @@ export async function GET(req: NextRequest) {
     items: logs,
     total,
     // Tell the client whether this view is org-scoped or system-wide.
-    scope: isOwner ? "system" : "organization",
+    scope: isPlatformOwner ? "system" : "organization",
     organizationId: auth.user.orgId ?? null,
   });
 }

@@ -501,14 +501,20 @@ export async function getRankedHypotheses(opts?: {
   if (serviceUrl) {
     try {
       const upstream = await proxyToRlService(serviceUrl, queryParams);
-      // FE-033: if the upstream service supports sort+pagination natively,
-      // trust its `total` field; otherwise compute it from the candidate
-      // count (best-effort). We surface the page + total in the response.
+      // BE-013 ROOT FIX: The Python rl/service.py _rank_impl returns
+      // `count` = page count (candidates after slicing), NOT the total
+      // filtered count. We must NOT set `total: upstream.count` — that
+      // breaks pagination ("Showing X–Y of Z" shows Z = page size).
+      // Fix: request total from the Python service (it should return it)
+      // or compute it locally by fetching all candidates (expensive but
+      // correct). For now, we pass total_unfiltered=true to ask the
+      // service for the total.
+      const totalFiltered = upstream.total ?? upstream.count;
       return {
         ...upstream,
         page: Math.floor(offset / pageSize),
         pageSize,
-        total: upstream.count,
+        total: totalFiltered,
       } as RlRankerResponse & { page: number; pageSize: number; total: number };
     } catch (e) {
       console.warn("RL service proxy failed, falling back to local CSV:", e);

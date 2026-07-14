@@ -9,21 +9,20 @@ import { writeAuditLog, requireCsrfOrSend, clearCsrfCookie } from "@/lib/api-hel
 import { cookies } from "next/headers";
 
 /**
+ * POST /api/auth/logout
+ *
  * FE-002 ROOT FIX: Logout MUST revoke refresh tokens server-side.
  *
- * Previously this handler only cleared the browser cookies, leaving the
- * refresh-token row in the DB valid for up to 30 days. Any refresh token
- * captured by XSS, network sniffing, or shared-computer browser cache
- * remained usable via /api/auth/refresh, giving the attacker a persistent
- * back door even after the victim logged out.
+ * BE-015 ROOT FIX: The previous code swallowed revokeAllRefreshTokensForUser
+ * errors in a catch block — logging to stderr but still returning 200.
+ * This gave users a FALSE sense of security: their cookies were cleared
+ * locally but the attacker's stolen refresh token kept working for 30 days.
  *
- * Fix: after writing the audit log we call revokeAllRefreshTokensForUser()
- * to invalidate every outstanding refresh token for the user. This is the
- * OWASP-recommended pattern — logout is a server-side state change, not
- * just a cookie wipe. We also defensively read the raw refresh-cookie
- * value before clearing so future extensions can revoke that specific
- * token (currently redundant with the user-wide revocation but provides
- * defense-in-depth if the user object ever fails to resolve).
+ * Root fix: If revocation fails, return 500 "Logout failed — please contact
+ * support." Do NOT clear cookies until revocation succeeds. This ensures
+ * the user KNOWS their logout may not have terminated all sessions.
+ * If the user has no session (already logged out), we still clear cookies
+ * defensively — there's nothing to revoke.
  */
 export async function POST(req: NextRequest) {
   // FE-011: CSRF protection on every state-changing route.
@@ -38,32 +37,31 @@ export async function POST(req: NextRequest) {
   const refreshCookieValue = store.get(REFRESH_COOKIE)?.value;
 
   if (user) {
+    // BE-015: Revoke BEFORE clearing cookies. If this fails, we return 500
+    // and the user's cookies stay — they know something went wrong.
+    try {
+      await revokeAllRefreshTokensForUser(user.userId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[logout] refresh-token revocation failed:", msg);
+      return NextResponse.json(
+        {
+          error: "logout_failed",
+          message: "Session revocation failed — your logout may not have terminated all sessions. Please contact support.",
+        },
+        { status: 500 }
+      );
+    }
+
+    // Revocation succeeded — now log and clear cookies.
     await writeAuditLog({
       user,
       action: "logout",
       resource: `user:${user.userId}`,
     });
-    // Revoke every outstanding refresh token for this user — not just the
-    // current one. A compromised sibling session (different browser,
-    // stolen token) must also be terminated.
-    try {
-      await revokeAllRefreshTokensForUser(user.userId);
-    } catch (err) {
-      // Log but do not fail the logout response. If revocation fails we
-      // still want the user's cookies cleared so they appear logged out
-      // locally; the lingering token will eventually expire.
-       
-      console.error("[logout] refresh-token revocation failed", err);
-    }
   } else if (refreshCookieValue) {
     // Even if we cannot resolve a user from the access token, the refresh
-    // cookie may still be valid. The consumeRefreshToken path will both
-    // revoke it and rotate it — but we want revocation only. Calling
-    // revokeAllRefreshTokensForUser requires a userId, so we look one up
-    // indirectly via the refresh-token row. This branch is defensive: it
-    // only triggers when the access token is missing/expired but the
-    // refresh cookie is still present.
-    // We deliberately do NOT rotate the token here.
+    // cookie may still be valid. Try to revoke it directly via the DB.
     try {
       const { db } = await import("@/lib/db");
       const record = await db.refreshToken.findUnique({
@@ -76,13 +74,21 @@ export async function POST(req: NextRequest) {
         });
       }
     } catch (err) {
-       
-      console.error("[logout] orphan refresh-token revocation failed", err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[logout] orphan refresh-token revocation failed:", msg);
+      // BE-015: Return 500 if we can't even revoke the orphan token.
+      return NextResponse.json(
+        {
+          error: "logout_failed",
+          message: "Session revocation failed. Please contact support.",
+        },
+        { status: 500 }
+      );
     }
   }
 
+  // All revocation succeeded — clear cookies and return success.
   await clearAuthCookies();
-  // FE-011: clear the CSRF cookie too so a re-login gets a fresh token.
   await clearCsrfCookie();
   return NextResponse.json({ ok: true });
 }

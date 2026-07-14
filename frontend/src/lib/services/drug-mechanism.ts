@@ -56,6 +56,13 @@ export interface DrugMechanismResult {
   /** Canonicalized mechanism reference, e.g. "ChEMBL::CHEMBL25::Direct thrombin inhibitor". */
   source: string | null;
   fetchedAt: string;
+  /**
+   * BE-017: Set when the lookup failed (network error, JSON parse error,
+   * ChEMBL down). The UI should show "Mechanism lookup failed — retry"
+   * instead of "—" (which looks like "no mechanism data"). Null means
+   * the lookup succeeded but the drug simply has no annotated mechanism.
+   */
+  error?: string | null;
 }
 
 // In-memory cache. Bounded to 256 entries; oldest evicted first.
@@ -250,6 +257,7 @@ export async function lookupDrugMechanism(
   try {
     const chemblId = await resolveChemblId(drugName);
     if (!chemblId) {
+      // Drug not found in ChEMBL — this is "no data", not an error.
       cacheSet(key, result);
       return result;
     }
@@ -259,9 +267,15 @@ export async function lookupDrugMechanism(
       result.mechanism = mechanism;
       result.source = `ChEMBL::${chemblId}`;
     }
-  } catch {
-    // Network error or JSON parse error — return the empty result.
-    // The caller renders "—" and the user can retry.
+  } catch (e) {
+    // BE-017 ROOT FIX: Distinguish "lookup failed" from "no mechanism data".
+    // Previously this catch block swallowed ALL errors silently and the UI
+    // showed "—" — the same as "no data". A researcher believed the data
+    // was missing when actually ChEMBL was down, and may have made decisions
+    // based on "no mechanism data" when the data exists.
+    const errorMsg = e instanceof Error ? e.message : String(e);
+    result.error = "chembl_unreachable";
+    console.error(`[drug-mechanism] BE-017: ChEMBL lookup failed for "${drugName}": ${errorMsg}`);
   }
 
   cacheSet(key, result);

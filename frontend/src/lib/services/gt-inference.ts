@@ -62,15 +62,37 @@ export interface GtInferenceResponse {
 // Checkpoint resolution
 // ---------------------------------------------------------------------------
 
+// BE-008 ROOT FIX: Resolve checkpoint dirs relative to repo root, not
+// process.cwd(). When Next.js runs from frontend/, cwd is frontend/ —
+// but checkpoints are written to repo-root/output_v100/ by run_4phase.py.
+const _REPO_ROOT_FOR_CHECKPOINTS = (() => {
+  const candidates = [
+    process.cwd(),
+    path.resolve(process.cwd(), ".."),
+    path.resolve(__dirname, "..", "..", ".."),
+    path.resolve(__dirname, "..", "..", "..", ".."),
+  ];
+  for (const c of candidates) {
+    if (
+      nodeFs.existsSync(path.resolve(c, "scripts", "gt_inference.py")) ||
+      nodeFs.existsSync(path.resolve(c, "output_v100")) ||
+      nodeFs.existsSync(path.resolve(c, "graph_transformer"))
+    ) {
+      return c;
+    }
+  }
+  return path.resolve(process.cwd(), "..");
+})();
+
 const CHECKPOINT_CANDIDATE_DIRS = [
   process.env.GT_CHECKPOINT_DIR,
   // RT-006: the bridge writes gt_checkpoint.pt directly to <output_dir>
   // (not to <output_dir>/checkpoints/). Check both locations for safety.
-  path.resolve(process.cwd(), "output_v100"),
-  path.resolve(process.cwd(), "output_v100", "checkpoints"),
-  path.resolve(process.cwd(), "output"),
-  path.resolve(process.cwd(), "output", "checkpoints"),
-  path.resolve(process.cwd(), "graph_transformer", "checkpoints"),
+  path.resolve(_REPO_ROOT_FOR_CHECKPOINTS, "output_v100"),
+  path.resolve(_REPO_ROOT_FOR_CHECKPOINTS, "output_v100", "checkpoints"),
+  path.resolve(_REPO_ROOT_FOR_CHECKPOINTS, "output"),
+  path.resolve(_REPO_ROOT_FOR_CHECKPOINTS, "output", "checkpoints"),
+  path.resolve(_REPO_ROOT_FOR_CHECKPOINTS, "graph_transformer", "checkpoints"),
 ].filter(Boolean) as string[];
 
 /**
@@ -180,6 +202,29 @@ async function runHttpInference(
 }
 
 /**
+ * BE-008 ROOT FIX: Resolve the repo root correctly, not via process.cwd().
+ * When Next.js runs from the frontend/ directory, process.cwd() returns
+ * frontend/ — but the scripts are at <repo_root>/scripts/. We detect the
+ * repo root by walking up until we find scripts/gt_inference.py.
+ */
+function resolveRepoRoot(): string {
+  // Next.js compiled code runs from frontend/.next/server/ — walk up.
+  const candidates = [
+    process.cwd(),
+    path.resolve(process.cwd(), ".."),
+    path.resolve(__dirname, "..", "..", ".."),
+    path.resolve(__dirname, "..", "..", "..", ".."),
+  ];
+  for (const candidate of candidates) {
+    if (nodeFs.existsSync(path.resolve(candidate, "scripts", "gt_inference.py"))) {
+      return candidate;
+    }
+  }
+  // Fallback: return parent of cwd (assumes cwd is frontend/)
+  return path.resolve(process.cwd(), "..");
+}
+
+/**
  * Spawn `gt_inference.py` (a small Python helper) to run the actual
  * model inference. The helper loads the checkpoint, runs
  * `predict_drug_disease_scores` or `top_k_novel_predictions`, and
@@ -201,13 +246,16 @@ async function runPythonInference(
   try {
     await fs.writeFile(reqPath, JSON.stringify({ checkpoint: checkpointPath, mode, ...payload }));
 
-    const repoRoot = process.cwd();
+    // BE-008 ROOT FIX: Resolve repo root correctly for the documented
+    // deployment (cd frontend && npm run dev). process.cwd() returns
+    // frontend/ but scripts/ lives one level up at repo root.
+    const repoRoot = resolveRepoRoot();
     const scriptPath = path.resolve(repoRoot, "scripts", "gt_inference.py");
 
     // If the helper doesn't exist, fail gracefully — caller surfaces a
     // clear message. (The script is shipped with the repo per RT-006 fix.)
     if (!nodeFs.existsSync(scriptPath)) {
-      throw new Error(`GT inference helper not found at ${scriptPath}. Run 'python run_4phase.py' first to train the model and ensure scripts/gt_inference.py is present.`);
+      throw new Error(`GT inference helper not found at ${scriptPath} (cwd=${process.cwd()}, repoRoot=${repoRoot}). Run 'python run_4phase.py' first to train the model and ensure scripts/gt_inference.py is present.`);
     }
 
     await new Promise<void>((resolve, reject) => {

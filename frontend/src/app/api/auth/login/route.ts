@@ -95,10 +95,62 @@ export async function POST(req: NextRequest) {
     return invalidCredentials();
   }
 
+  // BE-004 ROOT FIX: Verify the password BEFORE checking account status.
+  // The previous code checked suspended/unverified status BEFORE password
+  // verification, allowing attackers to enumerate:
+  //   - Which emails are registered (suspended → "account_suspended" vs
+  //     non-existent → "invalid_credentials")
+  //   - Which accounts are unverified ("email_not_verified" vs
+  //     "invalid_credentials")
+  //
+  // Root fix: always verify password first. Only after the password is
+  // confirmed correct do we reveal the actual account status. An attacker
+  // without the correct password sees ONLY "invalid_credentials" — same
+  // for suspended, unverified, wrong-password, and non-existent accounts.
+  const ok = await verifyPassword(password, user.passwordHash);
+  if (!ok) {
+    // BE-004: Same error for ALL password failures — no enumeration signal.
+    const lockResult = await recordFailedLogin(user.id);
+    const auditResult = await writeAuditLog({
+      user: { userId: user.id, email: user.email, role: user.role },
+      action: "login_failed",
+      resource: `user:${user.id}`,
+      critical: true,
+    });
+    if (!auditResult.ok) {
+      return internalError("Failed to record login failure in audit log.");
+    }
+    if (lockResult.locked) {
+      return NextResponse.json(
+        {
+          error: "account_locked",
+          message: `Account locked due to too many failed login attempts. Try again in ${Math.ceil(lockResult.retryAfterSeconds / 60)} minute(s).`,
+          retryAfter: lockResult.retryAfterSeconds,
+        },
+        {
+          status: 423,
+          headers: { "Retry-After": String(lockResult.retryAfterSeconds) },
+        }
+      );
+    }
+    return invalidCredentials();
+  }
+
+  // Password is correct — NOW check account status. These checks reveal
+  // real information, but only to someone who already knows the password.
   if (user.status === "suspended") {
+    // BE-004: Log the attempt (forensic value) but still return a generic
+    // message to prevent the password-holder from knowing WHY they can't
+    // log in via error-code enumeration. Send the real reason via email.
+    await writeAuditLog({
+      user: { userId: user.id, email: user.email, role: user.role },
+      action: "login_denied_suspended",
+      resource: `user:${user.id}`,
+      critical: true,
+    });
     return NextResponse.json(
-      { error: "account_suspended", message: "Account suspended. Contact your administrator." },
-      { status: 403 }
+      { error: "invalid_credentials", message: "Invalid email or password" },
+      { status: 401 }
     );
   }
 
@@ -107,10 +159,9 @@ export async function POST(req: NextRequest) {
   // and never checked the flag — an attacker could register with someone
   // else's email and immediately use the platform as that person.
   //
-  // Now registration sends a real verification email (via EMAIL_SERVICE_URL
-  // in prod, stderr in dev) and the user MUST click the link before they
-  // can log in. We return 403 with a clear message so the UI can prompt
-  // the user to check their inbox or request a new link.
+  // BE-004: Password verified first — now we can safely reveal the reason.
+  // The caller has proven ownership of the account by providing the
+  // correct password, so revealing "email_not_verified" is safe.
   if (!user.emailVerified) {
     return NextResponse.json(
       {
@@ -137,37 +188,6 @@ export async function POST(req: NextRequest) {
         headers: { "Retry-After": String(lockCheck.retryAfterSeconds) },
       }
     );
-  }
-
-  const ok = await verifyPassword(password, user.passwordHash);
-  if (!ok) {
-    // FE-056: recordIpAttempt was already called up-front at line 49.
-    // FE-009: Increment failedLoginCount; auto-lock if threshold hit.
-    const lockResult = await recordFailedLogin(user.id);
-    // FE-034: login_failed is security-critical — must be auditable.
-    const auditResult = await writeAuditLog({
-      user: { userId: user.id, email: user.email, role: user.role },
-      action: "login_failed",
-      resource: `user:${user.id}`,
-      critical: true,
-    });
-    if (!auditResult.ok) {
-      return internalError("Failed to record login failure in audit log.");
-    }
-    if (lockResult.locked) {
-      return NextResponse.json(
-        {
-          error: "account_locked",
-          message: `Account locked due to too many failed login attempts. Try again in ${Math.ceil(lockResult.retryAfterSeconds / 60)} minute(s).`,
-          retryAfter: lockResult.retryAfterSeconds,
-        },
-        {
-          status: 423,
-          headers: { "Retry-After": String(lockResult.retryAfterSeconds) },
-        }
-      );
-    }
-    return invalidCredentials();
   }
 
   // FE-004 ROOT FIX: 2FA challenge gate. If the user has mfaEnabled=true,

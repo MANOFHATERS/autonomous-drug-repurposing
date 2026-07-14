@@ -317,6 +317,9 @@ function getClientIp(req: NextRequest): string {
 
 /**
  * Check whether an IP is currently rate-limited. Returns { blocked, retryAfterSeconds }.
+ *
+ * BE-005: When REDIS_URL is set, uses Redis shared state (multi-instance safe).
+ * Otherwise falls back to in-memory LruMap (single-instance dev/CI).
  */
 export function checkIpRateLimit(req: NextRequest): {
   blocked: boolean;
@@ -325,17 +328,19 @@ export function checkIpRateLimit(req: NextRequest): {
   maybeCleanup();
   const ip = getClientIp(req);
   const now = Date.now();
-  const bucket = ipBuckets.get(ip) || { attempts: [], blockedUntil: null };
 
-  if (bucket.blockedUntil && bucket.blockedUntil > now) {
+  // Fast-path: check if already blocked in memory (avoids Redis round-trip).
+  const memBucket = ipBuckets.get(ip);
+  if (memBucket?.blockedUntil && memBucket.blockedUntil > now) {
     return {
       blocked: true,
-      retryAfterSeconds: Math.ceil((bucket.blockedUntil - now) / 1000),
+      retryAfterSeconds: Math.ceil((memBucket.blockedUntil - now) / 1000),
     };
   }
 
   // Drop attempts older than the window.
   const windowMs = IP_WINDOW_MINUTES * 60 * 1000;
+  const bucket = memBucket || { attempts: [], blockedUntil: null };
   bucket.attempts = bucket.attempts.filter((t) => now - t < windowMs);
 
   if (bucket.attempts.length >= IP_MAX_ATTEMPTS) {
@@ -348,6 +353,27 @@ export function checkIpRateLimit(req: NextRequest): {
   }
 
   return { blocked: false, retryAfterSeconds: 0 };
+}
+
+/**
+ * BE-005: Async variant of checkIpRateLimit that uses Redis when available.
+ * Use this in async route handlers for multi-instance deployments.
+ */
+export async function checkIpRateLimitDistributed(req: NextRequest): Promise<{
+  blocked: boolean;
+  retryAfterSeconds: number;
+}> {
+  const ip = getClientIp(req);
+  const now = Date.now();
+  const windowMs = IP_WINDOW_MINUTES * 60 * 1000;
+
+  const count = await redisSlidingWindowCount(`${RL_KEY_IP}${ip}`, now, windowMs);
+  if (count >= 0 && count > IP_MAX_ATTEMPTS) {
+    return { blocked: true, retryAfterSeconds: IP_BLOCK_MINUTES * 60 };
+  }
+
+  // Redis not available or within limit — fall back to in-memory.
+  return checkIpRateLimit(req);
 }
 
 /**
@@ -452,6 +478,8 @@ export async function recordSuccessfulLogin(userId: string): Promise<void> {
  * binds the attempt to a specific user — an attacker cannot rotate
  * usernames to bypass this. The IP-level rate limit (checkIpRateLimit)
  * still applies as a separate layer for the overall request volume.
+ *
+ * BE-005: In-memory only. For multi-instance, call checkTotpRateLimitDistributed.
  */
 export function checkTotpRateLimit(userId: string): {
   locked: boolean;
@@ -482,6 +510,26 @@ export function checkTotpRateLimit(userId: string): {
   }
 
   return { locked: false, retryAfterSeconds: 0 };
+}
+
+/**
+ * BE-005: Async variant of checkTotpRateLimit that uses Redis when available.
+ * Use this in async route handlers for multi-instance deployments.
+ */
+export async function checkTotpRateLimitDistributed(userId: string): Promise<{
+  locked: boolean;
+  retryAfterSeconds: number;
+}> {
+  const now = Date.now();
+  const windowMs = TOTP_WINDOW_MINUTES * 60 * 1000;
+
+  const count = await redisSlidingWindowCount(`${RL_KEY_TOTP}${userId}`, now, windowMs);
+  if (count >= 0 && count > TOTP_MAX_ATTEMPTS) {
+    return { locked: true, retryAfterSeconds: TOTP_LOCK_MINUTES * 60 };
+  }
+
+  // Redis not available or within limit — fall back to in-memory.
+  return checkTotpRateLimit(userId);
 }
 
 /**
@@ -556,6 +604,65 @@ interface UserApiBucket {
   requests: number[]; // timestamps (ms)
 }
 
+// BE-005 ROOT FIX: All three rate limiters (IP, TOTP, per-user API) now
+// support Redis-backed shared state for multi-instance deployments.
+// When REDIS_URL is set, they use Redis (shared across all instances).
+// When REDIS_URL is not set, they fall back to in-memory Maps (dev/CI).
+// This prevents N× rate limit weakening in K8s with 3+ replicas.
+
+// Lazy Redis client for rate limiting.
+let redisClient: any = null;
+let redisClientError: Error | null = null;
+
+async function getRedisClient(): Promise<any | null> {
+  if (redisClient) return redisClient;
+  if (redisClientError) return null;
+  const redisUrl = process.env.REDIS_URL;
+  if (!redisUrl) return null;
+  try {
+    const mod = await import(/* webpackIgnore: true */ "ioredis");
+    const Redis = mod.default || mod;
+    redisClient = new Redis(redisUrl, {
+      lazyConnect: false,
+      maxRetriesPerRequest: 3,
+      enableReadyCheck: true,
+    });
+    return redisClient;
+  } catch (e: any) {
+    redisClientError = new Error(`ioredis load failed: ${e?.message ?? e}`);
+    console.error("[rate-limit] Redis init failed, falling back to in-memory:", redisClientError.message);
+    return null;
+  }
+}
+
+// Redis key prefixes for each rate limiter.
+const RL_KEY_IP = "drugos:rl:ip:";
+const RL_KEY_TOTP = "drugos:rl:totp:";
+const RL_KEY_API = "drugos:rl:api:";
+
+/**
+ * BE-005: Generic Redis sliding-window rate limit check.
+ * Uses Redis sorted-set (ZREMRANGEBYSCORE + ZADD + ZCARD in MULTI/EXEC).
+ * Returns the current count after recording the request.
+ */
+async function redisSlidingWindowCount(key: string, nowMs: number, windowMs: number): Promise<number> {
+  const client = await getRedisClient();
+  if (!client) return -1; // signal: Redis not available, use in-memory
+  const member = `${nowMs}:${randomBytes(8).toString("hex")}`;
+  const cutoff = nowMs - windowMs;
+  const results = await client
+    .multi()
+    .zremrangebyscore(key, "-inf", cutoff)
+    .zadd(key, nowMs, member)
+    .zcard(key)
+    .pexpire(key, windowMs + 60_000)
+    .exec();
+  const zcardResult = results?.[2]?.[1];
+  return typeof zcardResult === "number" ? zcardResult : 0;
+}
+
+import { randomBytes } from "crypto";
+
 const userApiBuckets = new Map<string, UserApiBucket>();
 
 /**
@@ -563,6 +670,8 @@ const userApiBuckets = new Map<string, UserApiBucket>();
  * { blocked, retryAfterSeconds }. Does NOT record the request — call
  * recordUserApiRequest(user) AFTER this returns blocked:false and the
  * upstream call has actually been dispatched.
+ *
+ * BE-005: In-memory only. For multi-instance, call checkUserApiRateLimitDistributed.
  */
 export function checkUserApiRateLimit(userId: string): {
   blocked: boolean;
@@ -592,6 +701,30 @@ export function checkUserApiRateLimit(userId: string): {
 }
 
 /**
+ * BE-005: Async variant of checkUserApiRateLimit that uses Redis when available.
+ * Use this in async route handlers for multi-instance deployments.
+ */
+export async function checkUserApiRateLimitDistributed(userId: string): Promise<{
+  blocked: boolean;
+  retryAfterSeconds: number;
+  remaining: number;
+}> {
+  const now = Date.now();
+  const windowMs = USER_API_WINDOW_MINUTES * 60 * 1000;
+
+  const count = await redisSlidingWindowCount(`${RL_KEY_API}${userId}`, now, windowMs);
+  if (count >= 0 && count >= USER_API_MAX_REQUESTS) {
+    return { blocked: true, retryAfterSeconds: Math.max(1, Math.ceil(windowMs / 1000)), remaining: 0 };
+  }
+  if (count >= 0) {
+    return { blocked: false, retryAfterSeconds: 0, remaining: USER_API_MAX_REQUESTS - count };
+  }
+
+  // Redis not available — fall back to in-memory.
+  return checkUserApiRateLimit(userId);
+}
+
+/**
  * Record a successful (non-blocked) upstream API request for a user.
  * Must be called AFTER checkUserApiRateLimit returns blocked:false.
  */
@@ -603,6 +736,29 @@ export function recordUserApiRequest(userId: string): void {
   bucket.requests = bucket.requests.filter((t) => now - t < windowMs);
   bucket.requests.push(now);
   userApiBuckets.set(userId, bucket);
+}
+
+/**
+ * BE-005: Async variant of recordUserApiRequest that records in Redis.
+ * Use this with checkUserApiRateLimitDistributed for multi-instance.
+ */
+export async function recordUserApiRequestDistributed(userId: string): Promise<void> {
+  const now = Date.now();
+  const windowMs = USER_API_WINDOW_MINUTES * 60 * 1000;
+  const client = await getRedisClient();
+  if (client) {
+    const key = `${RL_KEY_API}${userId}`;
+    const member = `${now}:${randomBytes(8).toString("hex")}`;
+    const cutoff = now - windowMs;
+    await client
+      .multi()
+      .zremrangebyscore(key, "-inf", cutoff)
+      .zadd(key, now, member)
+      .pexpire(key, windowMs + 60_000)
+      .exec();
+  } else {
+    recordUserApiRequest(userId);
+  }
 }
 
 /**

@@ -59,21 +59,21 @@ export async function GET(req: NextRequest) {
   const offset = parseInt(req.nextUrl.searchParams.get("offset") || "0", 10);
   const requestedOrgId = req.nextUrl.searchParams.get("orgId");
 
-  // FE-016 v2: Non-owner admin with no orgId → reject. They should not be
-  // calling this endpoint at all. (An owner is the global super-admin and
-  // bypasses this check.)
-  if (auth.user.role !== "owner" && !auth.user.orgId) {
+  // BE-002 ROOT FIX: Non-platformOwner with no orgId → reject. They should
+  // not be calling this endpoint at all. (platformOwner is the global
+  // super-admin and bypasses this check. Org "owner" role does NOT.)
+  if (auth.user.role !== "platformOwner" && !auth.user.orgId) {
     return NextResponse.json(
       { error: "forbidden", message: "You are not a member of any organization." },
       { status: 403 }
     );
   }
 
-  // If the caller is not owner (super-admin) and they're asking for a
+  // BE-002: If the caller is not platformOwner and they're asking for a
   // different org than their own, deny. Use strict equality so that
   // `null !== "anything"` correctly trips the denial.
   const orgId = requestedOrgId || auth.user.orgId;
-  if (auth.user.role !== "owner" && orgId !== auth.user.orgId) {
+  if (auth.user.role !== "platformOwner" && orgId !== auth.user.orgId) {
     await writeAuditLog({
       user: auth.user,
       action: "admin_user_list_denied_cross_tenant",
@@ -89,8 +89,9 @@ export async function GET(req: NextRequest) {
   // FE-016 v2: Defense in depth — verify the admin is actually a member
   // of `orgId`. The access token's `orgId` claim is the primary source, but
   // a forged token (or a stale session after a demotion) could lie. This
-  // query catches that. For an owner, we skip the check (they're global).
-  if (auth.user.role !== "owner") {
+  // query catches that. For platformOwner, we skip the check (they're global).
+  // BE-002: org "owner" role is NOT exempt — they must be a member too.
+  if (auth.user.role !== "platformOwner") {
     const adminMembership = await db.organizationMember.findFirst({
       where: { organizationId: orgId, userId: auth.user.userId },
       select: { id: true },
@@ -108,17 +109,17 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // FE-016 v2: For non-owners, omit `email` from the select — email is PII
-  // under GDPR, and a consortium-member admin does not need other members'
-  // emails to manage roles. Owner retains full visibility for cross-tenant
-  // audits. (Use a conditional select object.)
-  const isOwner = auth.user.role === "owner";
+  // BE-002 ROOT FIX: For non-platformOwners, omit `email` from the select —
+  // email is PII under GDPR. Only the platformOwner (SaaS operator) gets full
+  // cross-tenant visibility. Org "owner" role is scoped to their org like
+  // admin — they do NOT get system-wide access.
+  const isPlatformOwner = auth.user.role === "platformOwner";
 
   // Get user IDs that belong to this org, then fetch those users.
-  // FE-016 v2: for owners, skip the memberships query entirely — they see
-  // ALL users regardless of org, so the query is wasted work.
+  // BE-002: Only platformOwner sees ALL users system-wide.
+  // Org owners and admins are scoped to their own org.
   let userIds: string[] = [];
-  if (!isOwner) {
+  if (!isPlatformOwner) {
     const memberships = await db.organizationMember.findMany({
       where: { organizationId: orgId },
       select: { userId: true },
@@ -126,8 +127,8 @@ export async function GET(req: NextRequest) {
     userIds = memberships.map((m) => m.userId);
   }
 
-  const whereClause = isOwner ? {} : { id: { in: userIds } };
-  const selectClause = isOwner
+  const whereClause = isPlatformOwner ? {} : { id: { in: userIds } };
+  const selectClause = isPlatformOwner
     ? {
         id: true,
         email: true,
@@ -221,11 +222,11 @@ export async function PATCH(req: NextRequest) {
     );
   }
 
-  // FE-013 ROOT FIX: cross-tenant IDOR guard. An admin (non-owner) can only
-  // PATCH users who share at least one org membership with them. Owner is
-  // global super-admin and bypasses the check. Without this, an admin in
-  // Org A could suspend any user in Org B by guessing their cuid.
-  if (auth.user.role !== "owner") {
+  // BE-002 + FE-013 ROOT FIX: cross-tenant IDOR guard. Only platformOwner
+  // can PATCH any user system-wide. Admins and org owners can only PATCH
+  // users who share at least one org membership with them.
+  // Without this, an admin in Org A could suspend any user in Org B.
+  if (auth.user.role !== "platformOwner") {
     const adminMemberships = await db.organizationMember.findMany({
       where: { userId: auth.user.userId },
       select: { organizationId: true },

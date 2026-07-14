@@ -398,6 +398,27 @@ model AuditLog {
   @@index([organizationId])
 }
 
+// BE-003 ROOT FIX: Model the dead-letter queue for failed audit log writes.
+// Previously the code used $executeRaw to CREATE TABLE IF NOT EXISTS which:
+//   1. Ran DDL on EVERY non-critical audit failure (performance drag)
+//   2. Created a table invisible to Prisma (unqueryable from app layer)
+//   3. Had a catch block that silently swallowed the fallback failure too
+// Modeling it in Prisma makes it queryable, type-safe, and eliminates raw DDL.
+model AuditLogDeadLetter {
+  id         String   @id @default(cuid())
+  action     String
+  resource   String?
+  userId     String?
+  actorName  String?
+  metadata   String   @default("{}") // JSON string
+  error      String   // the error message from the primary audit log write failure
+  createdAt  DateTime @default(now())
+
+  @@index([action])
+  @@index([createdAt])
+  @@index([userId])
+}
+
 // ---------------------------------------------------------------------------
 // WEBHOOKS
 // ---------------------------------------------------------------------------

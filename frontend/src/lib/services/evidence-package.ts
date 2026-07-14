@@ -30,6 +30,16 @@ export interface EvidencePackage {
   };
   safety: DrugSafetySummary | null;
   notes: string;
+  /**
+   * BE-018: Per-service status indicating which lookups succeeded vs. failed.
+   * The UI displays warnings for failed sections so researchers know
+   * "0 PubMed articles" means "PubMed was down" not "no literature exists".
+   */
+  serviceStatus: {
+    literature: "ok" | "failed";
+    clinicalTrials: "ok" | "failed";
+    safety: "ok" | "failed";
+  };
 }
 
 export interface BuildEvidencePackageInput {
@@ -62,6 +72,29 @@ export async function buildEvidencePackage(input: BuildEvidencePackageInput): Pr
     getDrugSafetySummary(drug),
   ]);
 
+  // BE-018 ROOT FIX: Track per-service status so the UI can distinguish
+  // "0 results because service was down" from "0 results because no data
+  // exists in the database". Previously all failures were hidden — a
+  // pharma partner receiving 0 clinical trials might believe no trials
+  // are registered when actually CT.gov was temporarily down.
+  const serviceStatus = {
+    literature: literature.status === "fulfilled" ? ("ok" as const) : ("failed" as const),
+    clinicalTrials: clinicalTrials.status === "fulfilled" ? ("ok" as const) : ("failed" as const),
+    safety: safety.status === "fulfilled" ? ("ok" as const) : ("failed" as const),
+  };
+
+  // BE-018: Build explicit warnings for any failed services.
+  const failedServices: string[] = [];
+  if (serviceStatus.literature === "failed") failedServices.push("PubMed");
+  if (serviceStatus.clinicalTrials === "failed") failedServices.push("ClinicalTrials.gov");
+  if (serviceStatus.safety === "failed") failedServices.push("openFDA");
+
+  const warningNote = failedServices.length > 0
+    ? ` WARNING: The following services were unreachable when this package was generated: ${failedServices.join(", ")}. ` +
+      `A count of 0 for these sections may indicate a service outage rather than absence of data. ` +
+      `Please retry package generation or check the services directly.`
+    : "";
+
   return {
     drug,
     disease,
@@ -78,9 +111,11 @@ export async function buildEvidencePackage(input: BuildEvidencePackageInput): Pr
     notes:
       input.notes ||
       `Evidence package assembled for ${drug} as a candidate for ${disease}. ` +
-        "All data is sourced from authoritative public databases (PubMed, " +
+        "Data is sourced from authoritative public databases (PubMed, " +
         "ClinicalTrials.gov, openFDA). This package does NOT contain any " +
-        "model predictions — those are owned by the standalone RL agent.",
+        "model predictions — those are owned by the standalone RL agent." +
+        warningNote,
+    serviceStatus,
   };
 }
 

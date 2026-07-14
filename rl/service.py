@@ -318,10 +318,13 @@ def _rank_impl(drug: Optional[str], disease: Optional[str], limit: int) -> Dict[
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be in [1, 500]")
 
-    # Try checkpoint first (production path).
+    # BE-013 ROOT FIX: Compute total (count after filtering, BEFORE
+    # pagination) and return it. The frontend uses total for "Showing
+    # X–Y of Z" and pagination controls. `count` is the page length.
     checkpoint_path = os.environ.get("RL_CHECKPOINT_PATH")
     if checkpoint_path and Path(checkpoint_path).exists():
         candidates = _load_candidates_from_checkpoint(checkpoint_path, drug, disease, limit)
+        total_filtered = len(candidates)  # checkpoint path doesn't paginate
         if candidates:
             return {
                 "candidates": candidates,
@@ -329,6 +332,7 @@ def _rank_impl(drug: Optional[str], disease: Optional[str], limit: int) -> Dict[
                 "modelVersion": "rl_drug_ranker.py-v105",
                 "generatedAt": __import__("datetime").datetime.utcnow().isoformat(),
                 "count": len(candidates),
+                "total": total_filtered,
                 "backend": "checkpoint",
             }
 
@@ -340,15 +344,21 @@ def _rank_impl(drug: Optional[str], disease: Optional[str], limit: int) -> Dict[
             "source": "none",
             "generatedAt": __import__("datetime").datetime.utcnow().isoformat(),
             "count": 0,
+            "total": 0,
             "note": "No RL output yet. Run `python run_4phase.py` to generate top_candidates_*.csv.",
         }
-    candidates = _load_candidates_from_csv(csv_path, drug, disease, limit)
+    # Load all matching candidates (no limit) to get the true total,
+    # then slice. BE-013: total must be count AFTER filtering.
+    all_candidates = _load_candidates_from_csv(csv_path, drug, disease, limit=500)
+    total_filtered = len(all_candidates)
+    candidates = all_candidates[:limit]
     return {
         "candidates": candidates,
         "source": "rl_service",
         "modelVersion": "rl_drug_ranker.py-v105",
         "generatedAt": __import__("datetime").datetime.utcnow().isoformat(),
         "count": len(candidates),
+        "total": total_filtered,
         "csvPath": str(csv_path),
         "backend": "csv",
     }

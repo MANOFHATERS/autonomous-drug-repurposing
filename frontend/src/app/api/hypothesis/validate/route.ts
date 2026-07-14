@@ -2,8 +2,29 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, requireRole, internalError, badRequest, writeAuditLog } from "@/lib/api-helpers";
 import { spawn } from "child_process";
 import path from "path";
+import nodeFs from "fs";
 import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
+
+/**
+ * BE-009 ROOT FIX: Resolve the repo root correctly, not via process.cwd().
+ * When Next.js runs from frontend/, process.cwd() returns frontend/ — but
+ * scripts/ lives at <repo_root>/scripts/. We detect by walking up.
+ */
+function resolveRepoRoot(): string {
+  const candidates = [
+    process.cwd(),
+    path.resolve(process.cwd(), ".."),
+    path.resolve(__dirname, "..", "..", "..", ".."),
+    path.resolve(__dirname, "..", "..", "..", "..", ".."),
+  ];
+  for (const candidate of candidates) {
+    if (nodeFs.existsSync(path.resolve(candidate, "scripts", "hypothesis_writeback.py"))) {
+      return candidate;
+    }
+  }
+  return path.resolve(process.cwd(), "..");
+}
 
 /**
  * POST /api/hypothesis/validate
@@ -130,11 +151,21 @@ async function runWriteback(payload: Record<string, unknown>): Promise<{
   const reqId = randomUUID();
   const reqPath = `/tmp/wb_req_${reqId}.json`;
   const respPath = `/tmp/wb_resp_${reqId}.json`;
-  const repoRoot = process.cwd();
+  // BE-009 ROOT FIX: Resolve repo root correctly for the documented
+  // deployment (cd frontend && npm run dev). process.cwd() returns
+  // frontend/ but scripts/ lives one level up at repo root.
+  const repoRoot = resolveRepoRoot();
   const scriptPath = path.resolve(repoRoot, "scripts", "hypothesis_writeback.py");
 
   try {
     await fs.writeFile(reqPath, JSON.stringify(payload));
+    // BE-009: Validate script exists before spawning (clearer error than exit 1).
+    if (!nodeFs.existsSync(scriptPath)) {
+      throw new Error(
+        `hypothesis_writeback.py not found at ${scriptPath} (cwd=${process.cwd()}, repoRoot=${repoRoot}). ` +
+        "Ensure the scripts/ directory is at the repo root."
+      );
+    }
     await new Promise<void>((resolve, reject) => {
       const child = spawn("python3", [scriptPath, reqPath, respPath], {
         cwd: repoRoot,

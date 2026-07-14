@@ -171,18 +171,19 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // Build a structured query for the KG service. We do NOT let the
-    // caller send arbitrary Cypher via GET (that would be a Cypher-
-    // injection vector). Instead, GET takes drug/disease/limit params
-    // and the KG service translates them to a safe parameterized query.
-    const upstreamBody: Record<string, unknown> = { limit };
-    if (drug) upstreamBody.drug = drug;
-    if (disease) upstreamBody.disease = disease;
+    // BE-011 ROOT FIX: The Python phase2/service.py exposes the subgraph
+    // exploration endpoint at GET /kg/explore (with query params), NOT
+    // POST /query. The previous code sent a POST body to /query which
+    // returned 404. Now we use GET with query params — matching the
+    // Python contract exactly.
+    const exploreUrl = new URL(`${kgUrl.replace(/\/$/, "")}/kg/explore`);
+    exploreUrl.searchParams.set("limit", String(limit));
+    if (drug) exploreUrl.searchParams.set("drug", drug);
+    if (disease) exploreUrl.searchParams.set("disease", disease);
 
-    const upstream = await fetch(`${kgUrl.replace(/\/$/, "")}/query`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(upstreamBody),
+    const upstream = await fetch(exploreUrl.toString(), {
+      method: "GET",
+      headers: { Accept: "application/json" },
     });
     if (!upstream.ok) {
       const text = await upstream.text();
