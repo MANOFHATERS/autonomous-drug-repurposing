@@ -279,7 +279,11 @@ export async function POST(req: NextRequest) {
   // The schema guarantees cypher is a non-empty string — no extra check needed.
 
   // FE-008 ROOT FIX layer 2: CYPHER WHITELIST.
-  const validation = validateReadOnlyCypher(body.cypher);
+  // FE-016 ROOT FIX (Team Member 15, v108 — pre-existing build blocker):
+  // body.cypher is typed as `string | undefined` but the KnowledgeGraphBody
+  // zod schema requires it (non-empty string). After validateBody returns
+  // ok, cypher is guaranteed present. Use `!` to assert non-null.
+  const validation = validateReadOnlyCypher(body.cypher!);
   if (!validation.ok) {
     await writeAuditLog({
       user: auth.user,
@@ -287,7 +291,7 @@ export async function POST(req: NextRequest) {
       resource: "kg:custom_cypher",
       metadata: {
         reason: validation.reason,
-        cypherPreview: body.cypher.slice(0, 120),
+        cypherPreview: body.cypher!.slice(0, 120),
       },
     });
     return NextResponse.json(
@@ -350,7 +354,7 @@ export async function POST(req: NextRequest) {
       action: "kg_cypher",
       resource: "kg:custom_cypher",
       metadata: {
-        cypherPreview: body.cypher.slice(0, 80),
+        cypherPreview: body.cypher!.slice(0, 80),
         recordCount:
           (data?.records?.length ?? data?.rows?.length ?? 0),
       },

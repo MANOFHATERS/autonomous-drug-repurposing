@@ -113,7 +113,14 @@ export async function POST(req: NextRequest) {
   if (!userRecord) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-  const passwordOk = await verifyPassword(body.currentPassword, userRecord.passwordHash);
+  // FE-016 ROOT FIX (Team Member 15, v108 — pre-existing build blocker):
+  // `body.currentPassword` is typed as `string | undefined` but the
+  // BillingSubscriptionBody zod schema at /lib/zod-schemas.ts:164 requires
+  // it (min 1 char). After `validateBody` returns ok, we know currentPassword
+  // is a non-empty string. Use `!` to assert non-null at the call site —
+  // semantically safe because the validator above already rejected missing
+  // passwords with 400.
+  const passwordOk = await verifyPassword(body.currentPassword!, userRecord.passwordHash);
   if (!passwordOk) {
     await writeAuditLog({
       user: auth.user,
