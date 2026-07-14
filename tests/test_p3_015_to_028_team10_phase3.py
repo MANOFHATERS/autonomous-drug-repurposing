@@ -399,24 +399,32 @@ def test_p3_025_safe_batchnorm_documented():
 
 
 # ---------------------------------------------------------------------------
-# P3-026: V1_AUC_THRESHOLD_DEMO must be 0.65 (raised from 0.55).
+# P3-026/P3-018: V1_AUC_THRESHOLD_DEMO must be 0.85 (P3-018 root fix).
+# The previous P3-026 fix raised it from 0.55 to 0.65, but the audit
+# explicitly says "Use 0.85 for ALL scales." P3-018 corrects this to 0.85.
 # ---------------------------------------------------------------------------
-def test_p3_026_demo_auc_threshold_is_0_65():
-    """V1_AUC_THRESHOLD_DEMO must be 0.65 (raised from 0.55 by P3-026)."""
+def test_p3_026_demo_auc_threshold_is_0_85():
+    """V1_AUC_THRESHOLD_DEMO must be 0.85 (P3-018: 0.85 for ALL scales).
+
+    The previous P3-026 fix raised the demo threshold from 0.55 to 0.65,
+    but the audit explicitly mandates: "Use 0.85 for ALL scales. If the
+    demo can't reach 0.85, document the gap and fix the model, not the
+    threshold." P3-018 corrects this — ALL scales now use 0.85.
+    """
     from graph_transformer.data import V1_AUC_THRESHOLD_DEMO, get_auc_threshold_for_scale
-    assert V1_AUC_THRESHOLD_DEMO == 0.65, (
-        f"P3-026 FAIL: V1_AUC_THRESHOLD_DEMO must be 0.65, got {V1_AUC_THRESHOLD_DEMO}"
+    assert V1_AUC_THRESHOLD_DEMO == 0.85, (
+        f"P3-018 FAIL: V1_AUC_THRESHOLD_DEMO must be 0.85, got {V1_AUC_THRESHOLD_DEMO}"
     )
-    # The scale-aware function must return 0.65 for small graphs.
-    assert get_auc_threshold_for_scale(50) == 0.65, (
-        "P3-026 FAIL: get_auc_threshold_for_scale(50) must return 0.65"
+    # The scale-aware function must return 0.85 for ALL scales (P3-018).
+    assert get_auc_threshold_for_scale(50) == 0.85, (
+        "P3-018 FAIL: get_auc_threshold_for_scale(50) must return 0.85"
     )
-    assert get_auc_threshold_for_scale(99) == 0.65, (
-        "P3-026 FAIL: get_auc_threshold_for_scale(99) must return 0.65"
+    assert get_auc_threshold_for_scale(99) == 0.85, (
+        "P3-018 FAIL: get_auc_threshold_for_scale(99) must return 0.85"
     )
     # Production threshold (0.85) must be unchanged.
     assert get_auc_threshold_for_scale(1000) == 0.85, (
-        "P3-026 FAIL: production threshold (1000+ drugs) must still be 0.85."
+        "P3-018 FAIL: production threshold (1000+ drugs) must still be 0.85."
     )
 
 
