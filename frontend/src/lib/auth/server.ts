@@ -280,7 +280,29 @@ export async function rotateRefreshToken(userId: string): Promise<{ refresh: str
   // locked, we revoke ALL their refresh tokens and throw — the caller
   // (consumeRefreshToken) returns null, and /api/auth/refresh returns 401
   // + clears cookies.
-  const user = await db.user.findUnique({ where: { id: userId } });
+  //
+  // BE-079 REAL ROOT FIX (v2): We now select `lastActiveOrgId` and pass it
+  // to signAccessToken. The prior code signed the refreshed access token
+  // with ONLY { userId, email, role } — NO orgId. So after the original
+  // 15-min access token expired, the refreshed one had orgId=undefined.
+  // Every org-scoped query (projects, hypotheses, billing, team) returned
+  // 403 because auth.user.orgId was undefined. This was a PRE-EXISTING
+  // bug that the prior BE-079 "fix" made more visible (users who switched
+  // orgs lost their orgId immediately on refresh) but never actually
+  // fixed. The fix persists lastActiveOrgId on the User row (see
+  // migration 20260714000001_be079_user_last_active_org_id) and reads it
+  // here so the refreshed access token carries the correct orgId.
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      status: true,
+      lockedUntil: true,
+      lastActiveOrgId: true,
+    },
+  });
   if (!user) throw new Error("User not found while rotating refresh token");
   if (user.status === "suspended") {
     // Revoke ALL refresh tokens for this user — they should not be able
@@ -298,7 +320,18 @@ export async function rotateRefreshToken(userId: string): Promise<{ refresh: str
 
   const { token, expiresAt } = issueRefreshToken();
   await db.refreshToken.create({ data: { userId, token, expiresAt } });
-  const access = signAccessToken({ userId: user.id, email: user.email, role: user.role });
+  // BE-079: Include lastActiveOrgId so the refreshed access token keeps
+  // the user's org context. If lastActiveOrgId is null (legacy user who
+  // hasn't logged in since the migration), orgId is undefined — the
+  // getAuthenticatedUser flow will force re-auth via the BE-062 org
+  // membership check (which only runs when orgId is truthy), and the
+  // next login will populate lastActiveOrgId.
+  const access = signAccessToken({
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+    orgId: user.lastActiveOrgId ?? undefined,
+  });
   return { refresh: token, access };
 }
 

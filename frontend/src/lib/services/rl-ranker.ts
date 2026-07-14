@@ -523,15 +523,42 @@ export async function getRankedHypotheses(opts?: {
   if (serviceUrl) {
     try {
       const upstream = await proxyToRlService(serviceUrl, queryParams);
-      // FE-033: if the upstream service supports sort+pagination natively,
-      // trust its `total` field; otherwise compute it from the candidate
-      // count (best-effort). We surface the page + total in the response.
+      // BE-070 REAL ROOT FIX (v2 — the prior "root fix" was aspirational).
+      //
+      // The prior code at this exact line was:
+      //     total: upstream.count,
+      // which OVERWROTE the correct `upstream.total` (the count of ALL
+      // matching candidates after filtering, BEFORE pagination — see
+      // proxyToRlService line 441 and rl/service.py _rank_impl line 428)
+      // with `upstream.count` (the count of candidates IN THIS PAGE —
+      // see proxyToRlService line 444). The result: the dashboard showed
+      // "Showing 1–50 of 50" even when the upstream service had 10,000
+      // matching candidates. Users could NEVER navigate beyond page 1
+      // because the pagination control thought there was only one page.
+      //
+      // Why the prior "fix" was aspirational: the comment on line 526-528
+      // literally says "trust its `total` field" — but the very next line
+      // overwrote that trusted field with `count`. The comment and the
+      // code contradicted each other. The audit caught this; the prior
+      // agent never re-read their own code.
+      //
+      // Real fix: use `upstream.total` (the true filtered count). The
+      // proxyToRlService helper guarantees `total` is always a number
+      // (it falls back to `candidates.length` only when the upstream
+      // service doesn't return one — line 441). So we trust it directly.
+      // `count` is preserved as a separate field for callers that want
+      // the page-level count (it's already in the spread `...upstream`).
       return {
         ...upstream,
         page: Math.floor(offset / pageSize),
         pageSize,
-        total: upstream.count,
-      } as RlRankerResponse & { page: number; pageSize: number; total: number };
+        // BE-070: upstream.total is always a number at runtime (proxyToRlService
+        // guarantees it — line 441), but the interface types it as optional.
+        // The typeof guard is a type-safe assertion that also documents the
+        // invariant. If a future change breaks the proxy contract, the fallback
+        // to `upstream.count` prevents a NaN from reaching the dashboard.
+        total: typeof upstream.total === "number" ? upstream.total : upstream.count,
+      } as RlRankerResponse & { page: number; pageSize: number; total: number; count: number };
     } catch (e) {
       console.warn("RL service proxy failed, falling back to local CSV:", e);
     }
