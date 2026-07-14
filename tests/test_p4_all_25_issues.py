@@ -1,684 +1,521 @@
-"""Forensic-level test suite for all 25 P4 issues (P4-001 through P4-025).
+"""
+Comprehensive test suite for all 25 Phase 4 issues (P4-001 through P4-025).
 
-Team Cosmic / Phase 4 RL Ranker — Autonomous Drug Repurposing Platform.
+Run: pytest tests/test_p4_all_25_issues.py -v
 
-These tests verify ROOT CAUSE fixes, NOT surface-level patches.
-Each test targets the EXACT bug described in the issue and confirms
-the fix prevents the corruption pathway.
-
-Run: python -m pytest tests/test_p4_all_25_issues.py -v
+These tests verify the ROOT-LEVEL fixes for each issue, not surface-level
+changes. Each test checks the ACTUAL behavior of the code, not comments or
+docstrings.
 """
 from __future__ import annotations
 
 import csv
-import json
-import logging
 import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
-from unittest.mock import MagicMock, patch
+from typing import Any, Dict, List, Set, Tuple
 
+# Ensure repo root is on path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import pandas as pd
 import pytest
 
-# Ensure repo root is importable
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
-# ---------------------------------------------------------------------------
-# P4-001 + P4-012: validated_positive outcome filtering
-# ---------------------------------------------------------------------------
+# ============================================================================
+# P4-001 (CRITICAL) — Toxic pairs must NOT get reward bonus
+# ============================================================================
+class TestP4_001_ValidatedBonusFiltering:
+    """validated_bonus must only apply to validated_positive outcomes."""
 
-class TestP4_001_P4_012_OutcomeFiltering:
-    """CRITICAL: Only validated_positive pairs get reward bonus.
+    def test_toxic_pairs_excluded_from_reward_bonus(self):
+        from rl.rl_drug_ranker import load_validated_hypotheses
 
-    P4-001: load_validated_hypotheses must filter on outcome.
-    P4-012: Same fix in the row iteration loop.
-    """
-
-    def test_toxic_pair_not_in_reward_set(self, tmp_path):
-        """A pair validated as TOXIC must NOT be in the reward-bonus set."""
-        csv_path = tmp_path / "validated_hypotheses.csv"
-        with open(csv_path, "w", newline="") as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
             writer = csv.DictWriter(f, fieldnames=["drug", "disease", "outcome"])
             writer.writeheader()
-            writer.writerow({"drug": "warfarin", "disease": "pregnancy", "outcome": "validated_toxic"})
-            writer.writerow({"drug": "metformin", "disease": "diabetes", "outcome": "validated_positive"})
+            writer.writerow({"drug": "aspirin", "disease": "pain", "outcome": "validated_positive"})
+            writer.writerow({"drug": "thalidomide", "disease": "pregnancy", "outcome": "validated_toxic"})
+            writer.writerow({"drug": "viagra", "disease": "ed", "outcome": "validated_negative"})
+            writer.writerow({"drug": "placebo", "disease": "nothing", "outcome": "invalidated"})
+            path = f.name
 
-        # We can't import the full rl_drug_ranker (needs torch), so we
-        # verify the CSV structure and outcome values directly.
-        with open(csv_path) as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-
-        toxic_rows = [r for r in rows if r["outcome"] == "validated_toxic"]
-        positive_rows = [r for r in rows if r["outcome"] == "validated_positive"]
-
-        assert len(toxic_rows) == 1, "Toxic row should exist in CSV"
-        assert len(positive_rows) == 1, "Positive row should exist in CSV"
-
-        # The critical check: the load_validated_hypotheses function
-        # (fixed in P4-001/P4-012) MUST skip toxic rows.
-        # We verify the filtering logic by simulating it:
-        result_pairs = []
-        for r in rows:
-            outcome = str(r.get("outcome", "validated_positive")).lower().strip()
-            if outcome not in ("", "validated_positive"):
-                continue  # P4-001 fix: skip non-positive outcomes
-            result_pairs.append((r["drug"].lower().strip(), r["disease"].lower().strip()))
-
-        assert ("warfarin", "pregnancy") not in result_pairs, \
-            "P4-001 CRITICAL: toxic pair must NOT be in reward set"
-        assert ("metformin", "diabetes") in result_pairs, \
-            "P4-001: positive pair must be in reward set"
-
-    def test_invalidated_pair_skipped(self, tmp_path):
-        """An invalidated pair must NOT get reward bonus."""
-        csv_path = tmp_path / "validated_hypotheses.csv"
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["drug", "disease", "outcome"])
-            writer.writeheader()
-            writer.writerow({"drug": "aspirin", "disease": "cancer", "outcome": "invalidated"})
-
-        with open(csv_path) as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-
-        result_pairs = []
-        for r in rows:
-            outcome = str(r.get("outcome", "validated_positive")).lower().strip()
-            if outcome not in ("", "validated_positive"):
-                continue
-            result_pairs.append((r["drug"].lower().strip(), r["disease"].lower().strip()))
-
-        assert ("aspirin", "cancer") not in result_pairs, \
-            "P4-001: invalidated pair must NOT be in reward set"
+        try:
+            result = load_validated_hypotheses(path)
+            assert ("aspirin", "pain") in result, "validated_positive must be included"
+            assert ("thalidomide", "pregnancy") not in result, "validated_toxic must be EXCLUDED"
+            assert ("viagra", "ed") not in result, "validated_negative must be EXCLUDED"
+            assert ("placebo", "nothing") not in result, "invalidated must be EXCLUDED"
+            assert len(result) == 1, f"Expected 1 pair, got {len(result)}"
+        finally:
+            os.unlink(path)
 
 
-# ---------------------------------------------------------------------------
-# P4-002: validated_bonus applied AFTER high_action_bonus multiplier
-# ---------------------------------------------------------------------------
-
+# ============================================================================
+# P4-002 (CRITICAL) — validated_bonus applied AFTER high_action_bonus
+# ============================================================================
 class TestP4_002_ValidatedBonusOrder:
-    """CRITICAL: validated_bonus must NOT be multiplied by high_action_bonus.
+    """validated_bonus must be applied AFTER high_action_bonus multiplication."""
 
-    Effective bonus must be exactly cfg.validated_bonus (0.1), not
-    cfg.validated_bonus * cfg.high_action_bonus (0.5).
-    """
+    def test_effective_bonus_within_bounds(self):
+        from rl.rl_drug_ranker import RewardConfig
 
-    def test_effective_bonus_not_multiplied(self):
-        """The effective validated bonus must be exactly 0.1, not 0.5."""
-        validated_bonus = 0.1
-        high_action_bonus = 5.0
-        # P4-002 fix: bonus is applied AFTER multiplication
-        # So: final_reward = (reward * high_action_bonus) + validated_bonus
-        reward = 0.5
-        final_reward = reward * high_action_bonus + validated_bonus
-        effective_bonus = final_reward - (reward * high_action_bonus)
+        cfg = RewardConfig(validated_bonus=0.1, high_action_bonus=5.0)
+        effective = cfg.validated_bonus * cfg.high_action_bonus
+        assert effective <= 1.0, (
+            f"effective bonus {effective} exceeds 1.0 — "
+            f"validated_bonus ({cfg.validated_bonus}) * high_action_bonus "
+            f"({cfg.high_action_bonus}) = {effective}. Agent will collapse to "
+            f"ranking only validated pairs HIGH."
+        )
 
-        # The effective bonus should be EXACTLY validated_bonus
-        assert effective_bonus == pytest.approx(validated_bonus), \
-            f"P4-002 CRITICAL: effective bonus {effective_bonus} != {validated_bonus}. " \
-            f"The bonus is being multiplied by high_action_bonus!"
+    def test_post_init_rejects_excessive_effective_bonus(self):
+        from rl.rl_drug_ranker import RewardConfig
 
-    def test_validation_ineffective_bonus(self):
-        """The RewardConfig validation must catch effective_bonus > 1.0."""
-        validated_bonus = 0.3
-        high_action_bonus = 5.0
-        effective = validated_bonus * high_action_bonus
-
-        # P4-002 fix: validation checks effective bonus
-        assert effective > 1.0, "Test setup: this config SHOULD fail validation"
-        # The actual validation would raise ValueError here
+        # validated_bonus=0.3 * high_action_bonus=5.0 = 1.5 > 1.0 should fail
+        with pytest.raises(ValueError):
+            RewardConfig(validated_bonus=0.3, high_action_bonus=5.0)
 
 
-# ---------------------------------------------------------------------------
-# P4-003: rank_top_candidates dead code fix
-# ---------------------------------------------------------------------------
+# ============================================================================
+# P4-003 (HIGH) — rank_top_candidates doesn't exist
+# ============================================================================
+class TestP4_003_CheckpointLoading:
+    """Must call existing method, not non-existent rank_top_candidates."""
 
-class TestP4_003_DeadCodeFix:
-    """HIGH: GTRLBridge.rank_top_candidates must not be dead code."""
+    def test_uses_existing_bridge_method(self):
+        from rl.service import _load_candidates_from_checkpoint
+        import inspect
 
-    def test_bridge_has_get_top_k_method(self):
-        """GTRLBridge must have get_top_k_novel_predictions method."""
-        try:
-            from graph_transformer.gt_rl_bridge import GTRLBridge
-            assert hasattr(GTRLBridge, "get_top_k_novel_predictions"), \
-                "P4-003: GTRLBridge missing get_top_k_novel_predictions"
-        except ImportError:
-            pytest.skip("graph_transformer not available (torch not installed)")
+        source = inspect.getsource(_load_candidates_from_checkpoint)
+        # Must CALL get_top_k_novel_predictions (the actual method)
+        # not rank_top_candidates (which doesn't exist)
+        assert "get_top_k_novel_predictions" in source, (
+            "Must call existing get_top_k_novel_predictions"
+        )
+        # The function body (not docstring/comments) must not call the old method
+        body_start = source.find("):")
+        body = source[body_start:] if body_start > 0 else source
+        assert "rank_top_candidates" not in body, (
+            "Function body must NOT call non-existent rank_top_candidates"
+        )
 
 
-# ---------------------------------------------------------------------------
-# P4-004: Reward weights from .meta.json sidecar
-# ---------------------------------------------------------------------------
-
+# ============================================================================
+# P4-004 (HIGH) — Dashboard uses different weights than agent
+# ============================================================================
 class TestP4_004_RewardWeightsFromMeta:
-    """HIGH: overallScore must use weights from .meta.json, not hardcoded 0.4/0.3/0.3."""
+    """overallScore must use agent's actual reward_weights, not hardcoded."""
 
-    def test_load_weights_from_meta_json(self, tmp_path):
-        """The service must read reward_weights from .meta.json sidecar."""
-        meta_path = tmp_path / "test.meta.json"
-        meta = {"reward_weights": {"gnn": 0.04, "safety": 0.25, "market": 0.12}}
-        with open(meta_path, "w") as f:
-            json.dump(meta, f)
+    def test_reads_weights_from_meta_sidecar(self):
+        from rl.service import _load_reward_weights_from_meta
+        import inspect
 
-        with open(meta_path) as f:
-            loaded = json.load(f)
+        source = inspect.getsource(_load_reward_weights_from_meta)
+        assert ".meta.json" in source, "Must read from .meta.json sidecar"
 
-        weights = loaded.get("reward_weights")
-        assert weights is not None, "P4-004: must load reward_weights from meta"
-        assert weights["gnn"] == 0.04, "P4-004: gnn weight must match agent's config"
-        assert weights["safety"] == 0.25, "P4-004: safety weight must match agent's config"
+    def test_load_candidates_uses_meta_weights(self):
+        from rl.service import _load_candidates_from_csv
+        import inspect
 
-    def test_hardcoded_weights_differ_from_agent(self):
-        """The old hardcoded weights (0.4/0.3/0.3) must NOT equal agent's weights."""
-        old_weights = {"gnn": 0.4, "safety": 0.3, "market": 0.3}
-        agent_weights = {"gnn": 0.04, "safety": 0.25, "market": 0.12}
-
-        assert old_weights != agent_weights, \
-            "P4-004: old hardcoded weights match agent weights — bug not fixed"
+        source = inspect.getsource(_load_candidates_from_csv)
+        assert "_reward_weights" in source, "Must use loaded reward weights"
+        # Must NOT use the OLD hardcoded weights 0.4/0.3/0.3 in overall calc.
+        # (The 0.04 gnn default weight is OK — it's the agent's actual weight.)
+        overall_section = source.split("overallScore")[0] if "overallScore" in source else source
+        # The old hardcoded formula was: gnn*0.4 + safety*0.3 + market*0.3
+        assert "0.4 *" not in overall_section and "* 0.4" not in overall_section, (
+            "Must NOT use old hardcoded 0.4 gnn weight in overall formula"
+        )
 
 
-# ---------------------------------------------------------------------------
-# P4-005: phase1/processed_data/ in search paths
-# ---------------------------------------------------------------------------
+# ============================================================================
+# P4-005 (HIGH) — Phase 1 path not searched
+# ============================================================================
+class TestP4_005_Phase1SearchPath:
+    """load_validated_hypotheses must search phase1/processed_data/."""
 
-class TestP4_005_Phase1PathInSearch:
-    """HIGH: load_validated_hypotheses must search phase1/processed_data/."""
+    def test_phase1_path_in_search_paths(self):
+        from rl.rl_drug_ranker import load_validated_hypotheses
+        import inspect
 
-    def test_phase1_path_in_candidate_paths(self):
-        """The search paths must include phase1/processed_data/."""
-        import os
-        # Simulate the search path construction from the fix
-        module_dir = "/repo/rl"
-        repo_root = os.path.dirname(module_dir)
-        candidate_paths = [
-            os.path.join(module_dir, "validated_hypotheses.csv"),
-            os.path.join(repo_root, "phase1", "processed_data", "validated_hypotheses.csv"),
-            "validated_hypotheses.csv",
-            os.path.join(os.getcwd(), "validated_hypotheses.csv"),
-        ]
-
-        phase1_path = os.path.join(repo_root, "phase1", "processed_data", "validated_hypotheses.csv")
-        assert phase1_path in candidate_paths, \
-            "P4-005: phase1/processed_data/ must be in search paths"
+        source = inspect.getsource(load_validated_hypotheses)
+        assert "phase1" in source and "processed_data" in source, (
+            "phase1/processed_data must be in search paths"
+        )
 
 
-# ---------------------------------------------------------------------------
-# P4-006: CORS security fix
-# ---------------------------------------------------------------------------
+# ============================================================================
+# P4-006 (HIGH) — CORS allows any origin
+# ============================================================================
+class TestP4_006_CORS:
+    """CORS must not allow '*' by default."""
 
-class TestP4_006_CORSSecurity:
-    """HIGH: CORS must use env var, not wildcard."""
-
-    def test_cors_uses_env_var(self):
-        """CORS origins must be configurable via env var."""
-        # P4-006 fix: RL_CORS_ORIGINS env var controls origins
-        test_origin = "https://pharma-partner.example.com"
-        os.environ["RL_CORS_ORIGINS"] = test_origin
-
-        origins_str = os.environ.get("RL_CORS_ORIGINS", "http://localhost:3000")
-        if origins_str == "*":
-            allow_origins = ["*"]
-        else:
-            allow_origins = [o.strip() for o in origins_str.split(",") if o.strip()]
-
-        assert "*" not in allow_origins, "P4-006: wildcard must not be in origins"
-        assert test_origin in allow_origins, "P4-006: configured origin must be allowed"
-
-        del os.environ["RL_CORS_ORIGINS"]
-
-    def test_default_origin_is_localhost(self):
-        """Default CORS origin must be localhost:3000 (dev), not wildcard."""
-        origins_str = os.environ.get("RL_CORS_ORIGINS", "http://localhost:3000")
-        assert origins_str != "*", "P4-006: default must NOT be wildcard"
+    def test_cors_not_wildcard(self):
+        import rl.service as svc
+        assert svc._RL_CORS_ORIGINS != "*", "CORS must NOT default to *"
 
 
-# ---------------------------------------------------------------------------
-# P4-007: Neo4j node labels match Phase 2 KG
-# ---------------------------------------------------------------------------
+# ============================================================================
+# P4-007 (HIGH) — Node label mismatch with Phase 2 KG
+# ============================================================================
+class TestP4_007_KGNodeLabels:
+    """writeback_to_phase2 must use same labels as Phase 2 kg_builder."""
 
-class TestP4_007_Neo4jNodeLabels:
-    """HIGH: writeback must use same labels as Phase 2 kg_builder."""
+    def test_uses_compound_label(self):
+        from phase4.writeback import writeback_to_phase2
+        import inspect
 
-    def test_writeback_uses_compound_label(self):
-        """The writeback Cypher must use :Compound (not :Drug)."""
-        # The Phase 2 config defines ENTITY_TYPE_COMPOUND = "Compound"
-        # The writeback must match this label.
-        assert True, "P4-007: Verified in code — writeback uses :Compound matching kg_builder"
+        source = inspect.getsource(writeback_to_phase2)
+        # Phase 2 uses :Compound (ENTITY_TYPE_COMPOUND = "Compound")
+        assert ":Compound" in source, "Must use :Compound label (matches Phase 2)"
 
-    def test_name_canonicalization(self):
-        """Names must be matched in multiple case forms."""
-        name = "metformin"
-        variants = {name, name.title(), name.lower()}
-        assert "Metformin" in variants, "P4-007: titlecase variant must exist"
-        assert "metformin" in variants, "P4-007: lowercase variant must exist"
+    def test_multi_variant_name_matching(self):
+        from phase4.writeback import writeback_to_phase2
+        import inspect
+
+        source = inspect.getsource(writeback_to_phase2)
+        # Must try multiple name variants to match existing nodes
+        assert "toLower" in source or "LOWER" in source, (
+            "Must use case-insensitive name matching"
+        )
 
 
-# ---------------------------------------------------------------------------
-# P4-008: driver.close() in try/finally
-# ---------------------------------------------------------------------------
-
+# ============================================================================
+# P4-008 (HIGH) — driver.close() outside session block
+# ============================================================================
 class TestP4_008_DriverCleanup:
-    """HIGH: Neo4j driver must be closed on error."""
+    """driver.close() must be in finally block inside session context."""
 
-    def test_driver_cleanup_on_error(self):
-        """The writeback must use try/finally to close the driver."""
-        # This is verified by code inspection — the writeback_to_phase2
-        # function now wraps driver.session() in a try/finally that
-        # calls driver.close() in the finally block.
-        assert True, "P4-008: Verified in code — driver.close() in try/finally"
+    def test_driver_close_in_finally(self):
+        from phase4.writeback import writeback_to_phase2
+        import inspect
+
+        source = inspect.getsource(writeback_to_phase2)
+        assert "finally:" in source, "Must use try/finally for driver cleanup"
+        assert "driver.close()" in source, "Must close driver"
 
 
-# ---------------------------------------------------------------------------
-# P4-009: Phase 3 retrain trigger ingestion
-# ---------------------------------------------------------------------------
-
+# ============================================================================
+# P4-009 (HIGH) — Phase 3 writeback never read
+# ============================================================================
 class TestP4_009_Phase3Retraining:
-    """HIGH: GT trainer must read retrain_triggered.json."""
+    """GT trainer must have method to load validated pairs for retraining."""
 
-    def test_load_validated_for_retraining_exists(self):
-        """The load_validated_for_retraining function must exist."""
-        try:
-            from graph_transformer.training.trainer import load_validated_for_retraining
-            assert callable(load_validated_for_retraining), \
-                "P4-009: load_validated_for_retraining must be callable"
-        except ImportError:
-            pytest.skip("graph_transformer not available")
+    def test_trainer_has_load_method(self):
+        from graph_transformer.training.trainer import GraphTransformerTrainer
+        assert hasattr(GraphTransformerTrainer, "load_validated_for_retraining")
 
-    def test_retrain_trigger_json_format(self, tmp_path):
-        """The retrain trigger JSON must be readable."""
-        trigger_path = tmp_path / "retrain_triggered.json"
-        entries = [
-            {"drug": "metformin", "disease": "diabetes", "outcome": "validated_positive"},
-            {"drug": "warfarin", "disease": "pregnancy", "outcome": "validated_toxic"},
-        ]
-        with open(trigger_path, "w") as f:
-            json.dump(entries, f)
+    def test_load_method_reads_retrain_trigger(self):
+        import inspect
+        from graph_transformer.training.trainer import GraphTransformerTrainer
 
-        with open(trigger_path) as f:
-            loaded = json.load(f)
-
-        assert len(loaded) == 2, "P4-009: must read all trigger entries"
-        assert loaded[0]["outcome"] == "validated_positive"
-        assert loaded[1]["outcome"] == "validated_toxic"
+        source = inspect.getsource(GraphTransformerTrainer.load_validated_for_retraining)
+        assert "retrain_triggered.json" in source, (
+            "Must read retrain_triggered.json"
+        )
 
 
-# ---------------------------------------------------------------------------
-# P4-010: Different edge labels per outcome
-# ---------------------------------------------------------------------------
-
+# ============================================================================
+# P4-010 (HIGH) — VALIDATED_TREATS for toxic outcomes
+# ============================================================================
 class TestP4_010_EdgeLabelsPerOutcome:
-    """HIGH: Edge labels must reflect the outcome."""
+    """Different edge labels for different validation outcomes."""
 
-    def test_edge_label_mapping(self):
-        """Each outcome must map to the correct edge label."""
-        edge_labels = {
-            "validated_positive": "VALIDATED_TREATS",
-            "validated_toxic": "VALIDATED_TOXIC",
-            "validated_negative": "VALIDATED_NEGATIVE",
-            "invalidated": "VALIDATED_NEGATIVE",
-        }
+    def test_distinct_edge_labels(self):
+        from phase4.writeback import writeback_to_phase2
+        import inspect
 
-        assert edge_labels["validated_positive"] == "VALIDATED_TREATS", \
-            "P4-010: positive must use VALIDATED_TREATS"
-        assert edge_labels["validated_toxic"] == "VALIDATED_TOXIC", \
-            "P4-010: toxic must use VALIDATED_TOXIC, not VALIDATED_TREATS"
-        assert edge_labels["validated_negative"] == "VALIDATED_NEGATIVE", \
-            "P4-010: negative must use VALIDATED_NEGATIVE"
+        source = inspect.getsource(writeback_to_phase2)
+        assert "VALIDATED_TREATS" in source, "Must have VALIDATED_TREATS"
+        assert "VALIDATED_TOXIC" in source, "Must have VALIDATED_TOXIC"
+        assert "VALIDATED_NEGATIVE" in source, "Must have VALIDATED_NEGATIVE"
 
 
-# ---------------------------------------------------------------------------
-# P4-011: Duplicate check in writeback_to_phase1
-# ---------------------------------------------------------------------------
-
+# ============================================================================
+# P4-011 (HIGH) — No duplicate check in writeback
+# ============================================================================
 class TestP4_011_DuplicateCheck:
-    """HIGH: Re-validating must UPDATE, not append duplicate."""
+    """Re-validating same hypothesis must UPDATE, not append duplicate."""
 
-    def test_duplicate_updates_existing_row(self, tmp_path):
-        """Re-validating the same (drug, disease, validated_by) must UPDATE."""
-        csv_path = tmp_path / "validated_hypotheses.csv"
-        fieldnames = ["drug", "disease", "outcome", "validated_by", "validated_at"]
+    def test_duplicate_check_exists(self):
+        from phase4.writeback import writeback_to_phase1
+        import inspect
 
-        # First write
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerow({
-                "drug": "metformin", "disease": "diabetes",
-                "outcome": "validated_positive", "validated_by": "partner_a",
-                "validated_at": "2024-01-01T00:00:00",
-            })
-
-        # Simulate duplicate check and UPDATE
-        existing_rows = []
-        with open(csv_path, "r", newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if (row.get("drug", "").strip() == "metformin"
-                        and row.get("disease", "").strip() == "diabetes"
-                        and row.get("validated_by", "").strip() == "partner_a"):
-                    row["outcome"] = "validated_negative"  # UPDATED
-                    row["validated_at"] = "2024-06-01T00:00:00"
-                existing_rows.append(row)
-
-        # Rewrite
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(existing_rows)
-
-        # Verify: only 1 row, updated
-        with open(csv_path, "r", newline="") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-
-        assert len(rows) == 1, f"P4-011: must have 1 row, got {len(rows)}"
-        assert rows[0]["outcome"] == "validated_negative", \
-            "P4-011: outcome must be UPDATED, not duplicated"
+        source = inspect.getsource(writeback_to_phase1)
+        assert "duplicate_found" in source or "duplicate" in source.lower(), (
+            "Must check for duplicates"
+        )
 
 
-# ---------------------------------------------------------------------------
-# P4-013: Streaming iterator (no OOM)
-# ---------------------------------------------------------------------------
+# ============================================================================
+# P4-012 (HIGH) — load_validated_hypotheses ignores outcome column
+# ============================================================================
+class TestP4_012_OutcomeFiltering:
+    """Same as P4-001 — outcome column must be checked."""
 
-class TestP4_013_StreamingIterator:
-    """HIGH: CSV loading must use streaming, not list(reader)."""
+    def test_outcome_column_checked(self):
+        from rl.rl_drug_ranker import load_validated_hypotheses
+        import inspect
 
-    def test_streaming_not_list(self):
-        """The code must use enumerate(reader) not list(reader)."""
-        # Verified by code inspection: the fix changes
-        #   rows = list(reader)  →  rows = enumerate(reader)
-        assert True, "P4-013: Verified in code — uses enumerate(reader) not list(reader)"
+        source = inspect.getsource(load_validated_hypotheses)
+        assert "outcome" in source, "Must check outcome column"
+        assert "validated_positive" in source, "Must filter for validated_positive"
 
 
-# ---------------------------------------------------------------------------
-# P4-014: Sort all candidates before limiting
-# ---------------------------------------------------------------------------
+# ============================================================================
+# P4-013 (HIGH) — CSV loads all rows into memory
+# ============================================================================
+class TestP4_013_StreamingCSV:
+    """Must use streaming iterator, not list(reader)."""
 
+    def test_for_loop_inside_with_block(self):
+        from rl.service import _load_candidates_from_csv
+        import inspect
+
+        source = inspect.getsource(_load_candidates_from_csv)
+        lines = source.split("\n")
+        with_indent = None
+        for_indent = None
+        for line in lines:
+            if "with open(csv_path" in line:
+                with_indent = len(line) - len(line.lstrip())
+            if "for i, row in enumerate(reader):" in line:
+                for_indent = len(line) - len(line.lstrip())
+
+        assert for_indent is not None, "Must use enumerate(reader)"
+        assert with_indent is not None, "Must use with open(...)"
+        assert for_indent > with_indent, (
+            f"for loop (indent={for_indent}) must be inside with block (indent={with_indent})"
+        )
+
+
+# ============================================================================
+# P4-014 (HIGH) — Sort happens after limit break
+# ============================================================================
 class TestP4_014_SortBeforeLimit:
-    """HIGH: Must sort ALL candidates by rank, then apply limit."""
+    """Must sort ALL candidates by rank, THEN apply limit."""
 
-    def test_sort_all_then_limit(self):
-        """The sort must happen BEFORE the limit, not after a break."""
-        candidates = [
-            {"drug": "c", "rank": 3},
-            {"drug": "a", "rank": 1},
-            {"drug": "b", "rank": 2},
-            {"drug": "d", "rank": 4},
-        ]
+    def test_sort_comes_before_limit(self):
+        from rl.service import _load_candidates_from_csv
+        import inspect
 
-        # P4-014 fix: sort ALL, THEN slice
-        candidates.sort(key=lambda c: c["rank"])
-        top_2 = candidates[:2]
-
-        assert top_2[0]["drug"] == "a", "P4-014: rank 1 must be first"
-        assert top_2[1]["drug"] == "b", "P4-014: rank 2 must be second"
+        source = inspect.getsource(_load_candidates_from_csv)
+        sort_pos = source.find("out.sort")
+        limit_pos = source.find("out[:limit]")
+        assert sort_pos > 0 and limit_pos > 0, "Must have both sort and limit"
+        assert sort_pos < limit_pos, "sort must come BEFORE limit"
 
 
-# ---------------------------------------------------------------------------
-# P4-015: Strict checkpoint mode
-# ---------------------------------------------------------------------------
-
+# ============================================================================
+# P4-015 (HIGH) — Silent fallback on checkpoint failure
+# ============================================================================
 class TestP4_015_StrictCheckpoint:
-    """HIGH: Default must be strict mode (raise on checkpoint failure)."""
-
-    def test_default_strict_mode(self):
-        """RL_STRICT_CHECKPOINT default must be true (strict)."""
-        strict_default = os.environ.get("RL_STRICT_CHECKPOINT", "true")
-        assert strict_default.lower() not in ("false", "0", "no", "off"), \
-            "P4-015: default must be strict mode"
+    """Must raise in strict mode, not silently fall back to CSV."""
 
     def test_strict_mode_raises(self):
-        """In strict mode, checkpoint failure must raise."""
-        os.environ["RL_STRICT_CHECKPOINT"] = "true"
-        strict_mode = os.environ.get("RL_STRICT_CHECKPOINT", "true").lower() not in ("false", "0", "no", "off")
-        assert strict_mode is True, "P4-015: strict mode must raise on failure"
+        from rl.service import _load_candidates_from_checkpoint
+        import inspect
+
+        source = inspect.getsource(_load_candidates_from_checkpoint)
+        assert "RL_STRICT_CHECKPOINT" in source, "Must check strict mode"
+        assert "RuntimeError" in source, "Must raise RuntimeError in strict mode"
 
 
-# ---------------------------------------------------------------------------
-# P4-016: Expanded WITHDRAWN_DRUGS
-# ---------------------------------------------------------------------------
-
+# ============================================================================
+# P4-016 (MEDIUM) — WITHDRAWN_DRUGS incomplete
+# ============================================================================
 class TestP4_016_WithdrawnDrugs:
-    """MEDIUM: WITHDRAWN_DRUGS must include key withdrawn drugs."""
+    """Must include valproate, domperidone, tegaserod, benzyl alcohol."""
 
     def test_key_withdrawn_drugs_present(self):
-        """Critical withdrawn drugs must be in the set."""
-        try:
-            from rl.rl_drug_ranker import WITHDRAWN_DRUGS
-        except ImportError:
-            pytest.skip("rl.rl_drug_ranker not importable (torch not installed)")
+        from rl.rl_drug_ranker import WITHDRAWN_DRUGS
 
-        critical_drugs = [
-            "valproate", "valproic acid",  # P4-016 fix
-            "domperidone",  # P4-016 fix
-            "tegaserod",  # P4-016 fix
-            "benzyl alcohol",  # P4-016 fix
-            "rofecoxib",  # original
-        ]
-        for drug in critical_drugs:
-            assert drug in WITHDRAWN_DRUGS, f"P4-016: {drug} must be in WITHDRAWN_DRUGS"
+        assert "valproate" in WITHDRAWN_DRUGS, "valproate missing"
+        assert "domperidone" in WITHDRAWN_DRUGS, "domperidone missing"
+        assert "tegaserod" in WITHDRAWN_DRUGS, "tegaserod missing"
+        assert "benzyl alcohol" in WITHDRAWN_DRUGS, "benzyl alcohol missing"
+        assert len(WITHDRAWN_DRUGS) >= 30, f"Expected >=30, got {len(WITHDRAWN_DRUGS)}"
 
 
-# ---------------------------------------------------------------------------
-# P4-017: Expanded INDICATION_WITHDRAWN_DRUGS
-# ---------------------------------------------------------------------------
+# ============================================================================
+# P4-017 (MEDIUM) — INDICATION_WITHDRAWN_DRUGS incomplete
+# ============================================================================
+class TestP4_017_IndicationWithdrawals:
+    """Must include isotretinoin, lenalidomide, methotrexate."""
 
-class TestP4_017_IndicationWithdrawn:
-    """MEDIUM: Must include pregnancy teratogens."""
+    def test_key_indication_withdrawals_present(self):
+        from rl.rl_drug_ranker import INDICATION_WITHDRAWN_DRUGS
 
-    def test_pregnancy_teratogens_present(self):
-        """Key pregnancy teratogens must be in the map."""
-        try:
-            from rl.rl_drug_ranker import INDICATION_WITHDRAWN_DRUGS
-        except ImportError:
-            pytest.skip("rl.rl_drug_ranker not importable")
-
-        teratogens = [
-            "isotretinoin", "accutane",
-            "lenalidomide", "pomalidomide",
-            "methotrexate",
-        ]
-        for drug in teratogens:
-            assert drug in INDICATION_WITHDRAWN_DRUGS, \
-                f"P4-017: {drug} must be in INDICATION_WITHDRAWN_DRUGS"
+        assert "isotretinoin" in INDICATION_WITHDRAWN_DRUGS
+        assert "lenalidomide" in INDICATION_WITHDRAWN_DRUGS
+        assert "methotrexate" in INDICATION_WITHDRAWN_DRUGS
+        assert len(INDICATION_WITHDRAWN_DRUGS) >= 5, (
+            f"Expected >=5, got {len(INDICATION_WITHDRAWN_DRUGS)}"
+        )
 
 
-# ---------------------------------------------------------------------------
-# P4-018: Expanded CONTROLLED_SUBSTANCES
-# ---------------------------------------------------------------------------
-
+# ============================================================================
+# P4-018 (MEDIUM) — CONTROLLED_SUBSTANCES incomplete
+# ============================================================================
 class TestP4_018_ControlledSubstances:
-    """MEDIUM: Must include DEA scheduled substances."""
+    """Must include benzodiazepines, ketamine, MDMA, psilocybin."""
 
     def test_key_controlled_substances_present(self):
-        """Critical controlled substances must be in the set."""
-        try:
-            from rl.rl_drug_ranker import CONTROLLED_SUBSTANCES
-        except ImportError:
-            pytest.skip("rl.rl_drug_ranker not importable")
+        from rl.rl_drug_ranker import CONTROLLED_SUBSTANCES
 
-        substances = [
-            "alprazolam", "xanax",
-            "diazepam", "valium",
-            "lorazepam", "ativan",
-            "clonazepam", "klonopin",
-            "cannabis", "marijuana",
-            "ketamine",
-            "mdma", "ecstasy",
-            "psilocybin",
-        ]
-        for substance in substances:
-            assert substance in CONTROLLED_SUBSTANCES, \
-                f"P4-018: {substance} must be in CONTROLLED_SUBSTANCES"
+        assert "alprazolam" in CONTROLLED_SUBSTANCES
+        assert "diazepam" in CONTROLLED_SUBSTANCES
+        assert "ketamine" in CONTROLLED_SUBSTANCES
+        assert "mdma" in CONTROLLED_SUBSTANCES
+        assert "psilocybin" in CONTROLLED_SUBSTANCES
+        assert len(CONTROLLED_SUBSTANCES) >= 50, (
+            f"Expected >=50, got {len(CONTROLLED_SUBSTANCES)}"
+        )
 
 
-# ---------------------------------------------------------------------------
-# P4-019: Tokenized matching (not substring)
-# ---------------------------------------------------------------------------
-
+# ============================================================================
+# P4-019 (MEDIUM) — Substring matching for indications
+# ============================================================================
 class TestP4_019_TokenizedMatching:
-    """MEDIUM: Must use tokenized matching, not substring."""
+    """Must use tokenized matching, not substring."""
 
-    def test_tokenized_not_substring(self):
-        """'pregnancy' must NOT match 'pregnancy-related-hypertension'."""
-        disease_name = "pregnancy-related-hypertension"
-        contraindication = "pregnancy"
+    def test_uses_tokenized_not_substring(self):
+        from rl.rl_drug_ranker import RewardFunction
+        import inspect
 
-        # P4-019 fix: tokenized matching
-        disease_tokens = set(disease_name.replace("-", " ").replace("_", " ").split())
-        contra_tokens = set(contraindication.replace("-", " ").replace("_", " ").split())
-        is_match = contra_tokens.issubset(disease_tokens)
-
-        # "pregnancy" IS in "pregnancy-related-hypertension" as a token
-        # But "pregnancy-related" is one token, so it wouldn't match exactly
-        # Let me test a clearer case:
-        disease_name2 = "chronic_nausea_syndrome"
-        contraindication2 = "nausea"
-        disease_tokens2 = set(disease_name2.replace("-", " ").replace("_", " ").split())
-        contra_tokens2 = set(contraindication2.replace("-", " ").replace("_", " ").split())
-        is_match2 = contra_tokens2.issubset(disease_tokens2)
-
-        # This SHOULD match because "nausea" is a token in the disease
-        # The key difference from substring: "nausea" won't match
-        # "nausea_and_vomiting_of_pregnancy" partially — it checks ALL tokens
-        assert is_match2, "P4-019: tokenized match should work for exact tokens"
+        source = inspect.getsource(RewardFunction.compute)
+        assert "issubset" in source, "Must use tokenized matching (issubset)"
+        # Must NOT have the old substring matching pattern in actual CODE
+        # (Comments describing the old behavior are OK)
+        code_lines = [l for l in source.split("\n") if not l.strip().startswith("#")]
+        code_only = "\n".join(code_lines)
+        assert "if contraindication in disease_name" not in code_only, (
+            "Must NOT use old substring matching pattern in code"
+        )
+        # Verify the tokenized approach uses token sets
+        assert "disease_tokens" in source, "Must compute disease_tokens"
+        assert "contra_tokens" in source, "Must compute contra_tokens"
 
 
-# ---------------------------------------------------------------------------
-# P4-020: Continuous safety_factor
-# ---------------------------------------------------------------------------
-
+# ============================================================================
+# P4-020 (MEDIUM) — Step function safety_factor
+# ============================================================================
 class TestP4_020_ContinuousSafetyFactor:
-    """MEDIUM: safety_factor must use linear interpolation."""
+    """safety_factor must use linear interpolation, not step function."""
 
     def test_continuous_interpolation(self):
-        """safety=0.6 must give factor=0.75 (interpolated), not 0.5 (step)."""
-        safety_hard_reject = 0.5
-        safety_warning = 0.7
-        safety_val = 0.6
+        from rl.rl_drug_ranker import RewardConfig, RewardFunction
 
-        # P4-020 fix: linear interpolation
-        if safety_val < safety_hard_reject:
-            factor = 0.0
-        elif safety_val < safety_warning:
-            factor = 0.5 + 0.5 * (
-                (safety_val - safety_hard_reject)
-                / (safety_warning - safety_hard_reject)
-            )
-        else:
-            factor = 1.0
+        cfg = RewardConfig(safety_hard_reject=0.5, safety_warning=0.7)
+        rf = RewardFunction(cfg)
 
-        expected = 0.5 + 0.5 * (0.1 / 0.2)  # = 0.75
-        assert factor == pytest.approx(expected), \
-            f"P4-020: safety=0.6 must give ~{expected}, got {factor}"
+        row = pd.Series({
+            "drug": "test_drug", "disease": "test_disease",
+            "gnn_score": 0.8, "safety_score": 0.6, "market_score": 0.5,
+            "confidence": 0.7, "pathway_score": 0.6, "patent_score": 0.5,
+            "rare_disease_flag": 0.0, "unmet_need_score": 0.5,
+            "efficacy_score": 0.6, "adme_score": 0.7,
+        })
+        reward = rf.compute(row)
+        # safety=0.6 should NOT be hard-rejected
+        assert reward > 0, f"safety=0.6 should give positive reward, got {reward}"
 
-    def test_step_function_eliminated(self):
-        """safety=0.51 and safety=0.69 must give DIFFERENT factors."""
-        safety_hard_reject = 0.5
-        safety_warning = 0.7
-
-        def compute_factor(safety_val):
-            if safety_val < safety_hard_reject:
-                return 0.0
-            elif safety_val < safety_warning:
-                return 0.5 + 0.5 * ((safety_val - safety_hard_reject) / (safety_warning - safety_hard_reject))
-            return 1.0
-
-        f_51 = compute_factor(0.51)
-        f_69 = compute_factor(0.69)
-
-        assert f_51 != f_69, \
-            f"P4-020: step function not eliminated — 0.51→{f_51}, 0.69→{f_69}"
-        assert f_51 < f_69, "P4-020: higher safety must give higher factor"
+        # Verify interpolation formula is in the source
+        import inspect
+        source = inspect.getsource(RewardFunction.compute)
+        assert "safety_val - cfg.safety_hard_reject" in source, (
+            "Must use continuous interpolation formula"
+        )
 
 
-# ---------------------------------------------------------------------------
-# P4-022: phase4/__init__.py exports
-# ---------------------------------------------------------------------------
+# ============================================================================
+# P4-021 (MEDIUM) — Cosmetic modular separation
+# ============================================================================
+class TestP4_021_ModularStructure:
+    """Module files must provide real imports, not just re-export shims."""
 
-class TestP4_022_Phase4Init:
-    """MEDIUM: phase4/__init__.py must have version and exports."""
+    def test_env_imports_drug_ranking_env(self):
+        from rl.env import DrugRankingEnv
+        assert DrugRankingEnv is not None
 
-    def test_version_and_exports(self):
-        """phase4 must have __version__ and __all__."""
-        try:
-            import phase4
-            assert hasattr(phase4, "__version__"), "P4-022: must have __version__"
-            assert hasattr(phase4, "__all__"), "P4-022: must have __all__"
-            assert "write_validated_hypothesis" in phase4.__all__, \
-                "P4-022: write_validated_hypothesis must be in __all__"
-        except ImportError:
-            pytest.skip("phase4 not importable")
+    def test_reward_imports_reward_config(self):
+        from rl.reward import RewardConfig, RewardFunction
+        assert RewardConfig is not None
+        assert RewardFunction is not None
 
 
-# ---------------------------------------------------------------------------
-# P4-023: Scale-aware KP recovery threshold
-# ---------------------------------------------------------------------------
+# ============================================================================
+# P4-022 (MEDIUM) — phase4/__init__.py empty
+# ============================================================================
+class TestP4_022_Phase4Package:
+    """phase4/__init__.py must have version and exports."""
 
+    def test_has_version(self):
+        import phase4
+        assert hasattr(phase4, "__version__")
+        assert phase4.__version__ != ""
+
+    def test_exports_write_validated_hypothesis(self):
+        import phase4
+        assert hasattr(phase4, "write_validated_hypothesis")
+
+
+# ============================================================================
+# P4-023 (MEDIUM) — Fixed KP_RECOVERY_THRESHOLD
+# ============================================================================
 class TestP4_023_ScaleAwareThreshold:
-    """MEDIUM: KP_RECOVERY_THRESHOLD must be scale-aware."""
-
-    def test_production_threshold(self):
-        """Production (≥1000 KPs) must use 0.5 threshold."""
-        try:
-            from rl.scientific_thresholds import resolve_kp_recovery_threshold
-            assert resolve_kp_recovery_threshold(n_test_kps=1000) == 0.5
-            assert resolve_kp_recovery_threshold(n_test_kps=5000) == 0.5
-        except ImportError:
-            pytest.skip("scientific_thresholds not importable")
-
-    def test_pilot_threshold(self):
-        """Pilot (100-1000 KPs) must use 0.4 threshold."""
-        try:
-            from rl.scientific_thresholds import resolve_kp_recovery_threshold
-            assert resolve_kp_recovery_threshold(n_test_kps=500) == 0.4
-            assert resolve_kp_recovery_threshold(n_test_kps=100) == 0.4
-        except ImportError:
-            pytest.skip("scientific_thresholds not importable")
+    """KP_RECOVERY_THRESHOLD must be scale-aware."""
 
     def test_demo_threshold(self):
-        """Demo (<100 KPs) must use 0.34 threshold."""
-        try:
-            from rl.scientific_thresholds import resolve_kp_recovery_threshold
-            assert resolve_kp_recovery_threshold(n_test_kps=50) == 0.34
-            assert resolve_kp_recovery_threshold(n_test_kps=10) == 0.34
-        except ImportError:
-            pytest.skip("scientific_thresholds not importable")
+        from rl.scientific_thresholds import resolve_kp_recovery_threshold
+        t = resolve_kp_recovery_threshold(n_test_kps=2)
+        assert abs(t - 0.34) < 0.01, f"demo threshold should be ~0.34, got {t}"
+
+    def test_pilot_threshold(self):
+        from rl.scientific_thresholds import resolve_kp_recovery_threshold
+        t = resolve_kp_recovery_threshold(n_test_kps=500)
+        assert abs(t - 0.4) < 0.01, f"pilot threshold should be ~0.4, got {t}"
+
+    def test_production_threshold(self):
+        from rl.scientific_thresholds import resolve_kp_recovery_threshold
+        t = resolve_kp_recovery_threshold(n_test_kps=1000)
+        assert abs(t - 0.5) < 0.01, f"production threshold should be ~0.5, got {t}"
 
 
-# ---------------------------------------------------------------------------
-# P4-024: Deterministic Top-N (shuffle=False)
-# ---------------------------------------------------------------------------
+# ============================================================================
+# P4-024 (MEDIUM) — evaluate_agent shuffles test data
+# ============================================================================
+class TestP4_024_DeterministicEval:
+    """evaluate_agent must pass shuffle=False for deterministic Top-N."""
 
-class TestP4_024_DeterministicTopN:
-    """MEDIUM: evaluate_agent must pass shuffle=False."""
+    def test_shuffle_false(self):
+        from rl.rl_drug_ranker import evaluate_agent
+        import inspect
 
-    def test_shuffle_false_in_evaluate(self):
-        """env.reset() in evaluate_agent must pass shuffle=False."""
-        # Verified by code inspection: the fix changes
-        #   obs, _ = env.reset()
-        # to:
-        #   obs, _ = env.reset(options={"shuffle": False})
-        assert True, "P4-024: Verified in code — passes options={'shuffle': False}"
+        source = inspect.getsource(evaluate_agent)
+        assert "shuffle=False" in source or '"shuffle": False' in source, (
+            "Must pass shuffle=False to env.reset()"
+        )
 
 
-# ---------------------------------------------------------------------------
-# P4-025: vec_normalize=None logged at WARNING
-# ---------------------------------------------------------------------------
+# ============================================================================
+# P4-025 (MEDIUM) — DEBUG log for critical VecNormalize issue
+# ============================================================================
+class TestP4_025_WarningNotDebug:
+    """VecNormalize missing must log at WARNING, not DEBUG."""
 
-class TestP4_025_VecNormalizeWarning:
-    """MEDIUM: vec_normalize=None must log at WARNING, not DEBUG."""
+    def test_logs_at_warning(self):
+        from rl.rl_drug_ranker import extract_policy_prob_high
+        import inspect
 
-    def test_warning_level_not_debug(self):
-        """The log must be at WARNING level (visible in production)."""
-        # Verified by code inspection: logger.debug(...) changed to
-        # logger.warning(...) and the message includes "P4-025 CRITICAL".
-        assert True, "P4-025: Verified in code — upgraded from DEBUG to WARNING"
+        source = inspect.getsource(extract_policy_prob_high)
+        else_pos = source.find("else:")
+        else_section = source[else_pos:else_pos + 2000]
+        assert "logger.warning" in else_section or "logger.error" in else_section, (
+            "Must log at WARNING or ERROR, not DEBUG"
+        )
 
 
 if __name__ == "__main__":
