@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, badRequest, writeAuditLog, requireCsrfOrSend, isPlatformSuperuser } from "@/lib/api-helpers";
 import { revokeAllRefreshTokensForUser } from "@/lib/auth/server";
 import { db } from "@/lib/db";
+// FE-016 ROOT FIX (Team Member 15, v108 — pre-existing build blocker):
+// Import the Prisma-generated enum types so the `data` object on line ~202
+// can be properly typed. Without these, Prisma's UserUpdateInput rejects
+// plain `string` for `role` and `status`, failing the production build.
+import type { UserRole, UserStatus } from "@prisma/client";
 import {
   ALLOWED_ROLES_ADMIN,
   ALLOWED_USER_STATUSES,
@@ -202,7 +207,16 @@ export async function PATCH(req: NextRequest) {
   }
   if (!body.userId) return badRequest("userId is required");
 
-  const data: { role?: string; status?: string } = {};
+  // FE-016 ROOT FIX (Team Member 15, v108 — pre-existing build blocker):
+  // The previous `data` was typed as `{ role?: string; status?: string }`,
+  // but Prisma's UserUpdateInput expects `role: UserRole` (an enum) and
+  // `status: UserStatus` (an enum). Passing plain `string` made the
+  // build fail at "Running TypeScript ..." in `next build`. The runtime
+  // validators (isValidAdminRole / isValidUserStatus) already ensure the
+  // string values map to valid enum members, so we cast at the assignment
+  // site. This is a minimal surgical fix to unblock the production build
+  // — the validation logic is unchanged.
+  const data: { role?: UserRole; status?: UserStatus } = {};
 
   if (body.role !== undefined) {
     if (!isValidAdminRole(body.role)) {
@@ -210,7 +224,8 @@ export async function PATCH(req: NextRequest) {
         `Invalid role. Must be one of: ${(ALLOWED_ROLES_ADMIN as readonly string[]).join(", ")}`
       );
     }
-    data.role = body.role;
+    // isValidAdminRole guarantees body.role is a valid UserRole value.
+    data.role = body.role as UserRole;
   }
   if (body.status !== undefined) {
     if (!isValidUserStatus(body.status)) {
@@ -218,7 +233,8 @@ export async function PATCH(req: NextRequest) {
         `Invalid status. Must be one of: ${(ALLOWED_USER_STATUSES as readonly string[]).join(", ")}`
       );
     }
-    data.status = body.status;
+    // isValidUserStatus guarantees body.status is a valid UserStatus value.
+    data.status = body.status as UserStatus;
   }
 
   if (Object.keys(data).length === 0) {
