@@ -1524,6 +1524,15 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
     activity_units: Mapped[Optional[str]] = mapped_column(
         String(20), nullable=True,
     )
+    # INT-003 ROOT FIX: ChEMBL's standard_relation carries censoring semantics
+    # ('=', '<', '>', '~') that distinguish exact measurements from bounds.
+    # Previously dropped at ORM load time, causing the RL ranker to treat
+    # IC50 > 100uM (weak binder) the same as IC50 = 1nM (potent inhibitor).
+    # This column stores the raw ChEMBL relation so the Phase 2 bridge can
+    # propagate it without heuristic guessing.
+    standard_relation: Mapped[Optional[str]] = mapped_column(
+        String(5), nullable=True,
+    )
     source: Mapped[Optional[str]] = mapped_column(
         String(SOURCE_LENGTH), nullable=True,
     )
@@ -1570,6 +1579,12 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
         CheckConstraint(
             "activity_value IS NULL OR activity_value > 0",
             name="chk_dpi_activity_value_positive",
+        ),
+        # INT-003 ROOT FIX: validate standard_relation is a valid ChEMBL censoring direction.
+        CheckConstraint(
+            "standard_relation IS NULL OR standard_relation IN "
+            "('=', '<', '>', '~')",
+            name="chk_dpi_standard_relation",
         ),
         # v43 ROOT FIX (Chain 8 -- 8 missing CHECK constraints in ORM):
         # The SQL migration 001 has chk_dpi_activity_type, chk_dpi_activity_units,
