@@ -62,16 +62,53 @@ export interface GtInferenceResponse {
 // Checkpoint resolution
 // ---------------------------------------------------------------------------
 
-const CHECKPOINT_CANDIDATE_DIRS = [
-  process.env.GT_CHECKPOINT_DIR,
-  // RT-006: the bridge writes gt_checkpoint.pt directly to <output_dir>
-  // (not to <output_dir>/checkpoints/). Check both locations for safety.
-  path.resolve(process.cwd(), "output_v100"),
-  path.resolve(process.cwd(), "output_v100", "checkpoints"),
-  path.resolve(process.cwd(), "output"),
-  path.resolve(process.cwd(), "output", "checkpoints"),
-  path.resolve(process.cwd(), "graph_transformer", "checkpoints"),
-].filter(Boolean) as string[];
+// BE-008 ROOT FIX: checkpoint search paths must resolve relative to the
+// REPO ROOT, not process.cwd(). The previous code used process.cwd()
+// directly — when Next.js runs from `frontend/` (the documented
+// deployment: `cd frontend && npm run dev`), the resolved paths were
+// `frontend/output_v100`, `frontend/graph_transformer/checkpoints`, etc.
+// — none of which exist. The actual checkpoints are at the REPO root:
+// `<repo>/output_v100`, `<repo>/graph_transformer/checkpoints`. Every
+// `/api/predict` and `/api/top-k` request silently fell back to
+// `source: "none"` and the GT prediction feature was non-functional.
+//
+// Root fix: compute the repo root ONCE using the same logic as
+// runPythonInference (env var GT_REPO_ROOT wins; else if process.cwd()
+// ends with "frontend" we go up one level; else we use process.cwd()
+// as-is). Then resolve all candidate dirs relative to that repo root.
+// This guarantees the checkpoint search finds files at the SAME path
+// the Python helper uses (which also receives `repoRoot` as its CWD).
+//
+// The array is built lazily inside findLatestGtCheckpoint() rather than
+// at module-load time, so changes to process.env.GT_REPO_ROOT at runtime
+// (e.g. via dotenv) are picked up. The previous module-load-time
+// evaluation froze the paths at first import.
+function getRepoRoot(): string {
+  const cwd = process.cwd();
+  return process.env.GT_REPO_ROOT || (
+    cwd.endsWith("frontend") ? path.resolve(cwd, "..") : cwd
+  );
+}
+
+function getCheckpointCandidateDirs(): string[] {
+  const repoRoot = getRepoRoot();
+  return [
+    process.env.GT_CHECKPOINT_DIR,
+    // RT-006: the bridge writes gt_checkpoint.pt directly to <output_dir>
+    // (not to <output_dir>/checkpoints/). Check both locations for safety.
+    path.resolve(repoRoot, "output_v100"),
+    path.resolve(repoRoot, "output_v100", "checkpoints"),
+    path.resolve(repoRoot, "output"),
+    path.resolve(repoRoot, "output", "checkpoints"),
+    path.resolve(repoRoot, "graph_transformer", "checkpoints"),
+    // BE-008: also check the frontend-relative paths as a last resort,
+    // for dev setups where the user copied a checkpoint into frontend/.
+    // This is NOT the documented deployment but provides backwards compat.
+    path.resolve(process.cwd(), "output_v100"),
+    path.resolve(process.cwd(), "output"),
+    path.resolve(process.cwd(), "graph_transformer", "checkpoints"),
+  ].filter(Boolean) as string[];
+}
 
 /**
  * Find the latest trained GT checkpoint. The bridge writes
@@ -83,7 +120,7 @@ const CHECKPOINT_CANDIDATE_DIRS = [
  * Returns null if no checkpoint exists.
  */
 function findLatestGtCheckpoint(): string | null {
-  for (const dir of CHECKPOINT_CANDIDATE_DIRS) {
+  for (const dir of getCheckpointCandidateDirs()) {
     let entries: string[] = [];
     try {
       entries = nodeFs.readdirSync(dir);

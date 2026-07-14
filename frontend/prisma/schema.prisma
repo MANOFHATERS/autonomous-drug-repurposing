@@ -50,6 +50,24 @@ enum UserRole {
   billing
   admin
   owner
+  // BE-002 ROOT FIX: a DISTINCT platform-level superuser role. The
+  // `owner` role is set by self-registration when a user creates an org
+  // (OrganizationMember.role=owner) AND by admin promotion (User.role=owner).
+  // The previous code granted User.role=owner SYSTEM-WIDE access — any user
+  // promoted to owner could enumerate every user in every org, suspend any
+  // user system-wide, and read every audit log across all tenants. A
+  // competitor could register, get promoted (or self-promote via a stale
+  // admin endpoint), and immediately read every pharma company's user list.
+  //
+  // Root fix: `platformOwner` is the ONLY role that bypasses org scoping.
+  // It is reserved for the SaaS operator's staff and can ONLY be set via
+  // direct DB access (no API route can grant it). The `owner` role now
+  // behaves like `admin` — org-scoped, no cross-tenant access.
+  //
+  // This is a NON-BREAKING schema change (new enum value). The Prisma
+  // migration is `ALTER TYPE "UserRole" ADD VALUE 'platformOwner';`.
+  // Existing `owner` users continue to work but are now org-scoped.
+  platformOwner
 }
 
 enum UserStatus {
@@ -491,6 +509,67 @@ model AuditLog {
   @@index([createdAt])
   // FE-040 ROOT FIX: index on organizationId for per-org audit-log queries
   // (compliance reporting, DSARs, multi-tenant scoping).
+  @@index([organizationId])
+}
+
+// ---------------------------------------------------------------------------
+// BE-003 ROOT FIX: AuditLogDeadLetter — model the dead-letter table that
+// writeAuditLog falls back to when the primary AuditLog insert fails.
+//
+// Previously, writeAuditLog used raw SQL ($executeRaw) to CREATE TABLE IF
+// NOT EXISTS audit_log_dead_letter and INSERT into it. This had THREE bugs:
+//   1. The table was NOT modeled in Prisma — no Prisma model could query
+//      it, so operators could not retrieve the lost entries via the
+//      application layer. The dead-letter rows were invisible.
+//   2. The DDL ran on EVERY non-critical audit failure — a performance
+//      drag (PostgreSQL parses + plans the CREATE TABLE on every call,
+//      even when the table already exists).
+//   3. If the DB was the failure cause (connection lost), BOTH the
+//      primary insert AND the fallback failed — the fallback's catch
+//      block logged to stderr but the request continued, silently
+//      losing the audit entry. FDA 21 CFR Part 11 requires complete
+//      audit trails — missing entries are a compliance violation.
+//
+// Root fix: model AuditLogDeadLetter as a first-class Prisma model. The
+// writeAuditLog fallback now uses `db.auditLogDeadLetter.create()` which
+// is type-safe, queryable from the application layer, and does not
+// require a DDL on every call. Operators can monitor the dead-letter
+// row count via /api/admin/audit-logs?dead_letter=true and alert when
+// it grows (indicating a systemic AuditLog write failure).
+//
+// NOTE: a Prisma migration is required to add this table to existing
+// deployments. Run `npx prisma migrate dev --name add_audit_log_dead_letter`
+// after deploying this change. The migration is additive (new table only)
+// so it does not conflict with existing data.
+// ---------------------------------------------------------------------------
+model AuditLogDeadLetter {
+  id         String   @id @default(cuid())
+  // The action that was attempted (e.g. "logout", "billing_change").
+  action     String
+  // The resource string from the attempted audit log entry.
+  resource   String?
+  // The userId of the actor (nullable for system events).
+  userId     String?
+  // The actor's email or "anonymous" — matches AuditLog.actorName.
+  actorName  String
+  // The JSON metadata blob from the attempted entry.
+  metadata   String   @default("{}")
+  // The error message that caused the primary insert to fail.
+  error      String
+  // Whether this was a critical audit log (critical:true passed to
+  // writeAuditLog). Critical entries that ended up in the dead-letter
+  // are a compliance emergency — they SHOULD have aborted the request
+  // but the dead-letter fallback ran anyway (only happens when the
+  // critical-write itself failed, which is a different code path).
+  critical   Boolean  @default(false)
+  // The organizationId of the actor (nullable for system events).
+  organizationId String?
+  createdAt  DateTime @default(now())
+
+  @@index([action])
+  @@index([userId])
+  @@index([createdAt])
+  @@index([critical])
   @@index([organizationId])
 }
 

@@ -523,14 +523,35 @@ export async function getRankedHypotheses(opts?: {
   if (serviceUrl) {
     try {
       const upstream = await proxyToRlService(serviceUrl, queryParams);
-      // FE-033: if the upstream service supports sort+pagination natively,
-      // trust its `total` field; otherwise compute it from the candidate
-      // count (best-effort). We surface the page + total in the response.
+      // BE-013 ROOT FIX: previously, this block overwrote `upstream.total`
+      // (the real filtered-then-paginated total returned by the Python
+      // rl/service.py `_rank_impl`) with `upstream.count` (the number of
+      // candidates ON THE CURRENT PAGE). That made the candidate table
+      // show "Page 1 of 1 — Showing 1-50 of 50" even when there were
+      // 1000 matching candidates — pagination controls were broken.
+      //
+      // Root fix: TRUST the upstream `total` when it is a positive number.
+      // The Python service (rl/service.py `_rank_impl`, line 362-434) was
+      // updated in BE-070 to return the real `total` (filtered count
+      // BEFORE pagination), `page`, and `pageSize`. We propagate those
+      // fields unchanged. Only fall back to `count` (page size) when the
+      // upstream did not return a `total` (legacy/older service version).
+      //
+      // We DO override `page` and `pageSize` here because the caller's
+      // `offset` and `pageSize` are the source of truth — the upstream
+      // may have echoed back slightly different values due to rounding
+      // or defaults. The `total` is the upstream's alone (we cannot
+      // compute it without fetching ALL candidates, which would defeat
+      // the purpose of pagination).
+      const upstreamTotal =
+        typeof upstream.total === "number" && upstream.total > 0
+          ? upstream.total
+          : upstream.count;
       return {
         ...upstream,
         page: Math.floor(offset / pageSize),
         pageSize,
-        total: upstream.count,
+        total: upstreamTotal,
       } as RlRankerResponse & { page: number; pageSize: number; total: number };
     } catch (e) {
       console.warn("RL service proxy failed, falling back to local CSV:", e);

@@ -30,6 +30,22 @@ export interface EvidencePackage {
   };
   safety: DrugSafetySummary | null;
   notes: string;
+  /**
+   * BE-018 ROOT FIX: per-service status so the caller can distinguish
+   * "0 results because the service has no data" from "0 results because
+   * the service was unreachable". A pharma partner making a go/no-go
+   * decision MUST know whether "0 clinical trials" means "no trials are
+   * registered" (real signal) or "CT.gov was down" (incomplete data).
+   *
+   * The UI should display a warning banner for any service marked "failed".
+   * The PDF export should include a "Data Completeness" section listing
+   * which sources succeeded and which failed.
+   */
+  serviceStatus: {
+    literature: "ok" | "failed";
+    clinicalTrials: "ok" | "failed";
+    safety: "ok" | "failed";
+  };
 }
 
 export interface BuildEvidencePackageInput {
@@ -62,6 +78,41 @@ export async function buildEvidencePackage(input: BuildEvidencePackageInput): Pr
     getDrugSafetySummary(drug),
   ]);
 
+  // BE-018 ROOT FIX: capture per-service status. A "rejected" promise means
+  // the service was unreachable (network error, 5xx, parse failure). A
+  // "fulfilled" promise with 0 results means the service is up but has no
+  // data for this query. The two cases MUST be distinguishable in the
+  // response — otherwise a pharma partner could make a go/no-go decision
+  // on incomplete data, believing "0 trials" means "no trials exist"
+  // when in fact CT.gov was down.
+  const literatureStatus = literature.status === "fulfilled" ? "ok" : "failed" as const;
+  const clinicalTrialsStatus = clinicalTrials.status === "fulfilled" ? "ok" : "failed" as const;
+  const safetyStatus = safety.status === "fulfilled" ? "ok" : "failed" as const;
+
+  // Log failures loudly so operators see upstream outages in the platform log.
+  if (literatureStatus === "failed") {
+    console.error(`[evidence-package] PubMed lookup failed for "${drug}+${disease}":`, (literature as PromiseRejectedResult).reason);
+  }
+  if (clinicalTrialsStatus === "failed") {
+    console.error(`[evidence-package] ClinicalTrials.gov lookup failed for "${drug}+${disease}":`, (clinicalTrials as PromiseRejectedResult).reason);
+  }
+  if (safetyStatus === "failed") {
+    console.error(`[evidence-package] openFDA lookup failed for "${drug}":`, (safety as PromiseRejectedResult).reason);
+  }
+
+  // Build a notes string that includes a data-completeness warning when any
+  // service failed. The notes are persisted in the EvidencePackage DB row
+  // and exported to the PDF, so the warning is visible to pharma partners.
+  const failedServices: string[] = [];
+  if (literatureStatus === "failed") failedServices.push("PubMed");
+  if (clinicalTrialsStatus === "failed") failedServices.push("ClinicalTrials.gov");
+  if (safetyStatus === "failed") failedServices.push("openFDA");
+  const completenessWarning = failedServices.length > 0
+    ? ` WARNING: ${failedServices.join(", ")} ${failedServices.length === 1 ? "was" : "were"} unreachable when this package was generated. ` +
+      `The corresponding section may show 0 results due to the outage, not due to absence of data. ` +
+      `Re-generate this package later when the service(s) recover.`
+    : "";
+
   return {
     drug,
     disease,
@@ -75,12 +126,18 @@ export async function buildEvidencePackage(input: BuildEvidencePackageInput): Pr
       trials: clinicalTrials.status === "fulfilled" ? clinicalTrials.value.trials : [],
     },
     safety: safety.status === "fulfilled" ? safety.value : null,
+    serviceStatus: {
+      literature: literatureStatus,
+      clinicalTrials: clinicalTrialsStatus,
+      safety: safetyStatus,
+    },
     notes:
       input.notes ||
       `Evidence package assembled for ${drug} as a candidate for ${disease}. ` +
         "All data is sourced from authoritative public databases (PubMed, " +
         "ClinicalTrials.gov, openFDA). This package does NOT contain any " +
-        "model predictions — those are owned by the standalone RL agent.",
+        "model predictions — those are owned by the standalone RL agent." +
+        completenessWarning,
   };
 }
 
@@ -96,13 +153,36 @@ export function evidencePackageToMarkdown(pkg: EvidencePackage): string {
   lines.push(`- **Generated**: ${pkg.generatedAt}`);
   lines.push(`- **Notes**: ${pkg.notes}`);
   lines.push(``);
+  // BE-018: Data Completeness section — surfaces per-service status so a
+  // pharma partner reading the PDF knows whether "0 trials" means "no
+  // trials registered" or "CT.gov was down when this was generated".
+  lines.push(`## 0. Data Completeness`);
+  lines.push(``);
+  const status = pkg.serviceStatus ?? { literature: "ok", clinicalTrials: "ok", safety: "ok" };
+  const anyFailed = status.literature === "failed" || status.clinicalTrials === "failed" || status.safety === "failed";
+  if (anyFailed) {
+    lines.push(`> ⚠ **WARNING**: One or more data sources were unreachable when this package was generated.`);
+    lines.push(`> Sections marked "failed" may show 0 results due to the outage, NOT due to absence of data.`);
+    lines.push(`> Re-generate this package after the failed service(s) recover to get a complete picture.`);
+    lines.push(``);
+  }
+  lines.push(`| Source | Status |`);
+  lines.push(`|--------|--------|`);
+  lines.push(`| PubMed Literature | ${status.literature === "ok" ? "✅ OK" : "❌ FAILED"} |`);
+  lines.push(`| ClinicalTrials.gov | ${status.clinicalTrials === "ok" ? "✅ OK" : "❌ FAILED"} |`);
+  lines.push(`| openFDA Safety | ${status.safety === "ok" ? "✅ OK" : "❌ FAILED"} |`);
+  lines.push(``);
   lines.push(`---`);
   lines.push(``);
   lines.push(`## 1. PubMed Literature (${pkg.literature.total} total matches)`);
   lines.push(``);
   if (pkg.literature.articles.length === 0) {
-    lines.push(`No articles returned. This may indicate PubMed search returned zero results `);
-    lines.push(`for this drug-disease pair, or the PubMed service was temporarily unavailable.`);
+    if (status.literature === "failed") {
+      lines.push(`❌ PubMed lookup FAILED — the service was unreachable when this package was generated.`);
+      lines.push(`"0 articles" reflects the outage, not the absence of literature. Re-generate later.`);
+    } else {
+      lines.push(`No articles returned. PubMed search returned zero results for this drug-disease pair.`);
+    }
   } else {
     for (const a of pkg.literature.articles) {
       lines.push(`### ${a.title}`);
@@ -120,7 +200,12 @@ export function evidencePackageToMarkdown(pkg: EvidencePackage): string {
   lines.push(`## 2. Clinical Trials (${pkg.clinicalTrials.total} total matches)`);
   lines.push(``);
   if (pkg.clinicalTrials.trials.length === 0) {
-    lines.push(`No registered clinical trials returned for this drug-disease pair.`);
+    if (status.clinicalTrials === "failed") {
+      lines.push(`❌ ClinicalTrials.gov lookup FAILED — the service was unreachable when this package was generated.`);
+      lines.push(`"0 trials" reflects the outage, not the absence of registered trials. Re-generate later.`);
+    } else {
+      lines.push(`No registered clinical trials returned for this drug-disease pair.`);
+    }
   } else {
     for (const t of pkg.clinicalTrials.trials) {
       lines.push(`### ${t.title}`);
@@ -140,7 +225,12 @@ export function evidencePackageToMarkdown(pkg: EvidencePackage): string {
   lines.push(`## 3. FDA Adverse Event Profile`);
   lines.push(``);
   if (!pkg.safety) {
-    lines.push(`openFDA service was unavailable when this package was generated.`);
+    if (status.safety === "failed") {
+      lines.push(`❌ openFDA lookup FAILED — the service was unreachable when this package was generated.`);
+      lines.push(`"No safety data" reflects the outage, not a clean safety record. Re-generate later.`);
+    } else {
+      lines.push(`openFDA returned no safety data for this drug (no adverse event reports on file).`);
+    }
   } else {
     lines.push(`- **Generic Name**: ${pkg.safety.genericName}`);
     lines.push(`- **Brand Name**: ${pkg.safety.brandName}`);
