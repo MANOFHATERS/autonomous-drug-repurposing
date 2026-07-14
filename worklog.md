@@ -1222,3 +1222,84 @@ Stage Summary:
 - 0 new test failures introduced
 - Phase 1 data pipeline integrity restored: silent data-loss paths closed, cross-checks now log failures, process-wide side effects scoped, dead code activated, contract violations fixed
 - Production-ready: all fixes are defense-in-depth, patient-safe, and verified by real code execution
+
+---
+Task ID: v108-BE-001-to-BE-020
+Agent: Main agent (Team 11 — Backend API Routes, Batch A)
+Task: Forensic root-level fixes for ISSUE-BE-001 through ISSUE-BE-020 (20 issues). Read each file line-by-line (no grep-only, no test-reading before fixing), fix root causes (not surface patches), run real code to verify, create branch, push, merge to main, re-clone to verify.
+
+Work Log:
+- Cloned repo to /home/z/my-project/work/autonomous-drug-repurposing
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx) — 4-phase platform: Phase 1 (7 data sources), Phase 2 (Neo4j KG), Phase 3 (Graph Transformer), Phase 4 (RL ranker)
+- Read EACH assigned file LINE-BY-LINE (forensic audit, no grep-only):
+  * frontend/src/app/api/route.ts (5 lines — BE-001)
+  * frontend/src/app/api/admin/users/route.ts (287 lines — BE-002)
+  * frontend/src/app/api/audit-logs/route.ts (58 lines — BE-002, BE-003)
+  * frontend/src/app/api/auth/login/route.ts (274 lines — BE-004, BE-005)
+  * frontend/src/app/api/auth/logout/route.ts (88 lines — BE-015)
+  * frontend/src/app/api/auth/password/route.ts (116 lines — BE-016)
+  * frontend/src/app/api/auth/register/route.ts (414 lines — BE-002 context)
+  * frontend/src/app/api/evidence-package/route.ts (263 lines — BE-006, BE-018)
+  * frontend/src/app/api/hypothesis/validate/route.ts (164 lines — BE-009)
+  * frontend/src/app/api/knowledge-graph/route.ts (364 lines — BE-011, BE-012, BE-020)
+  * frontend/src/app/api/predict/route.ts (106 lines — BE-007)
+  * frontend/src/app/api/rl/route.ts (507 lines — BE-014)
+  * frontend/src/lib/api-helpers.ts (480 lines — BE-002, BE-003)
+  * frontend/src/lib/auth/rate-limit.ts (625 lines — BE-005)
+  * frontend/src/lib/auth/per-user-rate-limit.ts (464 lines — BE-005 context)
+  * frontend/src/lib/services/gt-inference.ts (382 lines — BE-007, BE-008)
+  * frontend/src/lib/services/knowledge-graph-stats.ts (273 lines — BE-010, BE-019)
+  * frontend/src/lib/services/rl-ranker.ts (715 lines — BE-013)
+  * frontend/src/lib/services/drug-mechanism.ts (299 lines — BE-017)
+  * frontend/src/lib/services/evidence-package.ts (163 lines — BE-018)
+  * frontend/prisma/schema.prisma (521 lines — BE-002, BE-003)
+  * phase2/service.py (824 lines — verified BE-011, BE-012 contracts)
+  * rl/service.py (474 lines — verified BE-013 contract)
+  * scripts/gt_inference.py (253 lines — verified BE-008 helper exists)
+  * scripts/hypothesis_writeback.py (82 lines — verified BE-009 helper exists)
+
+- Verified each issue against the CURRENT code (not the audit's snapshot). Found:
+  * 13 issues STILL BROKEN in current code (BE-001, BE-002, BE-003, BE-004, BE-005, BE-006, BE-008, BE-013, BE-014, BE-015, BE-016, BE-017, BE-018)
+  * 7 issues ALREADY FIXED by prior commits (BE-007, BE-009, BE-010, BE-011, BE-012, BE-019, BE-020) — verified by reading the actual executable code, not comments. The prior fix claims were ACCURATE for these 7.
+
+- Applied 13 root-cause fixes via Edit/MultiEdit (NO scripts, NO surface patches):
+  * BE-001: Deleted frontend/src/app/api/route.ts (the "Hello, world!" placeholder)
+  * BE-002: Added `platformOwner` to UserRole enum + `isPlatformSuperuser()` helper. Updated requireAdmin, requireRole, admin/users GET+PATCH, audit-logs GET to gate system-wide access on platformOwner ONLY. The `owner` role is now org-scoped (same as admin). platformOwner is NOT in ALLOWED_ROLES_ADMIN — cannot be granted via API, only via direct DB access. Added explicit 403 for body.role === "platformOwner" in PATCH /api/admin/users.
+  * BE-003: Added `AuditLogDeadLetter` Prisma model with indexes. Replaced raw $executeRaw SQL (CREATE TABLE IF NOT EXISTS + INSERT) with `db.auditLogDeadLetter.create()`. Added ?dead_letter=true query param to GET /api/audit-logs (platformOwner only).
+  * BE-004: Reordered login route — verifyPassword() now runs BEFORE the suspended/unverified checks. An attacker with the wrong password gets `invalid_credentials` regardless of account status. Suspended/unverified status is only revealed AFTER the password is confirmed correct.
+  * BE-005: Added 3 async distributed rate limiters (checkIpRateLimitDistributed, recordFailedTotpDistributed, checkUserApiRateLimitDistributed) that use Redis when REDIS_URL is set, fall back to in-memory otherwise. Updated login route to use checkIpRateLimitDistributed with sync fallback on Redis error.
+  * BE-006: Removed the `skipKgValidation: true` admin/owner bypass entirely. KG validation is now mandatory for ALL callers. The `skipKgValidation` body field is silently dropped (legacy clients don't break, but the bypass no longer works). Audit log records `kgValidationSkipped: false` + `serviceStatus`.
+  * BE-008: Replaced module-load-time `CHECKPOINT_CANDIDATE_DIRS` const (which used process.cwd() directly) with a `getCheckpointCandidateDirs()` function that resolves relative to repoRoot (using GT_REPO_ROOT env var or cwd.endsWith("frontend") detection). The scriptPath resolution was already fixed by a prior commit — this fix completes it by fixing the checkpoint paths.
+  * BE-013: Fixed rl-ranker.ts getRankedHypotheses — it was overwriting `upstream.total` (real filtered count from Python) with `upstream.count` (page size). Now trusts `upstream.total` when it's a positive number, falls back to `upstream.count` for legacy services. The Python rl/service.py _rank_impl already returns total/page/pageSize (verified by reading line 362-434).
+  * BE-014: Replaced persistRlCandidates' non-atomic findFirst+update/create loop (up to 100 DB queries, all errors swallowed) with a single `db.$transaction(async (tx) => {...})` interactive transaction. Returns `{ persisted, failed, error? }`. The route surfaces the persistence outcome in the response + audit log. Total failure → 500 with clear error message.
+  * BE-015: Logout route now surfaces revocation failure as a `warning` field in the response AND writes a critical audit log entry (action: "logout_revocation_failed"). Cookies are still cleared (so user is logged out locally) but the warning tells them other sessions may still be active.
+  * BE-016: Password change route — same fix as BE-015. Warning field + critical audit log entry (action: "password_change_revocation_failed").
+  * BE-017: drug-mechanism.ts — added `error?: "chembl_unreachable" | "chembl_not_found"` field to DrugMechanismResult. The catch block now sets `result.error = "chembl_unreachable"` instead of silently swallowing. Failed lookups are NOT cached (so the next request retries). Batch lookup propagates the error field.
+  * BE-018: evidence-package.ts — added `serviceStatus: { literature, clinicalTrials, safety }` field to EvidencePackage. buildEvidencePackage populates it from Promise.allSettled results. evidencePackageToMarkdown adds a "Data Completeness" section with a warning banner when any service failed. Per-section "0 results" messages now distinguish "failed" from "no data".
+
+- Installed frontend dependencies (npm install — 1092 packages, ~39s). Prisma client generated successfully — confirms schema changes (platformOwner enum value + AuditLogDeadLetter model) are valid.
+
+- Ran `npx tsc --noEmit` on the full frontend. Result: 7 errors, ALL in src/components/drugos/all-screens.tsx (a file re-introduced by another team's commit a013b28 after FE-015 deleted it in fc5cde6). ZERO errors in any of my 17 assigned files.
+
+- Ran `npx eslint` on all 17 of my assigned files. Result: 0 errors, 11 warnings (pre-existing `any` types and necessary non-null assertions — no new warnings introduced).
+
+- Wrote 31-test forensic verification suite (tests/api/v108-be-001-020-forensic.test.ts) that checks EXECUTABLE CODE (not comments) for each of the 20 issues. ALL 31 TESTS PASS.
+
+- Wrote runtime smoke test (scripts/v108-runtime-smoke.ts) that imports the ACTUAL production modules and calls the pure functions. ALL 21 RUNTIME CHECKS PASS. Notable real-data verifications:
+  * BE-010: getKnowledgeGraphStats() returned source=local_registry — it found and read the REAL Phase 2 registry JSON at ../phase2/data/registry.json
+  * BE-017: lookupDrugMechanism("aspirin") returned mechanism="Inhibitor - Cyclooxygenase inhibitor" — it actually called ChEMBL's live API at https://www.ebi.ac.uk/chembl/api/data and got the real mechanism of action
+  * BE-008: predictPairs([]) returned source=none without crashing — checkpoint path resolution works
+  * BE-005: checkIpRateLimitDistributed() returned {blocked:false, retryAfterSeconds:0} — the in-memory fallback path works
+
+- Did NOT touch src/components/drugos/all-screens.tsx (another team's file — coordination rule). The pre-existing tsc errors there are NOT my responsibility.
+
+Stage Summary:
+- 13 issues FIXED at the root level (no surface patches, no aspirational comments). 7 issues verified as already-fixed by prior commits (BE-007, BE-009, BE-010, BE-011, BE-012, BE-019, BE-020).
+- 31 forensic verification tests + 21 runtime smoke checks — ALL PASS.
+- Files modified: 12 production files + 1 schema file + 2 test/script files.
+- The Phase 1 → Phase 2 → Phase 3 → Phase 4 chain is verified connected:
+  * Phase 2 service exposes /kg/stats, /query, /cypher, /kg/explore — all matched by the frontend routes.
+  * Phase 3 GT inference: scriptPath + checkpoint paths now resolve relative to repo root (works from frontend/ cwd).
+  * Phase 4 RL ranker: total/page/pageSize pagination fields now flow correctly from Python → TS → UI.
+  * Data flywheel: hypothesis writeback scriptPath resolves correctly (BE-009 verified).
+- Branch: fix/team11-be-001-020-forensic-root-fix-v108

@@ -56,6 +56,15 @@ export interface DrugMechanismResult {
   /** Canonicalized mechanism reference, e.g. "ChEMBL::CHEMBL25::Direct thrombin inhibitor". */
   source: string | null;
   fetchedAt: string;
+  /**
+   * BE-017 ROOT FIX: distinguish "no data exists in ChEMBL" from "lookup failed".
+   * - undefined: lookup succeeded (mechanism may be null if ChEMBL has no MoA record).
+   * - "chembl_unreachable": network error, HTTP 5xx, or JSON parse error.
+   * - "chembl_not_found": HTTP 404 / 422 from ChEMBL (treated as no data; mechanism=null).
+   * The UI should render "—" for null mechanism with no error, but "Mechanism lookup failed — retry"
+   * when error is set, so the researcher does not conflate "service down" with "no data".
+   */
+  error?: "chembl_unreachable" | "chembl_not_found";
 }
 
 // In-memory cache. Bounded to 256 entries; oldest evicted first.
@@ -250,6 +259,8 @@ export async function lookupDrugMechanism(
   try {
     const chemblId = await resolveChemblId(drugName);
     if (!chemblId) {
+      // No ChEMBL match — this is "no data", not a lookup failure.
+      // Leave error undefined so the UI renders "—" (not "lookup failed").
       cacheSet(key, result);
       return result;
     }
@@ -259,9 +270,25 @@ export async function lookupDrugMechanism(
       result.mechanism = mechanism;
       result.source = `ChEMBL::${chemblId}`;
     }
-  } catch {
-    // Network error or JSON parse error — return the empty result.
-    // The caller renders "—" and the user can retry.
+    // mechanism === null here means ChEMBL has the molecule but no MoA record.
+    // That is "no data", not a lookup failure — leave error undefined.
+  } catch (e: unknown) {
+    // BE-017 ROOT FIX: do NOT silently swallow. Distinguish "no data" from
+    // "lookup failed" so the UI can show "Mechanism lookup failed — retry"
+    // instead of "—". A researcher who sees "—" believes the data does not
+    // exist; a researcher who sees "lookup failed" knows to retry later.
+    // Common causes: ChEMBL is down, network timeout, malformed JSON response.
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`[drug-mechanism] ChEMBL lookup failed for "${drugName}": ${msg}`);
+    result.error = "chembl_unreachable";
+    // Do NOT cache failed lookups for the full TTL — cache for a short window
+    // (10s) so a transient failure doesn't persist, but we still debounce a
+    // flood of requests if ChEMBL is genuinely down. We do this by writing
+    // to the cache with a stale-at-10s marker via cacheSet, but the lookup
+    // function checks TTL=5min normally — so we instead just SKIP caching
+    // failures and let the next request retry. Trade-off: more load on
+    // ChEMBL during an outage, but faster recovery when ChEMBL comes back.
+    return result;
   }
 
   cacheSet(key, result);
@@ -289,6 +316,9 @@ export async function lookupDrugMechanisms(
         mechanism: null,
         source: null,
         fetchedAt: new Date().toISOString(),
+        // BE-017: surface the failure so the batch caller can distinguish
+        // "no data" from "lookup failed" for each drug in the batch.
+        error: "chembl_unreachable" as const,
       })))
     );
     for (const r of results) {

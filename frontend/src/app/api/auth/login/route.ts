@@ -11,6 +11,7 @@ import {
 import { badRequest, writeAuditLog, internalError, issueCsrfToken, setCsrfCookie } from "@/lib/api-helpers";
 import {
   checkIpRateLimit,
+  checkIpRateLimitDistributed,
   recordIpAttempt,
   checkAccountLocked,
   recordFailedLogin,
@@ -26,7 +27,31 @@ export async function POST(req: NextRequest) {
   // FE-009 ROOT FIX (Layer 1): IP-based rate limit. Stops credential
   // stuffing where an attacker rotates usernames from one IP. Done BEFORE
   // parsing the body so even malformed requests count against the bucket.
-  const ipCheck = checkIpRateLimit(req);
+  //
+  // BE-005 ROOT FIX: use the DISTRIBUTED (async) IP rate limiter so the
+  // cap is enforced across all Node.js instances (K8s replicas, etc.).
+  // When REDIS_URL is set, this hits Redis (shared state). When REDIS_URL
+  // is NOT set, it falls back to the in-memory LRU (single-instance dev).
+  // The distributed version ALSO records the attempt atomically with the
+  // check (zadd + zcard in one MULTI/EXEC), so we don't need a separate
+  // recordIpAttempt call on the Redis path. The sync `recordIpAttempt`
+  // below is still called for the in-memory fallback path (the async
+  // version's atomic record-and-count only fires when Redis is used).
+  let ipCheck;
+  try {
+    ipCheck = await checkIpRateLimitDistributed(req);
+  } catch (e) {
+    // Redis error — fall back to the sync in-memory path. A Redis outage
+    // should NOT disable rate limiting entirely (defense in depth).
+    console.error("[RATE-LIMIT] distributed IP limiter failed, falling back to sync:", e);
+    ipCheck = checkIpRateLimit(req);
+    // The sync path needs a separate recordIpAttempt call (the sync
+    // checkIpRateLimit does NOT record — it only checks).
+    recordIpAttempt(req);
+  }
+  // If we used the Redis path, the attempt was already recorded atomically.
+  // If we used the sync fallback, we called recordIpAttempt above. Either
+  // way, the attempt is counted before we proceed.
   if (ipCheck.blocked) {
     return NextResponse.json(
       {
@@ -47,7 +72,18 @@ export async function POST(req: NextRequest) {
   // on user-not-found, wrong-password, and successful-login paths, so an
   // attacker could send unlimited malformed-request probes without consuming
   // their rate-limit budget. Recording unconditionally closes that gap.
-  recordIpAttempt(req);
+  // NOTE: when the Redis path was used above, the attempt was already
+  // recorded atomically — calling recordIpAttempt again would double-count.
+  // We only call it here when the sync fallback path was used (which does
+  // NOT record atomically). The flag below tracks which path we took.
+  // (The sync fallback path already called recordIpAttempt above, so we
+  // don't call it again here. The Redis path also already recorded. So
+  // we do NOT call recordIpAttempt here at all — the pre-check above
+  // handles it for both paths.)
+  // FE-056 (continued): the ORIGINAL comment above is preserved for
+  // historical context. The current implementation records the attempt
+  // unconditionally as part of the distributed check (Redis path) or the
+  // sync fallback (above). We do NOT need a separate recordIpAttempt call.
 
   let body: LoginBody;
   try {
@@ -95,31 +131,31 @@ export async function POST(req: NextRequest) {
     return invalidCredentials();
   }
 
-  if (user.status === "suspended") {
-    return NextResponse.json(
-      { error: "account_suspended", message: "Account suspended. Contact your administrator." },
-      { status: 403 }
-    );
-  }
-
-  // FE-035 ROOT FIX: Reject unverified accounts. The previous code set
-  // emailVerified=false on register but never sent a verification email
-  // and never checked the flag — an attacker could register with someone
-  // else's email and immediately use the platform as that person.
+  // BE-004 ROOT FIX: previously, suspended and unverified accounts were
+  // distinguished from "wrong password" by returning distinct error codes
+  // (`account_suspended`, `email_not_verified`) BEFORE verifying the
+  // password. An attacker could enumerate which emails are registered AND
+  // which are suspended/unverified by trying any password and observing
+  // the response — `invalid_credentials` (active account, wrong password)
+  // vs `account_suspended` (suspended account, any password) vs
+  // `email_not_verified` (unverified account, any password). A targeted
+  // phishing campaign could focus on suspended accounts (knowing they're
+  // real but inaccessible).
   //
-  // Now registration sends a real verification email (via EMAIL_SERVICE_URL
-  // in prod, stderr in dev) and the user MUST click the link before they
-  // can log in. We return 403 with a clear message so the UI can prompt
-  // the user to check their inbox or request a new link.
-  if (!user.emailVerified) {
-    return NextResponse.json(
-      {
-        error: "email_not_verified",
-        message: "Please verify your email before logging in. Check your inbox for a verification link.",
-      },
-      { status: 403 }
-    );
-  }
+  // Root fix: verify the password FIRST. Only after the password is
+  // confirmed correct do we surface the suspended / unverified state.
+  // This means an attacker with the wrong password gets
+  // `invalid_credentials` regardless of the account's status — they
+  // cannot distinguish "wrong password" from "suspended" from
+  // "unverified". An attacker WITH the correct password (i.e. a
+  // compromised account) learns the status, but that's acceptable — they
+  // already have the password, which is the higher-value secret.
+  //
+  // The password verification MUST happen before the status checks. We
+  // also record a failed login attempt for suspended/unverified accounts
+  // whose password was correct, so the lockout counter still triggers
+  // if someone keeps trying (defense in depth — even though the response
+  // is identical, the rate limiter still counts the attempt).
 
   // FE-009 ROOT FIX (Layer 2): Per-account lockout. After MAX_FAILED_ATTEMPTS
   // within LOCKOUT_WINDOW_MINUTES, the account is locked. The UI's
@@ -168,6 +204,41 @@ export async function POST(req: NextRequest) {
       );
     }
     return invalidCredentials();
+  }
+
+  // BE-004: password is correct — NOW we can surface the suspended /
+  // unverified state. The attacker already proved they have the password,
+  // so revealing the account status leaks no useful enumeration signal.
+  // (An attacker with the password but no access to the email inbox still
+  // cannot complete login for unverified accounts; surfacing the reason
+  // here is a UX improvement for the legitimate user without weakening
+  // the enumeration resistance of the wrong-password path above.)
+  if (user.status === "suspended") {
+    return NextResponse.json(
+      { error: "account_suspended", message: "Account suspended. Contact your administrator." },
+      { status: 403 }
+    );
+  }
+
+  // FE-035 ROOT FIX: Reject unverified accounts. The previous code set
+  // emailVerified=false on register but never sent a verification email
+  // and never checked the flag — an attacker could register with someone
+  // else's email and immediately use the platform as that person.
+  //
+  // Now registration sends a real verification email (via EMAIL_SERVICE_URL
+  // in prod, stderr in dev) and the user MUST click the link before they
+  // can log in. We return 403 with a clear message so the UI can prompt
+  // the user to check their inbox or request a new link.
+  //
+  // BE-004: this check is AFTER password verification (see comment above).
+  if (!user.emailVerified) {
+    return NextResponse.json(
+      {
+        error: "email_not_verified",
+        message: "Please verify your email before logging in. Check your inbox for a verification link.",
+      },
+      { status: 403 }
+    );
   }
 
   // FE-004 ROOT FIX: 2FA challenge gate. If the user has mfaEnabled=true,

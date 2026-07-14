@@ -37,6 +37,10 @@ export async function POST(req: NextRequest) {
   const store = await cookies();
   const refreshCookieValue = store.get(REFRESH_COOKIE)?.value;
 
+  // BE-015 ROOT FIX: hoist the warning to function scope so the final
+  // response can include it regardless of which branch set it.
+  let revocationWarning: string | null = null;
+
   if (user) {
     await writeAuditLog({
       user,
@@ -46,14 +50,47 @@ export async function POST(req: NextRequest) {
     // Revoke every outstanding refresh token for this user — not just the
     // current one. A compromised sibling session (different browser,
     // stolen token) must also be terminated.
+    //
+    // BE-015 ROOT FIX: previously, a revocation failure (DB down, network
+    // timeout, connection pool exhaustion) was SILENTLY SWALLOWED — the
+    // user saw `{ ok: true }` and believed all sessions were ended, when
+    // in fact a stolen sibling refresh token kept working for up to 30
+    // days. A user who suspects compromise and clicks "Log Out" was given
+    // a FALSE sense of security.
+    //
+    // Root fix: surface the failure as a `warning` field in the response
+    // AND write a critical audit log entry. The UI MUST display the
+    // warning prominently so the user knows to contact support and change
+    // their password. We STILL clear cookies (so the user is logged out
+    // locally — failing the logout entirely would trap the user in their
+    // session, which is worse UX than a partial logout with a warning).
+    // The audit log records the failure for compliance (FDA 21 CFR Part 11
+    // requires complete audit trails).
     try {
       await revokeAllRefreshTokensForUser(user.userId);
     } catch (err) {
-      // Log but do not fail the logout response. If revocation fails we
-      // still want the user's cookies cleared so they appear logged out
-      // locally; the lingering token will eventually expire.
-       
+      revocationWarning =
+        "Your current session has been ended, but other sessions (e.g. on " +
+        "another browser, or a stolen refresh token) could NOT be revoked " +
+        "due to a server error. They will remain active for up to 30 days " +
+        "unless you change your password. Please contact support if you " +
+        "suspect compromise.";
       console.error("[logout] refresh-token revocation failed", err);
+      // Critical audit log — this is a security-relevant event.
+      try {
+        await writeAuditLog({
+          user,
+          action: "logout_revocation_failed",
+          resource: `user:${user.userId}`,
+          metadata: {
+            error: err instanceof Error ? err.message : String(err),
+          },
+          critical: true,
+        });
+      } catch {
+        // If even the audit-log write fails, log to stderr as last resort.
+        console.error("[logout] CRITICAL: revocation failed AND audit log failed");
+      }
     }
   } else if (refreshCookieValue) {
     // Even if we cannot resolve a user from the access token, the refresh
@@ -76,13 +113,27 @@ export async function POST(req: NextRequest) {
         });
       }
     } catch (err) {
-       
+      // BE-015: same root fix — surface the failure as a warning. The
+      // orphan-token branch is defensive; if it fails, the token will
+      // expire naturally (30-day TTL), but the user should be told.
       console.error("[logout] orphan refresh-token revocation failed", err);
+      revocationWarning =
+        "Your current session has been ended, but an orphaned refresh " +
+        "token could not be revoked due to a server error. It will " +
+        "expire naturally within 30 days. Contact support if concerned.";
     }
   }
 
   await clearAuthCookies();
   // FE-011: clear the CSRF cookie too so a re-login gets a fresh token.
   await clearCsrfCookie();
-  return NextResponse.json({ ok: true });
+  // BE-015: return a warning field if revocation failed, so the UI can
+  // display it prominently. The `ok: true` is preserved for backwards
+  // compatibility with clients that only check that field — the warning
+  // is the new signal that the logout was partial.
+  return NextResponse.json(
+    revocationWarning
+      ? { ok: true, warning: revocationWarning }
+      : { ok: true }
+  );
 }
