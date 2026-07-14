@@ -2301,58 +2301,52 @@ class GTRLBridge:
         # repurpose commercially). Drugs not in the table get a deterministic
         # hash-based fallback.
         # In production, this is loaded from the FDA Orange Book via Phase 1.
-        patent_per_drug: Dict[int, float] = {}
-        for drug_name, d_idx in drug_map.items():
-            # P3-013/P3-014 ROOT FIX: removed the dead bimodal-random
-            # patent_score block (it was immediately overwritten by the
-            # curated FDA Orange Book lookup below). Also removed the dead
-            # name_hash / drug_seed lines that were immediately overwritten
-            # by _deterministic_name_seed. Only the deterministic curated
-            # table lookup remains -- it already has its own SHA-256
-            # fallback inside get_drug_patent_score for drugs not in the
-            # Orange Book.
-            # P3-006 ROOT FIX: get_drug_patent_score now returns None for
-            # drugs not in the curated FDA Orange Book table (instead of
-            # fabricating a hash-based mock score). The caller decides how
-            # to handle the missing data. Here we use a neutral 0.5 with a
-            # WARNING log — the data gap is EXPLICIT, not hidden behind a
-            # deterministic hash. In production, the caller loads real FDA
-            # Orange Book data from Phase 1.
-            patent_score = get_drug_patent_score(drug_name, fallback_seed=self.seed)
-            if patent_score is None:
-                logger.warning(
-                    f"P3-006: drug '{drug_name}' not in curated FDA Orange "
-                    f"Book patent table. Using neutral 0.5 (data gap is "
-                    f"EXPLICIT — not a fabricated hash-based score). Load "
-                    f"real patent data from Phase 1 for production."
-                )
-                patent_score = 0.5
-            patent_per_drug[d_idx] = float(patent_score)
+        # P4-050 ROOT FIX: vectorize patent_per_drug and adme_per_drug via
+        # pandas .map() instead of Python for loops. The previous code looped
+        # over drug_map.items() (10K iterations for 10K drugs), each calling
+        # get_drug_patent_score / get_drug_adme_score. While each call is
+        # just a dict lookup + fallback, the Python loop overhead adds up at
+        # production scale. The vectorized version uses pandas .map() which
+        # is implemented in C for the iteration overhead, and handles the
+        # None-to-0.5 fallback in a single vectorized fillna() call.
+        _drug_names_df = pd.DataFrame(
+            list(drug_map.items()), columns=["name", "idx"]
+        )
+        # --- Patent score (vectorized) ---
+        _patent_scores = _drug_names_df["name"].map(
+            lambda d: get_drug_patent_score(d, fallback_seed=self.seed)
+        )
+        _n_patent_missing = int(_patent_scores.isna().sum())
+        if _n_patent_missing > 0:
+            logger.warning(
+                f"P3-006: {_n_patent_missing} drugs not in curated FDA Orange "
+                f"Book patent table. Using neutral 0.5 for each (data gap is "
+                f"EXPLICIT — not a fabricated hash-based score). Load real "
+                f"patent data from Phase 1 for production. (P4-050: "
+                f"vectorized via pandas .map() + fillna.)"
+            )
+        _patent_scores = _patent_scores.fillna(0.5).astype(float)
+        patent_per_drug: Dict[int, float] = dict(zip(
+            _drug_names_df["idx"].tolist(), _patent_scores.tolist()
+        ))
 
-        # --- ADME score (P3-027 ROOT FIX: curated DrugBank ADMET table) ---
-        # P3-027 ROOT FIX (CRITICAL — do NOT use hash-based random ADME).
-        # The previous code computed adme_score via deterministic SHA-256
-        # hash of the drug name: ``drug_rng = np.random.default_rng(drug_seed);
-        # adme = drug_rng.beta(5, 2)``. This is MOCK DATA — a deterministic
-        # random value, NOT a real ADME profile.
-        #
-        # The fix: use the curated DRUG_ADME_PROFILES table (sourced from
-        # DrugBank ADMET predictions and clinical bioavailability data).
-        # Return None for drugs not in the table. The caller handles None
-        # by using a neutral 0.5 with a WARNING — the data gap is EXPLICIT.
-        # In production, this is loaded from Phase 1 (DrugBank ADMET fields).
-        adme_per_drug: Dict[int, float] = {}
-        for drug_name, d_idx in drug_map.items():
-            adme_score = get_drug_adme_score(drug_name, fallback_seed=self.seed)
-            if adme_score is None:
-                logger.warning(
-                    f"P3-027: drug '{drug_name}' not in curated DrugBank "
-                    f"ADMET table. Using neutral 0.5 (data gap is EXPLICIT "
-                    f"— not a fabricated hash-based score). Load real ADMET "
-                    f"data from Phase 1 for production."
-                )
-                adme_score = 0.5
-            adme_per_drug[d_idx] = float(adme_score)
+        # --- ADME score (vectorized, P3-027 ROOT FIX) ---
+        _adme_scores = _drug_names_df["name"].map(
+            lambda d: get_drug_adme_score(d, fallback_seed=self.seed)
+        )
+        _n_adme_missing = int(_adme_scores.isna().sum())
+        if _n_adme_missing > 0:
+            logger.warning(
+                f"P3-027: {_n_adme_missing} drugs not in curated DrugBank "
+                f"ADMET table. Using neutral 0.5 for each (data gap is "
+                f"EXPLICIT — not a fabricated hash-based score). Load real "
+                f"ADMET data from Phase 1 for production. (P4-050: "
+                f"vectorized via pandas .map() + fillna.)"
+            )
+        _adme_scores = _adme_scores.fillna(0.5).astype(float)
+        adme_per_drug: Dict[int, float] = dict(zip(
+            _drug_names_df["idx"].tolist(), _adme_scores.tolist()
+        ))
 
         # --- Efficacy score: drug's clinical validation ---
         # V30 ROOT FIX (9.14): the original code used the count of
