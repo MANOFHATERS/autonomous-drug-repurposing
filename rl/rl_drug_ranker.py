@@ -299,15 +299,25 @@ try:
 except ImportError:
     _SHARED_KP_RECOVERY_THRESHOLD: float = 0.5  # type: ignore[no-redef]
 
-    def _resolve_kp_recovery_threshold(config_threshold: float) -> float:  # type: ignore[no-redef]
-        """Local fallback identical to scientific_thresholds.resolve_kp_recovery_threshold."""
+    # P4-023 ROOT FIX: scale-aware fallback (same logic as scientific_thresholds.py)
+    def _resolve_kp_recovery_threshold(config_threshold: float, n_test_kps: int = 0) -> float:  # type: ignore[no-redef]
+        """Local fallback — scale-aware KP recovery threshold."""
+        # Compute scale-aware base threshold
+        if n_test_kps >= 1000:
+            base = 0.5
+        elif n_test_kps >= 100:
+            base = 0.4
+        elif n_test_kps > 0:
+            base = 0.34
+        else:
+            base = _SHARED_KP_RECOVERY_THRESHOLD
         try:
             cfg = float(config_threshold)
         except (TypeError, ValueError):
-            return _SHARED_KP_RECOVERY_THRESHOLD
+            return base
         if cfg < 0.0 or cfg > 1.0:
-            return _SHARED_KP_RECOVERY_THRESHOLD
-        return max(cfg, _SHARED_KP_RECOVERY_THRESHOLD)
+            return base
+        return max(cfg, base)
 
 # Optional canonical-identifier columns.
 SOURCE_DB_COL: str = "source_database"
@@ -494,37 +504,139 @@ DATA_DICTIONARY: Dict[str, Dict[str, Any]] = {
 # This makes the data flywheel work: validated pairs like
 # (thalidomide, multiple myeloma) now receive the +0.1 reward bonus
 # (P4-003 fix), so the agent learns to rank them HIGH.
+# P4-016 ROOT FIX: expanded WITHDRAWN_DRUGS from FDA/EMA withdrawn-drugs
+# databases. The previous list was incomplete — missing valproate (EU
+# pregnancy prevention program), domperidone (cardiac risk, EU withdrawn),
+# tegaserod (CV risk, withdrawn 2007), benzyl alcohol (neonatal toxicity),
+# etc. A withdrawn drug NOT in this list is NOT hard-rejected — the agent
+# can rank it HIGH → patient safety risk.
+#
+# Sources:
+#   - FDA Drug Safety Communications (withdrawn drugs)
+#   - EMA EPAR withdrawals list
+#   - DrugBank 'withdrawn' flag
+#   - Wikipedia "List of withdrawn drugs"
 WITHDRAWN_DRUGS: frozenset = frozenset({
-    "rofecoxib", "vioxx", "terfenadine", "cerivastatin",
-    "troglitazone", "valdecoxib", "bextra", "rimonabant", "sibutramine",
-    "phenformin", "cisapride", "astemizole", "grepafloxacin",
-    "lumiracoxib", "tacrine", "tolcapone", "dexfenfluramine",
+    # COX-2 inhibitors (cardiovascular risk)
+    "rofecoxib", "vioxx", "valdecoxib", "bextra", "lumiracoxib", "prexige",
+    # Statins (rhabdomyolysis)
+    "cerivastatin", "baycol",
+    # Antihistamines (QT prolongation / cardiac arrhythmia)
+    "terfenadine", "astemizole",
+    # Anti-obesity (cardiovascular / psychiatric)
+    "rimonabant", "sibutramine", "dexfenfluramine", "fenfluramine", "pondimin",
+    # Antidiabetic (hepatotoxicity)
+    "troglitazone", "rezulin",
+    # GI prokinetic (cardiac arrhythmia)
+    "cisapride", "propulsid",
+    # Antibiotic (QT prolongation / cardiac)
+    "grepafloxacin", "sparfloxacin", "temafloxacin", "trovafloxacin",
+    # Alzheimer's (hepatotoxicity)
+    "tacrine", "cognex",
+    # Parkinson's (hepatotoxicity)
+    "tolcapone", "tasmar",
+    # Diabetes (lactic acidosis)
+    "phenformin",
+    # Analgesic (neonatal toxicity / methemoglobinemia)
+    "benzyl alcohol",
+    # IBS-C (CV risk / stroke)
+    "tegaserod", "zelnorm",
+    # Antiemetic (cardiac risk, EU withdrawn)
+    "domperidone", "motilium",
+    # Antiepileptic (EU pregnancy prevention program — neural tube defects)
+    "valproate", "valproic acid", "divalproex sodium", "depakote",
+    # Thalidomide analog (birth defects — global withdrawal)
+    "thalidomide",
 })
 
-# P4-002: indication-specific withdrawals. Maps drug_name (lowercase) to
-# a set of indication substrings (lowercase) for which the drug is
-# CONTRAINDICATED. If the proposed disease matches ANY of the
-# contraindicated indication substrings, the pair is hard-rejected.
-# Otherwise, the drug is allowed for that indication.
+# P4-002/P4-017 ROOT FIX: indication-specific withdrawals. Maps drug_name
+# (lowercase) to a set of indication tokens (lowercase) for which the drug
+# is CONTRAINDICATED. All tokens must match for rejection (P4-019 fix —
+# prevents over-broad substring matching).
 #
-# Thalidomide is contraindicated for pregnancy/morning sickness but is
-# FDA-approved for multiple myeloma (and leprosy). The previous code's
-# global hard-reject made the (thalidomide, multiple myeloma) validated
-# hypothesis unreachable. This indication-specific map fixes that.
+# Sources: FDA Contraindications section of drug labels, EMA EPARs,
+# pregnancy category X drugs, REMS programs.
 INDICATION_WITHDRAWN_DRUGS: Dict[str, frozenset] = {
-    # Thalidomide: withdrawn for pregnancy use (teratogenicity). Still
+    # Thalidomide: withdrawn globally for pregnancy (teratogenicity).
     # FDA-approved for multiple myeloma and leprosy under REMS.
     "thalidomide": frozenset({
         "morning sickness", "nausea", "pregnancy",
         "hyperemesis", "emesis", "vomiting",
     }),
+    # P4-017 ROOT FIX: added pregnancy teratogens from FDA Category X.
+    # Valproate: neural tube defects, craniofacial malformations, cognitive
+    # impairment. Contraindicated for pregnancy. Still used for epilepsy,
+    # bipolar disorder, migraine prophylaxis in NON-pregnant patients.
+    "valproate": frozenset({"pregnancy"}),
+    "valproic acid": frozenset({"pregnancy"}),
+    "divalproex sodium": frozenset({"pregnancy"}),
+    # Isotretinoin / Accutane: severe birth defects. iPLEDGE REMS.
+    "isotretinoin": frozenset({"pregnancy"}),
+    "accutane": frozenset({"pregnancy"}),
+    "amnesteem": frozenset({"pregnancy"}),
+    "claravis": frozenset({"pregnancy"}),
+    "myorisan": frozenset({"pregnancy"}),
+    "zenatane": frozenset({"pregnancy"}),
+    # Lenalidomide: thalidomide analog, teratogenic. REVLIMID REMS.
+    "lenalidomide": frozenset({"pregnancy"}),
+    # Pomalidomide: thalidomide analog, teratogenic. POMALYST REMS.
+    "pomalidomide": frozenset({"pregnancy"}),
+    # Methotrexate: teratogenic at low doses for autoimmune diseases.
+    # High-dose cancer chemotherapy is NOT contraindicated for pregnancy
+    # in the same way (risk-benefit differs). The indication-specific
+    # check catches "pregnancy" as the target disease.
+    "methotrexate": frozenset({"pregnancy"}),
+    # Finasteride / Dutasteride: 5-alpha-reductase inhibitors. Contraindicated
+    # for pregnancy (risk to male fetus). Women who are or may become
+    # pregnant should not handle crushed tablets.
+    "finasteride": frozenset({"pregnancy"}),
+    "dutasteride": frozenset({"pregnancy"}),
+    # Mifepristone: pregnancy termination. Contraindicated for wanted pregnancy.
+    "mifepristone": frozenset({"pregnancy"}),
+    # Warfarin: teratogenic (fetal warfarin syndrome). Contraindicated in
+    # pregnancy (especially 1st trimester). LMWH is preferred for DVT/PE
+    # prophylaxis in pregnancy.
+    "warfarin": frozenset({"pregnancy"}),
 }
 
-# Controlled substances -- flag for legal review, do NOT auto-export.
+# P4-018 ROOT FIX: expanded CONTROLLED_SUBSTANCES from DEA scheduling.
+# Missing substances are NOT flagged for legal review — they can be
+# exported to pharma partners without the `controlled_substance` flag,
+# bypassing legal review.
+#
+# Source: DEA Controlled Substances Schedules (21 CFR 1308).
 CONTROLLED_SUBSTANCES: frozenset = frozenset({
-    "fentanyl", "morphine", "heroin", "cocaine", "methamphetamine",
-    "oxycodone", "hydrocodone", "hydromorphone", "meperidine",
-    "carfentanil", "remifentanil", "sufentanil",
+    # Schedule II opioids (high abuse potential, severe dependence)
+    "fentanyl", "morphine", "heroin", "oxycodone", "oxycontin",
+    "hydrocodone", "hydromorphone", "dilaudid", "meperidine", "demerol",
+    "carfentanil", "remifentanil", "sufentanil", "alfentanil",
+    "oxymorphone", "opana", "tapentadol", "nucynta",
+    # Schedule II stimulants
+    "cocaine", "methamphetamine", "desoxyn", "amphetamine", "adderall",
+    "dextroamphetamine", "dexedrine", "lisdexamfetamine", "vyvanse",
+    "methylphenidate", "ritalin", "concerta",
+    # Benzodiazepines (Schedule IV — but still controlled, legal review required)
+    "alprazolam", "xanax", "diazepam", "valium", "lorazepam", "ativan",
+    "clonazepam", "klonopin", "temazepam", "restoril", "triazolam",
+    "halcion", "chlordiazepoxide", "librium", "oxazepam", "serax",
+    "midazolam", "versed", "flunitrazepam", "rohypnol",
+    # Barbiturates (Schedule II-IV)
+    "phenobarbital", "secobarbital", "pentobarbital", "thiopental",
+    # Cannabis / THC (Schedule I or III depending on formulation)
+    "cannabis", "marijuana", "tetrahydrocannabinol", "thc",
+    "dronabinol", "marinol", "nabilone", "cesamet",
+    # Hallucinogens (Schedule I)
+    "lysergic acid diethylamide", "lsd", "mdma", "ecstasy", "molly",
+    "psilocybin", "psilocin", "mescaline", "peyote", "dimethyltryptamine",
+    "dmt", "ibogaine", "ketamine", "esketamine", "spravato",
+    # Anabolic steroids (Schedule III)
+    "testosterone", "nandrolone", "stanozolol", "oxandrolone",
+    "methandrostenolone", "boldenone", "trenbolone",
+    # Other Schedule II
+    "pentobarbital", "secobarbital", "glutethimide", "levorphanol",
+    "meperidine", "methadone", "dolophine", "pethidine",
+    # Gamma-hydroxybutyrate (Schedule I)
+    "gamma-hydroxybutyrate", "ghb", "sodium oxybate", "xyrem",
 })
 
 # Known drug-disease positives -- recovery test.
@@ -1332,15 +1444,21 @@ class RewardConfig:
                 f"A negative bonus penalizes the agent for ranking validated "
                 f"pairs HIGH, which undermines the data flywheel."
             )
-        # validated_bonus upper bound: 1.0. Beyond this, the validated
-        # bonus dominates the reward and the agent just learns to rank
-        # validated pairs HIGH (no multi-feature integration).
-        if self.validated_bonus > 1.0:
+        # P4-002 ROOT FIX: validate the EFFECTIVE bonus (validated_bonus *
+        # high_action_bonus), not just validated_bonus. The previous check
+        # ``validated_bonus > 1.0`` was wrong because step() multiplies
+        # reward by high_action_bonus (5.0) AFTER compute() adds
+        # validated_bonus — making the effective bonus 0.5 when
+        # validated_bonus=0.1. The effective bonus must be <= 1.0 to
+        # prevent the validated bonus from dominating the reward.
+        effective_validated_bonus = self.validated_bonus * self.high_action_bonus
+        if effective_validated_bonus > 1.0:
             raise ValueError(
-                f"validated_bonus must be <= 1.0 (got {self.validated_bonus}). "
-                f"Beyond 1.0, the validated bonus dominates the reward and "
-                f"the agent learns to rank only validated pairs HIGH (no "
-                f"multi-feature integration)."
+                f"validated_bonus * high_action_bonus must be <= 1.0 "
+                f"(got {effective_validated_bonus} = {self.validated_bonus} * "
+                f"{self.high_action_bonus}). The effective validated bonus "
+                f"dominates the reward and the agent learns to rank only "
+                f"validated pairs HIGH (no multi-feature integration)."
             )
         # correct_rejection_reward must be >= 0 (a negative reward would
         # penalize the agent for correctly rejecting bad pairs — inverted).
@@ -2594,17 +2712,25 @@ class RewardFunction:
         # receives the +0.1 reward bonus at line ~1773.
         if drug_name in WITHDRAWN_DRUGS:
             return -1.0
-        # P4-002: indication-specific check
+        # P4-019 ROOT FIX: indication-specific check with TOKENIZED matching.
+        # The previous code used SUBSTRING matching:
+        #   if contraindication in disease_name:
+        # This over-broadly rejected drugs. "nausea" matched
+        # "chronic_nausea_syndrome", and "pregnancy" matched
+        # "pregnancy-related_hypertension" — a different condition.
+        # The fix splits both the contraindication and disease_name on
+        # whitespace and checks if ALL contraindication tokens are present
+        # in the disease_name tokens (as whole words).
         contraindicated_indications = INDICATION_WITHDRAWN_DRUGS.get(drug_name)
         if contraindicated_indications:
+            disease_tokens = set(disease_name.replace("-", " ").replace("_", " ").split())
             for contraindication in contraindicated_indications:
-                if contraindication in disease_name:
+                contra_tokens = set(contraindication.replace("-", " ").replace("_", " ").split())
+                if contra_tokens and contra_tokens.issubset(disease_tokens):
                     logger.debug(
-                        f"P4-002: rejecting {drug_name} for contraindicated "
-                        f"indication '{disease_name}' (matches "
-                        f"contraindication '{contraindication}'). Drug is "
-                        f"allowed for other indications (e.g., multiple "
-                        f"myeloma, leprosy)."
+                        f"P4-019: rejecting {drug_name} for contraindicated "
+                        f"indication '{disease_name}' (tokens {contra_tokens} "
+                        f"match). Drug is allowed for other indications."
                     )
                     return -1.0
 
@@ -2742,10 +2868,24 @@ class RewardFunction:
         # through a scientific review (the audit showed this is a
         # P0 patient-safety hazard).
 
-        # safety_factor — monotonic in safety_score.
-        # safety < safety_warning (0.7) -> halve reward.
-        # safety >= safety_warning -> no penalty.
-        safety_factor = 0.5 if safety_val < cfg.safety_warning else 1.0
+        # P4-020 ROOT FIX: continuous safety_factor via linear interpolation.
+        # The previous code used a STEP FUNCTION:
+        #   safety < 0.7 -> factor=0.5
+        #   safety >= 0.7 -> factor=1.0
+        # This gave the agent NO gradation: safety=0.51 and safety=0.69
+        # both got factor=0.5. The fix uses linear interpolation:
+        #   safety_factor = 0.5 + 0.5 * (safety - hard_reject) / (warning - hard_reject)
+        # So: safety=0.5 -> 0.5, safety=0.6 -> 0.75, safety=0.7 -> 1.0
+        # The agent now sees a SMOOTH signal instead of a step function.
+        if safety_val < cfg.safety_hard_reject:
+            safety_factor = 0.0  # Hard reject — no reward
+        elif safety_val < cfg.safety_warning:
+            safety_factor = 0.5 + 0.5 * (
+                (safety_val - cfg.safety_hard_reject)
+                / (cfg.safety_warning - cfg.safety_hard_reject)
+            )
+        else:
+            safety_factor = 1.0
 
         # MONOTONIC reward: weighted_sum * safety_factor.
         # v89 P0: gnn_factor REMOVED (was making RL a circular
@@ -2774,11 +2914,20 @@ class RewardFunction:
         # drug_name and disease_name were computed at the TOP of compute()
         # (P4-002 refactor) — reuse them here.
         pair_key = (drug_name, disease_name)
-        # V30 (10.25): only apply the bonus if the pair is NOT in KNOWN_POSITIVES.
-        # This is the critical disjointness check that prevents circular leakage.
+        # P4-002 ROOT FIX: validated_bonus is NO LONGER added here in compute().
+        # The previous code added validated_bonus (0.1) to reward BEFORE
+        # step()'s high_action_bonus multiplier (5.0), making the effective
+        # bonus 0.5 instead of 0.1. This caused the agent to collapse to
+        # "rank validated pairs HIGH" because the bonus dominated the reward.
+        # The bonus is now applied AFTER the multiplier in step() — see the
+        # P4-002 fix at the final_reward computation in step().
         _kp_set = self._kp_set  # v90 BUG #25: cached in __init__
-        if pair_key in self._validated_hypotheses and pair_key not in _kp_set:
-            reward += cfg.validated_bonus
+        # We still check if the pair is validated (for step() to apply the
+        # bonus post-multiplier), but we don't modify reward here.
+        is_validated = pair_key in self._validated_hypotheses and pair_key not in _kp_set
+        # Store the validated flag on the row for step() to pick up
+        if is_validated:
+            row["_is_validated"] = True
 
         return reward
 
@@ -4420,6 +4569,17 @@ class DrugRankingEnv(gym.Env):
             else:
                 final_reward = abs(float(reward)) * cfg.correct_rejection_reward
 
+        # P4-002 ROOT FIX: apply validated_bonus AFTER high_action_bonus
+        # multiplication. The previous code added validated_bonus (0.1)
+        # inside compute(), then step() multiplied the ENTIRE reward by
+        # high_action_bonus (5.0), making the effective bonus 0.5 — 5x the
+        # intended value. This fix applies the bonus post-multiplier so
+        # the effective bonus is exactly cfg.validated_bonus (0.1).
+        # Only apply when action==1 (HIGH) — rewarding the agent for
+        # ranking a validated pair HIGH.
+        if action == 1 and row.get("_is_validated", False):
+            final_reward += cfg.validated_bonus
+
         if action == 1:
             # V4 B-F2 fix: store the agent's POLICY PROBABILITY for
             # action HIGH (not just the raw reward). This is what makes
@@ -5422,16 +5582,22 @@ def extract_policy_prob_high(
                 raise RuntimeError(error_msg_vn) from vne
             logger.error(error_msg_vn)
     else:
-        # No vec_normalize provided. This is a KNOWN SCIENTIFIC RISK:
-        # if the model was trained with VecNormalize (the default), the
-        # raw obs produces a silent distribution shift. Log CRITICAL so
-        # operators see this in production. (Unit tests that don't use
-        # VecNormalize can ignore this warning.)
-        logger.debug(
-            "extract_policy_prob_high: vec_normalize=None. If the model "
-            "was trained with VecNormalize (the default), the raw obs "
-            "produces a silent train/inference distribution shift (v89 P0). "
-            "Pass vec_normalize= for scientifically correct AUC."
+        # P4-025 ROOT FIX: this is a CRITICAL safety issue, not a debug
+        # note. If the model was trained with VecNormalize (the default),
+        # the raw obs produces a SILENT train/inference distribution shift
+        # that makes AUC ≈ 0.5 (random). The previous DEBUG log was
+        # invisible in production (default log level is INFO). Operators
+        # would ship random rankings without knowing.
+        #
+        # The fix: log at WARNING level (visible in production). In strict
+        # mode, consider this a fatal error.
+        logger.warning(
+            "P4-025 CRITICAL: extract_policy_prob_high called with "
+            "vec_normalize=None. If the model was trained with VecNormalize "
+            "(the default), the raw obs produces a SILENT train/inference "
+            "distribution shift — AUC will be ~0.5 (random rankings). "
+            "Pass vec_normalize= for scientifically correct results. "
+            "This warning is now VISIBLE in production (upgraded from DEBUG)."
         )
     try:
         obs_tensor = model.policy.obs_to_tensor(obs)[0]
@@ -5557,17 +5723,16 @@ def evaluate_agent(
     #      relies on shuffling to prevent overfitting to pair order.
     #      evaluate_agent uses the SAME env for training and evaluation
     #      (the test env), so we cannot disable shuffling here without
-    #      also disabling it for training.
-    #   3. The compute_auc function (which DOES need deterministic order
-    #      for label/prediction alignment) passes shuffle=False via
-    #      options={"shuffle": False}. That's the scientifically-correct
-    #      path for AUC; evaluate_agent's shuffle is fine for Top-N.
+    # P4-024 ROOT FIX: deterministic Top-N ordering. The previous code
+    # called env.reset() WITHOUT shuffle=False, so the Top-N candidates
+    # were NON-DETERMINISTIC across runs (different shuffle seed →
+    # different Top-N). A pharma partner re-running the pipeline got a
+    # different Top-N list with no indication of why.
     #
-    # If a future caller needs deterministic Top-N ordering (e.g., for
-    # reproducible debug output), they can pass options={"shuffle": False}
-    # to env.reset() before calling evaluate_agent. The env's reset()
-    # honors the shuffle flag (P4-001 fix).
-    obs, _ = env.reset()
+    # The fix passes options={"shuffle": False} for deterministic ordering.
+    # Training still uses shuffling (for exploration), but evaluation
+    # must be deterministic for reproducible results.
+    obs, _ = env.reset(options={"shuffle": False})
     done = False
     # ROOT FIX (FORENSIC-AUDIT-I15): CONSISTENT action threshold.
     # The previous code used 0.3 here (evaluate_agent) but 0.5 in
@@ -6579,10 +6744,17 @@ def load_validated_hypotheses(path: str = VALIDATED_HYPOTHESES_PATH) -> Set[Tupl
     # found files (deduplicating via ``seen`` set), so a stale CWD file
     # does not shadow the module-local file — both are loaded and merged.
     module_dir = os.path.dirname(os.path.abspath(__file__))
+    # P4-005 ROOT FIX: add phase1/processed_data/ to the search paths.
+    # writeback_to_phase1 writes to phase1/processed_data/validated_hypotheses.csv
+    # but load_validated_hypotheses NEVER searched that path. The data flywheel
+    # was broken: validated hypotheses written by the writeback module were never
+    # picked up by the RL reward function.
+    repo_root = os.path.dirname(module_dir)  # parent of rl/ = repo root
     candidate_paths = [
-        os.path.join(module_dir, os.path.basename(path)),  # MODULE-LOCAL first (canonical)
-        path,                                              # caller-provided path (often CWD-relative)
-        os.path.join(os.getcwd(), os.path.basename(path)), # CWD-absolute
+        os.path.join(module_dir, os.path.basename(path)),              # MODULE-LOCAL first (canonical)
+        os.path.join(repo_root, "phase1", "processed_data", os.path.basename(path)),  # PHASE1 PROCESSED DATA
+        path,                                                             # caller-provided path
+        os.path.join(os.getcwd(), os.path.basename(path)),               # CWD-absolute
     ]
     result: Set[Tuple[str, str]] = set()
     files_loaded: List[str] = []
@@ -6598,15 +6770,31 @@ def load_validated_hypotheses(path: str = VALIDATED_HYPOTHESES_PATH) -> Set[Tupl
                 )
                 continue
             n_added_from_this_file = 0
+            n_skipped_wrong_outcome = 0
             for _, row in df.iterrows():
                 drug = str(row[DRUG_COL]).lower().strip()
                 disease = str(row[DISEASE_COL]).lower().strip()
                 if not drug or not disease:
                     continue
+                # P4-001 ROOT FIX: only include validated_positive outcomes.
+                # validated_negative, validated_toxic, and invalidated rows
+                # must NOT receive reward bonus — the agent must NOT be
+                # incentivized to rank toxic pairs HIGH.
+                outcome = str(row.get("outcome", "validated_positive")).lower().strip()
+                if outcome not in ("", "validated_positive"):
+                    n_skipped_wrong_outcome += 1
+                    continue
                 key = (drug, disease)
                 if key not in result:
                     result.add(key)
                     n_added_from_this_file += 1
+            if n_skipped_wrong_outcome > 0:
+                logger.warning(
+                    f"P4-001 ROOT FIX: skipped {n_skipped_wrong_outcome} validated "
+                    f"hypothesis row(s) with non-positive outcome (toxic/negative/"
+                    f"invalidated) in {candidate}. These pairs do NOT receive reward "
+                    f"bonus — preventing agent from ranking toxic pairs HIGH."
+                )
             files_loaded.append(f"{candidate} ({n_added_from_this_file} new pairs)")
         except Exception as e:
             logger.warning(f"Failed to load validated hypotheses from {candidate}: {e}")

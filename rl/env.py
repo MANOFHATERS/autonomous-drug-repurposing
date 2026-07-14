@@ -1,33 +1,31 @@
-"""rl.env — Drug Ranking RL Environment (P4-008 modular wrapper).
+"""rl.env — Drug Ranking RL Environment (P4-008/P4-021 modular wrapper).
 
-P4-008 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): this is a MODULAR
-WRAPPER around the DrugRankingEnv class and related environment
-utilities. The previous code was a 7,724-line monolith
-(rl_drug_ranker.py) that contained the env, reward function, training,
-evaluation, validation, and CLI all in one file. This made any change
-risky (a change to the env could break the CLI) and the file
-unmaintainable.
+P4-008: created thin re-export modules for structural separation.
+P4-021 ROOT FIX (MEDIUM): ACKNOWLEDGEMENT — the wrappers are currently
+RE-EXPORT SHIMS around the 9,142-line rl_drug_ranker.py monolith. ALL
+real logic remains in rl_drug_ranker.py. A full extraction of
+DrugRankingEnv (~980 lines, deep dependencies on column constants,
+RankedCandidate, PipelineMetrics, RewardFunction) would require a
+MAJOR REFACTOR with high breakage risk.
 
-The fix creates thin re-export modules (env.py, reward.py, train.py,
-evaluate.py, validate.py, cli.py) that give the codebase STRUCTURAL
-SEPARATION without the risk of a full refactor. Each wrapper is <100
-lines and re-exports the relevant symbols from rl_drug_ranker.py. The
-CI test test_p4_008_modular_file_size_limits verifies each wrapper is
-<500 lines (the issue's requirement).
+EXTRACTION PLAN (post-v105, when CI coverage is higher):
+  1. Extract column constants to rl/constants.py (no dependencies)
+  2. Extract RankedCandidate + PipelineMetrics to rl/types.py
+  3. Extract RewardConfig to rl/reward.py (self-contained dataclass)
+  4. Extract RewardFunction to rl/reward.py (~700 lines)
+  5. Extract DrugRankingEnv to rl/env.py (~980 lines, the final piece)
+  6. rl_drug_ranker.py becomes a backward-compat shim
 
-Callers can now import from the modular files:
-    from rl.env import DrugRankingEnv
-    from rl.reward import RewardFunction, compute_reward
-    from rl.train import train_agent
-    from rl.evaluate import evaluate_agent, compute_auc
-    from rl.validate import validate_input_schema, ScientificFailureError
-    from rl.cli import main
-
-OR continue importing from rl.rl_drug_ranker (backward compat).
+Until then, these wrappers provide the IMPORT INTERFACE for callers.
+The structural separation is REAL at the import level — the code
+organization just hasn't caught up yet.
 """
 from __future__ import annotations
 
-# Re-export the environment class and related symbols
+# P4-021: re-export from the monolith (backward compat).
+# DrugRankingEnv is ~980 lines in rl_drug_ranker.py starting at line 3839.
+# It depends on: column constants, RankedCandidate, PipelineMetrics,
+# RewardFunction, WITHDRAWN_DRUGS, INDICATION_WITHDRAWN_DRUGS, etc.
 from .rl_drug_ranker import (
     DrugRankingEnv,
     RankedCandidate,

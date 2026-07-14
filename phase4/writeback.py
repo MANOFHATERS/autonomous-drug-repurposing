@@ -112,6 +112,11 @@ def writeback_to_phase1(vh: ValidatedHypothesis) -> Path:
     edges. The next KG build will include this validated edge with a
     'validated=True' property.
 
+    P4-011 ROOT FIX: duplicate check. Re-validating the same hypothesis
+    UPDATES the existing row (changes validated_at, outcome, notes) instead
+    of appending a DUPLICATE. This prevents the CSV from growing with
+    duplicate entries over time, which would bias GT model training.
+
     Returns the path to the CSV. The CSV is created if it doesn't exist
     (with a header row).
     """
@@ -125,32 +130,89 @@ def writeback_to_phase1(vh: ValidatedHypothesis) -> Path:
         "original_gt_score", "original_rl_rank",
         "writeback_version",
     ]
-    with open(csv_path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if not file_exists:
+
+    # P4-011: check for duplicate (same drug, disease, validated_by)
+    # If found, UPDATE instead of append.
+    existing_rows: List[Dict[str, str]] = []
+    duplicate_found = False
+    if file_exists:
+        try:
+            with open(csv_path, "r", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if (row.get("drug", "").strip() == vh.drug.strip()
+                            and row.get("disease", "").strip() == vh.disease.strip()
+                            and row.get("validated_by", "").strip() == vh.validated_by.strip()):
+                        # UPDATE this row with new data
+                        row["outcome"] = vh.outcome
+                        row["validation_study_id"] = vh.validation_study_id or ""
+                        row["validated_at"] = vh.validated_at
+                        row["notes"] = vh.notes or ""
+                        row["original_gt_score"] = str(vh.original_gt_score) if vh.original_gt_score is not None else ""
+                        row["original_rl_rank"] = str(vh.original_rl_rank) if vh.original_rl_rank is not None else ""
+                        row["writeback_version"] = WRITEBACK_VERSION
+                        duplicate_found = True
+                    existing_rows.append(row)
+        except Exception as exc:
+            logger.warning("P4-011: failed to read existing CSV for duplicate check (%s). Appending.", exc)
+
+    if duplicate_found:
+        # Rewrite the entire CSV with the updated row
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-        writer.writerow({
-            "drug": vh.drug,
-            "disease": vh.disease,
-            "outcome": vh.outcome,
-            "validated_by": vh.validated_by,
-            "validation_study_id": vh.validation_study_id or "",
-            "validated_at": vh.validated_at,
-            "notes": vh.notes or "",
-            "original_gt_score": vh.original_gt_score if vh.original_gt_score is not None else "",
-            "original_rl_rank": vh.original_rl_rank if vh.original_rl_rank is not None else "",
-            "writeback_version": WRITEBACK_VERSION,
-        })
-    logger.info(
-        "RT-010 Phase 1 writeback: appended (%s, %s, %s) by %s to %s",
-        vh.drug, vh.disease, vh.outcome, vh.validated_by, csv_path,
-    )
+            writer.writerows(existing_rows)
+        logger.info(
+            "P4-011 ROOT FIX: UPDATED existing validated hypothesis "
+            "(%s, %s, by=%s) with outcome=%s. No duplicate appended.",
+            vh.drug, vh.disease, vh.validated_by, vh.outcome,
+        )
+    else:
+        # APPEND new row
+        with open(csv_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({
+                "drug": vh.drug,
+                "disease": vh.disease,
+                "outcome": vh.outcome,
+                "validated_by": vh.validated_by,
+                "validation_study_id": vh.validation_study_id or "",
+                "validated_at": vh.validated_at,
+                "notes": vh.notes or "",
+                "original_gt_score": vh.original_gt_score if vh.original_gt_score is not None else "",
+                "original_rl_rank": vh.original_rl_rank if vh.original_rl_rank is not None else "",
+                "writeback_version": WRITEBACK_VERSION,
+            })
+        logger.info(
+            "RT-010 Phase 1 writeback: appended (%s, %s, %s) by %s to %s",
+            vh.drug, vh.disease, vh.outcome, vh.validated_by, csv_path,
+        )
     return csv_path
 
 
 # ---------------------------------------------------------------------------
 # Phase 2 writeback: add VALIDATED_TREATS edge to Neo4j (if available)
 # ---------------------------------------------------------------------------
+
+def _canonicalize_name_for_kg(name: str) -> str:
+    """P4-007 ROOT FIX: canonicalize a drug/disease name for KG matching.
+
+    The Phase 2 kg_builder stores Compound/Disease nodes with names in
+    their original case from the source database (e.g., "Metformin" from
+    DrugBank). The writeback receives lowercase names (e.g., "metformin"
+    from the RL pipeline). A MERGE on {name: "metformin"} will NOT match
+    a node with name="Metformin" — it creates a DUPLICATE node.
+
+    This helper converts the name to a consistent form. The kg_builder
+    uses names as-is from the source, so we try BOTH the original case
+    and a title-cased variant in the MERGE to maximize match probability.
+    """
+    name = name.strip()
+    # Return the name and a title-cased variant for the MERGE
+    return name
+
 
 def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
     """Add a VALIDATED_TREATS edge to Neo4j (when available).
@@ -183,13 +245,53 @@ def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
                 os.environ.get("DRUGOS_NEO4J_PASSWORD", ""),
             ),
         )
-        # MERGE the edge (idempotent — re-validating the same hypothesis
-        # doesn't create duplicate edges). Edge properties record who
-        # validated, when, and the study ID for audit trail.
+        # P4-007 ROOT FIX: use the SAME node labels as Phase 2's kg_builder.
+        # The Phase 2 kg_builder (config.py: ENTITY_TYPE_COMPOUND = "Compound")
+        # uses :Compound for drug nodes. The previous code already used
+        # :Compound, which is correct. BUT it matched only by lowercase name,
+        # which could miss nodes stored with titlecase names (e.g., "Metformin"
+        # in the KG vs "metformin" from the writeback).
+        #
+        # The fix: MERGE tries multiple name variants (original, titlecase,
+        # lowercase) to maximize the chance of matching existing nodes.
+        # Also wraps driver in try/finally to prevent connection leaks (P4-008).
+        drug_original = _canonicalize_name_for_kg(vh.drug)
+        drug_title = drug_original.title()
+        drug_lower = drug_original.lower()
+        disease_original = _canonicalize_name_for_kg(vh.disease)
+        disease_title = disease_original.title()
+        disease_lower = disease_original.lower()
+
+        # P4-010 ROOT FIX: use different edge labels for different outcomes.
+        # VALIDATED_TREATS for validated_positive, VALIDATED_TOXIC for
+        # validated_toxic, VALIDATED_NEGATIVE for validated_negative.
+        # The previous code used VALIDATED_TREATS for ALL outcomes, so
+        # toxic pairs appeared as positive treatment evidence.
+        _edge_label = {
+            "validated_positive": "VALIDATED_TREATS",
+            "validated_toxic": "VALIDATED_TOXIC",
+            "validated_negative": "VALIDATED_NEGATIVE",
+            "invalidated": "VALIDATED_NEGATIVE",  # invalidated = negative
+        }.get(vh.outcome, "VALIDATED_TREATS")
+
         cypher = """
-        MERGE (d:Compound {name: $drug})
-        MERGE (v:Disease {name: $disease})
-        MERGE (d)-[r:VALIDATED_TREATS]->(v)
+        // Try to match existing Compound node by various name forms
+        CALL {
+            WITH $drug_lower, $drug_title, $drug_original
+            MATCH (d:Compound)
+            WHERE toLower(d.name) = $drug_lower OR d.name = $drug_title OR d.name = $drug_original
+            RETURN d LIMIT 1
+        }
+        WITH d
+        // Try to match existing Disease node by various name forms
+        CALL {
+            WITH $disease_lower, $disease_title, $disease_original
+            MATCH (v:Disease)
+            WHERE toLower(v.name) = $disease_lower OR v.name = $disease_title OR v.name = $disease_original
+            RETURN v LIMIT 1
+        }
+        WITH d, v
+        MERGE (d)-[r:`""" + _edge_label + """`]->(v)
           ON CREATE SET
             r.validated_at = $validated_at,
             r.validated_by = $validated_by,
@@ -201,26 +303,32 @@ def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
             r.revalidation_count = coalesce(r.revalidation_count, 0) + 1
         RETURN r
         """
-        with driver.session() as session:
-            result = session.run(cypher, {
-                "drug": vh.drug,
-                "disease": vh.disease,
-                "validated_at": vh.validated_at,
-                "validated_by": vh.validated_by,
-                "study_id": vh.validation_study_id or "",
-                "outcome": vh.outcome,
-                "wbv": WRITEBACK_VERSION,
-            })
-            summary = result.consume()
-            logger.info(
-                "RT-010 Phase 2 writeback: VALIDATED_TREATS edge "
-                "upserted in Neo4j (%s -> %s, outcome=%s, by=%s). "
-                "Counters: %s",
-                vh.drug, vh.disease, vh.outcome, vh.validated_by,
-                summary.counters._stats,
-            )
-        driver.close()
-        return True
+        try:
+            with driver.session() as session:
+                result = session.run(cypher, {
+                    "drug_original": drug_original,
+                    "drug_title": drug_title,
+                    "drug_lower": drug_lower,
+                    "disease_original": disease_original,
+                    "disease_title": disease_title,
+                    "disease_lower": disease_lower,
+                    "validated_at": vh.validated_at,
+                    "validated_by": vh.validated_by,
+                    "study_id": vh.validation_study_id or "",
+                    "outcome": vh.outcome,
+                    "wbv": WRITEBACK_VERSION,
+                })
+                summary = result.consume()
+                logger.info(
+                    "RT-010 Phase 2 writeback: VALIDATED_TREATS edge "
+                    "upserted in Neo4j (%s -> %s, outcome=%s, by=%s). "
+                    "Counters: %s",
+                    vh.drug, vh.disease, vh.outcome, vh.validated_by,
+                    summary.counters._stats,
+                )
+            return True
+        finally:
+            driver.close()
     except Exception as exc:
         logger.warning(
             "RT-010 Phase 2 writeback: Neo4j write failed (%s). "

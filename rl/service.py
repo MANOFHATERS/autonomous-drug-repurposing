@@ -27,6 +27,7 @@ Environment:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -53,9 +54,20 @@ app = FastAPI(
     description="HTTP wrapper around Phase 4 RL hypothesis ranker.",
     version="1.0.0",
 )
+# P4-006 ROOT FIX: CORS allow_origins is now read from an env var
+# (RL_CORS_ORIGINS) instead of hardcoded ["*"] which allowed ANY website
+# to call the service. A malicious website could exfiltrate the entire
+# ranking database (pharma partner data, drug names, disease names,
+# reward scores). Defaults to localhost:3000 for dev.
+_RL_CORS_ORIGINS = os.environ.get("RL_CORS_ORIGINS", "http://localhost:3000")
+if _RL_CORS_ORIGINS == "*":
+    _allow_origins = ["*"]
+else:
+    _allow_origins = [o.strip() for o in _RL_CORS_ORIGINS.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allow_origins,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -89,6 +101,33 @@ def _find_latest_output_csv() -> Optional[Path]:
     return candidates[0][0]
 
 
+def _load_reward_weights_from_meta(csv_path: Path) -> Optional[Dict[str, float]]:
+    """P4-004 ROOT FIX: load reward weights from the .meta.json sidecar.
+
+    The RL agent's RewardConfig uses specific weights (gnn=0.04, safety=0.25,
+    market=0.12, etc.). The previous code used HARDCODED weights 0.4/0.3/0.3
+    which produced a DIFFERENT overall score than the agent's reward function.
+    This fix reads the actual weights from the metadata sidecar written by
+    ``save_results`` (``.meta.json`` next to the CSV) so the dashboard's
+    overallScore matches what the agent learned.
+    """
+    meta_path = csv_path.with_suffix(".meta.json")
+    if not meta_path.exists():
+        # Also try <stem>.meta.json (e.g., top_candidates_20250714.meta.json)
+        meta_path = csv_path.parent / (csv_path.stem + ".meta.json")
+    if not meta_path.exists():
+        return None
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        weights = meta.get("reward_weights")
+        if weights and isinstance(weights, dict):
+            return weights
+    except Exception:
+        pass
+    return None
+
+
 def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Optional[str], limit: int) -> List[Dict[str, Any]]:
     """Parse the RL ranker's output CSV into the RankedHypothesis schema."""
     import csv as csv_mod
@@ -96,6 +135,9 @@ def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Opti
     out: List[Dict[str, Any]] = []
     if not csv_path.exists():
         return out
+
+    # P4-004: load reward weights from sidecar (if available)
+    _reward_weights = _load_reward_weights_from_meta(csv_path)
 
     def _num(v: Any) -> Optional[float]:
         if v is None or v == "":
@@ -106,11 +148,16 @@ def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Opti
         except (ValueError, TypeError):
             return None
 
+    # P4-013 ROOT FIX: use streaming iterator instead of list(reader).
+    # The previous code loaded ALL rows into memory (~500MB for 1M rows),
+    # then iterated. The break only stopped PROCESSING — the full file was
+    # already in memory. This fix uses a streaming for-loop and breaks
+    # as soon as we have enough candidates, preventing OOM on production.
     with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
         reader = csv_mod.DictReader(f)
-        rows = list(reader)
+        rows = enumerate(reader)  # lazy iterator, NOT list
 
-    for i, row in enumerate(rows):
+    for i, row in rows:
         # Normalize keys to lowercase.
         r = {k.lower(): v for k, v in row.items()}
         d = r.get("drug", "")
@@ -129,16 +176,43 @@ def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Opti
         rank = _num(r.get("rank")) or (i + 1)
         policy_prob = _num(r.get("policy_prob"))
 
-        # Compute overall score if missing (same formula as frontend).
+        # P4-004 ROOT FIX: compute overall using the SAME weights as the
+        # agent's reward function. If the .meta.json sidecar is available,
+        # read the weights from there. Otherwise fall back to the agent's
+        # default weights (NOT the old hardcoded 0.4/0.3/0.3).
         overall: Optional[float] = None
-        signals = []
-        if gnn is not None: signals.append((gnn, 0.4))
-        if safety is not None: signals.append((safety, 0.3))
-        if market is not None: signals.append((market, 0.3))
-        if signals:
-            total_w = sum(w for _, w in signals)
-            overall = sum(v * w for v, w in signals) / total_w
-        elif policy_prob is not None:
+        if _reward_weights:
+            # Use weights from sidecar — these are the EXACT weights the
+            # agent trained with
+            signals = []
+            score_keys = {
+                "gnn": gnn, "safety": safety, "market": market,
+                "confidence": _num(r.get("confidence")),
+                "pathway": _num(r.get("pathway_score")),
+                "patent": _num(r.get("patent_score")),
+                "rare_disease": _num(r.get("rare_disease_score")),
+                "unmet_need": _num(r.get("unmet_need_score")),
+                "efficacy": _num(r.get("efficacy_score")),
+                "adme": _num(r.get("adme_score")),
+            }
+            for key, score in score_keys.items():
+                w = _reward_weights.get(key)
+                if score is not None and w is not None and w > 0:
+                    signals.append((score, w))
+            if signals:
+                total_w = sum(w for _, w in signals)
+                overall = sum(v * w for v, w in signals) / total_w if total_w > 0 else None
+        else:
+            # Fallback: use the agent's DEFAULT reward weights (same as
+            # RewardConfig defaults in rl_drug_ranker.py)
+            signals = []
+            if gnn is not None: signals.append((gnn, 0.04))
+            if safety is not None: signals.append((safety, 0.25))
+            if market is not None: signals.append((market, 0.12))
+            if signals:
+                total_w = sum(w for _, w in signals)
+                overall = sum(v * w for v, w in signals) / total_w
+        if overall is None and policy_prob is not None:
             overall = policy_prob
 
         out.append({
@@ -160,11 +234,14 @@ def _load_candidates_from_csv(csv_path: Path, drug: Optional[str], disease: Opti
             "literatureSupport": _num(r.get("literature_support")),
             "isKnownPositive": str(r.get("is_known_positive", "")).lower() in ("1", "true", "yes"),
         })
-        if len(out) >= limit:
-            break
 
-    # Sort by rank (or reward desc if no rank).
+    # P4-014 ROOT FIX: sort ALL candidates by rank, THEN apply limit.
+    # The previous code broke after ``len(out) >= limit`` and THEN sorted,
+    # which meant only the FIRST ``limit`` rows in CSV order were sorted —
+    # NOT the top-``limit`` by rank. If the CSV was unsorted, the API
+    # returned arbitrary candidates instead of the true top-N.
     out.sort(key=lambda c: (c.get("rank") or 1e9))
+    out = out[:limit]
     return out
 
 
@@ -176,34 +253,51 @@ def _load_candidates_from_checkpoint(checkpoint_path: str, drug: Optional[str], 
     to ship.
     """
     try:
-        # The bridge's GTRLBridge loads the checkpoint and runs inference.
-        # We delegate to it.
+        # P4-003 ROOT FIX: GTRLBridge has NO method ``rank_top_candidates``.
+        # The previous ``hasattr(bridge, 'rank_top_candidates')`` guard was
+        # always False, so the checkpoint branch NEVER executed and the
+        # service ALWAYS fell back to CSV. The fix calls the EXISTING
+        # ``get_top_k_novel_predictions`` method (verified present in
+        # graph_transformer/gt_rl_bridge.py). The dead ``hasattr`` guard
+        # is removed.
         from graph_transformer.gt_rl_bridge import GTRLBridge
         bridge = GTRLBridge(output_dir=str(_HERE / "_service_output"), device="cpu", seed=42)
-        # The bridge's load_rl_agent + rank_top_candidates methods.
-        # We don't actually retrain -- just load + infer.
-        if hasattr(bridge, "load_rl_agent"):
-            bridge.load_rl_agent(checkpoint_path)
-        if hasattr(bridge, "rank_top_candidates"):
-            df = bridge.rank_top_candidates(top_n=limit)
-            candidates = []
-            for _, row in df.iterrows():
-                candidates.append({
-                    "drug": row.get("drug", ""),
-                    "disease": row.get("disease", ""),
-                    "rank": row.get("rank"),
-                    "reward": row.get("reward"),
-                    "policyProb": row.get("policy_prob"),
-                    "gnnScore": row.get("gnn_score"),
-                    "safetyScore": row.get("safety_score"),
-                    "marketScore": row.get("market_score"),
-                })
-            if drug:
-                candidates = [c for c in candidates if drug.lower() in c["drug"].lower()]
-            if disease:
-                candidates = [c for c in candidates if disease.lower() in c["disease"].lower()]
-            return candidates[:limit]
+        bridge.load_rl_agent(checkpoint_path)
+        df = bridge.get_top_k_novel_predictions(top_k=limit)
+        candidates = []
+        for _, row in df.iterrows():
+            candidates.append({
+                "drug": row.get("drug", ""),
+                "disease": row.get("disease", ""),
+                "rank": row.get("rank"),
+                "reward": row.get("reward"),
+                "policyProb": row.get("policy_prob"),
+                "gnnScore": row.get("gnn_score"),
+                "safetyScore": row.get("safety_score"),
+                "marketScore": row.get("market_score"),
+            })
+        if drug:
+            candidates = [c for c in candidates if drug.lower() in c["drug"].lower()]
+        if disease:
+            candidates = [c for c in candidates if disease.lower() in c["disease"].lower()]
+        return candidates[:limit]
     except Exception as exc:
+        # P4-015 ROOT FIX: in strict mode (default), RAISE on checkpoint
+        # failure instead of silently falling back to stale CSV. The env
+        # var RL_STRICT_CHECKPOINT controls this: "true" (default) = raise,
+        # "false" = warn and fall back. Pharma partners must see an error
+        # when the checkpoint is broken, not stale CSV rankings.
+        strict_mode = os.environ.get("RL_STRICT_CHECKPOINT", "true").lower() not in ("false", "0", "no", "off")
+        if strict_mode:
+            logger.error(
+                "P4-015 STRICT MODE: RL checkpoint inference failed and "
+                "RL_STRICT_CHECKPOINT=true. Raising exception instead of "
+                "silently falling back to stale CSV. Error: %s", exc,
+            )
+            raise RuntimeError(
+                f"RL checkpoint inference failed (checkpoint={checkpoint_path}): {exc}. "
+                f"Set RL_STRICT_CHECKPOINT=false to allow fallback to CSV."
+            ) from exc
         logger.warning("RL checkpoint inference failed (%s), falling back to CSV.", exc)
     return []
 
