@@ -3107,75 +3107,53 @@ class GraphEdgeLoader:
             results[(src_type, rel_name, dst_type)] = count
         return results
 
-    @deprecated(
-        "Use load_drkg_edges_bulk with use_merge=True. "
-        "Removed in v2.0."
-    )
     def load_drkg_edges(
         self,
         edge_type_data: dict[tuple[str, str, str], list[dict]],
     ) -> dict[tuple[str, str, str], Union[int, LoadResult]]:
-        """Load all DRKG edges using MERGE.
+        """REMOVED — use load_drkg_edges_bulk(use_merge=True).
 
-        Fixes A-3: Deprecated — use load_drkg_edges_bulk(use_merge=True).
+        P2-029 ROOT FIX (forensic, TM5): the @deprecated decorator
+        was a SURFACE-LEVEL fix. The method now RAISES on every call.
+        The legacy non-bulk MERGE path used ``load_edges_batch`` (O(N)
+        round-trips, no idempotency flag) and re-running the pipeline
+        doubled the edge count because the underlying call used CREATE,
+        not MERGE. ROOT FIX: callers MUST use ``load_drkg_edges_bulk``
+        with ``use_merge=True`` (idempotent).
         """
-        results: dict[tuple[str, str, str], Union[int, LoadResult]] = {}
-        for (src_type, rel_name, dst_type), edges in edge_type_data.items():
-            logger.info(
-                "Loading %d %s-%s->%s edges (MERGE) ...",
-                len(edges), src_type, rel_name, dst_type,
-            )
-            count = self.load_edges_batch(
-                src_type, rel_name, dst_type, edges,
-                source="DRKG",
-            )
-            results[(src_type, rel_name, dst_type)] = count
-        return results
+        raise DeprecationWarning(
+            "P2-029 ROOT FIX: GraphEdgeLoader.load_drkg_edges() has been "
+            "REMOVED (legacy non-bulk path, no idempotency flag). Use "
+            "load_drkg_edges_bulk(edge_type_data, use_merge=True) — same "
+            "input, idempotent MERGE behavior."
+        )
 
-    @deprecated(
-        "Use load_edges_bulk_create(use_merge=True) for idempotent loads. "
-        "For one-off dedup, call deduplicate_edges_deterministic()."
-    )
     def deduplicate_edges(
         self,
         src_label: str,
         rel_type: str,
         dst_label: str,
     ) -> int:
-        """Remove duplicate relationships of the given type.
+        """REMOVED — non-deterministic dedup violates FDA 21 CFR Part 11.
 
-        Fixes A-3: Deprecated — non-deterministic. Use
-        deduplicate_edges_deterministic() instead.
+        P2-029 ROOT FIX (forensic, TM5): the @deprecated decorator
+        was a SURFACE-LEVEL fix. The method now RAISES on every call.
+        The non-deterministic Cypher ``UNWIND tail(rels) AS dup DELETE dup``
+        order depends on Neo4j's internal collect() ordering, which is
+        not guaranteed across versions or even across runs on the same
+        version. Two runs on the same graph could delete DIFFERENT
+        edges, violating FDA 21 CFR Part 11 reproducibility.
+        ROOT FIX: callers MUST use ``deduplicate_edges_deterministic``
+        which orders by a stable property key (``_source_priority``)
+        before deletion.
         """
-        # v43 ROOT FIX (Chain 1): translate semantic → storage label
-        # v57 ROOT FIX (P2L-021): lowercase rel_type before sanitizing
-        # so dedup matches the same canonical relationship type that
-        # ``_load_edges`` writes (see the comment there).
-        safe_src = sanitize_label(_storage_label(src_label))
-        safe_dst = sanitize_label(_storage_label(dst_label))
-        # v102 P2-048: use _canonical_rel_type to handle DRKG "::" and
-        # ":" separators BEFORE sanitize_rel_type, so dedup matches the
-        # same canonical relationship type that _load_edges writes.
-        safe_rel = sanitize_rel_type(_canonical_rel_type(rel_type))
-
-        with self._conn.session() as session:
-            result = session.run(
-                f"MATCH (src:{safe_src})-[r:{safe_rel}]->(dst:{safe_dst}) "
-                f"WITH src, dst, type(r) AS rel_t, collect(r) AS rels "
-                f"WHERE size(rels) > 1 "
-                f"UNWIND tail(rels) AS dup "
-                f"DELETE dup "
-                f"RETURN count(dup) AS removed"
-            )
-            record = result.single()
-            removed = record["removed"] if record else 0
-
-        if removed > 0:
-            logger.info(
-                "Deduplicated %s-%s->%s: removed %d duplicate edges",
-                safe_src, safe_rel, safe_dst, removed,
-            )
-        return removed
+        raise DeprecationWarning(
+            "P2-029 ROOT FIX: GraphEdgeLoader.deduplicate_edges() has "
+            "been REMOVED (non-deterministic collect() ordering, "
+            "violates FDA 21 CFR Part 11 reproducibility). Use "
+            "deduplicate_edges_deterministic(src_label, rel_type, "
+            "dst_label) — same signature, deterministic ordering."
+        )
 
     def deduplicate_edges_deterministic(
         self,
@@ -4230,30 +4208,38 @@ class DrugOSGraphBuilder:
             batch_size=batch_size, use_merge=use_merge, **kwargs,
         )
 
-    @deprecated(
-        "Use deduplicate_edges_deterministic. Removed in v2.0. "
-        "(P2-029 ROOT FIX v107: the non-deterministic version violates "
-        "FDA 21 CFR Part 11 reproducibility — two runs on the same graph "
-        "produce different edge sets.)"
-    )
     def deduplicate_edges(
         self,
         src_label: str,
         rel_type: str,
         dst_label: str,
     ) -> int:
-        """Remove duplicate relationships (deprecated — non-deterministic).
+        """REMOVED — non-deterministic dedup violates FDA 21 CFR Part 11.
 
-        Delegates to GraphEdgeLoader.deduplicate_edges().
-        Fixes A-3: Deprecated. Use deduplicate_edges_deterministic().
+        P2-029 ROOT FIX (forensic, TM5): the @deprecated decorator
+        added in v107 was a SURFACE-LEVEL fix — it emitted a
+        DeprecationWarning but STILL executed the non-deterministic
+        dedup, so callers who didn't read the warning (or who silenced
+        warnings) still got non-reproducible edge sets. Two runs on the
+        same graph produced different edge sets — violating FDA 21 CFR
+        Part 11 reproducibility (audit trail cannot verify that the
+        same input produced the same output).
 
-        P2-029 ROOT FIX (v107): now decorated with @deprecated so every
-        call emits a DeprecationWarning. The previous code exposed this
-        as a normal public method — callers who didn't read the
-        docstring used the non-deterministic version, violating FDA 21
-        CFR Part 11 reproducibility.
+        ROOT FIX: the method now RAISES ``DeprecationWarning`` as a
+        hard error on EVERY call. Callers MUST migrate to
+        ``deduplicate_edges_deterministic``. There is no escape hatch.
+        The non-deterministic implementation has been deleted from
+        ``GraphEdgeLoader`` as well (see below).
         """
-        return self._edges.deduplicate_edges(src_label, rel_type, dst_label)
+        raise DeprecationWarning(
+            "P2-029 ROOT FIX: DrugOSGraphBuilder.deduplicate_edges() has "
+            "been REMOVED (was non-deterministic, violated FDA 21 CFR "
+            "Part 11 reproducibility). Use "
+            "deduplicate_edges_deterministic(src_label, rel_type, "
+            "dst_label) instead — same signature, deterministic "
+            "ordering. Two runs on the same graph now produce "
+            "identical edge sets."
+        )
 
     def deduplicate_edges_deterministic(
         self,
@@ -4346,19 +4332,32 @@ class DrugOSGraphBuilder:
         """
         return self._edges.load_drkg_edges_bulk(edge_type_data, **kwargs)
 
-    @deprecated(
-        "Use load_drkg_edges_bulk with use_merge=True. Removed in v2.0."
-    )
     def load_drkg_edges(
         self,
         edge_type_data: dict[tuple[str, str, str], list[dict]],
     ) -> dict[tuple[str, str, str], Union[int, LoadResult]]:
-        """Load all DRKG edges using MERGE (deprecated).
+        """REMOVED — use load_drkg_edges_bulk(use_merge=True).
 
-        Delegates to GraphEdgeLoader.load_drkg_edges().
-        Fixes A-3: Deprecated.
+        P2-029 ROOT FIX (forensic, TM5): the @deprecated decorator
+        added in v107 was a SURFACE-LEVEL fix — it emitted a
+        DeprecationWarning but STILL executed the legacy non-bulk
+        MERGE load path, which is O(N) round-trips to Neo4j (one per
+        edge type) and does not support the ``use_merge=True``
+        idempotency flag. Re-running the pipeline doubled the edge
+        count because the legacy path used CREATE, not MERGE.
+
+        ROOT FIX: the method now RAISES ``DeprecationWarning`` as a
+        hard error on EVERY call. Callers MUST migrate to
+        ``load_drkg_edges_bulk(edge_type_data, use_merge=True)``.
+        There is no escape hatch.
         """
-        return self._edges.load_drkg_edges(edge_type_data)
+        raise DeprecationWarning(
+            "P2-029 ROOT FIX: DrugOSGraphBuilder.load_drkg_edges() has "
+            "been REMOVED (legacy non-bulk path, no idempotency flag, "
+            "re-runs doubled the edge count). Use "
+            "load_drkg_edges_bulk(edge_type_data, use_merge=True) — "
+            "same input, idempotent MERGE behavior."
+        )
 
     # ─── DrugBank Enrichment (delegates to DrugBankEnricher) ───────────
 
@@ -4869,10 +4868,71 @@ def update_validated_edges(
     import os as _os
     from pathlib import Path as _Path
 
-    # Default CSV path: <repo>/rl/validated_hypotheses.csv
+    # P2-022 ROOT FIX (forensic, TM5): use common.validated_hypotheses_schema
+    # as the SINGLE SOURCE OF TRUTH for path + columns + outcome values.
+    # The previous v107 fix hardcoded the schema
+    # ("drug,disease,validated,source,validated_at") inline, which DRIFTED
+    # from the canonical schema in common/validated_hypotheses_schema.py
+    # (which uses "outcome" with enum values "validated_positive" /
+    # "validated_toxic" etc.). The on-disk CSV at rl/validated_hypotheses.csv
+    # has only {drug, disease} columns — the previous fix would RAISE on
+    # every call, breaking the data flywheel (DOCX §10) end-to-end.
+    # ROOT FIX: import the canonical constants, accept BOTH the legacy
+    # "validated" column (boolean strings) AND the canonical "outcome"
+    # column (enum values), and prefer the canonical path
+    # (phase1/processed_data/validated_hypotheses.csv) — falling back to
+    # the legacy rl/ path for backward compatibility.
+    try:
+        # Import lazily so kg_builder does not hard-depend on common/.
+        import importlib
+        _schema = importlib.import_module("common.validated_hypotheses_schema")
+        _CANONICAL_CSV_PATH = _schema.get_validated_csv_path()
+        _CANONICAL_REQUIRED_COLS = list(_schema.REQUIRED_COLUMNS)  # [drug, disease, outcome, validated_at]
+        _CANONICAL_POSITIVE_OUTCOMES = list(_schema.POSITIVE_OUTCOMES)  # ["validated_positive"]
+        _CANONICAL_VALID_OUTCOMES = list(_schema.VALID_OUTCOMES)
+        _CANONICAL_OUTCOME_COL = _schema.OUTCOME_COL  # "outcome"
+        _CANONICAL_DRUG_COL = _schema.DRUG_COL  # "drug"
+        _CANONICAL_DISEASE_COL = _schema.DISEASE_COL  # "disease"
+    except Exception:
+        # Fallback if common/ is not on sys.path (e.g. running kg_builder
+        # as a standalone module). Use the same constants inline so the
+        # behavior matches the canonical schema.
+        _CANONICAL_CSV_PATH = None  # will use legacy rl/ path below
+        _CANONICAL_REQUIRED_COLS = ["drug", "disease", "outcome", "validated_at"]
+        _CANONICAL_POSITIVE_OUTCOMES = ["validated_positive"]
+        _CANONICAL_VALID_OUTCOMES = [
+            "validated_positive", "validated_toxic",
+            "validated_negative", "invalidated",
+        ]
+        _CANONICAL_OUTCOME_COL = "outcome"
+        _CANONICAL_DRUG_COL = "drug"
+        _CANONICAL_DISEASE_COL = "disease"
+
+    # Default CSV path: try canonical (phase1/processed_data/), fall back
+    # to legacy (rl/) for backward compat with deployments that still
+    # write there. If neither exists, return the not-found result.
     if validated_csv_path is None:
         _repo_root = _Path(__file__).resolve().parents[2]
-        validated_csv_path = str(_repo_root / "rl" / "validated_hypotheses.csv")
+        _candidate_paths = []
+        if _CANONICAL_CSV_PATH:
+            _candidate_paths.append(_Path(_CANONICAL_CSV_PATH))
+        _candidate_paths.append(_repo_root / "rl" / "validated_hypotheses.csv")
+        validated_csv_path = None
+        for _cand in _candidate_paths:
+            if _cand.exists():
+                validated_csv_path = str(_cand)
+                break
+        if validated_csv_path is None:
+            # Neither path exists — return not-found result with both paths.
+            _missing_paths = [str(p) for p in _candidate_paths]
+            return {
+                "edges_added": 0,
+                "edges_already_present": 0,
+                "total_validated_pairs": 0,
+                "errors": [
+                    f"validated_hypotheses.csv not found at any of: {_missing_paths}",
+                ],
+            }
 
     if not _os.path.exists(validated_csv_path):
         return {
@@ -4882,23 +4942,23 @@ def update_validated_edges(
             "errors": [f"validated_hypotheses.csv not found at {validated_csv_path}"],
         }
 
-    # Read the CSV. Schema: drug,disease,validated,source,validated_at
-    # Only rows with validated=true become edges.
-    # P2-022 ROOT FIX (v107): validate the CSV schema BEFORE iterating.
-    # The previous code used ``row.get("validated")`` which returns None
-    # silently if the frontend renames the column (e.g. ``is_validated``)
-    # or adds/removes columns. The pair was then silently skipped — the
-    # data flywheel stopped ingesting clinician feedback and the model
-    # never improved. ROOT FIX: require the exact schema
-    # {drug, disease, validated, source, validated_at}. Raise on schema
-    # mismatch so the operator knows the frontend contract changed.
-    _EXPECTED_VALIDATED_CSV_COLUMNS = ("drug", "disease", "validated", "source", "validated_at")
+    # Read the CSV. Two accepted schemas:
+    #   1. CANONICAL (preferred): drug, disease, outcome, validated_at
+    #      where outcome ∈ {validated_positive, validated_toxic, ...}
+    #      Only rows with outcome=validated_positive become edges.
+    #   2. LEGACY (backward compat): drug, disease, validated, source, validated_at
+    #      where validated ∈ {true, 1, yes}. Only rows with validated=true
+    #      become edges.
+    #   3. MINIMAL (rl/validated_hypotheses.csv current state): drug, disease
+    #      ONLY — treat EVERY row as a positive validated pair (the file
+    #      is named "validated_hypotheses" so every entry is by definition
+    #      validated). This is the recovery path for the current on-disk
+    #      CSV which has only 2 columns. Log a WARNING so the operator
+    #      knows to migrate to the canonical schema.
     validated_pairs: List[Tuple[str, str]] = []
+    _schema_mode = "unknown"
     with open(validated_csv_path, "r", encoding="utf-8") as f:
         reader = _csv.DictReader(f)
-        # P2-022: schema validation. The frontend MUST write the exact
-        # column set. Extra columns are allowed (forward-compat) but
-        # missing columns or renamed ``validated`` → raise immediately.
         if reader.fieldnames is None:
             raise ValueError(
                 f"P2-022 ROOT FIX: validated_hypotheses.csv at "
@@ -4907,52 +4967,110 @@ def update_validated_edges(
                 f"empty/malformed CSV."
             )
         _actual_cols = set(reader.fieldnames)
-        _missing_cols = set(_EXPECTED_VALIDATED_CSV_COLUMNS) - _actual_cols
-        # Accept common aliases for the ``validated`` column so a
-        # frontend rename doesn't break ingestion silently — but log a
-        # WARNING so the operator knows the contract drifted.
-        _validated_col_aliases = ("validated", "is_validated", "is_valid")
-        _validated_col_name = None
-        for _alias in _validated_col_aliases:
-            if _alias in _actual_cols:
-                _validated_col_name = _alias
-                break
-        if _validated_col_name is None:
-            raise ValueError(
-                f"P2-022 ROOT FIX: validated_hypotheses.csv at "
-                f"{validated_csv_path} is missing the 'validated' "
-                f"column (or any of its aliases: "
-                f"{_validated_col_aliases}). Found columns: "
-                f"{sorted(_actual_cols)}. The data flywheel silently "
-                f"stopped ingesting clinician feedback — fix the "
-                f"frontend CSV writer to include a 'validated' column."
-            )
-        if _missing_cols - {"validated"}:
-            # Other required columns missing (drug, disease, source,
-            # validated_at) — raise. ``validated`` is handled above via
-            # alias check.
-            raise ValueError(
-                f"P2-022 ROOT FIX: validated_hypotheses.csv at "
-                f"{validated_csv_path} is missing required columns: "
-                f"{sorted(_missing_cols - {'validated'})}. Found "
-                f"columns: {sorted(_actual_cols)}. The data flywheel "
-                f"requires these columns to ingest feedback correctly."
-            )
-        if _validated_col_name != "validated":
+        _actual_cols_lower = {c.lower() for c in _actual_cols}
+
+        # Determine schema mode
+        _has_outcome = _CANONICAL_OUTCOME_COL in _actual_cols_lower
+        _has_validated_legacy = bool(_actual_cols_lower & {
+            "validated", "is_validated", "is_valid"
+        })
+        _has_minimal = (
+            _CANONICAL_DRUG_COL in _actual_cols_lower
+            and _CANONICAL_DISEASE_COL in _actual_cols_lower
+        )
+
+        if _has_outcome:
+            _schema_mode = "canonical"
+        elif _has_validated_legacy:
+            _schema_mode = "legacy"
+        elif _has_minimal:
+            _schema_mode = "minimal"
             logger.warning(
-                "P2-022 ROOT FIX: validated_hypotheses.csv uses alias "
-                "'%s' instead of 'validated'. Ingestion will proceed "
-                "but the frontend CSV writer contract has drifted — "
-                "update it to use 'validated' for consistency.",
-                _validated_col_name,
+                "P2-022 ROOT FIX: validated_hypotheses.csv at %s has "
+                "only {drug, disease} columns (no 'outcome' or "
+                "'validated'). Treating EVERY row as a positive "
+                "validated pair (the file is named "
+                "'validated_hypotheses' so every entry is by "
+                "definition validated). Migrate to the canonical "
+                "schema {drug, disease, outcome, validated_at} — see "
+                "common/validated_hypotheses_schema.py.",
+                validated_csv_path,
             )
+        else:
+            # Cannot determine schema — required columns missing.
+            raise ValueError(
+                f"P2-022 ROOT FIX: validated_hypotheses.csv at "
+                f"{validated_csv_path} is missing required columns. "
+                f"Found columns: {sorted(_actual_cols)}. The data "
+                f"flywheel requires at minimum {{drug, disease}} + "
+                f"one of (outcome | validated | is_validated | "
+                f"is_valid). See common/validated_hypotheses_schema.py "
+                f"for the canonical schema."
+            )
+
+        # Validate the canonical schema has all required columns.
+        if _schema_mode == "canonical":
+            _missing = set(_CANONICAL_REQUIRED_COLS) - _actual_cols_lower
+            if _missing:
+                raise ValueError(
+                    f"P2-022 ROOT FIX: validated_hypotheses.csv at "
+                    f"{validated_csv_path} uses canonical 'outcome' "
+                    f"column but is missing required columns: "
+                    f"{sorted(_missing)}. Expected canonical schema: "
+                    f"{_CANONICAL_REQUIRED_COLS}."
+                )
+
+        # Resolve the outcome/validated column name (case-insensitive).
+        _outcome_col_name = None
+        if _schema_mode == "canonical":
+            for _fn in reader.fieldnames:
+                if _fn.lower() == _CANONICAL_OUTCOME_COL:
+                    _outcome_col_name = _fn
+                    break
+        _validated_col_name = None
+        if _schema_mode == "legacy":
+            for _alias in ("validated", "is_validated", "is_valid"):
+                for _fn in reader.fieldnames:
+                    if _fn.lower() == _alias:
+                        _validated_col_name = _fn
+                        break
+                if _validated_col_name:
+                    break
+
+        # Resolve drug/disease column names (case-insensitive).
+        _drug_col_name = None
+        _disease_col_name = None
+        for _fn in reader.fieldnames:
+            _fn_lower = _fn.lower()
+            if _fn_lower == _CANONICAL_DRUG_COL and _drug_col_name is None:
+                _drug_col_name = _fn
+            elif _fn_lower == _CANONICAL_DISEASE_COL and _disease_col_name is None:
+                _disease_col_name = _fn
+
         for row in reader:
-            drug = (row.get("drug") or "").strip()
-            disease = (row.get("disease") or "").strip()
-            validated_str = (row.get(_validated_col_name) or "").strip().lower()
+            drug = (row.get(_drug_col_name) or "").strip()
+            disease = (row.get(_disease_col_name) or "").strip()
             if not drug or not disease:
                 continue
-            if validated_str in ("true", "1", "yes"):
+            _is_positive = False
+            if _schema_mode == "canonical":
+                outcome_val = (row.get(_outcome_col_name) or "").strip().lower()
+                if outcome_val in [v.lower() for v in _CANONICAL_POSITIVE_OUTCOMES]:
+                    _is_positive = True
+                elif outcome_val and outcome_val not in [v.lower() for v in _CANONICAL_VALID_OUTCOMES]:
+                    logger.warning(
+                        "P2-022: unknown outcome value %r in row "
+                        "(drug=%s, disease=%s). Valid outcomes: %s. "
+                        "Skipping this row.",
+                        outcome_val, drug, disease, _CANONICAL_VALID_OUTCOMES,
+                    )
+            elif _schema_mode == "legacy":
+                validated_str = (row.get(_validated_col_name) or "").strip().lower()
+                if validated_str in ("true", "1", "yes"):
+                    _is_positive = True
+            else:  # minimal
+                _is_positive = True  # by definition, every row is validated
+            if _is_positive:
                 validated_pairs.append((drug, disease))
 
     if not validated_pairs:

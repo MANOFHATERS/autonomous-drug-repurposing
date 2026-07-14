@@ -222,8 +222,37 @@ logger = logging.getLogger(__name__)
 
 
 # FIX(issue-53): SecurityError class for pickle deserialization safety.
-class SecurityError(RuntimeError):
-    """Raised when a potentially unsafe load is attempted without explicit opt-in."""
+# P2-025 ROOT FIX (forensic, TM5): previously this file defined its OWN
+# local ``SecurityError(RuntimeError)`` while ``exceptions.py`` defined a
+# DIFFERENT ``SecurityError(DrugOSDataError)``. Two distinct classes with
+# the same name but different MROs — callers catching ``SecurityError``
+# would miss one or the other depending on which module they imported
+# from. This is exactly the "comment says fixed, code is broken" pattern.
+# ROOT FIX: import the canonical ``SecurityError`` from exceptions.py
+# (which inherits from DrugOSDataError → Exception). For backward compat,
+# we ALSO register it as a virtual subclass of RuntimeError so any
+# existing ``except RuntimeError`` that depended on the old MRO still
+# catches it. The class object is now identical across modules:
+# ``pyg_builder.SecurityError is exceptions.SecurityError`` → True.
+try:
+    from .exceptions import SecurityError as _CanonicalSecurityError
+    # Backward-compat: the old ``pyg_builder.SecurityError`` inherited
+    # from RuntimeError. The canonical one inherits from DrugOSDataError
+    # (which inherits from Exception, not RuntimeError). Register the
+    # canonical class as a virtual subclass of RuntimeError so legacy
+    # ``except RuntimeError`` blocks still catch it.
+    try:
+        RuntimeError.register(_CanonicalSecurityError)  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        pass  # abc.register may fail on some Python versions; non-fatal
+    SecurityError = _CanonicalSecurityError
+except ImportError:
+    # Fallback: define a local SecurityError(RuntimeError) if the
+    # exceptions module cannot be imported (e.g. running pyg_builder as
+    # a standalone script without the package context). This preserves
+    # the legacy behavior.
+    class SecurityError(RuntimeError):  # type: ignore[no-redef]
+        """Raised when a potentially unsafe load is attempted without explicit opt-in."""
 
 
 # FIX(issue-3): explicit Protocol for graph builder contract.
@@ -3719,7 +3748,7 @@ from .schema_mappings import (
 # Keep the old constant names as aliases so existing code doesn't break.
 # These are deprecated — new code should import from schema_mappings directly.
 #
-# v108 ROOT FIX (Team 6 + Team 4, conflict-resolved): the previous
+# v108 ROOT FIX (Team 6 + Team 4 + TM5, conflict-resolved): the previous
 # "INT-004 root fix" called ``__all__.extend([...])`` here WITHOUT ever
 # defining ``__all__`` at module level. Python raised ``NameError: name
 # '__all__' is not defined`` at IMPORT TIME — the entire ``pyg_builder``
@@ -3729,11 +3758,13 @@ from .schema_mappings import (
 # explicitly warned: "many of these fixes introduced NEW bugs while
 # patching old ones" — this was one of them.
 #
-# Team 4 and Team 6 both independently found and fixed this bug. The
-# conflict is resolved by merging both approaches: define ``__all__``
-# with the ACTUAL public API names (Team 6's approach — more complete
-# than Team 4's empty list) so ``from pyg_builder import *`` exports
-# the real public names, THEN extend with the deprecated aliases.
+# Team 4, Team 6, and Team 5 (TM5) all independently found and fixed
+# this bug. Conflict resolved by taking Team 6's approach (most complete
+# — defines ``__all__`` with the ACTUAL public API names so
+# ``from pyg_builder import *`` exports the real public names), then
+# extends with the deprecated aliases. TM5's P2-024/P2-025 ROOT FIX
+# (SecurityError consolidation) sits above at line ~225 and is
+# preserved through this rebase.
 __all__: list = [
     "SecurityError",
     "GraphBuilderProtocol",

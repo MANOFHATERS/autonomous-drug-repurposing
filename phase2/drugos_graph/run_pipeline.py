@@ -5403,6 +5403,42 @@ def step9_build_pyg(
                     ),
                 },
             )
+            # P2-020 ROOT FIX (forensic, TM5): the 4 sibling branches
+            # (disabled_by_env / transformers_not_importable /
+            # hf_token_missing_gated_model / no_drug_records) all set
+            # the MLflow tags CHEMBERTA_DISABLED=true +
+            # CHEMBERTA_FAILURE_REASON + FEATURE_FALLBACK +
+            # MOLECULAR_STRUCTURE_LEARNED + log_params. THIS branch
+            # (encode_failed — the most common production failure
+            # mode: HF Hub unreachable, model deleted, network
+            # partition) did NOT. Operators monitoring the MLflow
+            # dashboard saw a "RUNNING" run with no tags indicating
+            # failure — they had no idea the model was training on
+            # random Xavier features. The issue title explicitly
+            # calls this out: "The only signal is an MLflow tag
+            # CHEMBERTA_DISABLED=true. Operators who don't monitor
+            # MLflow tags have no idea the model is training on
+            # random features." ROOT FIX: add the same MLflow tag
+            # block as the 4 sibling branches so the encode_failed
+            # path is also observable in the MLflow UI.
+            try:
+                from .mlflow_tracker import MLflowTracker as _MLFT_p2_020
+                _t = _MLFT_p2_020()
+                _t.start_run(run_name=f"chemberta_disabled_step9_{int(time.time())}")
+                _t.set_tag("CHEMBERTA_DISABLED", "true")
+                _t.set_tag("CHEMBERTA_FAILURE_REASON", "encode_failed")
+                _t.set_tag("FEATURE_FALLBACK", "random_xavier")
+                _t.set_tag("MOLECULAR_STRUCTURE_LEARNED", "false")
+                _t.set_tag("CHEMBERTA_EXCEPTION_TYPE", type(exc).__name__)
+                _t.log_params({
+                    "chemberta_used": False,
+                    "chemberta_failure_reason": "encode_failed",
+                    "compound_feature_source": "random_xavier",
+                    "chemberta_exception_type": type(exc).__name__,
+                })
+                _t.end_run()
+            except Exception:
+                pass  # MLflow tagging is best-effort, never fatal
             _strict_raise("encode_failed", exc)
 
     # v72 ROOT FIX (P2C-016): record chemberta_features_used on the
@@ -6424,13 +6460,53 @@ def step11_train_transe(
         # leaks (drugs in test also appear in train). It's kept only as
         # a last-resort fallback for tiny datasets where node-disjoint
         # split would leave val/test empty.
+        #
+        # P2-028 ROOT FIX (forensic, TM5, defense-in-depth): step9's
+        # node_disjoint_split already RAISES in production (lines
+        # 5522-5542), so this leaky fallback is only reachable in dev
+        # mode. However, defense-in-depth requires that step11 ALSO
+        # refuse to use this leaky split in production — if a future
+        # code change makes step9's split silently succeed but produce
+        # empty val/test sets (e.g. graph with 1 drug), step11 would
+        # fall through to THIS branch and silently train on a leaky
+        # split. ROOT FIX: in production, RAISE RuntimeError if this
+        # branch is reached. The V1 launch criterion '>0.85 AUC on
+        # held-out drug-disease pairs' is structurally unverifiable on
+        # a leaky split — the held-out AUC is a random-split proxy
+        # that does NOT measure generalization. In dev mode, preserve
+        # the legacy lenient behavior for tiny fixtures.
+        _is_prod_p2_028_defense = os.environ.get(
+            "DRUGOS_ENVIRONMENT", "production"
+        ).lower() in ("prod", "production")
+        if _is_prod_p2_028_defense:
+            logger.error(
+                "P2-028 ROOT FIX (defense-in-depth): step11 reached "
+                "the leaky stratified-random fallback split in "
+                "PRODUCTION mode. Both node_disjoint_split and "
+                "temporal_split failed or produced empty val/test "
+                "sets. This split has entity-level leakage (same drug "
+                "in train and test) — AUC will be inflated and the "
+                "V1 launch criterion '>0.85 AUC' is structurally "
+                "unverifiable. RAISING to force investigation. Set "
+                "DRUGOS_ENVIRONMENT=dev to allow the leaky fallback "
+                "(dev fixtures only)."
+            )
+            raise RuntimeError(
+                "P2-028 ROOT FIX (defense-in-depth): step11 leaky "
+                "stratified-random fallback split reached in production. "
+                "Both node_disjoint_split and temporal_split failed. "
+                "The fallback has entity-level leakage — refusing to "
+                "train on a leaky split. Set DRUGOS_ENVIRONMENT=dev to "
+                "allow (dev fixtures only)."
+            )
         logger.warning(
             "Step 11: using stratified random split (temporal split not "
             "available — no approval_year data, or fewer than half of "
             "treats triples had an approval_year). The DOCX V1 launch "
             "criterion '>0.85 AUC on held-out drug-disease pairs' is "
             "therefore structurally unverifiable in this run; the "
-            "held-out AUC reported below is a random-split proxy."
+            "held-out AUC reported below is a random-split proxy. "
+            "(P2-028: dev mode only — production RAISES.)"
         )
         _by_rel: Dict[int, List[int]] = {}
         for _i, _r in enumerate(rels):
