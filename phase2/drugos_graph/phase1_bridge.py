@@ -217,7 +217,21 @@ except Exception:  # pragma: no cover — fallback for direct-script execution
             return ""
         try:
             ik = str(inchikey).strip()
-        except Exception:
+        except (TypeError, ValueError) as exc:
+            # P2-015 ROOT FIX (v108 forensic): narrowed from bare
+            # ``except Exception`` which silently swallowed programming
+            # bugs (NameError, AttributeError from typos) and masked
+            # real data issues. ``str()`` can only raise TypeError
+            # (object incompatible with __str__) or ValueError (rare —
+            # e.g. numpy scalar with NaN). Both are logged so operators
+            # can audit the root cause rather than seeing a silent ""
+            # return.
+            logger.warning(
+                "_normalize_inchikey: str(inchikey) raised %s "
+                "(inchikey type=%s, repr=%.80r). Returning empty string. "
+                "(P2-015 root fix, v108)",
+                type(exc).__name__, type(inchikey).__name__, inchikey,
+            )
             return ""
         if not ik or ik.lower() in ("nan", "none", "null", "na"):
             return ""
