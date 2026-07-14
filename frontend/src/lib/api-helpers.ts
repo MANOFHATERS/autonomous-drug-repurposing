@@ -20,13 +20,47 @@ export async function requireAuth(): Promise<{ user: AuthenticatedUser; response
 export async function requireAdmin(): Promise<{ user: AuthenticatedUser; response: null } | { user: null; response: Response }> {
   const auth = await requireAuth();
   if (auth.user === null) return auth;
-  if (auth.user.role !== "admin" && auth.user.role !== "owner") {
+  // BE-002 ROOT FIX: accept admin, owner, AND platformOwner. All three are
+  // "admin-level" roles for the purpose of requireAdmin (they can all
+  // access admin endpoints). The DIFFERENCE is in cross-tenant scoping:
+  // only `platformOwner` bypasses org scoping (see isPlatformSuperuser).
+  // `owner` is now org-scoped just like `admin` — the previous code
+  // granted `owner` system-wide access, which was a multi-tenant data
+  // breach (any user promoted to owner could enumerate every user in
+  // every org). The fix is to introduce `platformOwner` as the ONLY
+  // role with system-wide access, settable only via direct DB access.
+  if (
+    auth.user.role !== "admin" &&
+    auth.user.role !== "owner" &&
+    auth.user.role !== "platformOwner"
+  ) {
     return {
       user: null,
       response: NextResponse.json({ error: "forbidden", message: "Admin access required" }, { status: 403 }),
     };
   }
   return auth;
+}
+
+/**
+ * BE-002 ROOT FIX: returns true ONLY for the `platformOwner` role.
+ *
+ * The `platformOwner` role is the ONLY role that bypasses org scoping.
+ * It is reserved for the SaaS operator's staff and can ONLY be set via
+ * direct DB access — no API route can grant it (ALLOWED_ROLES_ADMIN in
+ * register/route.ts does NOT include "platformOwner").
+ *
+ * Routes that have a "system-wide" path (e.g. admin/users GET without
+ * org filter, audit-logs GET without org filter) MUST gate that path
+ * on `isPlatformSuperuser(auth.user)`. The `owner` and `admin` roles
+ * are org-scoped — they see only their own org's data.
+ *
+ * This is the root fix for the multi-tenant data breach where any user
+ * promoted to `owner` could read every user in every org, suspend any
+ * user system-wide, and read every audit log across all tenants.
+ */
+export function isPlatformSuperuser(user: { role: string } | null): boolean {
+  return user?.role === "platformOwner";
 }
 
 /**
@@ -60,8 +94,11 @@ export async function requireRole(
       ),
     };
   }
-  // Admin/owner are always allowed (superuser bypass).
-  const allowed = new Set([...roles, "admin", "owner"]);
+  // Admin/owner/platformOwner are always allowed (superuser bypass).
+  // BE-002: platformOwner is the new system-wide superuser role. owner
+  // and admin are org-scoped admin-level roles (they can access admin
+  // endpoints but only see their own org's data).
+  const allowed = new Set([...roles, "admin", "owner", "platformOwner"]);
   if (!allowed.has(user.role)) {
     return {
       user: null,
@@ -225,36 +262,37 @@ export async function writeAuditLog(params: {
       return { ok: false, error: errMsg };
     }
 
-    // Non-critical: try to write to a fallback mechanism. If the DB
-    // itself is down, this also fails — but at least we tried.
+    // BE-003 ROOT FIX: non-critical fallback — write to the
+    // AuditLogDeadLetter table (modeled in Prisma schema). The previous
+    // code used raw $executeRaw SQL with CREATE TABLE IF NOT EXISTS on
+    // every call — that had three bugs (see schema.prisma comment for
+    // AuditLogDeadLetter). The Prisma-model path is:
+    //   1. Type-safe (no SQL injection, no DDL on every call).
+    //   2. Queryable from the application layer (operators can list
+    //      dead-letter entries via /api/admin/audit-logs?dead_letter=true).
+    //   3. Monitorable (alert when row count grows — indicates a
+    //      systemic AuditLog write failure that needs operator attention).
+    // If THIS write also fails (DB truly down), we log to stderr as the
+    // last-resort record. The request continues because the action was
+    // non-critical — but the dead-letter entry is the compliance trail.
     try {
-      // Best-effort fallback: write to a separate "audit_log_dead_letter"
-      // table if it exists. We don't model it in Prisma because adding
-      // a model would require a migration; instead we use $executeRaw
-      // with a CREATE TABLE IF NOT EXISTS so it's idempotent.
-      // For SQLite/Postgres compatible DDL.
-      await db.$executeRaw`CREATE TABLE IF NOT EXISTS audit_log_dead_letter (
-        id SERIAL PRIMARY KEY,
-        action TEXT NOT NULL,
-        resource TEXT,
-        user_id TEXT,
-        actor_name TEXT,
-        metadata TEXT,
-        error TEXT,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-      )`;
-      await db.$executeRaw`INSERT INTO audit_log_dead_letter
-        (action, resource, user_id, actor_name, metadata, error)
-        VALUES (${params.action}, ${params.resource || null},
-                ${params.user?.userId || null},
-                ${params.user?.email || "anonymous"},
-                ${JSON.stringify(params.metadata || {})},
-                ${errMsg})`;
+      await db.auditLogDeadLetter.create({
+        data: {
+          action: params.action,
+          resource: params.resource || null,
+          userId: params.user?.userId || null,
+          actorName: params.user?.email || "anonymous",
+          metadata: JSON.stringify(params.metadata || {}),
+          error: errMsg,
+          critical: params.critical === true,
+          ...(effectiveOrgId ? { organizationId: effectiveOrgId } : {}),
+        },
+      });
     } catch (fallbackErr) {
       // Both primary and fallback failed — the DB is likely down.
       // The stderr log above is the only record. Operators must
       // monitor for [AUDIT-LOG-FAILURE] entries.
-      console.error("[AUDIT-LOG-FAILURE] Fallback also failed:", fallbackErr);
+      console.error("[AUDIT-LOG-FAILURE] Dead-letter write also failed:", fallbackErr);
     }
     return { ok: false, error: errMsg };
   }

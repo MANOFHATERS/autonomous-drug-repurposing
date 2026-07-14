@@ -186,64 +186,54 @@ DEFAULT_FEATURE_DIMS: Dict[str, int] = {
 # get_auc_threshold_for_scale() function returns the appropriate threshold
 # based on graph size.
 V1_AUC_THRESHOLD: float = 0.85
-# P3-026 ROOT FIX (SCIENTIFIC — RAISED FROM 0.55 TO 0.65): the P3-034 fix
-# raised the demo threshold from 0.50 (exactly random) to 0.55, but 0.55
-# is STILL too low for a meaningful validation gate. On a 30-drug demo
-# graph with ~15 val pairs, AUC is discrete (step size 1/(n_pos*n_neg)
-# ≈ 0.07 for 5 pos / 10 neg). A model that ranks just ONE extra pair
-# correctly gets AUC ≈ 0.57, which passes the 0.55 threshold. This is
-# essentially random — the model didn't "learn" anything, it got lucky
-# on a single pair. The 0.55 threshold gave false confidence that the
-# model was learning when it was actually at chance level.
+# P3-018 ROOT FIX (CRITICAL — use 0.85 for ALL scales, per audit mandate).
+# The previous code used V1_AUC_THRESHOLD_DEMO = 0.65 and
+# V1_AUC_THRESHOLD_PILOT = 0.70, claiming this was "scientifically correct"
+# because demo graphs are small. The audit explicitly says:
+#   "Use 0.85 for ALL scales. If the demo can't reach 0.85, document the
+#    gap and fix the model, not the threshold. A demo model with AUC=0.65
+#    passes validation, giving false confidence that the model is 'working.'
+#    The team ships to pharma partners believing the model meets the V1
+#    contract. In production (10K drugs), the model may or may not reach
+#    0.85 — the demo gave no signal."
 #
-# The fix raises the threshold to 0.65 — at least 2 ranks better than
-# random on a 15-pair val set. This is the minimum bar for "the model
-# learned a REAL signal" on a demo graph. Models that cannot clear 0.65
-# on the demo graph are NOT ready for the pilot scale and should be
-# debugged (check feature quality, edge density, training convergence)
-# before scaling up. Production graphs use V1_AUC_THRESHOLD (0.85) per
-# the DOCX V1 contract.
-V1_AUC_THRESHOLD_DEMO: float = 0.65  # raised from 0.55 (P3-026): meaningful bar
-V1_AUC_THRESHOLD_PILOT: float = 0.70  # for pilot-scale (100-1000 drugs)
+# Lowering the threshold for demos is NOT scientifically correct — it's
+# lowering the bar to make a broken model pass. The fix: use 0.85 for ALL
+# scales. If the demo can't reach 0.85, the pipeline logs a DEMO_LIMITATION
+# warning explaining WHY (too few training pairs) and what the production
+# expectation is. The model is NOT marked as "validated" — it's marked as
+# "demo-only, not production-ready" so the team knows not to ship it.
+#
+# This matches the DOCX V1 launch contract: "Graph Transformer achieves
+# >0.85 AUC on held-out drug-disease pairs." No exceptions for demo scale.
+V1_AUC_THRESHOLD_DEMO: float = 0.85  # P3-018: was 0.65 — now 0.85 for ALL scales
+V1_AUC_THRESHOLD_PILOT: float = 0.85  # P3-018: was 0.70 — now 0.85 for ALL scales
 
 
 def get_auc_threshold_for_scale(num_drugs: int) -> float:
-    """Return the appropriate AUC threshold based on graph size.
+    """Return the AUC threshold for the graph scale.
 
-    The DOCX V1 launch contract requires >0.85 AUC on held-out drug-disease
-    pairs. This is achievable on PRODUCTION-scale graphs (10K+ drugs, millions
-    of training pairs). On smaller graphs, the threshold is lowered to reflect
-    the statistical reality:
+    P3-018 ROOT FIX: ALL scales now use 0.85 (the V1 launch contract).
+    The previous code returned 0.65 for demo graphs and 0.70 for pilot
+    graphs, which the audit found was "lowering the bar to make a broken
+    model pass." The fix: use 0.85 for ALL scales.
 
-      - < 100 drugs (demo): 0.65 (P3-026: raised from 0.50/0.55 — the model
-        has ~100 training pairs, too few for high AUC. 0.65 = at least 2
-        ranks better than random on a 15-pair val set, a meaningful bar.
-        The pipeline's CORRECTNESS is verified by KP recovery and RL AUC,
-        not GT AUC alone.)
-      - 100-1000 drugs (pilot): 0.70 (medium capacity — the model has ~1K-10K
-        training pairs, enough for moderate generalization.)
-      - >= 1000 drugs (production): 0.85 (full V1 launch contract -- the model
-        has 100K+ training pairs, enough for high AUC.)
-
-    This is NOT "lowering the bar" -- it's using the SCIENTIFICALLY CORRECT
-    threshold for each scale. A 30-drug demo graph CANNOT achieve 0.85 AUC
-    by mathematical construction (the test set has ~30 pairs, and AUC on 30
-    pairs has variance > 0.1). The 0.65 threshold for demos (P3-026) means
-    "at least 2 ranks better than random", a meaningful proof-of-concept
-    bar that filters out lucky-on-one-pair random models.
+    If a demo graph cannot reach 0.85, the pipeline logs a DEMO_LIMITATION
+    warning explaining that the model is NOT production-ready (too few
+    training pairs for the model to generalize). The model is marked as
+    "demo-only" so the team knows not to ship it to pharma partners.
 
     Args:
         num_drugs: Number of drug nodes in the graph.
 
     Returns:
-        AUC threshold (float) appropriate for the graph size.
+        0.85 (the V1 launch contract threshold, for ALL scales).
     """
-    if num_drugs >= 1000:
-        return V1_AUC_THRESHOLD
-    elif num_drugs >= 100:
-        return V1_AUC_THRESHOLD_PILOT
-    else:
-        return V1_AUC_THRESHOLD_DEMO
+    # P3-018: all scales use 0.85. The num_drugs parameter is kept for
+    # backward API compatibility — callers that pass num_drugs still get
+    # the correct threshold.
+    _ = num_drugs  # accepted for API compat, no longer affects threshold
+    return V1_AUC_THRESHOLD  # 0.85 for ALL scales (P3-018)
 
 
 def validate_node_type(node_type: str) -> None:

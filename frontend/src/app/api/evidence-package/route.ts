@@ -153,7 +153,7 @@ export async function POST(req: NextRequest) {
   const auth = await requireAuthRole("researcher", "data-scientist", "pi", "business-dev");
   if (auth.user === null) return auth.response;
 
-  let body: { drug: string; disease: string; notes?: string; literatureLimit?: number; trialsLimit?: number; skipKgValidation?: boolean };
+  let body: { drug: string; disease: string; notes?: string; literatureLimit?: number; trialsLimit?: number };
   try {
     body = await req.json();
   } catch {
@@ -163,31 +163,35 @@ export async function POST(req: NextRequest) {
     return badRequest("Both 'drug' and 'disease' fields are required");
   }
 
-  // FE-008 ROOT FIX: validate the drug and disease exist in the KG.
+  // BE-006 ROOT FIX: the previous code accepted a `skipKgValidation: true`
+  // body flag from admin/owner callers to bypass KG entity validation
+  // entirely. This was a security hole: an admin could generate an
+  // evidence package for "aspirin for cancer" (no KG edge), and the
+  // package would look IDENTICAL to a KG-validated one in the UI. The
+  // only signal that validation was skipped was a field in the audit log
+  // — invisible to the researcher receiving the package. A researcher
+  // acting on the package would believe the KG confirms the drug-disease
+  // relationship when in fact the KG has no such edge.
   //
-  // We skip this check ONLY when:
-  //   - The caller passes `skipKgValidation: true` in the body (admin
-  //     override — used by the evidence-package smoke test, NOT exposed
-  //     to the UI), AND
-  //   - The caller is an admin or owner (RBAC check).
+  // Root fix: REMOVE the bypass entirely. KG validation is now mandatory
+  // for ALL callers (admin, owner, platformOwner included). If an admin
+  // needs to generate a package for an entity not in the KG, they MUST
+  // add the entity to the KG first (via the Phase 2 ingestion pipeline).
+  // This enforces the scientific-contract invariant: every evidence
+  // package is backed by a KG edge.
   //
-  // For all other callers, the check is mandatory. If the drug or
-  // disease is not in the KG, return 404 with a clear error.
-  const skipKgValidation =
-    body.skipKgValidation === true &&
-    (auth.user.role === "admin" || auth.user.role === "owner");
-
-  if (!skipKgValidation) {
-    const [drugCheck, diseaseCheck] = await Promise.all([
-      validateEntityInKg(body.drug, "drug"),
-      validateEntityInKg(body.disease, "disease"),
-    ]);
-    if (!drugCheck.ok) {
-      return notFound(drugCheck.reason || `Drug "${body.drug}" not found in knowledge graph`);
-    }
-    if (!diseaseCheck.ok) {
-      return notFound(diseaseCheck.reason || `Disease "${body.disease}" not found in knowledge graph`);
-    }
+  // We ALSO ignore the `skipKgValidation` field if a legacy client sends
+  // it — the field is silently dropped (no error) so existing clients
+  // don't break, but the bypass no longer works.
+  const [drugCheck, diseaseCheck] = await Promise.all([
+    validateEntityInKg(body.drug, "drug"),
+    validateEntityInKg(body.disease, "disease"),
+  ]);
+  if (!drugCheck.ok) {
+    return notFound(drugCheck.reason || `Drug "${body.drug}" not found in knowledge graph`);
+  }
+  if (!diseaseCheck.ok) {
+    return notFound(diseaseCheck.reason || `Disease "${body.disease}" not found in knowledge graph`);
   }
 
   try {
@@ -220,7 +224,11 @@ export async function POST(req: NextRequest) {
         disease: pkg.disease,
         literatureCount: pkg.literature.total,
         trialsCount: pkg.clinicalTrials.total,
-        kgValidationSkipped: skipKgValidation,
+        // BE-006: kgValidationSkipped is now ALWAYS false — the bypass
+        // was removed. The field is kept in the audit log for backwards
+        // compatibility with log-analysis tooling that expects it.
+        kgValidationSkipped: false,
+        serviceStatus: pkg.serviceStatus,
       },
     });
     return NextResponse.json({ id: record.id, package: pkg, markdown });

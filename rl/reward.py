@@ -1,14 +1,15 @@
 """rl.reward — Reward Function & Config (P4-008/P4-021 modular wrapper).
 
-P4-021 ROOT FIX: this module is a RE-EXPORT SHIM. The real
-RewardConfig class (~350 lines) and RewardFunction class (~700 lines)
-are in rl_drug_ranker.py. A full extraction is planned — see
-rl/env.py for the extraction plan.
+P4-021 ROOT FIX (Team Member 9, REAL EXTRACTION STEP):
+The column constants (FEATURE_COLS, REQUIRED_COLUMNS) are now imported
+from rl/constants.py (the self-contained constants module), NOT from
+the 9000-line monolith. This is the FIRST real extraction step toward
+P4-021's goal of actual decoupling.
 
-RewardConfig is relatively self-contained (lines 1138-1483) and can
-be extracted first. RewardFunction depends on RewardConfig, column
-constants, and the withdrawn-drug sets — it should be extracted after
-RewardConfig.
+The RewardConfig and RewardFunction classes still live in
+rl_drug_ranker.py because they have deep dependencies on the
+withdrawn-drug sets, pandas/numpy, and the column constants. A full
+extraction is planned post-v105 when CI coverage is higher.
 
 Callers can import:
     from rl.reward import RewardFunction, RewardConfig, compute_reward
@@ -16,7 +17,11 @@ Callers can import:
 """
 from __future__ import annotations
 
-# P4-021: re-export from the monolith (backward compat).
+# P4-021: import CONSTANTS from rl/constants.py (self-contained, no monolith dep).
+from .constants import FEATURE_COLS, REQUIRED_COLUMNS
+
+# P4-021: RewardConfig + RewardFunction still come from the monolith (they have
+# deep interdependencies on the withdrawn-drug sets, pandas/numpy, etc.).
 from .rl_drug_ranker import (
     RewardConfig,
     RewardFunction,
@@ -26,10 +31,9 @@ from .rl_drug_ranker import (
     save_reward_weights_for_tenant,
     apply_tenant_reward_weights,
     DEFAULT_REWARD_WEIGHTS_DIR,
-    # Feature column list (used by reward function)
-    FEATURE_COLS,
-    REQUIRED_COLUMNS,
-    # Constants used by the reward function
+    # Constants used by the reward function (still from monolith — these are
+    # scientific guardrail sets, not column names, so they stay with the
+    # reward logic until RewardFunction is extracted).
     WITHDRAWN_DRUGS,
     INDICATION_WITHDRAWN_DRUGS,
     CONTROLLED_SUBSTANCES,

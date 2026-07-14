@@ -244,46 +244,42 @@ def _pandas_lineterminator_kwargs() -> Dict[str, Any]:
 # ============================================================================
 # SECTION 1: COLUMN CONFIGURATION
 # ============================================================================
-
-# --- Core identifier columns ---
-DRUG_COL: str = "drug"
-DISEASE_COL: str = "disease"
-
-# --- Feature columns (observed by the RL agent) ---
-GNN_SCORE_COL: str = "gnn_score"
-SAFETY_COL: str = "safety_score"
-MARKET_COL: str = "market_score"
-CONFIDENCE_COL: str = "confidence"
-PATHWAY_COL: str = "pathway_score"
-
-# PATENT_COL semantics: For REPURPOSING, OFF-patent = better (cheaper,
-# generic availability, no IP blocking by original manufacturer).
-PATENT_COL: str = "patent_score"
-RARE_DISEASE_COL: str = "rare_disease_flag"
-
-# Renamed from existing_drugs_score: previous name was actively misleading.
-UNMET_NEED_COL: str = "unmet_need_score"
-
-# Clinical efficacy signal (project doc requires 3 dimensions including efficacy).
-EFFICACY_COL: str = "efficacy_score"
-
-# ADME (Absorption, Distribution, Metabolism, Excretion) properties.
-ADME_COL: str = "adme_score"
-
-# Disease-context features added at runtime by the env.
-DISEASE_PAIR_COUNT_COL: str = "disease_pair_count"
-DISEASE_AVG_GNN_COL: str = "disease_avg_gnn"
-DISEASE_AVG_SAFETY_COL: str = "disease_avg_safety"
-
-# P4-007 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): gnn_score timestamp
-# column. The input CSV may include this column (ISO 8601 format) to
-# indicate when the gnn_score was computed by the Phase 3 GT model. The
-# DrugRankingEnv checks the timestamp at init time and logs a WARNING if
-# the gnn_score is stale (>24h old), because the GT model may have been
-# retrained since then — the RL agent would be training on stale predictions,
-# and the deployed policy would be mismatched to fresh gnn_scores.
-GNN_SCORE_TIMESTAMP_COL: str = "gnn_score_timestamp"
-GNN_SCORE_STALENESS_WARNING_HOURS: float = 24.0
+# P4-021 ROOT FIX (Team Member 9): column constants are now imported from
+# rl/constants.py (the SELF-CONTAINED constants module). This is the FIRST
+# REAL extraction step toward P4-021's goal of actual decoupling. Both
+# rl_drug_ranker.py AND the wrapper modules (rl/env.py, rl/reward.py) import
+# from rl/constants.py, so a column-name change lives in ONE place and the
+# wrapper modules no longer transitively depend on the 9000-line monolith
+# for constants. The constants are re-exported below for backward compat.
+from .constants import (
+    DRUG_COL,
+    DISEASE_COL,
+    GNN_SCORE_COL,
+    SAFETY_COL,
+    MARKET_COL,
+    CONFIDENCE_COL,
+    PATHWAY_COL,
+    PATENT_COL,
+    RARE_DISEASE_COL,
+    UNMET_NEED_COL,
+    EFFICACY_COL,
+    ADME_COL,
+    DISEASE_PAIR_COUNT_COL,
+    DISEASE_AVG_GNN_COL,
+    DISEASE_AVG_SAFETY_COL,
+    GNN_SCORE_TIMESTAMP_COL,
+    GNN_SCORE_STALENESS_WARNING_HOURS,
+    SOURCE_DB_COL,
+    DRUG_CANONICAL_COL,
+    DISEASE_CANONICAL_COL,
+    REWARD_COL,
+    RANK_COL,
+    LITERATURE_SUPPORT_COL,
+    IS_KNOWN_POSITIVE_COL,
+    CONTROLLED_SUBSTANCE_COL,
+    FEATURE_COLS,
+    REQUIRED_COLUMNS,
+)
 
 # P4-013 ROOT FIX (v2 — Team Member 12): import the shared threshold
 # resolver at module load time so the scientific_validation gate (line ~8379)
@@ -319,34 +315,10 @@ except ImportError:
             return base
         return max(cfg, base)
 
-# Optional canonical-identifier columns.
-SOURCE_DB_COL: str = "source_database"
-DRUG_CANONICAL_COL: str = "drug_inchikey"
-DISEASE_CANONICAL_COL: str = "disease_mesh_id"
-
-# Output column constants
-REWARD_COL: str = "reward"
-RANK_COL: str = "rank"
-LITERATURE_SUPPORT_COL: str = "literature_support"
-IS_KNOWN_POSITIVE_COL: str = "is_known_positive"
-CONTROLLED_SUBSTANCE_COL: str = "controlled_substance"
-
-# Default feature columns. The environment may EXTEND this list with disease
-# context features at runtime.
-FEATURE_COLS: List[str] = [
-    GNN_SCORE_COL,
-    SAFETY_COL,
-    MARKET_COL,
-    CONFIDENCE_COL,
-    PATHWAY_COL,
-    PATENT_COL,
-    RARE_DISEASE_COL,
-    UNMET_NEED_COL,
-    EFFICACY_COL,
-    ADME_COL,
-]
-
-REQUIRED_COLUMNS: List[str] = FEATURE_COLS + [DRUG_COL, DISEASE_COL]
+# Optional canonical-identifier columns, output columns, FEATURE_COLS, and
+# REQUIRED_COLUMNS are now imported from rl/constants.py (P4-021 fix above).
+# The duplicate inline definitions have been removed — the single source of
+# truth is rl/constants.py.
 
 # ============================================================================
 # SECTION 1b: DATA DICTIONARY
@@ -545,8 +517,15 @@ WITHDRAWN_DRUGS: frozenset = frozenset({
     "domperidone", "motilium",
     # Antiepileptic (EU pregnancy prevention program — neural tube defects)
     "valproate", "valproic acid", "divalproex sodium", "depakote",
-    # Thalidomide analog (birth defects — global withdrawal)
-    "thalidomide",
+    # NOTE: thalidomide is INTENTIONALLY NOT in this set. It is FDA-approved
+    # for multiple myeloma and leprosy under REMS. It is in
+    # INDICATION_WITHDRAWN_DRUGS (contraindicated ONLY for pregnancy-related
+    # indications). A global hard-reject would block the validated
+    # (thalidomide, multiple myeloma) pair — exactly the kind of FDA-approved
+    # repurposing the data flywheel (DOCX §10) is supposed to capture.
+    # The previous code had "thalidomide" here AND a comment claiming it
+    # was removed — the comment was wrong (aspirational ROOT FIX). This
+    # is the REAL fix: actually remove it.
 })
 
 # P4-002/P4-017 ROOT FIX: indication-specific withdrawals. Maps drug_name

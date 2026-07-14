@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, badRequest, writeAuditLog, requireCsrfOrSend } from "@/lib/api-helpers";
+import { requireAdmin, badRequest, writeAuditLog, requireCsrfOrSend, isPlatformSuperuser } from "@/lib/api-helpers";
 import { revokeAllRefreshTokensForUser } from "@/lib/auth/server";
 import { db } from "@/lib/db";
 import {
@@ -59,21 +59,26 @@ export async function GET(req: NextRequest) {
   const offset = parseInt(req.nextUrl.searchParams.get("offset") || "0", 10);
   const requestedOrgId = req.nextUrl.searchParams.get("orgId");
 
-  // FE-016 v2: Non-owner admin with no orgId → reject. They should not be
-  // calling this endpoint at all. (An owner is the global super-admin and
-  // bypasses this check.)
-  if (auth.user.role !== "owner" && !auth.user.orgId) {
+  // BE-002 ROOT FIX: only `platformOwner` (the platform-level superuser)
+  // bypasses the org-membership requirement. The `owner` role is now
+  // org-scoped (same as `admin`) — a user who created an org gets
+  // OrganizationMember.role=owner but User.role=researcher (or whatever
+  // they were promoted to). The previous code granted User.role=owner
+  // system-wide access, which was a multi-tenant data breach.
+  // platformOwner is settable ONLY via direct DB access — no API route
+  // can grant it. See isPlatformSuperuser in api-helpers.ts.
+  if (!isPlatformSuperuser(auth.user) && !auth.user.orgId) {
     return NextResponse.json(
       { error: "forbidden", message: "You are not a member of any organization." },
       { status: 403 }
     );
   }
 
-  // If the caller is not owner (super-admin) and they're asking for a
+  // If the caller is not a platform superuser and they're asking for a
   // different org than their own, deny. Use strict equality so that
   // `null !== "anything"` correctly trips the denial.
   const orgId = requestedOrgId || auth.user.orgId;
-  if (auth.user.role !== "owner" && orgId !== auth.user.orgId) {
+  if (!isPlatformSuperuser(auth.user) && orgId !== auth.user.orgId) {
     await writeAuditLog({
       user: auth.user,
       action: "admin_user_list_denied_cross_tenant",
@@ -86,11 +91,12 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // FE-016 v2: Defense in depth — verify the admin is actually a member
+  // BE-002: Defense in depth — verify the admin is actually a member
   // of `orgId`. The access token's `orgId` claim is the primary source, but
   // a forged token (or a stale session after a demotion) could lie. This
-  // query catches that. For an owner, we skip the check (they're global).
-  if (auth.user.role !== "owner") {
+  // query catches that. For a platformOwner, we skip the check (they're
+  // global). owner and admin are org-scoped — they MUST pass this check.
+  if (!isPlatformSuperuser(auth.user)) {
     const adminMembership = await db.organizationMember.findFirst({
       where: { organizationId: orgId, userId: auth.user.userId },
       select: { id: true },
@@ -108,17 +114,23 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // FE-016 v2: For non-owners, omit `email` from the select — email is PII
-  // under GDPR, and a consortium-member admin does not need other members'
-  // emails to manage roles. Owner retains full visibility for cross-tenant
-  // audits. (Use a conditional select object.)
-  const isOwner = auth.user.role === "owner";
+  // BE-002: For non-platform-superusers, omit `email` from the select —
+  // email is PII under GDPR, and a consortium-member admin does not need
+  // other members' emails to manage roles. platformOwner retains full
+  // visibility for cross-tenant audits (they are the SaaS operator's
+  // staff with a legitimate need-to-know across tenants).
+  //
+  // The `owner` role is NO LONGER treated as a superuser — an org owner
+  // sees only their own org's users, same as an admin. This closes the
+  // multi-tenant data breach where any user promoted to `owner` could
+  // enumerate every user in every org.
+  const isSuperuser = isPlatformSuperuser(auth.user);
 
   // Get user IDs that belong to this org, then fetch those users.
-  // FE-016 v2: for owners, skip the memberships query entirely — they see
-  // ALL users regardless of org, so the query is wasted work.
+  // BE-002: for platformOwner, skip the memberships query entirely —
+  // they see ALL users regardless of org, so the query is wasted work.
   let userIds: string[] = [];
-  if (!isOwner) {
+  if (!isSuperuser) {
     const memberships = await db.organizationMember.findMany({
       where: { organizationId: orgId },
       select: { userId: true },
@@ -126,8 +138,8 @@ export async function GET(req: NextRequest) {
     userIds = memberships.map((m) => m.userId);
   }
 
-  const whereClause = isOwner ? {} : { id: { in: userIds } };
-  const selectClause = isOwner
+  const whereClause = isSuperuser ? {} : { id: { in: userIds } };
+  const selectClause = isSuperuser
     ? {
         id: true,
         email: true,
@@ -213,19 +225,33 @@ export async function PATCH(req: NextRequest) {
     return badRequest("Nothing to update. Provide role and/or status.");
   }
 
-  // FE-006: prevent privilege escalation to owner unless caller is owner.
-  if (body.role === "owner" && auth.user.role !== "owner") {
+  // FE-006 / BE-002: prevent privilege escalation to owner unless caller
+  // is a platform superuser (platformOwner). The `owner` role is org-scoped
+  // but still admin-level, so promoting someone to owner within your own
+  // org is allowed if you're already an admin/owner of that org. Promotion
+  // to `platformOwner` is NEVER allowed via API — that role is settable
+  // only via direct DB access.
+  if (body.role === "platformOwner") {
     return NextResponse.json(
-      { error: "forbidden", message: "Only an owner can promote another user to owner." },
+      { error: "forbidden", message: "The platformOwner role cannot be granted via the API. It is settable only via direct database access by the SaaS operator." },
+      { status: 403 }
+    );
+  }
+  if (body.role === "owner" && !isPlatformSuperuser(auth.user) && auth.user.role !== "owner") {
+    return NextResponse.json(
+      { error: "forbidden", message: "Only an owner or platform superuser can promote another user to owner." },
       { status: 403 }
     );
   }
 
-  // FE-013 ROOT FIX: cross-tenant IDOR guard. An admin (non-owner) can only
-  // PATCH users who share at least one org membership with them. Owner is
-  // global super-admin and bypasses the check. Without this, an admin in
-  // Org A could suspend any user in Org B by guessing their cuid.
-  if (auth.user.role !== "owner") {
+  // FE-013 ROOT FIX / BE-002: cross-tenant IDOR guard. An admin or owner
+  // (both org-scoped) can only PATCH users who share at least one org
+  // membership with them. platformOwner is the ONLY role that bypasses
+  // this check (they are the SaaS operator's staff). Without this, an
+  // admin in Org A could suspend any user in Org B by guessing their cuid.
+  // The previous code granted `owner` the same bypass as platformOwner,
+  // which was the multi-tenant data breach.
+  if (!isPlatformSuperuser(auth.user)) {
     const adminMemberships = await db.organizationMember.findMany({
       where: { userId: auth.user.userId },
       select: { organizationId: true },

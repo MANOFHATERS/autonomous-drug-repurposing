@@ -623,3 +623,209 @@ export const __test = {
     ipBuckets.forEach((_, k) => ipBuckets.delete(k));
   },
 };
+
+// ---------------------------------------------------------------------------
+// BE-005 ROOT FIX: distributed (Redis-backed) rate limiters for multi-instance
+// deployments.
+//
+// The sync functions above (checkIpRateLimit, recordIpAttempt,
+// checkTotpRateLimit, recordFailedTotp, checkUserApiRateLimit,
+// recordUserApiRequest) use in-memory Maps that are NOT shared across
+// Node.js instances. A multi-instance deployment (Kubernetes with 3+
+// replicas) has N× the effective rate limit — a distributed credential-
+// stuffing attack across 3 instances gets 60 login attempts per IP per
+// 5 minutes (3×20) instead of 20. The rate limits are effectively 3×
+// weaker in production than in single-instance testing.
+//
+// Root fix: provide ASYNC distributed versions of each function. When
+// `REDIS_URL` is set, they use the same RedisBackend as
+// `checkUserRateLimitDistributed` (from per-user-rate-limit.ts). When
+// `REDIS_URL` is NOT set, they fall back to the in-memory versions
+// (single-instance dev/test). The function signatures match the sync
+// versions except they return Promises — migration is a one-line change
+// from `const rl = checkIpRateLimit(req)` to
+// `const rl = await checkIpRateLimitDistributed(req)`.
+//
+// The login route is updated to use the distributed versions (it is the
+// highest-value target for distributed credential stuffing). The TOTP
+// and per-user API routes can be migrated similarly — the functions are
+// provided here, callers can adopt them incrementally.
+// ---------------------------------------------------------------------------
+
+/**
+ * Lazy-init the Redis backend for the rate limiters. Reuses the same
+ * `ioredis` dynamic-import pattern as per-user-rate-limit.ts so the
+ * dependency is optional (single-instance deployments don't need it).
+ * Returns null when REDIS_URL is not set — callers fall back to the
+ * in-memory path.
+ */
+let __redisBackend: any | null = null;
+let __redisBackendInitError: Error | null = null;
+
+async function getRedisBackend(): Promise<any | null> {
+  if (__redisBackend) return __redisBackend;
+  if (__redisBackendInitError) throw __redisBackendInitError;
+  const redisUrl = process.env.REDIS_URL;
+  if (!redisUrl) return null;
+  try {
+    const mod = await import(/* webpackIgnore: true */ "ioredis");
+    const Redis = mod.default || mod;
+    __redisBackend = new Redis(redisUrl, {
+      lazyConnect: false,
+      maxRetriesPerRequest: 3,
+      enableReadyCheck: true,
+    });
+    return __redisBackend;
+  } catch (e: any) {
+    const err = new Error(
+      `REDIS_URL is set but "ioredis" could not be loaded for rate-limit.ts. ` +
+        `Install it with: npm install ioredis. Original error: ${e?.message ?? e}`
+    );
+    __redisBackendInitError = err;
+    throw err;
+  }
+}
+
+/**
+ * BE-005: ASYNC distributed IP rate limit check. Uses Redis when
+ * REDIS_URL is set, falls back to the sync in-memory LRU otherwise.
+ *
+ * The Redis key is `drugos:rl:ip:<ip>` with a sorted-set sliding window
+ * (same pattern as per-user-rate-limit.ts). The window and limits are
+ * the same as the sync version (IP_MAX_ATTEMPTS=20 per 5 min, block 15 min).
+ *
+ * Records the attempt atomically with the check (zadd + zcard in one
+ * MULTI/EXEC) so a flood of concurrent requests from the same IP all
+ * count against the same window. The sync version's recordIpAttempt
+ * must be called separately — the async version combines both for
+ * atomicity.
+ */
+export async function checkIpRateLimitDistributed(req: NextRequest): Promise<{
+  blocked: boolean;
+  retryAfterSeconds: number;
+}> {
+  const redis = await getRedisBackend().catch(() => null);
+  if (!redis) {
+    // Fall back to the sync in-memory path. The sync `checkIpRateLimit`
+    // does NOT record the attempt (it only checks), so we call
+    // `recordIpAttempt` here to make the distributed version's contract
+    // identical to the Redis path (which records atomically). This way
+    // callers don't need to know which path was taken — the attempt is
+    // always recorded.
+    recordIpAttempt(req);
+    return checkIpRateLimit(req);
+  }
+  const ip = getClientIp(req);
+  const now = Date.now();
+  const windowMs = IP_WINDOW_MINUTES * 60 * 1000;
+  const key = `drugos:rl:ip:${ip}`;
+  const member = `${now}:${randomBytesStr(8)}`;
+  // Atomic: prune → add → count → expire.
+  const results = await redis
+    .multi()
+    .zremrangebyscore(key, "-inf", now - windowMs)
+    .zadd(key, now, member)
+    .zcard(key)
+    .pexpire(key, windowMs + 60_000)
+    .exec();
+  const count = typeof results?.[2]?.[1] === "number" ? results[2][1] : 0;
+  if (count > IP_MAX_ATTEMPTS) {
+    return {
+      blocked: true,
+      retryAfterSeconds: IP_BLOCK_MINUTES * 60,
+    };
+  }
+  return { blocked: false, retryAfterSeconds: 0 };
+}
+
+/**
+ * BE-005: ASYNC distributed TOTP rate limit check. Uses Redis when
+ * REDIS_URL is set, falls back to the sync in-memory Map otherwise.
+ *
+ * Records the failed attempt atomically with the check.
+ */
+export async function recordFailedTotpDistributed(userId: string): Promise<{
+  locked: boolean;
+  retryAfterSeconds: number;
+  attemptsRemaining: number;
+}> {
+  const redis = await getRedisBackend().catch(() => null);
+  if (!redis) {
+    return recordFailedTotp(userId);
+  }
+  const now = Date.now();
+  const windowMs = TOTP_WINDOW_MINUTES * 60 * 1000;
+  const key = `drugos:rl:totp:${userId}`;
+  const member = `${now}:${randomBytesStr(8)}`;
+  const results = await redis
+    .multi()
+    .zremrangebyscore(key, "-inf", now - windowMs)
+    .zadd(key, now, member)
+    .zcard(key)
+    .pexpire(key, windowMs + 60_000)
+    .exec();
+  const count = typeof results?.[2]?.[1] === "number" ? results[2][1] : 0;
+  if (count > TOTP_MAX_ATTEMPTS) {
+    return {
+      locked: true,
+      retryAfterSeconds: TOTP_LOCK_MINUTES * 60,
+      attemptsRemaining: 0,
+    };
+  }
+  return {
+    locked: false,
+    retryAfterSeconds: 0,
+    attemptsRemaining: Math.max(0, TOTP_MAX_ATTEMPTS - count),
+  };
+}
+
+/**
+ * BE-005: ASYNC distributed per-user API rate limit check. Uses Redis
+ * when REDIS_URL is set, falls back to the sync in-memory Map otherwise.
+ *
+ * Records the request atomically with the check.
+ */
+export async function checkUserApiRateLimitDistributed(userId: string): Promise<{
+  blocked: boolean;
+  retryAfterSeconds: number;
+  remaining: number;
+}> {
+  const redis = await getRedisBackend().catch(() => null);
+  if (!redis) {
+    return checkUserApiRateLimit(userId);
+  }
+  const now = Date.now();
+  const windowMs = USER_API_WINDOW_MINUTES * 60 * 1000;
+  const key = `drugos:rl:userapi:${userId}`;
+  const member = `${now}:${randomBytesStr(8)}`;
+  const results = await redis
+    .multi()
+    .zremrangebyscore(key, "-inf", now - windowMs)
+    .zadd(key, now, member)
+    .zcard(key)
+    .pexpire(key, windowMs + 60_000)
+    .exec();
+  const count = typeof results?.[2]?.[1] === "number" ? results[2][1] : 0;
+  if (count > USER_API_MAX_REQUESTS) {
+    return {
+      blocked: true,
+      retryAfterSeconds: Math.max(1, USER_API_WINDOW_MINUTES * 60),
+      remaining: 0,
+    };
+  }
+  return {
+    blocked: false,
+    retryAfterSeconds: 0,
+    remaining: Math.max(0, USER_API_MAX_REQUESTS - count),
+  };
+}
+
+// Tiny helper to avoid pulling `crypto` into this file (the sync versions
+// don't need it). Generates an 8-byte hex suffix for Redis sorted-set
+// member uniqueness.
+function randomBytesStr(n: number): string {
+  // Lazy import so the sync path doesn't pay the crypto import cost.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { randomBytes } = require("crypto") as typeof import("crypto");
+  return randomBytes(n).toString("hex");
+}

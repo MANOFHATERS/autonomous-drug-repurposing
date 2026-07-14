@@ -87,14 +87,43 @@ export async function POST(req: NextRequest) {
     // INVERSE of safe behavior — it revoked exactly when the password
     // update had already happened but audit failed, leaving the
     // common-path (audit succeeds) WIDE OPEN.
+    //
+    // BE-016 ROOT FIX: previously, a revocation failure here was SILENTLY
+    // SWALLOWED — the user saw "Password updated. All other sessions have
+    // been signed out" when in fact the other sessions were NOT signed
+    // out (DB error, network timeout, etc.). A user who changed their
+    // password due to suspected compromise was given a FALSE sense of
+    // security; the attacker's stolen refresh token kept working for up
+    // to 30 days. Root fix: surface the failure as a `warning` field in
+    // the response AND write a critical audit log entry. We still clear
+    // the current session's cookies (so the user must re-authenticate
+    // with the new password locally), but the warning tells them other
+    // sessions may still be active.
+    let revocationWarning: string | null = null;
     try {
       await revokeAllRefreshTokensForUser(user.userId);
     } catch (revErr) {
-      // Revocation failure is a security incident — log loudly. We still
-      // clear the current session's cookies below so the user is forced
-      // to re-authenticate with the new password locally; the lingering
-      // tokens will eventually expire (30-day TTL).
+      revocationWarning =
+        "Your password was changed and this session has been signed out, " +
+        "but other sessions (e.g. on another browser, or a stolen refresh " +
+        "token) could NOT be revoked due to a server error. They will " +
+        "remain active for up to 30 days. If you suspect compromise, " +
+        "please contact support immediately to force-revoke all sessions.";
       console.error("[password] refresh-token revocation failed", revErr);
+      // Critical audit log — this is a security-relevant event.
+      try {
+        await writeAuditLog({
+          user,
+          action: "password_change_revocation_failed",
+          resource: user.userId,
+          metadata: {
+            error: revErr instanceof Error ? revErr.message : String(revErr),
+          },
+          critical: true,
+        });
+      } catch {
+        console.error("[password] CRITICAL: revocation failed AND audit log failed");
+      }
     }
     // Clear the current session's cookies so the user is forced to
     // re-authenticate with the new password. This is the user-facing
@@ -105,10 +134,21 @@ export async function POST(req: NextRequest) {
       // audit log failed. Inform the user — they need to log in again.
       return internalError("Password changed and all sessions revoked, but the audit log failed. Please log in again with your new password.");
     }
-    return NextResponse.json({
-      ok: true,
-      message: "Password updated. All other sessions have been signed out — please log in again.",
-    });
+    return NextResponse.json(
+      revocationWarning
+        ? {
+            ok: true,
+            warning: revocationWarning,
+            message:
+              "Password updated. This session has been signed out — please " +
+              "log in again. See the warning field for revocation status.",
+          }
+        : {
+            ok: true,
+            message:
+              "Password updated. All other sessions have been signed out — please log in again.",
+          }
+    );
   } catch (e) {
     console.error("Password update failed:", e);
     return internalError("Failed to update password.");

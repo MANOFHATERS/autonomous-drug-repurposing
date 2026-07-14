@@ -319,6 +319,16 @@ export async function POST(req: NextRequest) {
       where: { userId: user.id },
       orderBy: { joinedAt: "asc" },
     });
+    // BE-079 REAL ROOT FIX (v2): Persist lastActiveOrgId on the User row,
+    // mirroring the non-MFA login path. Without this, the 2FA user's
+    // refreshed access token (issued 15 min later by rotateRefreshToken)
+    // would have no orgId, and every org-scoped query would 403.
+    if (membership?.organizationId) {
+      await db.user.update({
+        where: { id: user.id },
+        data: { lastActiveOrgId: membership.organizationId },
+      });
+    }
     const tokens = await rotateRefreshToken(user.id);
     const access = signAccessToken({
       userId: user.id,

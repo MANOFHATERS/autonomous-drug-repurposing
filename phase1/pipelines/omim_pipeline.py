@@ -1104,6 +1104,10 @@ class OMIMPipeline(BasePipeline):
         self._source_format = "embedded_csv"
         self._download_method_used = "embedded_sample"
         self._source_url_sanitised = "embedded://omim_gda"
+        # P1-055 ROOT FIX (v108): set source_version for the audit trail.
+        # The embedded sample is a snapshot of OMIM morbidmap data aligned
+        # to Piñero 2020 §2.3. The version string records this.
+        self.source_version = "OMIM_morbidmap_embedded_sample"
         logger.info(
             "[omim] Embedded sample GDA dataset written to %s (%d rows)",
             dest, len(df),
@@ -1177,6 +1181,21 @@ class OMIMPipeline(BasePipeline):
             )
         except OSError:
             pass
+
+        # P1-055 ROOT FIX (v108): set source_version from the morbidmap
+        # file's mtime. OMIM morbidmap.txt does not embed a version string,
+        # so we use the file's mtime as a proxy for the release date.
+        # This gives the audit trail a meaningful version identifier
+        # (e.g. "OMIM_morbidmap_2026-07-13") instead of None.
+        if not getattr(self, "source_version", None):
+            try:
+                stat = path.stat()
+                mtime_date = datetime.fromtimestamp(
+                    stat.st_mtime, tz=timezone.utc
+                ).strftime("%Y-%m-%d")
+                self.source_version = f"OMIM_morbidmap_{mtime_date}"
+            except OSError:
+                self.source_version = "OMIM_morbidmap_unknown_date"
 
         return path
 

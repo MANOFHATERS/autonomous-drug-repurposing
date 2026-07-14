@@ -2503,7 +2503,28 @@ class BasePipeline(ABC):
         file_key = self._get_processed_filename()
         file_schema = schema.get("properties", {}).get(file_key, {})
         if not file_schema:
-            # No schema for this file -- validation is a no-op
+            # P1-047 ROOT FIX (v108): the previous code silently returned
+            # ``True, []`` (no errors) when the schema had no entry for
+            # this file. This made validate_output() a NO-OP for any
+            # pipeline whose _get_processed_filename() returned a name
+            # not in schema/v1.json. A drugbank row with a malformed
+            # InChIKey passed validation because there was no schema
+            # entry for ``drugbank_drugs.csv``. The KG then had malformed
+            # InChIKeys, and cross-source entity resolution on InChIKey
+            # failed silently. ROOT FIX: log a WARNING so operators can
+            # detect the missing schema entry. We still return True, []
+            # (backward compat — a missing schema is not a data error),
+            # but the WARNING surfaces the gap so it can be fixed.
+            logger.warning(
+                "[%s] validate_output: NO schema entry found for '%s' in "
+                "schema/v1.json. Validation is a NO-OP for this file — "
+                "malformed data (bad InChIKey, out-of-range scores, etc.) "
+                "will NOT be caught. Add a schema entry for '%s' to enable "
+                "validation (P1-047 ROOT FIX).",
+                self.source_name,
+                file_key,
+                file_key,
+            )
             return True, []
 
         # v107 ROOT FIX (ISSUE-P1-024 + ISSUE-P1-035): lazily verify that
