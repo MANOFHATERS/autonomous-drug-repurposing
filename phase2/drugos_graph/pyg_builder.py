@@ -3719,21 +3719,29 @@ from .schema_mappings import (
 # Keep the old constant names as aliases so existing code doesn't break.
 # These are deprecated — new code should import from schema_mappings directly.
 #
-# v108 FORENSIC FIX (Team 4): the previous "INT-004 root fix" called
-# ``__all__.extend([...])`` here WITHOUT ever defining ``__all__`` at
-# module level. Python raised ``NameError: name '__all__' is not
-# defined`` at IMPORT TIME — the entire ``pyg_builder`` module was
-# UNIMPORTABLE. Any pipeline that did ``from .pyg_builder import
-# PyGBuilder`` or ``import pyg_builder`` crashed immediately. The whole
-# Phase 2 -> Phase 3 PyG path was dead on arrival. The user explicitly
-# warned: "many of these fixes introduced NEW bugs while patching old
-# ones" — this was one of them. ROOT FIX: define ``__all__`` as an empty
-# list at the top of the module (or just below the existing aliases) so
-# the ``.extend(...)`` call has a valid target. The list is populated
-# here with the deprecated aliases so backward compatibility is
-# preserved and downstream code that does ``from pyg_builder import *``
-# still gets the four names.
-__all__: List[str] = []
+# v108 ROOT FIX (Team 6 + Team 4, conflict-resolved): the previous
+# "INT-004 root fix" called ``__all__.extend([...])`` here WITHOUT ever
+# defining ``__all__`` at module level. Python raised ``NameError: name
+# '__all__' is not defined`` at IMPORT TIME — the entire ``pyg_builder``
+# module was UNIMPORTABLE. Any pipeline that did ``from .pyg_builder
+# import PyGBuilder`` or ``import pyg_builder`` crashed immediately.
+# The whole Phase 2 -> Phase 3 PyG path was dead on arrival. The user
+# explicitly warned: "many of these fixes introduced NEW bugs while
+# patching old ones" — this was one of them.
+#
+# Team 4 and Team 6 both independently found and fixed this bug. The
+# conflict is resolved by merging both approaches: define ``__all__``
+# with the ACTUAL public API names (Team 6's approach — more complete
+# than Team 4's empty list) so ``from pyg_builder import *`` exports
+# the real public names, THEN extend with the deprecated aliases.
+__all__: list = [
+    "SecurityError",
+    "GraphBuilderProtocol",
+    "LinkPredictionSplit",
+    "HeteroDataSummary",
+    "PyGBuilder",
+    "build_pyg_hetero_data",
+]
 __all__.extend([
     "_PHASE2_TO_GT_NODE_TYPE",
     "_GT_TO_PHASE2_NODE_TYPE",
