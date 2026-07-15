@@ -437,21 +437,64 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # Initialize weights
         self.apply(self._init_weights)
 
+        # FORENSIC ROOT FIX (audit Issue 133, SILENT BUG): re-zero the
+        # NodeTypeEmbedding's unknown-type slot AFTER self.apply(_init_weights).
+        # NodeTypeEmbedding.__init__ zeroed the unknown slot, but
+        # _init_weights's new Xavier init for nn.Embedding (audit Issue 133)
+        # OVERWRITES that zero with random values -- silently breaking the
+        # unknown-type contract (out-of-range node types would produce
+        # random perturbations to the projected features instead of zero).
+        # We re-zero here so the unknown slot is zero REGARDLESS of the
+        # order of operations between NodeTypeEmbedding.__init__ and
+        # self.apply(_init_weights).
+        try:
+            self.node_type_proj.node_type_embedding._reset_unknown_slot()
+        except AttributeError:
+            # Defensive: if a future NodeTypeProjection variant doesn't
+            # expose node_type_embedding, skip silently. The contract is
+            # only meaningful when NodeTypeEmbedding is in use.
+            pass
+
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
         """Initialize all module weights with appropriate strategies.
 
-        V30 ROOT FIX (7.1): the original code used normal(0, 1) for nn.Embedding
-        (std=1.0). For 128-dim embeddings, the L2 norm of each row was ~11.3,
-        which DOMINATED the projected features. BERT/GPT use std=0.02 (50x
-        smaller) so the type embedding adds a gentle bias to the projected
-        features rather than overwriting them. With std=1.0, the type
-        embedding forced all drug nodes to cluster near their type vector,
-        destroying the per-drug signal from the projection layer.
+        FORENSIC ROOT FIX (audit Issue 133): nn.Embedding is now
+        initialized with ``nn.init.xavier_normal_`` (Glorot & Bengio
+        2010, "Understanding the difficulty of training deep
+        feed-forward neural networks"), NOT ``torch.randn`` / normal_.
 
-        The fix uses std=0.02 for nn.Embedding (matching BERT/GPT practice).
-        nn.Linear and nn.LayerNorm are unchanged (Xavier uniform is standard
-        for Linear with ReLU/GELU; ones/zeros is standard for LayerNorm).
+        The previous code used ``nn.init.normal_(mean=0.0, std=0.02)``
+        (the BERT/GPT convention). The audit explicitly mandates Xavier.
+        Both are scientifically defensible, but the audit is the
+        contract for this codebase, so Xavier is the choice.
+
+        Xavier_normal_ draws from N(0, sqrt(2 / (fan_in + fan_out))).
+        For nn.Embedding, fan_in = embedding_dim and fan_out = 1 (each
+        forward pass looks up a single row), so the effective std is
+        sqrt(2 / (embedding_dim + 1)) ~= sqrt(2/embedding_dim). For
+        embedding_dim=128, that's std ~= 0.125 -- between the previous
+        0.02 (BERT) and 1.0 (PyTorch default randn). Xavier is the
+        standard choice for any layer that feeds into a Linear or
+        attention computation (which the node type embeddings do --
+        they get ADDED to the projected features before the first
+        attention layer).
+
+        nn.Linear and nn.LayerNorm are unchanged (Xavier uniform is
+        standard for Linear with ReLU/GELU; ones/zeros is standard for
+        LayerNorm).
+
+        SILENT BUG FIX: NodeTypeEmbedding.__init__ zeroes out the
+        'unknown' type slot (index num_node_types) so out-of-range
+        node types produce NEUTRAL embeddings (zero perturbation to
+        the projected features). ``self.apply(self._init_weights)``
+        runs AFTER NodeTypeEmbedding.__init__, so the Xavier init
+        here OVERWRITES that zero with random values -- breaking the
+        unknown-type contract. The fix is in
+        ``DrugRepurposingGraphTransformer.__init__``: AFTER
+        ``self.apply(self._init_weights)``, we explicitly call
+        ``self.node_type_proj.node_type_embedding._reset_unknown_slot()``
+        to re-zero the unknown slot. See that call site for details.
         """
         if isinstance(module, nn.Linear):
             nn.init.xavier_uniform_(module.weight)
@@ -461,9 +504,10 @@ class DrugRepurposingGraphTransformer(nn.Module):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            # V30 ROOT FIX (7.1): std=0.02 (BERT/GPT standard). The previous
-            # std=1.0 dominated projected features with type-cluster signal.
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            # FORENSIC ROOT FIX (audit Issue 133): Xavier init for
+            # node embeddings (was normal_(std=0.02)). See the
+            # docstring above for the full rationale.
+            nn.init.xavier_normal_(module.weight)
 
     def encode(
         self,

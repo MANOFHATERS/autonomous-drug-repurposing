@@ -188,52 +188,100 @@ def _load_checkpoint(checkpoint_path: str) -> Dict[str, Any]:
 
     P3-001 ROOT FIX: this mirrors the loading path in
     ``scripts/gt_inference.py`` so the HTTP service and the subprocess
-    path produce IDENTICAL predictions. The checkpoint bundle includes
-    the model state dict; ``graph_state.pt`` (written alongside by the
-    bridge) includes ``node_features``, ``edge_indices``, ``node_maps``,
-    ``drug_names``, ``disease_names``, and ``known_pairs``.
+    path produce IDENTICAL predictions.
+
+    FORENSIC ROOT FIX (audit Issue 124): the model class is now
+    dispatched via the checkpoint's ``model_class_name`` field. The
+    previous code ALWAYS constructed ``DrugRepurposingGraphTransformer``
+    regardless of what class the trainer actually saved. If a future
+    model variant is trained (e.g., a HGT-class model), the service
+    would silently construct the WRONG class and crash on
+    ``load_state_dict`` with a shape-mismatch error. The fix looks up
+    the class by qualified name (defaulting to
+    ``DrugRepurposingGraphTransformer`` for pre-fix checkpoints) and
+    instantiates it with the saved ``hyperparams``.
+
+    FORENSIC ROOT FIX (audit Issue 139): the checkpoint is now
+    SELF-CONTAINED -- it carries node_features, edge_indices, node_maps,
+    drug_names, disease_names, known_pairs alongside the model_state_dict
+    and hyperparams. We load EVERYTHING from the single .pt file. For
+    backward compatibility with pre-fix checkpoints (which saved only
+    the model_state_dict + schema), we fall back to the legacy
+    ``graph_state.pt`` sidecar if the new fields are missing.
     """
     import torch
-    from graph_transformer.models.graph_transformer import (
-        DrugRepurposingGraphTransformer,
-    )
 
     ckpt_path = Path(checkpoint_path)
     if not ckpt_path.exists():
         raise FileNotFoundError(f"GT checkpoint not found: {ckpt_path}")
 
-    # Look for graph_state.pt in the same directory
-    graph_state_path = ckpt_path.parent / "graph_state.pt"
-    if not graph_state_path.exists():
-        candidates = list(ckpt_path.parent.glob("*graph_state*.pt")) + \
-                     list(ckpt_path.parent.glob("*graph*.pt"))
-        candidates = [c for c in candidates if c != ckpt_path]
-        if not candidates:
-            raise FileNotFoundError(
-                f"Graph state file not found next to checkpoint {ckpt_path}. "
-                f"Expected: {graph_state_path}. The bridge must write this "
-                f"file alongside the model checkpoint so inference can "
-                f"reproduce the exact graph topology the model was trained on."
-            )
-        graph_state_path = candidates[0]
-
     # P3-004 ROOT FIX: weights_only=True (with feature detection)
     ckpt = _torch_load_safe(str(ckpt_path))
-    graph_state = _torch_load_safe(str(graph_state_path))
 
-    # Reconstruct model from saved config
-    model_config = ckpt.get("model_config", graph_state.get("model_config", {}))
-    node_features_dims = graph_state.get("node_features_dims") or graph_state.get(
-        "feature_dims", {}
-    )
-    model = DrugRepurposingGraphTransformer(
-        node_features_dims=node_features_dims,
-        embedding_dim=model_config.get("embedding_dim", 32),
-        num_layers=model_config.get("num_layers", 3),
-        num_heads=model_config.get("num_heads", 2),
-        dropout=model_config.get("dropout", 0.2),
-        attention_dropout=model_config.get("attention_dropout", 0.2),
-        link_predictor_hidden_dims=model_config.get("link_predictor_hidden_dims", [64, 32]),
+    # FORENSIC ROOT FIX (audit Issue 139): try to load graph data from
+    # the SELF-CONTAINED checkpoint first. Fall back to the legacy
+    # graph_state.pt sidecar for pre-fix checkpoints.
+    node_features = ckpt.get("node_features")
+    edge_indices = ckpt.get("edge_indices")
+    node_maps = ckpt.get("node_maps")
+    drug_names = ckpt.get("drug_names")
+    disease_names = ckpt.get("disease_names")
+    known_pairs = ckpt.get("known_pairs")
+    hyperparams = ckpt.get("hyperparams")
+    model_class_name = ckpt.get("model_class_name")
+
+    used_sidecar = False
+    if node_features is None or edge_indices is None:
+        # Pre-fix checkpoint: load graph data from graph_state.pt sidecar.
+        graph_state_path = ckpt_path.parent / "graph_state.pt"
+        if not graph_state_path.exists():
+            candidates = list(ckpt_path.parent.glob("*graph_state*.pt")) + \
+                         list(ckpt_path.parent.glob("*graph*.pt"))
+            candidates = [c for c in candidates if c != ckpt_path]
+            if not candidates:
+                raise FileNotFoundError(
+                    f"Checkpoint {ckpt_path} is a PRE-FIX checkpoint "
+                    f"(no embedded graph data) and no graph_state.pt "
+                    f"sidecar was found next to it. Expected: "
+                    f"{graph_state_path}. Either re-train with the "
+                    f"forensic-fix trainer (which saves a self-contained "
+                    f"checkpoint) or restore the missing sidecar. "
+                    f"(audit Issue 139)"
+                )
+            graph_state_path = candidates[0]
+        graph_state = _torch_load_safe(str(graph_state_path))
+        node_features = node_features or graph_state.get("node_features")
+        edge_indices = edge_indices or graph_state.get("edge_indices")
+        node_maps = node_maps or graph_state.get("node_maps")
+        drug_names = drug_names or graph_state.get("drug_names", [])
+        disease_names = disease_names or graph_state.get("disease_names", [])
+        known_pairs = known_pairs or graph_state.get("known_pairs", [])
+        # Legacy checkpoints didn't save model_class_name or hyperparams;
+        # rebuild hyperparams from graph_state.model_config (best effort).
+        if hyperparams is None:
+            legacy_cfg = graph_state.get("model_config", {})
+            legacy_dims = graph_state.get("node_features_dims") or graph_state.get(
+                "feature_dims", {}
+            )
+            hyperparams = {
+                "feature_dims": legacy_dims,
+                "embedding_dim": legacy_cfg.get("embedding_dim", 32),
+                "num_layers": legacy_cfg.get("num_layers", 3),
+                "num_heads": legacy_cfg.get("num_heads", 2),
+                "dropout": legacy_cfg.get("dropout", 0.2),
+                "attention_dropout": legacy_cfg.get("attention_dropout", 0.2),
+                "link_predictor_hidden_dims": legacy_cfg.get(
+                    "link_predictor_hidden_dims", [64, 32]
+                ),
+            }
+        used_sidecar = True
+
+    # FORENSIC ROOT FIX (audit Issue 124): dispatch the model class via
+    # the saved ``model_class_name``. Defaults to
+    # ``DrugRepurposingGraphTransformer`` for pre-fix checkpoints (which
+    # don't save the class name).
+    model = _construct_model_from_class_name(
+        model_class_name, hyperparams
     )
     model_state_dict = ckpt.get("model_state_dict", ckpt.get("model", ckpt))
     model.load_state_dict(model_state_dict)
@@ -241,18 +289,138 @@ def _load_checkpoint(checkpoint_path: str) -> Dict[str, Any]:
 
     _MODEL_STATE.update({
         "model": model,
-        "node_features": graph_state["node_features"],
-        "edge_indices": graph_state["edge_indices"],
-        "node_maps": graph_state["node_maps"],
-        "drug_names": graph_state["drug_names"],
-        "disease_names": graph_state["disease_names"],
-        "known_pairs": graph_state.get("known_pairs", []),
-        "embedding_dim": model_config.get("embedding_dim", 32),
+        "node_features": node_features,
+        "edge_indices": edge_indices,
+        "node_maps": node_maps or {},
+        "drug_names": drug_names or [],
+        "disease_names": disease_names or [],
+        "known_pairs": known_pairs or [],
+        "hyperparams": hyperparams or {},
+        "model_class_name": model_class_name or type(model).__name__,
+        "embedding_dim": (hyperparams or {}).get("embedding_dim", 32),
         "backend": "checkpoint",
         "checkpoint_path": checkpoint_path,
+        "used_graph_state_sidecar": used_sidecar,
     })
-    logger.info("GT checkpoint loaded from %s", checkpoint_path)
+    logger.info(
+        "GT checkpoint loaded from %s (class=%s, sidecar=%s)",
+        checkpoint_path,
+        _MODEL_STATE["model_class_name"],
+        used_sidecar,
+    )
     return _MODEL_STATE
+
+
+def _construct_model_from_class_name(
+    model_class_name: Optional[str],
+    hyperparams: Optional[Dict[str, Any]],
+):
+    """FORENSIC ROOT FIX (audit Issue 124): dispatch the model class.
+
+    Looks up the class by its qualified name (e.g.,
+    ``graph_transformer.models.graph_transformer.DrugRepurposingGraphTransformer``)
+    and instantiates it with the saved ``hyperparams``. Falls back to
+    ``DrugRepurposingGraphTransformer`` (the only production class today)
+    if the class name is missing or unresolvable -- this preserves
+    backward compatibility with pre-fix checkpoints.
+
+    Raises a clear ``ValueError`` if the saved class name resolves to a
+    class that is NOT a ``torch.nn.Module`` (catches corrupted or
+    hostile checkpoints early).
+    """
+    import torch.nn as nn
+
+    DEFAULT_CLASS = "graph_transformer.models.graph_transformer.DrugRepurposingGraphTransformer"
+    target_name = model_class_name or DEFAULT_CLASS
+    # Strip any module-alias prefixes that could collide with the import
+    # system (e.g., "graph_transformer.models.graph_transformer.GraphTransformerModel"
+    # is the V89 alias for the same class).
+    cls = _resolve_class_by_name(target_name)
+    if cls is None:
+        # Fall back to the default class with a warning -- this preserves
+        # backward compatibility. A future PR can make this strict once
+        # all production checkpoints carry the correct class name.
+        logger.warning(
+            "Could not resolve model_class_name=%r. Falling back to "
+            "DrugRepurposingGraphTransformer (the only production class "
+            "today). Re-train with the forensic-fix trainer to embed "
+            "the correct class name in the checkpoint. (audit Issue 124)",
+            target_name,
+        )
+        from graph_transformer.models.graph_transformer import (
+            DrugRepurposingGraphTransformer as _FallbackCls,
+        )
+        cls = _FallbackCls
+
+    if not (isinstance(cls, type) and issubclass(cls, nn.Module)):
+        raise ValueError(
+            f"Resolved model_class_name={target_name!r} to {cls!r}, which "
+            f"is NOT a torch.nn.Module subclass. The checkpoint may be "
+            f"corrupted or hostile. Refusing to instantiate. "
+            f"(audit Issue 124)"
+        )
+
+    # Filter the hyperparams to only those the class's __init__ accepts.
+    # This makes the loader robust to extra/missing keys as the model
+    # constructor evolves (e.g., a new hyperparam added in a future
+    # version is silently dropped when loading an old checkpoint).
+    import inspect
+    sig = inspect.signature(cls.__init__)
+    accepted = {
+        k for k in sig.parameters.keys() if k != "self"
+    }
+    safe_hyperparams = {
+        k: v for k, v in (hyperparams or {}).items() if k in accepted
+    }
+    dropped = set((hyperparams or {}).keys()) - accepted
+    if dropped:
+        logger.warning(
+            "Dropping hyperparams not accepted by %s.__init__: %s. "
+            "This is expected when loading a checkpoint saved by a "
+            "newer trainer version into an older model class. "
+            "(audit Issue 124)",
+            cls.__name__, sorted(dropped),
+        )
+
+    # Ensure edge_types and node_types are tuples (JSON-serialized
+    # checkpoints store them as lists; the model's __init__ expects
+    # tuples for hashing).
+    if "edge_types" in safe_hyperparams and safe_hyperparams["edge_types"] is not None:
+        safe_hyperparams["edge_types"] = [
+            tuple(et) if isinstance(et, (list, tuple)) else et
+            for et in safe_hyperparams["edge_types"]
+        ]
+    if "exclude_edges" in safe_hyperparams and safe_hyperparams["exclude_edges"] is not None:
+        safe_hyperparams["exclude_edges"] = set(
+            tuple(e) if isinstance(e, (list, tuple)) else e
+            for e in safe_hyperparams["exclude_edges"]
+        )
+
+    return cls(**safe_hyperparams)
+
+
+def _resolve_class_by_name(qualified_name: str):
+    """Resolve a ``module.path.ClassName`` string to the class object.
+
+    Returns ``None`` if the module cannot be imported or the class
+    cannot be found. The caller decides whether to fall back or raise.
+    """
+    if not qualified_name or "." not in qualified_name:
+        # Bare class name -- assume it's in the canonical model module.
+        from graph_transformer.models import graph_transformer as _gt_mod
+        return getattr(_gt_mod, qualified_name, None)
+    module_path, _, class_name = qualified_name.rpartition(".")
+    try:
+        import importlib
+        module = importlib.import_module(module_path)
+    except (ImportError, ModuleNotFoundError) as exc:
+        logger.warning(
+            "Could not import module %r for model_class_name %r: %s",
+            module_path, qualified_name, exc,
+        )
+        return None
+    cls = getattr(module, class_name, None)
+    return cls
 
 
 def _compute_confidence(prob: float) -> float:
