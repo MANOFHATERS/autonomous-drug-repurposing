@@ -579,9 +579,19 @@ except Exception:  # pragma: no cover -- already registered (idempotent)
 
 #: Output columns emitted by :meth:`DrugResolver.to_dataframe` (audit C.17).
 #: Order is significant -- downstream consumers depend on it.
+#:
+#: TM1 TASK 10 ROOT FIX: ``drug_id`` added as a CANONICAL output column
+#: with documented priority order: InChIKey → PubChem CID → ChEMBL ID.
+#: This is the SINGLE canonical drug identifier that downstream systems
+#: (Phase 2 KG, Phase 3 GNN, Phase 4 RL) MUST use to refer to a drug.
+#: Source-specific IDs (``chembl_id``, ``drugbank_id``, ``pubchem_cid``)
+#: are kept as auxiliary columns for traceability but ``drug_id`` is the
+#: canonical join key. The priority order is documented in
+#: :func:`compute_canonical_drug_id` below.
 _OUTPUT_COLUMNS: Tuple[str, ...] = (
     "canonical_inchikey",
     "canonical_name",
+    "drug_id",  # TM1 TASK 10: canonical priority InChIKey → PubChem CID → ChEMBL ID
     "chembl_id",
     "drugbank_id",
     "pubchem_cid",
@@ -600,6 +610,80 @@ _OUTPUT_COLUMNS: Tuple[str, ...] = (
     "input_checksum",
     "data_quality_score",
 )
+
+
+def compute_canonical_drug_id(
+    canonical_inchikey: Optional[str],
+    pubchem_cid: Optional[int] = None,
+    chembl_id: Optional[str] = None,
+) -> Optional[str]:
+    """TM1 TASK 10 ROOT FIX: compute the canonical ``drug_id``.
+
+    The canonical drug_id is the SINGLE identifier downstream systems use
+    to refer to a drug. It is computed via a documented priority order:
+
+    1. **InChIKey** (27-char standard OR ``SYNTH...`` synthetic key) — the
+       globally-unique chemical identifier. Wins because it is source-
+       independent (the same molecule has the same InChIKey in ChEMBL,
+       DrugBank, and PubChem).
+    2. **PubChem CID** (positive integer) — fallback when no InChIKey is
+       available (e.g. biologics, mixtures, or records where the structure
+       is unknown but PubChem has a compound entry). Prefixed as
+       ``PUBCHEM:<cid>`` to make the source unambiguous.
+    3. **ChEMBL ID** (``CHEMBL\\d+``) — last-resort fallback when neither
+       InChIKey nor PubChem CID is available. Prefixed as
+       ``CHEMBL:<id>`` to make the source unambiguous.
+
+    The prefix on fallback IDs (``PUBCHEM:``, ``CHEMBL:``) ensures they
+    never collide with InChIKeys (which always start with 14 uppercase
+    letters) or with each other.
+
+    Returns ``None`` if ALL three inputs are ``None`` — the caller must
+    handle this case (typically by dead-lettering the record).
+
+    Parameters
+    ----------
+    canonical_inchikey : str or None
+        The 27-char InChIKey or synthetic ``SYNTH...`` key. ``None`` or
+        empty string means "no InChIKey available".
+    pubchem_cid : int or None
+        PubChem Compound ID (positive integer). ``None`` or non-positive
+        means "no PubChem CID available".
+    chembl_id : str or None
+        ChEMBL molecule ID (matches ``CHEMBL\\d+``). ``None`` or empty
+        means "no ChEMBL ID available".
+
+    Returns
+    -------
+    str or None
+        The canonical drug_id, or ``None`` if all three inputs are null.
+
+    Examples
+    --------
+    >>> compute_canonical_drug_id("BSYNRYMUTXBXSQ-UHFFFAOYSA-N", 2244, "CHEMBL25")
+    'BSYNRYMUTXBXSQ-UHFFFAOYSA-N'
+    >>> compute_canonical_drug_id(None, 2244, "CHEMBL25")
+    'PUBCHEM:2244'
+    >>> compute_canonical_drug_id(None, None, "CHEMBL25")
+    'CHEMBL:CHEMBL25'
+    >>> compute_canonical_drug_id(None, None, None) is None
+    True
+    """
+    # Priority 1: InChIKey (real or synthetic).
+    if canonical_inchikey and isinstance(canonical_inchikey, str) and canonical_inchikey.strip():
+        return canonical_inchikey.strip()
+    # Priority 2: PubChem CID (positive int).
+    if pubchem_cid is not None:
+        try:
+            cid_int = int(pubchem_cid)
+            if cid_int > 0:
+                return f"PUBCHEM:{cid_int}"
+        except (TypeError, ValueError):
+            pass
+    # Priority 3: ChEMBL ID.
+    if chembl_id and isinstance(chembl_id, str) and chembl_id.strip():
+        return f"CHEMBL:{chembl_id.strip()}"
+    return None
 
 #: Fields considered secret / sensitive when masking config for logs /
 #: state-dict export (audit C.12 / 12.15).
@@ -3471,12 +3555,19 @@ class DrugResolver(Resolver):
 
         def _make_row(canonical_ik: str, entry: dict) -> dict:
             sources = entry.get("sources", [])
+            # TM1 TASK 10: compute the canonical drug_id with priority
+            # InChIKey → PubChem CID → ChEMBL ID. The drug_id is the
+            # SINGLE canonical identifier downstream systems use.
+            _chembl = entry.get("chembl_id")
+            _pubchem = entry.get("pubchem_cid")
+            _drug_id = compute_canonical_drug_id(canonical_ik, _pubchem, _chembl)
             row = {
                 "canonical_inchikey": canonical_ik,
                 "canonical_name": entry.get("canonical_name", ""),
-                "chembl_id": entry.get("chembl_id"),
+                "drug_id": _drug_id,  # TM1 TASK 10: canonical priority
+                "chembl_id": _chembl,
                 "drugbank_id": entry.get("drugbank_id"),
-                "pubchem_cid": entry.get("pubchem_cid"),
+                "pubchem_cid": _pubchem,
                 "uniprot_id": entry.get("uniprot_id"),
                 "string_id": entry.get("string_id"),
                 "smiles": entry.get("smiles"),
@@ -3535,11 +3626,21 @@ class DrugResolver(Resolver):
         Audit C.2 -- nested mutable values (``sources``,
         ``collapsed_stereoisomers``, ``field_provenance``) are deep-copied
         so callers cannot mutate the resolver's internal state.
+
+        TM1 TASK 10: each record now includes a ``drug_id`` field with
+        priority InChIKey → PubChem CID → ChEMBL ID (computed via
+        :func:`compute_canonical_drug_id`).
         """
         records: List[dict] = []
         for canonical_ik, entry in self.mapping.items():
             row = copy.deepcopy(entry)
             row["canonical_inchikey"] = canonical_ik
+            # TM1 TASK 10: compute canonical drug_id.
+            row["drug_id"] = compute_canonical_drug_id(
+                canonical_ik,
+                entry.get("pubchem_cid"),
+                entry.get("chembl_id"),
+            )
             row["sources"] = list(entry.get("sources", []))
             records.append(row)
         return records

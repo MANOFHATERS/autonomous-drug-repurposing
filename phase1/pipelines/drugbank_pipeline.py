@@ -1277,7 +1277,7 @@ class DrugBankPipeline(BasePipeline):
         works correctly (the InChIKeys match across ChEMBL and DrugBank).
         """
         import gzip as _gzip
-        from pipelines._embedded_samples import (
+        from pipelines._dev_samples import (
             embedded_drugbank_drugs,
             embedded_drugbank_interactions,
             embedded_drugbank_indications,
@@ -1372,7 +1372,7 @@ class DrugBankPipeline(BasePipeline):
                 # interactions (the ChEMBL activities are the authoritative
                 # source for DPI; the DrugBank pipeline's job is to provide
                 # drug metadata + indications, which we have).
-                from pipelines._embedded_samples import embedded_drugbank_interactions
+                from pipelines._dev_samples import embedded_drugbank_interactions
                 interactions_csv = self.raw_dir / "drugbank_interactions_sample.csv"
                 embedded_drugbank_interactions().to_csv(interactions_csv, index=False)
                 # Copy the indications file

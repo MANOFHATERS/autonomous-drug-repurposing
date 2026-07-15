@@ -586,13 +586,13 @@ class TestP1_018_PubChemStereoPreserved:
 
 
 # ============================================================================
-# P1-019: _embedded_samples must refuse to run in production
+# P1-019: _dev_samples must refuse to run in production
 # ============================================================================
 
 class TestP1_019_EmbeddedSamplesProductionGuard:
     """Verify embedded_samples raises RuntimeError in production."""
 
-    def test_embedded_samples_refuses_in_production(self, monkeypatch):
+    def test_dev_samples_refuses_in_production(self, monkeypatch):
         """Set DRUGOS_ENVIRONMENT=production, call embedded_chembl_molecules.
 
         MUST raise RuntimeError.
@@ -604,13 +604,13 @@ class TestP1_019_EmbeddedSamplesProductionGuard:
 
         # Re-import to pick up env (the module reads env at call time, not import).
         import importlib
-        import pipelines._embedded_samples as mod
+        import pipelines._dev_samples as mod
         importlib.reload(mod)
 
         with pytest.raises(RuntimeError, match="P1-019"):
             mod.embedded_chembl_molecules()
 
-    def test_embedded_samples_allowed_in_development(self, monkeypatch):
+    def test_dev_samples_allowed_in_development(self, monkeypatch):
         """In development, embedded_samples MUST work."""
         monkeypatch.setenv("DRUGOS_ENVIRONMENT", "development")
         monkeypatch.setenv("ENVIRONMENT", "development")
@@ -618,7 +618,7 @@ class TestP1_019_EmbeddedSamplesProductionGuard:
         monkeypatch.setenv("DRUGOS_DOWNLOAD_MODE", "sample")
 
         import importlib
-        import pipelines._embedded_samples as mod
+        import pipelines._dev_samples as mod
         importlib.reload(mod)
 
         df = mod.embedded_chembl_molecules()

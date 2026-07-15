@@ -1013,7 +1013,7 @@ class OMIMPipeline(BasePipeline):
 
           ROOT FIX: when DRUGOS_DOWNLOAD_MODE=sample (the default) AND
           OMIM_API_KEY is missing, fall back to the embedded sample
-          GDA dataset (``_embedded_samples.embedded_omim_gda()``). The
+          GDA dataset (``_dev_samples.embedded_omim_gda()``). The
           embedded sample is biologically valid (real MIM numbers, real
           gene symbols, real disease associations -- see the
           ``embedded_omim_gda`` docstring). It is written to
@@ -1085,11 +1085,11 @@ class OMIMPipeline(BasePipeline):
         Used as a fallback when OMIM_API_KEY is missing OR the live
         download fails in sample mode. The embedded sample is biologically
         valid (real MIM numbers, real gene symbols -- see
-        ``_embedded_samples.embedded_omim_gda`` docstring) and produces a
+        ``_dev_samples.embedded_omim_gda`` docstring) and produces a
         small but scientifically valid Knowledge Graph.
         """
         import pandas as _pd
-        from pipelines._embedded_samples import embedded_omim_gda
+        from pipelines._dev_samples import embedded_omim_gda
         dest = (
             (self.raw_dir if self.raw_dir else OMIM_RAW_MORBIDMAP_PATH.parent)
             / "omim_embedded_sample.csv"

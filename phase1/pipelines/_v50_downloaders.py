@@ -372,7 +372,7 @@ def download_chembl_full(raw_dir: Path) -> dict[str, Path]:
         # If we got 0 molecules, fall back to embedded samples
         if molecules_path.stat().st_size == 0:
             logger.warning("ChEMBL: API unreachable -- falling back to embedded samples")
-            from pipelines._embedded_samples import embedded_chembl_molecules, embedded_chembl_activities
+            from pipelines._dev_samples import embedded_chembl_molecules, embedded_chembl_activities
             # v107 ROOT FIX (ISSUE-P1-028 — silent CSV/JSONL contract switch):
             # The previous v85/v90 fix changed the fallback to write .csv
             # and unlink the .jsonl — but the docstring above AND the
@@ -573,7 +573,7 @@ def download_uniprot_full(raw_dir: Path) -> dict[str, Path]:
 
         if proteins_path.stat().st_size == 0:
             logger.warning("UniProt: API unreachable -- falling back to embedded samples")
-            from pipelines._embedded_samples import embedded_uniprot_proteins
+            from pipelines._dev_samples import embedded_uniprot_proteins
             embedded_uniprot_proteins().to_csv(proteins_path.with_suffix(".csv"), index=False)
             proteins_path.unlink(missing_ok=True)
             result["proteins"] = proteins_path.with_suffix(".csv")
@@ -678,7 +678,7 @@ def download_string_full(raw_dir: Path, organism: str = STRING_DEFAULT_ORGANISM)
 
         if ppi_path.stat().st_size < 100:  # essentially empty
             logger.warning("STRING: API unreachable -- falling back to embedded samples")
-            from pipelines._embedded_samples import embedded_string_ppi
+            from pipelines._dev_samples import embedded_string_ppi
             embedded_string_ppi().to_csv(ppi_path.with_suffix(".csv"), index=False)
             ppi_path.unlink(missing_ok=True)
             result["ppi"] = ppi_path.with_suffix(".csv")
@@ -729,7 +729,7 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
     drug_source = "sample"
     if inchikeys is None:
         if mode == "sample":
-            from pipelines._embedded_samples import embedded_chembl_molecules
+            from pipelines._dev_samples import embedded_chembl_molecules
             inchikeys = list(embedded_chembl_molecules()["inchikey"])
             drug_source = "embedded_sample"
         else:
@@ -761,12 +761,12 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
                         )
                     else:
                         logger.warning("PubChem: no drugs CSV found -- using sample InChIKeys")
-                        from pipelines._embedded_samples import embedded_chembl_molecules
+                        from pipelines._dev_samples import embedded_chembl_molecules
                         inchikeys = list(embedded_chembl_molecules()["inchikey"])
                         drug_source = "embedded_sample"
             except Exception as exc:
                 logger.warning("PubChem: failed to read InChIKeys -- using samples: %s", exc)
-                from pipelines._embedded_samples import embedded_chembl_molecules
+                from pipelines._dev_samples import embedded_chembl_molecules
                 inchikeys = list(embedded_chembl_molecules()["inchikey"])
                 drug_source = "embedded_sample"
 
@@ -839,7 +839,7 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
     # If we got 0 rows (header only), fall back to embedded samples
     if enrichment_path.stat().st_size < 200:
         logger.warning("PubChem: API unreachable -- falling back to embedded samples")
-        from pipelines._embedded_samples import embedded_pubchem_enrichment
+        from pipelines._dev_samples import embedded_pubchem_enrichment
         embedded_pubchem_enrichment().to_csv(enrichment_path, index=False)
 
     result["enrichment"] = enrichment_path
@@ -895,7 +895,7 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     # In full mode: build from ChEMBL FDA-approved + RxNorm.
     if mode == "sample":
         logger.info("DrugBank: SAMPLE mode -- using embedded 10 FDA-approved drugs")
-        from pipelines._embedded_samples import (
+        from pipelines._dev_samples import (
             embedded_drugbank_drugs,
             embedded_drugbank_indications,
         )

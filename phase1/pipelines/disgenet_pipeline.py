@@ -1206,7 +1206,7 @@ class DisGeNETPipeline(BasePipeline):
           ROOT FIX: when DRUGOS_DOWNLOAD_MODE=sample (the default) AND
           (no API key OR the live download fails), fall back to the
           embedded sample GDA dataset
-          (``_embedded_samples.embedded_disgenet_gda()``). The embedded
+          (``_dev_samples.embedded_disgenet_gda()``). The embedded
           sample is biologically valid (real gene IDs, real DOIDs, real
           association types -- see the ``embedded_disgenet_gda``
           docstring). It is written to
@@ -1349,11 +1349,11 @@ class DisGeNETPipeline(BasePipeline):
         Used as a fallback when the API key is missing OR the live
         download fails in sample mode. The embedded sample is biologically
         valid (real gene IDs, real DOIDs, real association types -- see
-        ``_embedded_samples.embedded_disgenet_gda`` docstring) and
+        ``_dev_samples.embedded_disgenet_gda`` docstring) and
         produces a small but scientifically valid Knowledge Graph.
         """
         import pandas as _pd
-        from pipelines._embedded_samples import embedded_disgenet_gda
+        from pipelines._dev_samples import embedded_disgenet_gda
         dest = self.raw_dir / "disgenet_embedded_sample.csv"
         dest.parent.mkdir(parents=True, exist_ok=True)
         df = embedded_disgenet_gda()

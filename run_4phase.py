@@ -198,82 +198,16 @@ def ensure_phase1_data(phase1_dir: Path) -> Dict[str, Path]:
     return {csv.stem: csv for csv in csvs}
 
 
-def _ensure_phase1_samples(phase1_dir: Path) -> Path:
-    """Materialize embedded sample CSVs when processed_data is empty.
-
-    v107 FORENSIC ROOT FIX (ISSUE-P1-002):
-      This function previously wrote embedded mock samples unconditionally
-      when the directory was empty. It is now HARD-GATED behind
-      ``DRUGOS_ALLOW_MOCK_FALLBACK=1``. If the env var is not set, the
-      function raises ``SystemExit(1)`` with a clear error. This ensures
-      the platform NEVER silently injects mock data into the KG.
-
-    Returns the (possibly newly populated) phase1_dir. Does NOT reassign
-    the caller's parameter (R-023).
-    """
-    if phase1_dir.exists() and any(phase1_dir.glob("*.csv*")):
-        return phase1_dir
-
-    # v107 P1-002: hard gate -- only allow mock fallback if the operator
-    # EXPLICITLY opted in. This prevents the KG from being built on fake
-    # data in any environment where the operator did not intend it.
-    if os.environ.get("DRUGOS_ALLOW_MOCK_FALLBACK", "").lower() not in ("1", "true", "yes"):
-        logger.error(
-            "Phase 1 dir %s is empty AND DRUGOS_ALLOW_MOCK_FALLBACK is not set. "
-            "Refusing to write embedded mock samples (would corrupt KG with "
-            "fake drugs). Run `python -m pipelines all` to produce real data, "
-            "or set DRUGOS_ALLOW_MOCK_FALLBACK=1 for local dev testing.",
-            phase1_dir,
-        )
-        sys.exit(1)
-
-    phase1_dir.mkdir(parents=True, exist_ok=True)
-
-    _p1_root = str(PHASE1_ROOT)
-    if _p1_root not in sys.path:
-        sys.path.insert(0, _p1_root)
-    from pipelines._embedded_samples import (
-        embedded_chembl_molecules,
-        embedded_chembl_activities,
-        embedded_uniprot_proteins,
-        embedded_string_ppi,
-        embedded_drugbank_drugs,
-        embedded_drugbank_interactions,
-        embedded_drugbank_indications,
-        embedded_omim_gda,
-        embedded_omim_susceptibility,
-        embedded_disgenet_gda,
-        embedded_pubchem_enrichment,
-    )
-
-    # Canonical filename set: ONE file per source. The bridge's
-    # read_phase1_outputs looks for these exact names.
-    writes = [
-        ("drugbank_drugs.csv", embedded_drugbank_drugs),
-        ("drugbank_interactions.csv", embedded_drugbank_interactions),
-        ("drugbank_indications.csv", embedded_drugbank_indications),
-        ("omim_gene_disease_associations.csv", embedded_omim_gda),
-        ("omim_gene_disease_susceptibility.csv", embedded_omim_susceptibility),
-        ("chembl_drugs.csv", embedded_chembl_molecules),
-        ("chembl_activities_clean.csv", embedded_chembl_activities),
-        ("uniprot_proteins.csv", embedded_uniprot_proteins),
-        ("string_protein_protein_interactions.csv", embedded_string_ppi),
-        ("disgenet_gene_disease_associations.csv", embedded_disgenet_gda),
-        ("pubchem_enrichment.csv", embedded_pubchem_enrichment),
-    ]
-    for fname, fn in writes:
-        fn().to_csv(phase1_dir / fname, index=False)
-    logger.warning(
-        "Wrote %d embedded sample CSVs to %s (DRUGOS_ALLOW_MOCK_FALLBACK=1). "
-        "KG will contain FAKE drug records -- acceptable ONLY for local dev.",
-        len(writes), phase1_dir,
-    )
-    return phase1_dir
-
-
 # ---------------------------------------------------------------------------
 # Bridge: Phase 1 -> Phase 2 (single call, no duplicate work)
 # ---------------------------------------------------------------------------
+# TM1 TASK 3 ROOT FIX: _ensure_phase1_samples() was DELETED. The function
+# previously wrote embedded mock CSVs when processed_data was empty, gated
+# only by DRUGOS_ALLOW_MOCK_FALLBACK=1. The user's audit (TM1 Issue 3)
+# requires: "Replace with a hard check: if processed_data/ is empty, log an
+# error and exit with code 1." The hard check is now inline in run_bridge()
+# below — no separate function needed. The previous function's body (the
+# DRUGOS_ALLOW_MOCK_FALLBACK gate + 11-CSV writer loop) is GONE.
 def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
     """Run ``run_phase1_to_phase2`` ONCE and return (builder, staged).
 
@@ -286,8 +220,24 @@ def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
     logger.info("BRIDGE: Phase 1 -> Phase 2 (run_phase1_to_phase2)")
     logger.info("=" * 70)
 
-    # Make sure Phase 1 actually has CSVs to read (Tier-2 fallback).
-    resolved_phase1_dir = _ensure_phase1_samples(phase1_dir)
+    # Make sure Phase 1 actually has CSVs to read. TM1 TASK 3 ROOT FIX:
+    # the previous Tier-2 fallback (_ensure_phase1_samples) wrote embedded
+    # mock samples when the directory was empty — violating the "NEVER
+    # overwrite real data with mock samples" mandate. Now we do a HARD
+    # CHECK: if the directory is empty or missing, log an error and exit
+    # with code 1 so the operator knows real data was NOT produced.
+    if not phase1_dir.exists() or not any(phase1_dir.glob("*.csv*")):
+        logger.error(
+            "Phase 1 dir %s is empty or missing. TM1 Task 3 root fix: "
+            "the platform NO LONGER auto-writes embedded mock samples. "
+            "Run the real pipelines first: `python -m phase1.pipelines all`. "
+            "For local dev with mock data, set DRUGOS_ENVIRONMENT=development "
+            "and run `python -m phase1.pipelines samples <dir>` BEFORE "
+            "invoking run_4phase.py.",
+            phase1_dir,
+        )
+        sys.exit(1)
+    resolved_phase1_dir = phase1_dir
 
     from drugos_graph.phase1_bridge import run_phase1_to_phase2
 
