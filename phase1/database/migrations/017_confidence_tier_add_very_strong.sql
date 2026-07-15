@@ -60,6 +60,24 @@ BEGIN
     END IF;
 END $$;
 
+-- ===========================================================================
+-- Step 4: Schema version metadata
+-- ===========================================================================
+-- P1-042 ROOT FIX (v110): the previous version of this migration was MISSING
+-- the INSERT INTO schema_version row. check_migrations() cross-references
+-- schema_version; without the version=17 row, those checks reported
+-- schema_version_matches=False even though the migration had been applied.
+-- ROOT FIX: add the INSERT with ON CONFLICT DO NOTHING for idempotency.
+INSERT INTO schema_version (version, description)
+VALUES (
+    17,
+    'P1-004 v102 ROOT FIX EXTENSION: split Piñero strong band [0.3, 1.0] into '
+    '"strong" [0.3, 0.5) and "very_strong" [0.5, 1.0]. Backfill rows with '
+    'score >= 0.5 AND confidence_tier = strong to very_strong. Update CHECK '
+    'constraint to allow the new label.'
+)
+ON CONFLICT (version) DO NOTHING;
+
 COMMIT;
 
 -- ===========================================================================
