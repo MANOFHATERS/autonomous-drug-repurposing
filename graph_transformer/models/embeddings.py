@@ -173,6 +173,29 @@ class NodeTypeEmbedding(nn.Module):
             )
         return self.embeddings(node_type_indices)
 
+    def _reset_unknown_slot(self) -> None:
+        """Re-zero the unknown-type slot (index ``UNKNOWN_TYPE_IDX``).
+
+        FORENSIC ROOT FIX (audit Issue 133, SILENT BUG): this method
+        is called by ``DrugRepurposingGraphTransformer.__init__``
+        AFTER ``self.apply(self._init_weights)``. The model's
+        ``_init_weights`` re-initializes ALL ``nn.Embedding`` modules
+        (including this one) with Xavier_normal_ (audit Issue 133).
+        That re-init OVERWRITES the zero this class's ``__init__``
+        wrote to the unknown-type slot at construction time, silently
+        breaking the unknown-type contract (out-of-range node types
+        would produce RANDOM perturbations to the projected features
+        instead of zero).
+
+        Re-zeroing here -- AFTER the model's _init_weights has run --
+        restores the unknown-type contract regardless of init order.
+        This is the root-level fix for a bug that has been silently
+        degrading predictions whenever Phase 2 added a new node type
+        after the model was trained.
+        """
+        with torch.no_grad():
+            self.embeddings.weight[self.UNKNOWN_TYPE_IDX].zero_()
+
     def was_degraded(self) -> bool:
         """Return True if the most-recent forward() saw any unknown-type index.
 

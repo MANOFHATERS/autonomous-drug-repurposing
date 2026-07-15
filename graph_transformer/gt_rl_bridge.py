@@ -1299,6 +1299,14 @@ class GTRLBridge:
                 _temp_trainer = GraphTransformerTrainer(
                     self.model, self.node_features, self.edge_indices,
                     device=self.device, seed=self.seed,
+                    # FORENSIC ROOT FIX (audit Issue 139): pass graph
+                    # metadata here too so the resume path's
+                    # load_checkpoint can restore it from the
+                    # self-contained checkpoint.
+                    node_maps=self.node_maps,
+                    drug_names=self.drug_names,
+                    disease_names=self.disease_names,
+                    known_pairs=self.known_pairs,
                 )
                 _temp_trainer.load_checkpoint(checkpoint_path)
                 logger.info(
@@ -1431,9 +1439,26 @@ class GTRLBridge:
             node_features=self.node_features,
             edge_indices=self.edge_indices,
             learning_rate=5e-4,
-            weight_decay=1e-5,  # S-11 fix: trainer default (was 1e-4 undocumented)
+            # FORENSIC ROOT FIX (audit Issue 136): use weight_decay=0.01
+            # (the production-grade Transformer value per Loshchilov &
+            # Hutter 2019), not the previous 1e-5. Combined with the
+            # trainer's switch from Adam to AdamW (decoupled weight
+            # decay), this prevents the model from overfitting the
+            # training pairs. The previous 1e-5 was effectively zero
+            # regularization and let the model memorize known pairs
+            # without learning generalizable structure.
+            weight_decay=0.01,
             device=self.device,
             seed=self.seed,  # V4 C-F6 fix: pass seed for reproducible shuffling
+            # FORENSIC ROOT FIX (audit Issue 139): pass the graph metadata
+            # so the trainer can save a SELF-CONTAINED checkpoint (no
+            # separate graph_state.pt sidecar needed). The service can
+            # then load EVERYTHING (model + graph + name lookups) from a
+            # single .pt file, eliminating the two-file sync problem.
+            node_maps=self.node_maps,
+            drug_names=self.drug_names,
+            disease_names=self.disease_names,
+            known_pairs=self.known_pairs,
         )
 
         # V90 ROOT FIX (COMPOUND #3): handle checkpoint resume HERE (after
