@@ -210,19 +210,26 @@ def test_c2_adme_score_is_drug_level():
 
 
 def test_c2_efficacy_score_is_drug_level():
-    """v89 ROOT FIX: efficacy_score is a PAIR-LEVEL property (drug, disease).
+    """TASK-147 ROOT FIX (v111): efficacy_score is a DRUG-LEVEL property.
 
-    The v88 code made efficacy_score a DRUG-LEVEL property (same value for
-    all disease pairs of the same drug). This was scientifically WRONG --
-    efficacy is a (drug, disease) property. A drug can be efficacious for
-    disease A and useless for disease B.
-
-    The v89 fix computes efficacy as:
+    The v89 code made efficacy_score a PAIR-LEVEL linear combination:
       efficacy = 0.5 * gnn_score + 0.3 * pathway_score + 0.2 * drug_validation
-    This is PAIR-LEVEL (varies by disease pair), which is scientifically correct.
+    This was SCIENTIFICALLY WRONG because it was perfectly collinear with
+    gnn_score and pathway_score — the RL reward function double-counted the
+    gnn_score signal (once as gnn_score, once via efficacy_score = 0.5*gnn).
 
-    This test verifies efficacy_score VARIES across disease pairs for the same
-    drug (it's NOT drug-level constant anymore).
+    The P3-009 / TASK-147 fix makes efficacy_score DRUG-LEVEL (computed from
+    target diversity — the count of distinct protein targets a drug has).
+    This is an INDEPENDENT signal:
+      - It does NOT depend on gnn_score (the GT model's prediction).
+      - It does NOT depend on pathway_score (multi-hop path count).
+      - It measures the drug's clinical validation breadth.
+
+    This test verifies:
+      1. efficacy_score is the SAME across all disease pairs for a given drug
+         (drug-level, not pair-level).
+      2. efficacy_score is NOT a linear combination of gnn_score and
+         pathway_score (no collinearity / double-counting).
     """
     from graph_transformer.gt_rl_bridge import GTRLBridge
 
@@ -234,20 +241,49 @@ def test_c2_efficacy_score_is_drug_level():
 
         df = bridge.generate_rl_input()
 
-        # v89: efficacy_score should NOW vary across disease pairs (pair-level)
-        # At least one drug should have >1 unique efficacy value across its pairs
-        found_variation = False
+        # TASK-147: efficacy_score must be DRUG-LEVEL (same value across all
+        # disease pairs for a given drug). At least one drug should have
+        # multiple disease pairs — for that drug, efficacy_score must be
+        # constant.
+        found_drug_level = False
         for drug_name in df["drug"].unique():
             drug_rows = df[df["drug"] == drug_name]
+            if len(drug_rows) < 2:
+                continue  # need >= 2 pairs to verify constancy
             efficacy_values = drug_rows["efficacy_score"].values
-            if len(np.unique(efficacy_values)) > 1:
-                found_variation = True
-                break
-        assert found_variation, (
-            f"v89 ROOT FIX FAILED: efficacy_score is STILL drug-level constant "
-            f"(no drug has varying efficacy across disease pairs). efficacy_score "
-            f"must be PAIR-LEVEL (varies by disease)."
+            # All efficacy values for this drug must be equal (drug-level).
+            assert len(np.unique(efficacy_values)) == 1, (
+                f"TASK-147 FAILED: drug '{drug_name}' has varying "
+                f"efficacy_score across disease pairs ({len(np.unique(efficacy_values))} "
+                f"unique values). efficacy_score must be DRUG-LEVEL (constant "
+                f"per drug, computed from target diversity)."
+            )
+            found_drug_level = True
+        assert found_drug_level, (
+            "No drug with >=2 disease pairs found — cannot verify drug-level "
+            "efficacy_score. The demo graph may be too small."
         )
+
+        # TASK-147: efficacy_score must NOT be a linear combination of
+        # gnn_score and pathway_score. Compute the correlation — if it's
+        # near 1.0, efficacy_score is collinear (the old v89 bug).
+        # Allow some noise tolerance (the drug-level efficacy may weakly
+        # correlate with gnn_score if drugs with more targets also score
+        # higher, but the correlation should be far from 1.0).
+        if len(df) > 10:
+            corr_gnn = df["efficacy_score"].corr(df["gnn_score"])
+            corr_path = df["efficacy_score"].corr(df["pathway_score"])
+            assert abs(corr_gnn) < 0.95, (
+                f"TASK-147 FAILED: efficacy_score is highly correlated with "
+                f"gnn_score (corr={corr_gnn:.3f}). This indicates efficacy_score "
+                f"is a linear combination of gnn_score (the v89 bug). The fix "
+                f"requires efficacy_score to be an INDEPENDENT signal."
+            )
+            assert abs(corr_path) < 0.95, (
+                f"TASK-147 FAILED: efficacy_score is highly correlated with "
+                f"pathway_score (corr={corr_path:.3f}). This indicates "
+                f"efficacy_score is a linear combination of pathway_score."
+            )
 
     print("  C-2: efficacy_score is pair-level (v89 PASS)")
 

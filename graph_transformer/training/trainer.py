@@ -1773,10 +1773,31 @@ class GraphTransformerTrainer:
         # V90 BUG #41: only include best_state_dict if it's not None.
         if self.best_state_dict is not None:
             checkpoint["best_state_dict"] = self.best_state_dict
-        torch.save(checkpoint, path)
+        # TASK-159 ROOT FIX (v111): ATOMIC checkpoint save. Write to a
+        # temp file in the same directory, then os.replace() to the final
+        # path. Crash-safe: a partial write does not corrupt the existing
+        # checkpoint.
+        import os as _os_mod
+        import tempfile as _tempfile_mod
+        from pathlib import Path as _Path_mod
+        _out_dir = _Path_mod(path).parent
+        _out_dir.mkdir(parents=True, exist_ok=True)
+        _tmp_fd, _tmp_path = _tempfile_mod.mkstemp(
+            prefix=".gt_ckpt_tmp_", suffix=".pt", dir=str(_out_dir),
+        )
+        _os_mod.close(_tmp_fd)
+        try:
+            torch.save(checkpoint, _tmp_path)
+            _os_mod.replace(_tmp_path, path)
+        except Exception:
+            try:
+                _os_mod.unlink(_tmp_path)
+            except Exception:
+                pass
+            raise
         logger.info(
-            f"V30 ROOT FIX (8.14) + V90 (BUG #21/#33/#41): Checkpoint saved "
-            f"to {path} (full schema, best_epoch={self.best_epoch}, "
+            f"V30 ROOT FIX (8.14) + V90 (BUG #21/#33/#41) + TASK-159 (atomic): "
+            f"Checkpoint saved to {path} (full schema, best_epoch={self.best_epoch}, "
             f"best_state_dict={'present' if self.best_state_dict is not None else 'None (skipped)'})"
         )
 
@@ -2095,25 +2116,38 @@ def retrain_on_validated(
     # NOT the legacy rl/ path. The canonical path is where writeback.py
     # writes validated hypotheses — the trainer must read from the SAME
     # location for the data flywheel to work.
+    #
+    # TASK-158 ROOT FIX (v111 forensic): the previous code only set
+    # OUTCOME_COL / POSITIVE_OUTCOMES INSIDE the ``if validated_csv_path
+    # is None`` block. When a caller EXPLICITLY passed validated_csv_path
+    # (e.g., the test, or load_validated_for_retraining), the variables
+    # were NEVER DEFINED, causing UnboundLocalError at line 1959
+    # (``row.get(OUTCOME_COL)``). The fix: ALWAYS import the schema
+    # constants at the top of the function (with a fallback if the
+    # common module is unavailable), so they're defined regardless of
+    # whether validated_csv_path was passed.
+    try:
+        import sys as _sys_mod
+        _repo_root = str(_Path(__file__).resolve().parents[2])
+        if _repo_root not in _sys_mod.path:
+            _sys_mod.path.insert(0, _repo_root)
+        from common.validated_hypotheses_schema import (
+            CANONICAL_VALIDATED_CSV,
+            OUTCOME_COL,
+            OUTCOME_VALIDATED_POSITIVE,
+            POSITIVE_OUTCOMES,
+        )
+    except Exception:
+        OUTCOME_COL = "outcome"
+        OUTCOME_VALIDATED_POSITIVE = "validated_positive"
+        POSITIVE_OUTCOMES = [OUTCOME_VALIDATED_POSITIVE]
+        CANONICAL_VALIDATED_CSV = str(
+            _Path(__file__).resolve().parents[2]
+            / "phase1" / "processed_data" / "validated_hypotheses.csv"
+        )
+
     if validated_csv_path is None:
-        try:
-            import sys
-            _repo_root = str(_Path(__file__).resolve().parents[2])
-            if _repo_root not in sys.path:
-                sys.path.insert(0, _repo_root)
-            from common.validated_hypotheses_schema import (
-                CANONICAL_VALIDATED_CSV,
-                OUTCOME_COL,
-                OUTCOME_VALIDATED_POSITIVE,
-                POSITIVE_OUTCOMES,
-            )
-            validated_csv_path = CANONICAL_VALIDATED_CSV
-        except Exception:
-            _repo_root = _Path(__file__).resolve().parents[2]
-            validated_csv_path = str(_repo_root / "phase1" / "processed_data" / "validated_hypotheses.csv")
-            OUTCOME_COL = "outcome"
-            OUTCOME_VALIDATED_POSITIVE = "validated_positive"
-            POSITIVE_OUTCOMES = [OUTCOME_VALIDATED_POSITIVE]
+        validated_csv_path = CANONICAL_VALIDATED_CSV
 
     # INT-015 ROOT FIX: read "outcome" column (not "validated").
     # Writeback writes outcome values: "validated_positive", "validated_toxic",
@@ -2368,7 +2402,58 @@ def retrain_on_validated(
             graph_state_path,
         )
 
-    _torch.save(bundle, out_path)
+    # TASK-159 ROOT FIX (v111 forensic): ATOMIC checkpoint save.
+    # The previous code called ``_torch.save(bundle, out_path)`` directly.
+    # If the process crashed mid-write (OOM, signal, disk full, power
+    # loss), the checkpoint file would be LEFT IN A CORRUPT state:
+    #   - Partial pickle bytes (torch.save streams via pickle)
+    #   - Truncated tensor data
+    #   - Missing trailing metadata
+    # The next run would load the corrupt checkpoint and either crash
+    # with an opaque UnpicklingError, OR (worse) silently load partial
+    # state and produce scientifically wrong predictions. For an
+    # institutional-grade production system, this is unacceptable —
+    # a single crash could invalidate weeks of training.
+    #
+    # ROOT FIX: write to a TEMPORARY file in the SAME directory, then
+    # atomically rename. The rename syscall is atomic on POSIX (single
+    # inode operation) and on Windows (MoveFileEx with
+    # MOVEFILE_REPLACE_EXISTING). If the write fails, the original
+    # checkpoint is UNTOUCHED. If the rename fails, the temp file is
+    # cleaned up. The next run always sees a complete, valid checkpoint.
+    import tempfile as _tempfile
+    _out_dir = _Path(out_path).parent
+    _out_dir.mkdir(parents=True, exist_ok=True)
+    _tmp_fd, _tmp_path = _tempfile.mkstemp(
+        prefix=".gt_checkpoint_tmp_",
+        suffix=".pt",
+        dir=str(_out_dir),
+    )
+    _os.close(_tmp_fd)
+    try:
+        _torch.save(bundle, _tmp_path)
+        # Atomic rename: on POSIX, rename() is atomic; on Windows,
+        # os.replace() uses MoveFileExW with MOVEFILE_REPLACE_EXISTING.
+        _os.replace(_tmp_path, out_path)
+        logger.info(
+            "TASK-159 ROOT FIX: atomically saved fine-tuned checkpoint to "
+            "%s (via temp file %s + os.replace). Crash-safe: if the save "
+            "had failed, the original checkpoint would be untouched.",
+            out_path, _tmp_path,
+        )
+    except Exception as _save_exc:
+        # Clean up the temp file if the save or rename failed.
+        try:
+            _os.unlink(_tmp_path)
+        except Exception:
+            pass
+        logger.error(
+            "TASK-159: atomic checkpoint save FAILED (%s). The original "
+            "checkpoint at %s is UNTOUCHED. The fine-tuned model state "
+            "was NOT persisted. Re-run retrain_on_validated to retry.",
+            _save_exc, out_path,
+        )
+        raise
 
     logger.info(
         "retrain_on_validated: added %d validated pairs to known_pairs. "
