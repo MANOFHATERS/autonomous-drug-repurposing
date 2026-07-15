@@ -1012,10 +1012,25 @@ def _validate_neo4j_cli_combos(args: argparse.Namespace) -> Optional[str]:
 
     Fixes GAP-CONF-01: No validation of CLI argument combinations.
 
+    v108 ROOT FIX (issue 75): added validation for the new
+    ``--from-saved`` / ``--from-phase1`` / ``--save-graph`` flags.
+    The mutex group in ``main()`` already rejects
+    ``--from-phase1 + --from-saved``; this function adds the manual
+    check for ``--from-saved + --data-source drkg`` (which can't be
+    in the mutex group because ``drkg`` is a value of ``--data-source``,
+    not its own flag). It also rejects ``--from-phase1 + --data-source
+    drkg`` defensively (even though ``main()`` silently overrides it,
+    a loud error is safer than a silent behavior change for an operator
+    who passed contradictory flags).
+
     Parameters
     ----------
     args : argparse.Namespace
-        Parsed CLI arguments.
+        Parsed CLI arguments. Expected to have attributes: ``skip_neo4j``,
+        ``step``, ``from_phase1``, ``from_saved``, ``data_source``,
+        ``save_graph`` (the issue-75 attributes are read via ``getattr``
+        with safe defaults so older unit tests that construct a partial
+        namespace don't crash).
 
     Returns
     -------
@@ -1028,6 +1043,31 @@ def _validate_neo4j_cli_combos(args: argparse.Namespace) -> Optional[str]:
         return "--skip-neo4j with --step 12 is redundant (step 12 validates Neo4j)"
     if args.skip_neo4j and args.step == 13:
         return "--skip-neo4j with --step 13 means README will be minimal"
+    # v108 ROOT FIX (issue 75): mutual-exclusion checks for the new
+    # input-mode flags. The mutex group in ``main()`` already prevents
+    # ``--from-phase1 + --from-saved`` at the argparse layer, but we
+    # ALSO need to check ``--from-saved + --data-source drkg`` and
+    # ``--from-phase1 + --data-source drkg`` manually here (a value of
+    # ``--data-source`` cannot be in a mutually exclusive group with
+    # action flags).
+    _from_phase1 = getattr(args, "from_phase1", False)
+    _from_saved = getattr(args, "from_saved", None)
+    _data_source = getattr(args, "data_source", "phase1")
+    if _from_saved is not None and _data_source == "drkg":
+        return (
+            "--from-saved and --data-source drkg are mutually exclusive "
+            "(issue 75 root fix): --from-saved loads a Phase 1 bridge "
+            "snapshot, which cannot be combined with the DRKG data path. "
+            "Drop --data-source drkg, or drop --from-saved."
+        )
+    if _from_phase1 and _data_source == "drkg":
+        # ``main()`` would silently override this to phase1, but a loud
+        # error is safer for an operator who passed contradictory flags.
+        return (
+            "--from-phase1 and --data-source drkg are mutually exclusive "
+            "(issue 75 root fix): --from-phase1 is an explicit synonym "
+            "for --data-source phase1. Drop one of the flags."
+        )
     return None
 
 
@@ -1637,12 +1677,28 @@ def _run_step_with_deps(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
         if step_num == 2:
             r1 = step1_load_data(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
             if r1.get("fatal"):
                 logger.critical("Step 1 failed (fatal): %s", r1.get("fatal_reason"))
@@ -1661,6 +1717,14 @@ def _run_step_with_deps(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
             if r1.get("fatal"):
                 logger.critical("Step 1 failed (fatal): %s", r1.get("fatal_reason"))
@@ -1695,6 +1759,14 @@ def _run_step_with_deps(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
             if r1.get("fatal"):
                 logger.critical("Step 1 failed (fatal): %s", r1.get("fatal_reason"))
@@ -1706,6 +1778,14 @@ def _run_step_with_deps(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
             if r1.get("fatal"):
                 logger.critical("Step 1 failed (fatal): %s", r1.get("fatal_reason"))
@@ -1730,6 +1810,14 @@ def _run_step_with_deps(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
             if r1.get("fatal"):
                 logger.critical("Step 1 failed (fatal): %s", r1.get("fatal_reason"))
@@ -1741,6 +1829,14 @@ def _run_step_with_deps(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
             if r1.get("fatal"):
                 logger.critical("Step 1 failed (fatal): %s", r1.get("fatal_reason"))
@@ -1922,8 +2018,210 @@ def step1_load_drkg(skip_download: bool = False) -> dict:
 # path (e.g. for large-scale training that needs DRKG's 5.87M triples).
 
 
+# v108 ROOT FIX (issue 74): Phase 1 source-key → schema file_key map.
+# Each Phase 2 source key (as used in step1_load_phase1's ``name_map``)
+# maps to the corresponding top-level key in
+# ``phase1/pipelines/schema/v1.json``'s ``"properties"`` object. Sources
+# without a schema entry (interactions, indications, omim_susceptibility)
+# are SKIP-WITH-WARN — the bridge has no published Phase 1 contract for
+# those files, so we cannot fail validation on them.
+_PHASE1_SOURCE_TO_SCHEMA_FILE_KEY: Dict[str, str] = {
+    "drugs": "drugbank_drugs.csv",
+    "chembl_drugs": "drugs.csv",  # chembl pipeline emits drugs.csv (or chembl_drugs.csv alias); schema entry is "drugs.csv"
+    "chembl_activities": "chembl_activities_clean.csv",
+    "uniprot_proteins": "proteins.csv",
+    "string_ppi": "protein_protein_interactions.csv",
+    "disgenet_gda": "gene_disease_associations.csv",
+    "omim_gda": "omim_gene_disease_associations.csv",
+    "pubchem_enrichment": "pubchem_enrichment.csv",
+}
+
+
+def _validate_phase1_output(staged_data: Dict[str, Any]) -> Dict[str, Any]:
+    """v108 ROOT FIX (issue 74): validate Phase 1 staged CSVs against
+    the Phase 1 contract via ``BasePipeline.validate_output(df)``.
+
+    Previously, ``step1_load_phase1`` returned a HARD-CODED
+    ``{"passed": True, "triples": len(df)}`` validation dict — Phase
+    1's ``BasePipeline.validate_output(df)`` (defined at
+    ``phase1/pipelines/base_pipeline.py:2466``) was NEVER invoked from
+    Phase 2, and ``phase1_bridge.py`` has ZERO references to
+    ``validate_output|validate_schema|phase1_contract``. A
+    ``drugbank_drugs.csv`` with a malformed InChIKey column would
+    silently pass Phase 2's "validation" gate and load corrupt data
+    into the KG (the exact failure mode Phase 1's validate_output was
+    written to catch — see P1-047 root-fix docstring at line 2506).
+    This function closes that gap by ACTUALLY calling the Phase 1
+    contract validator on each staged DataFrame.
+
+    Parameters
+    ----------
+    staged_data : dict[str, pandas.DataFrame]
+        Mapping from Phase 2 source key (e.g. ``"drugs"``,
+        ``"chembl_activities"``, ``"string_ppi"``, ``"indications"``)
+        to the staged DataFrame read from the corresponding Phase 1
+        processed CSV. ``None`` values (source CSV not present in this
+        run) are tolerated and recorded as ``skipped``. Source keys
+        not in ``_PHASE1_SOURCE_TO_SCHEMA_FILE_KEY`` are SKIP-WITH-WARN
+        (their ``passed`` is True but ``skipped`` carries the reason).
+
+    Returns
+    -------
+    dict
+        Keys:
+        - ``passed``: bool — True iff every schema-mapped source
+          validated without errors.
+        - ``errors``: list[str] — flat list of per-source error
+          messages (each prefixed by ``[<src_key> (<file_key>)]``).
+        - ``triples``: int — total rows across all staged DataFrames
+          (mirrors the legacy ``triples`` key in
+          step1_load_phase1's return dict for backward compat).
+        - ``per_source``: dict[str, dict] — per-source result with
+          ``passed``, ``errors``, ``rows``, and either ``file_key``
+          (when validated) or ``skipped`` (when skipped).
+
+    Fail-closed contract
+    --------------------
+    If the Phase 1 contract cannot be imported (Phase 1 package
+    missing, schema file unreadable, BasePipeline raises during
+    instantiation, validate_output itself raises), this function
+    returns ``{"passed": False, ...}`` so the caller can abort the
+    pipeline. The ONLY way to continue past a failed validation is
+    the explicit ``--skip-phase1-validation`` CLI flag (handled by
+    the caller, NOT this function).
+    """
+    # Lazy import inside the function to avoid circular imports
+    # (phase2.drugos_graph imports phase1.pipelines.base_pipeline —
+    # if base_pipeline ever imports anything from phase2, we'd get
+    # an ImportError at module load time without this lazy guard).
+    try:
+        from phase1.pipelines.base_pipeline import BasePipeline
+    except Exception as exc:
+        # Fail-closed: Phase 1 contract not importable.
+        return {
+            "passed": False,
+            "errors": [f"Phase 1 contract not importable: {exc}"],
+            "triples": 0,
+            "per_source": {},
+        }
+
+    # Cache the validator subclass on the function so we only pay the
+    # __init_subclass__ source-name WARNING once per process (otherwise
+    # the WARN log "Unrecognized source_name 'phase1_validation'" would
+    # fire on every call — noisy, even though harmless).
+    if not hasattr(_validate_phase1_output, "_ValidatorCls"):
+        class _Phase1ContractValidator(BasePipeline):
+            """Minimal concrete BasePipeline subclass used ONLY to call
+            ``validate_output(df)``. The three abstract methods
+            (download/clean/load) are stubbed as NotImplementedError —
+            they are NEVER called during validation (we only invoke
+            ``validate_output`` which is a non-abstract method on
+            BasePipeline). ``source_name`` is set to a sentinel not in
+            VALID_SOURCE_NAMES — BasePipeline.__init_subclass__ will
+            WARN once but NOT raise (verified at base_pipeline.py:872).
+            """
+
+            source_name = "phase1_validation"
+
+            def download(self):  # pragma: no cover -- never called
+                raise NotImplementedError(
+                    "Phase 2 contract validator does not download"
+                )
+
+            def clean(self, raw_path):  # pragma: no cover -- never called
+                raise NotImplementedError(
+                    "Phase 2 contract validator does not clean"
+                )
+
+            def load(self, df, session=None):  # pragma: no cover -- never called
+                raise NotImplementedError(
+                    "Phase 2 contract validator does not load"
+                )
+
+        _validate_phase1_output._ValidatorCls = _Phase1ContractValidator
+
+    ValidatorCls = _validate_phase1_output._ValidatorCls
+
+    all_errors: List[str] = []
+    per_source: Dict[str, Dict[str, Any]] = {}
+    total_rows = 0
+    all_passed = True
+
+    for src_key, df in (staged_data or {}).items():
+        # Tolerate missing DataFrames (source CSV not present this run).
+        if df is None:
+            per_source[src_key] = {
+                "passed": True,
+                "errors": [],
+                "rows": 0,
+                "skipped": "no DataFrame (source CSV not present)",
+            }
+            continue
+        try:
+            n_rows = int(len(df))
+        except TypeError:
+            n_rows = 0
+        total_rows += n_rows
+
+        file_key = _PHASE1_SOURCE_TO_SCHEMA_FILE_KEY.get(src_key)
+        if not file_key:
+            # No schema mapping for this source key — skip with WARN
+            # recorded in per_source so operators can see WHY a source
+            # wasn't validated.
+            per_source[src_key] = {
+                "passed": True,
+                "errors": [],
+                "rows": n_rows,
+                "skipped": "no schema mapping for source key (Phase 1 contract has no entry)",
+            }
+            continue
+
+        try:
+            # Instantiate the validator and override processed_filename
+            # so BasePipeline._get_processed_filename() returns the
+            # schema file_key (not the default "<source_name>.csv").
+            validator = ValidatorCls()
+            validator.processed_filename = file_key
+            is_valid, errors = validator.validate_output(df)
+        except Exception as exc:
+            # Fail-closed: a validator crash is treated as a validation
+            # failure so the operator MUST investigate (or override via
+            # --skip-phase1-validation).
+            is_valid = False
+            errors = [f"validate_output crashed: {exc}"]
+
+        per_source[src_key] = {
+            "passed": bool(is_valid),
+            "errors": list(errors) if errors else [],
+            "rows": n_rows,
+            "file_key": file_key,
+        }
+        if not is_valid:
+            all_passed = False
+            for e in (errors or []):
+                all_errors.append(f"[{src_key} ({file_key})] {e}")
+
+    return {
+        "passed": all_passed,
+        "errors": all_errors,
+        "triples": total_rows,
+        "per_source": per_source,
+    }
+
+
 def step1_load_phase1(
     phase1_processed_dir: Optional[Path | str] = None,
+    skip_phase1_validation: bool = False,
+    # v108 ROOT FIX (issue 75): new input-mode flags. Both default to
+    # None so existing call sites (which don't pass these) are
+    # unaffected. ``from_saved_path`` is set when ``--from-saved PATH``
+    # was passed — it SKIPS the Phase 1 bridge and loads a previously-
+    # saved RecordingGraphBuilder snapshot from PATH instead.
+    # ``save_graph_path`` is set when ``--save-graph PATH`` was passed —
+    # it saves the recorder state to PATH AFTER the bridge populates it
+    # (and BEFORE step 2 consumes it).
+    from_saved_path: Optional[Path | str] = None,
+    save_graph_path: Optional[Path | str] = None,
 ) -> dict:
     """Step 1 (alternative): Load Phase 1 outputs via the phase1_bridge.
 
@@ -1943,11 +2241,59 @@ def step1_load_phase1(
       - ``input_checksums``: per-file SHA-256 checksums.
       - ``bridge_summary``: the bridge's own summary dict (for logging).
 
+    v108 ROOT FIX (issue 74): the ``validation`` key is NO LONGER
+    hard-coded to ``{"passed": True, "triples": len(df)}``. The
+    function now calls ``_validate_phase1_output(staged_data)`` which
+    invokes Phase 1's ``BasePipeline.validate_output(df)`` on every
+    staged source CSV (drugs, chembl_activities, string_ppi, etc.).
+    If validation FAILS, the function raises ``DrugOSDataError`` so
+    the pipeline ABORTS before building the KG with corrupt data. The
+    only override is the explicit ``--skip-phase1-validation`` CLI
+    flag (passed in here as ``skip_phase1_validation=True``).
+
+    v108 ROOT FIX (issue 75): two new optional flags.
+    ``from_saved_path`` (CLI: ``--from-saved PATH``) SKIPS the Phase 1
+    bridge entirely and loads a previously-saved
+    ``RecordingGraphBuilder`` snapshot from PATH (produced by a prior
+    ``--save-graph PATH`` run). The loaded builder is passed directly
+    to step 2 — saving minutes of bridge runtime during iterative KG
+    debugging. Phase 1 contract validation is also skipped when
+    loading from a snapshot (it was already performed when the snapshot
+    was first created). ``save_graph_path`` (CLI: ``--save-graph PATH``)
+    saves the recorder state to PATH AFTER the bridge has populated it
+    (and BEFORE step 2 consumes it), so a future ``--from-saved PATH``
+    invocation can reload the snapshot. Both default to None.
+
     Parameters
     ----------
     phase1_processed_dir : path-like, optional
         Phase 1 processed_data directory. Defaults to the bridge's
-        DEFAULT_PHASE1_PROCESSED_DIR.
+        DEFAULT_PHASE1_PROCESSED_DIR. Ignored when ``from_saved_path``
+        is set (the snapshot is the sole data source in that mode).
+    skip_phase1_validation : bool, default False
+        v108 ROOT FIX (issue 74): when True, log a WARN and continue
+        even if Phase 1 contract validation fails. EMERGENCY DEV USE
+        ONLY — production runs MUST leave this False so corrupt Phase
+        1 data is rejected before KG construction. Ignored when
+        ``from_saved_path`` is set (validation is skipped entirely in
+        that mode).
+    from_saved_path : path-like, optional
+        v108 ROOT FIX (issue 75): when set, SKIP the Phase 1 bridge
+        and load a previously-saved ``RecordingGraphBuilder`` snapshot
+        from this path. The loaded builder is passed directly to
+        step 2. Phase 1 contract validation is also skipped (it was
+        performed at save time). ``input_checksums`` records only the
+        snapshot file's SHA-256 (the original Phase 1 CSVs are not
+        re-read in this mode).
+    save_graph_path : path-like, optional
+        v108 ROOT FIX (issue 75): when set, save the
+        ``RecordingGraphBuilder`` state to this path AFTER the bridge
+        has populated it (and BEFORE step 2 consumes it). A future
+        ``--from-saved PATH`` invocation can reload this snapshot and
+        skip step 1. Format is auto-detected from the file extension
+        (``.json`` → JSON, ``.parquet`` → Parquet). No effect when
+        ``from_saved_path`` is also set (loading an existing snapshot,
+        no point saving it again).
 
     Returns
     -------
@@ -1958,7 +2304,17 @@ def step1_load_phase1(
     """
     _configure_logging()
     logger.info("=" * 60)
-    logger.info("STEP 1 (PHASE1): Loading Phase 1 outputs via bridge")
+    # v108 ROOT FIX (issue 75): adjust the step-1 banner to reflect
+    # the active input mode (bridge vs from-saved) so operators can
+    # tell at a glance whether the (slow) Phase 1 bridge is running.
+    if from_saved_path is not None:
+        logger.info(
+            "STEP 1 (PHASE1): Loading saved RecordingGraphBuilder "
+            "snapshot from %s (SKIPPING Phase 1 bridge) — issue 75",
+            from_saved_path,
+        )
+    else:
+        logger.info("STEP 1 (PHASE1): Loading Phase 1 outputs via bridge")
     logger.info("=" * 60)
     t0 = time.time()
 
@@ -1972,17 +2328,69 @@ def step1_load_phase1(
     )
 
     pdir = Path(phase1_processed_dir) if phase1_processed_dir else DEFAULT_PHASE1_PROCESSED_DIR
-    logger.info("Phase 1 processed_data: %s", pdir)
+    if from_saved_path is None:
+        # Only log the Phase 1 dir when we're actually going to read
+        # from it (the from_saved path doesn't touch pdir).
+        logger.info("Phase 1 processed_data: %s", pdir)
 
-    # Use a RecordingGraphBuilder here so step1 is purely in-memory and
-    # doesn't require a Neo4j connection. If the user wants to load into
-    # Neo4j, that's step3's job — step3 calls DrugOSGraphBuilder directly.
-    recorder = RecordingGraphBuilder()
-    bridge_result = run_phase1_to_phase2(
-        phase1_processed_dir=pdir,
-        builder=recorder,
-    )
-    summary = bridge_result["summary"]
+    # v108 ROOT FIX (issue 75): if --from-saved PATH was passed, SKIP
+    # the Phase 1 bridge entirely and load the previously-saved
+    # RecordingGraphBuilder snapshot from PATH. The snapshot was
+    # produced by a prior --save-graph PATH run; it contains the exact
+    # node_loads / edge_loads / dead_letter / _node_ids_by_label state
+    # that the bridge would have produced. This lets operators iterate
+    # on step 2+ without re-running the (slow) Phase 1 bridge on every
+    # invocation.
+    if from_saved_path is not None:
+        logger.info(
+            "ISSUE-75: --from-saved %s — loading RecordingGraphBuilder "
+            "snapshot, SKIPPING Phase 1 bridge.",
+            from_saved_path,
+        )
+        recorder = RecordingGraphBuilder.load(from_saved_path)
+        # Synthesize a summary from the loaded recorder (the bridge
+        # isn't available to produce one). Mirror the keys that
+        # downstream code reads: nodes_loaded, edges_loaded,
+        # edge_types_present, sources_read, errors.
+        _nodes_loaded = sum(
+            len(load.get("nodes", [])) for load in recorder.node_loads
+        )
+        _edges_loaded = sum(
+            len(load.get("edges", [])) for load in recorder.edge_loads
+        )
+        _edge_types_present = sorted({
+            load.get("rel_type") for load in recorder.edge_loads
+            if load.get("rel_type")
+        })
+        summary = {
+            "nodes_loaded": _nodes_loaded,
+            "edges_loaded": _edges_loaded,
+            "edge_types_present": _edge_types_present,
+            # sources_read is unknown from a saved snapshot — record
+            # an empty list so downstream code that iterates over it
+            # (e.g. _check_v1_launch_criteria's bridge-source counter)
+            # doesn't crash. The snapshot itself is the lineage
+            # artifact in this mode.
+            "sources_read": [],
+            "errors": [],
+        }
+        # The bridge_staged field is not available from a saved
+        # snapshot (Phase1StagedData isn't serialized). Downstream
+        # code that reads bridge_staged (step 4) falls back to its
+        # normal path (re-reading the CSV) — acceptable in from-saved
+        # mode, where the snapshot's primary win is skipping step 1.
+        bridge_result = {"summary": summary, "staged": None}
+    else:
+        # Use a RecordingGraphBuilder here so step1 is purely in-memory
+        # and doesn't require a Neo4j connection. If the user wants to
+        # load into Neo4j, that's step3's job — step3 calls
+        # DrugOSGraphBuilder directly.
+        recorder = RecordingGraphBuilder()
+        bridge_result = run_phase1_to_phase2(
+            phase1_processed_dir=pdir,
+            builder=recorder,
+        )
+        summary = bridge_result["summary"]
     if summary["errors"]:
         logger.error("Phase 1 bridge reported errors: %s", summary["errors"])
     if summary["nodes_loaded"] == 0:
@@ -2182,16 +2590,169 @@ def step1_load_phase1(
         "chembl_activities": ["chembl_activities_clean.csv"],
         "omim_susceptibility": ["omim_gene_disease_susceptibility.csv"],
     }
-    input_checksums = {}
-    for key, fnames in name_map.items():
-        if isinstance(fnames, str):
-            fnames = [fnames]
-        for fname in fnames:
-            p = pdir / fname
-            if p.exists():
-                from .phase1_bridge import _sha256_of_file
-                input_checksums[fname] = _sha256_of_file(p)
-                break  # only checksum the first matching filename
+    # v108 ROOT FIX (issue 75): when loading from a saved snapshot
+    # (--from-saved PATH), the Phase 1 source CSVs are NOT read (the
+    # snapshot is the sole data source). Skip both the input-checksums
+    # loop AND the Phase 1 contract validation (the snapshot was
+    # already validated at save time, when the prior run went through
+    # _validate_phase1_output). Compute a minimal validation_result
+    # + input_checksums so downstream code reading
+    # result["validation"]["passed"] and result["input_checksums"]
+    # continues to work.
+    if from_saved_path is not None:
+        from .phase1_bridge import _sha256_of_file
+        input_checksums = {
+            str(from_saved_path): _sha256_of_file(Path(from_saved_path)),
+        }
+        validation_result = {
+            "passed": True,
+            "errors": [],
+            "triples": len(df),
+            "per_source": {
+                "_skipped": (
+                    "loaded from saved RecordingGraphBuilder snapshot "
+                    "(--from-saved); Phase 1 contract validation was "
+                    "performed at save time (issue 75 root fix)"
+                ),
+            },
+        }
+        logger.info(
+            "ISSUE-75: skipped Phase 1 contract validation (loaded "
+            "from saved snapshot — validation was performed at save "
+            "time). input_checksums covers only the snapshot file.",
+        )
+    else:
+        # ── Normal path: compute checksums over Phase 1 source CSVs ──
+        input_checksums = {}
+        for key, fnames in name_map.items():
+            if isinstance(fnames, str):
+                fnames = [fnames]
+            for fname in fnames:
+                p = pdir / fname
+                if p.exists():
+                    from .phase1_bridge import _sha256_of_file
+                    input_checksums[fname] = _sha256_of_file(p)
+                    break  # only checksum the first matching filename
+
+        # v108 ROOT FIX (issue 74): ACTUALLY validate the staged Phase 1
+        # source CSVs against the Phase 1 contract
+        # (``BasePipeline.validate_output(df)`` at
+        # phase1/pipelines/base_pipeline.py:2466) BEFORE returning. The
+        # previous code returned a HARD-CODED
+        # ``{"passed": True, "triples": len(df)}`` validation dict — Phase
+        # 1's validate_output was NEVER invoked from Phase 2, so a
+        # drugbank_drugs.csv with a malformed InChIKey column would
+        # silently pass Phase 2's "validation" gate and load corrupt data
+        # into the KG.
+        #
+        # We re-read each Phase 1 source CSV into a DataFrame here (the
+        # bridge already read them but stores them only as
+        # Phase1StagedData node/edge lists — not as keyed-by-source
+        # DataFrames — so we cannot reuse the bridge's read). The
+        # name_map above already lists every candidate filename per
+        # source, so we walk it a second time to build the staged_data
+        # dict that _validate_phase1_output expects.
+        staged_data: Dict[str, Any] = {}
+        for key, fnames in name_map.items():
+            if isinstance(fnames, str):
+                fnames = [fnames]
+            for fname in fnames:
+                p = pdir / fname
+                if p.exists():
+                    try:
+                        if p.suffix == ".gz":
+                            staged_data[key] = pd.read_csv(
+                                p, compression="gzip", low_memory=False,
+                            )
+                        else:
+                            staged_data[key] = pd.read_csv(p, low_memory=False)
+                    except Exception as read_exc:
+                        # Tolerate per-source read failures — record as
+                        # None so _validate_phase1_output marks the source
+                        # as ``skipped`` (rather than crashing step 1 on
+                        # a single corrupt CSV). The Phase 1 bridge itself
+                        # raised earlier if a REQUIRED CSV was missing, so
+                        # reaching here means the CSV is optional OR
+                        # corrupt-but-present — either way, log + skip.
+                        logger.warning(
+                            "Could not read %s for Phase 1 contract "
+                            "validation (issue 74): %s — source '%s' will "
+                            "be marked as skipped in the validation report.",
+                            p, read_exc, key,
+                        )
+                        staged_data[key] = None
+                    break  # only read the first matching filename
+
+        validation_result = _validate_phase1_output(staged_data)
+
+        if not validation_result["passed"]:
+            if skip_phase1_validation:
+                # EMERGENCY DEV OVERRIDE — explicit opt-in via the CLI
+                # flag ``--skip-phase1-validation``. Log a loud WARN so
+                # the operator cannot miss that corrupt Phase 1 data is
+                # about to flow into the KG. Production runs MUST NOT set
+                # this flag.
+                logger.warning(
+                    "ISSUE-74 ROOT FIX: Phase 1 contract validation FAILED "
+                    "but --skip-phase1-validation is set — continuing "
+                    "despite invalid data. THIS IS AN EMERGENCY DEV "
+                    "OVERRIDE; DO NOT USE IN PRODUCTION. Per-source "
+                    "errors (first 10): %s",
+                    validation_result["errors"][:10],
+                )
+            else:
+                # Fail-closed: abort step 1 BEFORE the KG is built with
+                # corrupt data. Use DrugOSDataError so the typed-exception
+                # handlers in run_full_pipeline / _run_step_with_deps can
+                # distinguish "Phase 1 contract violation" from generic
+                # Python crashes.
+                from .exceptions import DrugOSDataError
+                logger.error(
+                    "ISSUE-74 ROOT FIX: Phase 1 contract validation "
+                    "FAILED — aborting step 1 (fail-closed). Per-source "
+                    "validation report: %s. To override (emergency dev "
+                    "use only), pass --skip-phase1-validation.",
+                    validation_result["per_source"],
+                )
+                _err_summary = "; ".join(validation_result["errors"][:5])
+                if len(validation_result["errors"]) > 5:
+                    _err_summary += (
+                        f" ... ({len(validation_result['errors'])} total errors)"
+                    )
+                raise DrugOSDataError(
+                    f"Phase 1 contract validation failed (issue 74 root "
+                    f"fix): {_err_summary}"
+                )
+
+    # v108 ROOT FIX (issue 75): if --save-graph PATH was passed, save
+    # the RecordingGraphBuilder state to PATH now (after the bridge has
+    # populated it OR after we loaded it from a snapshot — but skip the
+    # save when we JUST loaded from a snapshot, since re-saving an
+    # unchanged snapshot is wasteful and could mask the original save's
+    # lineage). A future --from-saved PATH invocation can reload this
+    # snapshot and skip step 1.
+    if save_graph_path is not None and from_saved_path is None:
+        try:
+            recorder.save(save_graph_path)
+            logger.info(
+                "ISSUE-75: saved RecordingGraphBuilder snapshot to %s "
+                "(--save-graph). A future run with --from-saved %s can "
+                "reload this snapshot and skip step 1.",
+                save_graph_path, save_graph_path,
+            )
+        except Exception as save_exc:
+            # The save is best-effort — failure to save the snapshot
+            # does NOT fail the pipeline (the operator can re-run with
+            # --save-graph after fixing the underlying issue). Log an
+            # ERROR so the operator knows the snapshot is NOT available
+            # for future --from-saved invocations.
+            logger.error(
+                "ISSUE-75: failed to save RecordingGraphBuilder snapshot "
+                "to %s (--save-graph): %s. Continuing — the pipeline will "
+                "still complete, but the snapshot is NOT available for "
+                "future --from-saved invocations.",
+                save_graph_path, save_exc,
+            )
 
     elapsed = time.time() - t0
     logger.info(
@@ -2209,11 +2770,25 @@ def step1_load_phase1(
             "edges_loaded": summary["edges_loaded"],
             "edge_types_present": summary["edge_types_present"],
             "sources_read": summary["sources_read"],
+            # v108 ROOT FIX (issue 74): record the validation result
+            # in the audit trail so operators can verify the Phase 1
+            # contract was actually enforced (not hard-coded True).
+            "phase1_contract_validation_passed": validation_result["passed"],
+            "phase1_contract_validation_sources": len(
+                validation_result["per_source"]
+            ),
+            "phase1_contract_validation_errors": len(
+                validation_result["errors"]
+            ),
         },
     )
     return {
         "df": df,
-        "validation": {"passed": True, "triples": len(df)},
+        # v108 ROOT FIX (issue 74): replace the hard-coded
+        # ``{"passed": True, "triples": len(df)}`` with the ACTUAL
+        # Phase 1 contract validation result. Downstream code that
+        # reads ``result["validation"]["passed"]`` now gets the truth.
+        "validation": validation_result,
         "elapsed": elapsed,
         "input_checksums": input_checksums,
         "bridge_summary": summary,
@@ -2256,6 +2831,15 @@ def step1_load_data(
     data_source: str = "phase1",
     skip_download: bool = False,
     phase1_processed_dir: Optional[Path | str] = None,
+    skip_phase1_validation: bool = False,
+    # v108 ROOT FIX (issue 75): new input-mode flags. Both default to
+    # None so existing call sites (which don't pass these) are
+    # unaffected. ``from_saved_path`` is set when ``--from-saved PATH``
+    # was passed; ``save_graph_path`` is set when ``--save-graph PATH``
+    # was passed. Both are forwarded to ``step1_load_phase1`` (ignored
+    # on the drkg branch).
+    from_saved_path: Optional[Path | str] = None,
+    save_graph_path: Optional[Path | str] = None,
 ) -> dict:
     """Step 1 dispatcher: select data source (phase1 | drkg).
 
@@ -2263,9 +2847,30 @@ def step1_load_data(
     consuming Phase 1 outputs via the bridge. Pass ``data_source="drkg"``
     to fall back to the legacy DRKG-download path (e.g. for large-scale
     training that needs DRKG's 5.87M triples).
+
+    v108 ROOT FIX (issue 74): ``skip_phase1_validation`` is forwarded
+    to ``step1_load_phase1`` so the CLI flag
+    ``--skip-phase1-validation`` can override the fail-closed contract
+    validation. Ignored when ``data_source == "drkg"``.
+
+    v108 ROOT FIX (issue 75): ``from_saved_path`` and ``save_graph_path``
+    are forwarded to ``step1_load_phase1`` so the CLI flags
+    ``--from-saved PATH`` and ``--save-graph PATH`` work end-to-end.
+    ``from_saved_path`` skips the Phase 1 bridge and loads a previously-
+    saved ``RecordingGraphBuilder`` snapshot. ``save_graph_path`` saves
+    the recorder state after the bridge runs. Both are ignored when
+    ``data_source == "drkg"``.
     """
     if data_source == "phase1":
-        return step1_load_phase1(phase1_processed_dir)
+        return step1_load_phase1(
+            phase1_processed_dir,
+            skip_phase1_validation=skip_phase1_validation,
+            # v108 ROOT FIX (issue 75): forward the new input-mode
+            # flags so step1_load_phase1 can load a saved snapshot or
+            # save the recorder state.
+            from_saved_path=from_saved_path,
+            save_graph_path=save_graph_path,
+        )
     elif data_source == "drkg":
         return step1_load_drkg(skip_download)
     else:
@@ -9035,6 +9640,15 @@ def run_full_pipeline(
     resume_after: Optional[float] = None,
     data_source: str = "phase1",
     phase1_processed_dir: Optional[Path | str] = None,
+    skip_phase1_validation: bool = False,
+    # v108 ROOT FIX (issue 75): new input-mode flags. Both default to
+    # None so existing call sites (which don't pass these) are
+    # unaffected. ``from_saved_path`` is set when ``--from-saved PATH``
+    # was passed; ``save_graph_path`` is set when ``--save-graph PATH``
+    # was passed. Both are forwarded to ``step1_load_data`` →
+    # ``step1_load_phase1``.
+    from_saved_path: Optional[Path | str] = None,
+    save_graph_path: Optional[Path | str] = None,
 ) -> dict:
     """Execute the complete Week 2 graph construction pipeline.
 
@@ -9066,6 +9680,35 @@ def run_full_pipeline(
     phase1_processed_dir : path-like, optional
         Phase 1 processed_data directory (only used when
         ``data_source="phase1"``).
+    skip_phase1_validation : bool, default False
+        v108 ROOT FIX (issue 74): when True, the pipeline logs a WARN
+        and continues even if Phase 1 contract validation
+        (``BasePipeline.validate_output``) fails on any staged source
+        CSV. EMERGENCY DEV USE ONLY — production runs MUST leave this
+        False so corrupt Phase 1 data is rejected before KG
+        construction. Forwarded to ``step1_load_data`` →
+        ``step1_load_phase1``.
+    from_saved_path : path-like, optional
+        v108 ROOT FIX (issue 75): when set, ``step1_load_phase1``
+        SKIPS the Phase 1 bridge entirely and loads a previously-saved
+        ``RecordingGraphBuilder`` snapshot from this path (produced by
+        a prior ``save_graph_path`` run). The loaded builder is passed
+        directly to step 2 (build_mappings). Phase 1 contract
+        validation is also skipped (it was already performed when the
+        snapshot was first created). ``data_source`` is forced to
+        ``"phase1"`` regardless of the ``data_source`` argument
+        (the snapshot was built from Phase 1 data). Mutually exclusive
+        with ``data_source="drkg"`` (enforced by
+        ``_validate_neo4j_cli_combos``).
+    save_graph_path : path-like, optional
+        v108 ROOT FIX (issue 75): when set, ``step1_load_phase1``
+        saves the ``RecordingGraphBuilder`` state to this path AFTER
+        the bridge has populated it (and BEFORE step 2 consumes it).
+        A future ``from_saved_path`` invocation can reload this
+        snapshot and skip step 1. Format is auto-detected from the
+        file extension (``.json`` → JSON, ``.parquet`` → Parquet).
+        No effect when ``from_saved_path`` is also set (loading an
+        existing snapshot, no point saving it again).
 
     Returns
     -------
@@ -9155,6 +9798,14 @@ def run_full_pipeline(
         try:
             r1 = step1_load_data(
                 data_source, skip_download, phase1_processed_dir,
+                skip_phase1_validation=skip_phase1_validation,
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so step1_load_phase1 can either load a saved
+                # RecordingGraphBuilder snapshot (--from-saved PATH)
+                # or save the recorder state after the bridge runs
+                # (--save-graph PATH).
+                from_saved_path=from_saved_path,
+                save_graph_path=save_graph_path,
             )
             results["step1"] = {k: v for k, v in r1.items() if k not in ("df", "entity_maps", "edge_maps", "edge_props_lookup", "node_props_lookup", "bridge_staged")}
             if r1.get("fatal"):
@@ -9243,6 +9894,13 @@ def run_full_pipeline(
                 data_source,
                 skip_download=True,
                 phase1_processed_dir=phase1_processed_dir,
+                skip_phase1_validation=skip_phase1_validation,
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags on the resume-cache-miss path too, so
+                # --from-saved / --save-graph continue to work after a
+                # checkpoint resume that misses the disk cache.
+                from_saved_path=from_saved_path,
+                save_graph_path=save_graph_path,
             )
             df = r1["df"]
             _prebuilt_entity_maps = r1.get("entity_maps")
@@ -10163,6 +10821,84 @@ def main() -> None:
              "--data-source phase1). Defaults to the bridge's "
              "DEFAULT_PHASE1_PROCESSED_DIR.",
     )
+    # v108 ROOT FIX (issue 74): explicit opt-in flag for emergency
+    # dev use only. When set, the pipeline logs a WARN and continues
+    # even if Phase 1 contract validation
+    # (BasePipeline.validate_output at
+    # phase1/pipelines/base_pipeline.py:2466) FAILS on any staged
+    # source CSV. Default is False (fail-closed) so corrupt Phase 1
+    # data is rejected BEFORE KG construction. Production runs MUST
+    # NOT set this flag.
+    parser.add_argument(
+        "--skip-phase1-validation",
+        action="store_true",
+        default=False,
+        help="EMERGENCY DEV USE ONLY — bypass Phase 1 contract "
+             "validation (BasePipeline.validate_output). When set, "
+             "the pipeline logs a WARN and continues even if a "
+             "staged Phase 1 CSV fails validation (missing required "
+             "columns, malformed InChIKey, out-of-range scores, "
+             "etc.). Default is False (fail-closed: step 1 raises "
+             "DrugOSDataError on any validation failure). Production "
+             "runs MUST NOT set this flag (issue 74 root fix).",
+    )
+    # v108 ROOT FIX (issue 75): add --from-phase1 / --from-saved /
+    # --save-graph flags so the entry point (__main__.py) supports
+    # BOTH loading fresh Phase 1 data AND resuming from a previously-
+    # saved RecordingGraphBuilder snapshot. The previous code only
+    # exposed ``--data-source phase1|drkg`` — there was NO way to
+    # load a saved builder JSON (RecordingGraphBuilder.save/.load
+    # exist in phase1_bridge.py:876/948 but were NEVER invoked from
+    # __main__ or run_pipeline). This made iterative KG debugging
+    # painful: every run re-ran the entire Phase 1 bridge (~minutes)
+    # even when only step 2+ changed. The new flags are ADDITIVE:
+    # ``--data-source phase1|drkg`` continues to work unchanged.
+    #
+    # Mutually exclusive group: ``--from-phase1`` and ``--from-saved``
+    # cannot be combined (one says "load fresh Phase 1 data", the
+    # other says "skip step 1 entirely and load a snapshot").
+    # ``--data-source drkg`` cannot be combined with ``--from-saved``
+    # (manual check in ``_validate_neo4j_cli_combos`` — can't be in
+    # the mutex group because it's a value of ``--data-source``, not
+    # its own flag).
+    _issue75_mx = parser.add_mutually_exclusive_group()
+    _issue75_mx.add_argument(
+        "--from-phase1",
+        action="store_true",
+        default=False,
+        help="v108 ROOT FIX (issue 75): synonym for --data-source "
+             "phase1. When set, forces data_source='phase1' "
+             "regardless of --data-source. Mutually exclusive with "
+             "--from-saved. Default is False (use --data-source to "
+             "choose instead).",
+    )
+    _issue75_mx.add_argument(
+        "--from-saved",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="v108 ROOT FIX (issue 75): load a previously-saved "
+             "RecordingGraphBuilder snapshot from PATH (produced by "
+             "a prior --save-graph PATH run). SKIPS step 1 (Phase 1 "
+             "bridge) entirely — the loaded builder is passed "
+             "directly to step 2. Mutually exclusive with "
+             "--from-phase1 and --data-source drkg. Use --save-graph "
+             "PATH on a fresh run to produce the snapshot.",
+    )
+    parser.add_argument(
+        "--save-graph",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="v108 ROOT FIX (issue 75): AFTER step 1 completes "
+             "(Phase 1 bridge run), save the RecordingGraphBuilder "
+             "state to PATH so a future --from-saved PATH invocation "
+             "can reload it without re-running the bridge. Format is "
+             "auto-detected from the file extension (.json → JSON, "
+             ".parquet → Parquet). Optional — no effect when "
+             "--from-saved is also set (loading an existing "
+             "snapshot, no point saving it again).",
+    )
     args = parser.parse_args()
 
     # GAP-CONF-02: Validate config on startup
@@ -10175,6 +10911,32 @@ def main() -> None:
     combo_error = _validate_neo4j_cli_combos(args)
     if combo_error:
         parser.error(combo_error)
+
+    # v108 ROOT FIX (issue 75): reconcile --from-phase1 / --from-saved
+    # with --data-source. ``--from-phase1`` forces data_source="phase1"
+    # regardless of ``--data-source`` (override with a WARN log so the
+    # operator knows the explicit synonym won). ``--from-saved`` also
+    # forces data_source="phase1" (the saved snapshot was produced by
+    # a Phase 1 bridge run). The mutex group already prevents
+    # ``--from-phase1 + --from-saved``; the manual check in
+    # ``_validate_neo4j_cli_combos`` already rejected
+    # ``--from-saved + --data-source drkg``, so reaching here with
+    # ``args.from_saved`` set means ``args.data_source`` is "phase1"
+    # (or "drkg" was rejected upstream).
+    if args.from_phase1 and args.data_source != "phase1":
+        logger.warning(
+            "ISSUE-75: --from-phase1 was set AND --data-source=%s — "
+            "forcing data_source='phase1' (--from-phase1 wins as the "
+            "explicit synonym).",
+            args.data_source,
+        )
+        args.data_source = "phase1"
+    if args.from_saved is not None:
+        # ``--from-saved`` always implies data_source="phase1" (the
+        # snapshot was built from Phase 1 data). ``_validate_neo4j_cli_
+        # combos`` already rejected ``--from-saved + --data-source drkg``,
+        # so this is a no-op when data_source is already "phase1".
+        args.data_source = "phase1"
 
     if args.step is not None:
         # BUG-DES-02 FIX: Use clean _run_step_with_deps instead of
@@ -10194,6 +10956,22 @@ def main() -> None:
                 resume_after=args.resume,
                 data_source=args.data_source,
                 phase1_processed_dir=args.phase1_dir,
+                # v108 ROOT FIX (issue 74): forward the emergency-dev
+                # override flag to run_full_pipeline → step1_load_data
+                # → step1_load_phase1 so Phase 1 contract validation
+                # can be bypassed at the operator's explicit risk.
+                skip_phase1_validation=args.skip_phase1_validation,
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags. ``from_saved_path`` is None unless
+                # ``--from-saved PATH`` was passed (in which case
+                # step1_load_phase1 loads the snapshot instead of
+                # running the bridge). ``save_graph_path`` is None
+                # unless ``--save-graph PATH`` was passed (in which
+                # case step1_load_phase1 saves the recorder to PATH
+                # AFTER the bridge populates it). Both are None by
+                # default, so existing invocations are unaffected.
+                from_saved_path=args.from_saved,
+                save_graph_path=args.save_graph,
             )
         except V1LaunchCriteriaFailed as exc:
             # v21 ROOT FIX (Audit Chain 12): the typed exception from

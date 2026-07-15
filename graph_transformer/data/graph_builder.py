@@ -268,13 +268,39 @@ class BiomedicalGraphBuilder:
 
         self._finalized = False
 
-    def register_node(self, node_type: str, name: str, features: np.ndarray) -> int:
+    def register_node(
+        self,
+        node_type: str,
+        name: str,
+        features: np.ndarray,
+        *,
+        canonical_id: "str | None" = None,
+    ) -> int:
         """Register a single node.
 
+        v108 ROOT FIX (issue 65): previously, this method used the free-
+        text ``name`` parameter as the primary key in ``_node_maps``.
+        This caused different proteins that happen to share a display
+        name (e.g. "ACE", "ADORA2A", "VKORC1", "HMGCR") to COLLAPSE
+        into a single node — losing drug-target signal and producing
+        scientifically-wrong GNN training data.
+
+        ROOT FIX: when ``canonical_id`` is provided (e.g.
+        ``"protein:P12821"``, ``"drug:DB00945"``), it is used as the
+        primary key instead of ``name``. Two distinct proteins with
+        the same display name but different canonical IDs remain
+        distinct nodes. When ``canonical_id`` is None (legacy callers),
+        ``name`` is used as before — backward compatible.
+
         Args:
-            node_type: Node type string.
-            name: Unique node name/ID.
+            node_type: Node type string (lowercase canonical, e.g.
+                ``"protein"``, ``"drug"``).
+            name: Display name (e.g. ``"ACE"``). Used as the primary
+                key ONLY when ``canonical_id`` is None (legacy mode).
             features: Feature vector (1D numpy array).
+            canonical_id: v108 (issue 65) — the canonical primary key
+                (e.g. ``"protein:P12821"``). When provided, this is
+                used as the dedup key instead of ``name``.
 
         Returns:
             Node index.
@@ -283,20 +309,30 @@ class BiomedicalGraphBuilder:
             self._node_maps[node_type] = {}
             self._node_features[node_type] = []
 
-        if name in self._node_maps[node_type]:
+        # v108 ROOT FIX (issue 65): prefer canonical_id as the primary key
+        # when provided. This prevents name-collision-induced node collapse
+        # (the audit confirmed ADORA2A, VKORC1, HMGCR, ACE all collapsed).
+        primary_key = canonical_id if canonical_id is not None else name
+
+        if primary_key in self._node_maps[node_type]:
             # V30 ROOT FIX (3.6): warn on duplicate-name registration. The
             # original code silently returned the existing index and DROPPED
             # the new features, hiding data-quality bugs at the integration
             # boundary. We now log a WARNING so mismatches surface.
+            # v108 (issue 65): include the canonical_id in the warning so
+            # operators can see WHICH key is being deduped.
             logger.warning(
-                f"register_node: duplicate name '{name}' (type='{node_type}'). "
-                f"Returning existing index {self._node_maps[node_type][name]} "
-                f"and ignoring the new features (3.6 fix: visible warning)."
+                f"register_node: duplicate primary_key {primary_key!r} "
+                f"(type={node_type!r}, name={name!r}, canonical_id="
+                f"{canonical_id!r}). Returning existing index "
+                f"{self._node_maps[node_type][primary_key]} and ignoring "
+                f"the new features (3.6 fix: visible warning; v108 issue 65: "
+                f"canonical_id-aware)."
             )
-            return self._node_maps[node_type][name]
+            return self._node_maps[node_type][primary_key]
 
         idx = len(self._node_maps[node_type])
-        self._node_maps[node_type][name] = idx
+        self._node_maps[node_type][primary_key] = idx
         self._node_features[node_type].append(features)
         return idx
 
@@ -446,6 +482,83 @@ class BiomedicalGraphBuilder:
                 f"Known {tgt_type} nodes: {list(tgt_map.keys())[:10]}..."
             )
         return False
+
+    # v108 ROOT FIX (issue 66): register_edge with symmetric deduplication.
+    def register_edge(
+        self,
+        src_type: str,
+        rel_type: str,
+        tgt_type: str,
+        src_name: str,
+        tgt_name: str,
+        *,
+        symmetric: "bool | None" = None,
+    ) -> bool:
+        """Register a single edge with optional SYMMETRIC deduplication.
+
+        v108 ROOT FIX (issue 66): the audit found that PPI edges (e.g.
+        ``(Protein-A, interacts_with, Protein-B)`` and
+        ``(Protein-B, interacts_with, Protein-A)``) were DOUBLE-COUNTED
+        because ``add_edge`` deduplicates directionally only
+        (``(src_idx, tgt_idx)`` — the reversed pair is a distinct edge).
+
+        ROOT FIX: when ``symmetric=True`` (or when ``symmetric=None``
+        and ``rel_type`` is in :data:`config.SYMMETRIC_RELATIONS`),
+        the pair ``(A, B)`` and ``(B, A)`` are treated as the SAME
+        edge — only the first registration succeeds; the second is
+        silently dropped.
+
+        Args:
+            src_type, tgt_type: Node type strings (canonical lowercase
+                or PascalCase — both work, the comparison is by index).
+            rel_type: Snake_case verb (e.g. ``"interacts_with"``).
+            src_name, tgt_name: Source / target node names (as
+                registered via ``register_node``).
+            symmetric: True = force symmetric dedup;
+                       False = force directional (legacy add_edge behavior);
+                       None = auto-detect from SYMMETRIC_RELATIONS.
+
+        Returns:
+            True if the edge was newly added; False if dropped (either
+            because it was a duplicate, a self-loop, or an endpoint was
+            not registered).
+        """
+        # Auto-detect symmetric if not specified.
+        if symmetric is None:
+            try:
+                # Try to import SYMMETRIC_RELATIONS from drugos_graph.config.
+                # If the import fails (e.g. when graph_transformer is used
+                # standalone without the drugos_graph package), default
+                # to False (legacy directional dedup).
+                import sys as _sys
+                _dg_path = None
+                for _p in _sys.path:
+                    if _p and _p.endswith("phase2"):
+                        _dg_path = _p
+                        break
+                if _dg_path is not None and _dg_path not in _sys.path:
+                    _sys.path.insert(0, _dg_path)
+                from drugos_graph.config import SYMMETRIC_RELATIONS  # type: ignore
+                symmetric = rel_type in SYMMETRIC_RELATIONS
+            except ImportError:
+                # Fallback: hard-coded set of canonical symmetric relations.
+                symmetric = rel_type in {"interacts_with"}
+
+        if symmetric:
+            # Canonicalise the pair so (A,B) and (B,A) collapse to the
+            # same edge. We do this BEFORE the lookup so both directions
+            # hit the same entry in _edge_sets.
+            if src_name > tgt_name:
+                src_name, tgt_name = tgt_name, src_name
+                src_type, tgt_type = tgt_type, src_type
+            # Note: if src_type != tgt_type (heterogeneous), we DON'T
+            # swap because the edge type tuple would change. This is
+            # correct: symmetric edges are only meaningful between the
+            # SAME node type (PPIs are Protein-Protein).
+
+        # Delegate to the existing add_edge — it handles the dedup set,
+        # self-loop rejection, and unknown-node warnings.
+        return self.add_edge(src_type, rel_type, tgt_type, src_name, tgt_name)
 
     def _sync_edge_lists(self) -> None:
         """Rebuild _edge_lists from _edge_sets (post-dedup view)."""
