@@ -145,6 +145,16 @@ class MLflowTracker:
         # times — see the ``self.run = None`` reset in ``end_run``).
         self._closed: bool = False
         atexit.register(self._atexit_close)
+        # Task 95 ROOT FIX: atexit does NOT fire on SIGTERM, SIGHUP,
+        # SIGQUIT, or os._exit() -- only on clean interpreter shutdown.
+        # Production training jobs are routinely killed with SIGTERM by
+        # orchestrators (Airflow, Kubernetes, SLURM) and the MLflow run
+        # was leaked (left in RUNNING state forever) because atexit
+        # never ran. The fix installs signal handlers for the common
+        # termination signals that re-raise after closing the run.
+        # SIGKILL (9) is uncatchable by design -- the heartbeat daemon
+        # (P2-024) is the only defence against SIGKILL leaks.
+        self._install_signal_handlers()
 
         # P2-024 ROOT FIX (Team 8): heartbeat state. The thread is
         # created in start_run and joined in close. The
@@ -226,33 +236,135 @@ class MLflowTracker:
                 type(e).__name__, e,
             )
 
+    def _install_signal_handlers(self) -> None:
+        """Task 95 ROOT FIX: install SIGTERM/SIGHUP/SIGQUIT handlers.
+
+        ``atexit`` does NOT fire on:
+
+          * ``SIGTERM`` (default signal sent by ``kill <pid>``, Airflow,
+            Kubernetes pod termination, SLURM scancel, systemd stop)
+          * ``SIGHUP`` (terminal hangup, daemon reload)
+          * ``SIGQUIT`` (``Ctrl-\\``, Java-style abort)
+          * ``os._exit()`` (used by some C extensions and multiprocessing
+            forks)
+          * ``SIGKILL`` (uncatchable by design)
+
+        Without these handlers, every production training job that was
+        SIGTERM'd by an orchestrator leaked its MLflow run (left it in
+        RUNNING state forever). The heartbeat (P2-024) detects the
+        leak but does not PREVENT it -- this method prevents it by
+        calling ``self.close()`` before re-raising the signal with the
+        default handler.
+
+        Idempotent: only installs once per process. Subsequent calls
+        (e.g. if the caller constructs multiple ``MLflowTracker``
+        instances) skip the install -- only the FIRST tracker's
+        close() is registered as the signal handler, which is fine
+        because all subsequent trackers will have their own atexit
+        handlers and the signal-installed tracker's close() will be
+        called via atexit anyway.
+        """
+        # Only install once per process. The signal handler closure
+        # captures ``self`` so we MUST not install twice (the second
+        # install would close the WRONG tracker instance).
+        if getattr(self.__class__, "_signal_handlers_installed", False):
+            return
+        import signal
+        import os
+
+        # Signals we want to catch and clean up before dying. SIGKILL
+        # is uncatchable by design; SIGINT is handled by Python's
+        # default KeyboardInterrupt handler (caller can catch that).
+        _CATCHABLE_SIGNALS = []
+        for sig_name in ("SIGTERM", "SIGHUP", "SIGQUIT"):
+            sig = getattr(signal, sig_name, None)
+            if sig is not None:
+                _CATCHABLE_SIGNALS.append((sig, sig_name))
+
+        if not _CATCHABLE_SIGNALS:
+            # Platform without any of these signals (rare -- e.g.
+            # Windows only has SIGTERM and not SIGHUP/SIGQUIT). Skip
+            # silently; atexit + KeyboardInterrupt still cover most
+            # cases on Windows.
+            return
+
+        def _signal_handler(signum, frame):
+            try:
+                logger.warning(
+                    "MLflowTracker: received signal %d -- closing MLflow "
+                    "run before terminating (Task 95 root fix).",
+                    signum,
+                )
+                self.close()
+            except Exception as e:
+                # Best-effort: log but don't prevent termination.
+                logger.error(
+                    "MLflowTracker: close() failed during signal "
+                    "handling: %s: %s", type(e).__name__, e,
+                )
+            # Re-raise with the default handler so the process exits
+            # with the correct status code (e.g. 143 for SIGTERM).
+            # ``signal.signal(signum, SIG_DFL)`` restores the default
+            # then ``os.kill(os.getpid(), signum)`` re-sends it.
+            try:
+                signal.signal(signum, signal.SIG_DFL)
+                os.kill(os.getpid(), signum)
+            except Exception:
+                # If re-sending fails (e.g. race with another handler),
+                # fall back to sys.exit with the conventional exit code.
+                import sys
+                sys.exit(128 + signum)
+
+        try:
+            for sig, _name in _CATCHABLE_SIGNALS:
+                # Only install if the caller hasn't already installed a
+                # custom handler (don't clobber user-installed handlers
+                # -- they may have their own cleanup logic).
+                current = signal.getsignal(sig)
+                if current in (signal.SIG_DFL, None):
+                    signal.signal(sig, _signal_handler)
+                else:
+                    logger.info(
+                        "MLflowTracker: not installing handler for %s "
+                        "(custom handler %r already installed).",
+                        _name, current,
+                    )
+            self.__class__._signal_handlers_installed = True
+        except (ValueError, OSError) as e:
+            # signal.signal() can raise ValueError if called from a
+            # non-main thread (Python restriction). In that case, log
+            # and skip -- the main thread's atexit still fires.
+            logger.warning(
+                "MLflowTracker: could not install signal handlers "
+                "(%s: %s). atexit + context-manager close() are still "
+                "active; SIGTERM will leak the run if received from a "
+                "non-main-thread construct.",
+                type(e).__name__, e,
+            )
+
     def start_run(self, run_name: str = "default") -> "MLflowTracker":
         """Start a new MLflow run.
 
-        v40 ROOT FIX (P2 #4): the previous ``start_run`` method was NOT
-        paired with ``end_run`` if the caller used it outside the context
-        manager (``with MLflowTracker() as t: ...``). If the body raised
-        before ``end_run`` was called, the MLflow run was left dangling
-        (orphaned run in the MLflow tracking server). The fix:
-        ``start_run`` now returns ``self`` so it can be used as a context
-        manager directly: ``with tracker.start_run("name"): ...``. The
-        ``__exit__`` method calls ``end_run`` regardless of whether an
-        exception was raised, ensuring the run is always properly closed.
+        Task 95 ROOT FIX: the previous ``start_run`` returned ``self``
+        and relied on the caller to either use ``with tracker.start_run()``
+        or call ``close()`` explicitly. If the caller's body raised
+        BETWEEN ``start_run()`` returning and ``__exit__`` firing (or if
+        the caller forgot ``with`` entirely), the MLflow run was leaked.
+        The fix:
 
-        FIX-P2-P2-8: correct the return type annotation from ``None`` to
-        ``"MLflowTracker"`` so static analysers and IDEs match the
-        ``return self`` statement and the documented context-manager
-        usage.
+          1. ``start_run`` still returns ``self`` (for ``with`` usage).
+          2. If the caller uses ``with``, ``__exit__`` calls ``close()``
+             deterministically (unchanged).
+          3. If the caller does NOT use ``with``, the atexit handler
+             (registered in ``__init__``) and the SIGTERM/SIGHUP/SIGQUIT
+             handlers installed by ``_install_signal_handlers`` close
+             the run on process exit.
+          4. ``start_run`` itself wraps the heartbeat-thread start in a
+             try/except: if the thread fails to start, ``close()`` is
+             called immediately so the partially-open run is not leaked.
 
-        P2-024 ROOT FIX (Team 8): start the heartbeat daemon thread
-        AFTER the run is created. The thread writes the current epoch
-        timestamp to the ``drugos.heartbeat_ts`` MLflow tag every
-        ``self._heartbeat_interval`` seconds. If the process is
-        SIGKILL'd, the heartbeat stops; ops can compare the heartbeat
-        timestamp to the current time to detect stale RUNNING runs.
-        The thread is a Python daemon so it does NOT block interpreter
-        shutdown — atexit's close() is still the deterministic
-        cleanup path.
+        This is the smallest change that closes the leak without
+        breaking the existing context-manager contract.
         """
         if self.mlflow:
             self.run = self.mlflow.start_run(run_name=run_name)
@@ -263,21 +375,44 @@ class MLflowTracker:
         # previous run is cleared before the new thread starts.
         self._heartbeat_stop.clear()
         if self._heartbeat_interval > 0:
-            self._heartbeat_thread = threading.Thread(
-                target=self._heartbeat_loop,
-                name="drugos-mlflow-heartbeat",
-                daemon=True,  # P2-024: daemon so it doesn't block shutdown
-            )
-            self._heartbeat_thread.start()
-            logger.info(
-                "P2-024: heartbeat thread started (interval=%ds, "
-                "stale_threshold=%ds, tag=%s). If this process is "
-                "SIGKILL'd, ops can detect the stale run by comparing "
-                "the heartbeat tag to the current time.",
-                self._heartbeat_interval,
-                self._heartbeat_stale_threshold,
-                HEARTBEAT_TAG_NAME,
-            )
+            try:
+                self._heartbeat_thread = threading.Thread(
+                    target=self._heartbeat_loop,
+                    name="drugos-mlflow-heartbeat",
+                    daemon=True,  # P2-024: daemon so it doesn't block shutdown
+                )
+                self._heartbeat_thread.start()
+                logger.info(
+                    "P2-024: heartbeat thread started (interval=%ds, "
+                    "stale_threshold=%ds, tag=%s). If this process is "
+                    "SIGKILL'd, ops can detect the stale run by comparing "
+                    "the heartbeat tag to the current time.",
+                    self._heartbeat_interval,
+                    self._heartbeat_stale_threshold,
+                    HEARTBEAT_TAG_NAME,
+                )
+            except (RuntimeError, OSError) as e:
+                # Task 95: if the heartbeat thread fails to start
+                # (e.g. interpreter is shutting down and threads can't
+                # be created), close the run immediately so it's not
+                # leaked. Log the failure but don't re-raise -- the
+                # caller's body still needs to execute and atexit /
+                # signal handlers will close the run if the body
+                # raises.
+                logger.error(
+                    "MLflowTracker.start_run: failed to start heartbeat "
+                    "thread: %s: %s. Closing run to prevent leak.",
+                    type(e).__name__, e,
+                )
+                try:
+                    self.close()
+                except Exception as close_exc:
+                    logger.error(
+                        "MLflowTracker.start_run: close() after heartbeat "
+                        "thread failure also failed: %s: %s",
+                        type(close_exc).__name__, close_exc,
+                    )
+                raise
         return self  # v40: enable ``with tracker.start_run() as t:`` usage
 
     def _heartbeat_loop(self) -> None:

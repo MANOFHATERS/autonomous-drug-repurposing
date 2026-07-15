@@ -498,6 +498,10 @@ __all__: List[str] = [
     "ClinicalTrialsConfig",
     # ── Download ──
     "download_clinicaltrials",
+    # ── v2 REST API (Task 92) ──
+    "CTGOV_API_V2_BASE",
+    "fetch_ctgov_studies",
+    "load_ctgov_studies_for_query",
     # ── Parse ──
     "parse_clinicaltrials",
     "parse_clinicaltrials_trials",
@@ -5552,3 +5556,165 @@ def fetch_ctgov_studies(
         },
     )
     return results
+
+
+# =============================================================================
+# Section 25 -- v2 REST API loader (Task 92 ROOT FIX)
+# =============================================================================
+# Task 92: ``fetch_ctgov_studies`` was fully implemented with the v2 API
+# (``https://clinicaltrials.gov/api/v2/studies``) and ``nextPageToken``
+# cursor pagination, but was never wired into the pipeline. The AACT
+# static ZIP (``load_clinicaltrials``) is the primary production path
+# for full-graph builds, but several legitimate use cases need the v2
+# REST API instead:
+#
+#   * Incremental updates (fetch trials registered since the last AACT
+#     snapshot).
+#   * Targeted queries (e.g. "all Phase III trials for breast cancer
+#     with carboplatin").
+#   * CI smoke tests (10-trial sample without downloading the 8 GB
+#     AACT ZIP).
+#
+# The user task description was "must handle the v2 API. Currently uses
+# the deprecated v1 API." The v1 API URL (``api/query/study_results``)
+# does NOT appear anywhere in the actual code (it was already removed);
+# the v2 client existed but was dead code. This wrapper makes the v2
+# client a first-class production path so the v2 API is actually USED
+# rather than just present-but-uncalled.
+
+
+def load_ctgov_studies_for_query(
+    query: str,
+    *,
+    max_pages: int = 10,
+    page_size: int = 100,
+    timeout: int = 30,
+) -> Dict[str, Any]:
+    """Fetch ClinicalTrials.gov v2 study records for a query string.
+
+    Task 92 ROOT FIX. Wraps ``fetch_ctgov_studies`` (which uses the v2
+    API with ``nextPageToken`` cursor pagination) and converts the raw
+    study dicts into KG node + edge records.
+
+    Parameters
+    ----------
+    query : str
+        Search query (e.g. ``"breast cancer AND carboplatin"``,
+        ``"AREA[Phase](PHASE3) AND AREA[Condition](breast cancer)"``).
+        The v2 API uses the same query syntax as the website.
+    max_pages : int, default 10
+        Maximum number of pagination requests. At ``page_size=100``,
+        this allows up to 1,000 studies.
+    page_size : int, default 100
+        Studies per request. The v2 API caps this at 1,000.
+    timeout : int, default 30
+        Per-request timeout in seconds.
+
+    Returns
+    -------
+    dict
+        Summary dict with keys:
+          * ``query``: the input query string.
+          * ``studies_fetched``: total raw studies returned by the API.
+          * ``pages_fetched``: number of pagination requests issued.
+          * ``truncated``: True if ``max_pages`` was hit before the
+            API ran out of results.
+          * ``nodes``: list of KG node records (ClinicalTrial + Drug +
+            Disease nodes extracted from the studies).
+          * ``edges``: list of KG edge records (Drug -> tested_for ->
+            Disease, ClinicalTrial -> investigates -> Drug, etc.).
+    """
+    raw_studies = fetch_ctgov_studies(
+        query,
+        max_pages=max_pages,
+        page_size=page_size,
+        timeout=timeout,
+    )
+
+    pages_fetched = (
+        max_pages if raw_studies and len(raw_studies) >= max_pages * page_size
+        else (len(raw_studies) // max(page_size, 1)) + (1 if len(raw_studies) % page_size else 0)
+    )
+    truncated = len(raw_studies) >= max_pages * page_size
+
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+    seen_trials: set = set()
+    seen_drugs: set = set()
+    seen_diseases: set = set()
+
+    for study in raw_studies:
+        nct_id = str(study.get("nct_id") or study.get("NCTId") or "").strip()
+        if not nct_id:
+            continue
+        if nct_id not in seen_trials:
+            seen_trials.add(nct_id)
+            nodes.append({
+                "id": nct_id,
+                "label": "ClinicalTrial",
+                "name": str(study.get("brief_title") or study.get("official_title") or nct_id),
+                "phase": str(study.get("phase") or ""),
+                "status": str(study.get("overall_status") or ""),
+                "enrollment": study.get("enrollment"),
+                "_source": "ctgov_v2_api",
+            })
+        # Extract interventions (drugs) and conditions (diseases).
+        interventions = study.get("interventions") or study.get("InterventionName") or []
+        if isinstance(interventions, str):
+            interventions = [interventions]
+        conditions = study.get("conditions") or study.get("Condition") or []
+        if isinstance(conditions, str):
+            conditions = [conditions]
+
+        for intervention in interventions:
+            drug_name = str(intervention).strip()
+            if not drug_name:
+                continue
+            # Use the drug name as a temporary ID; the entity resolver
+            # will crosswalk this to InChIKey/CID downstream.
+            drug_id = f"DRUG_NAME:{drug_name.upper()}"
+            if drug_id not in seen_drugs:
+                seen_drugs.add(drug_id)
+                nodes.append({
+                    "id": drug_id,
+                    "label": "Compound",
+                    "name": drug_name,
+                    "_source": "ctgov_v2_api",
+                })
+            edges.append({
+                "src_id": drug_id,
+                "dst_id": nct_id,
+                "rel_type": "investigated_in",
+                "source": "ctgov_v2_api",
+                "props": {"trial_role": "intervention"},
+            })
+
+        for condition in conditions:
+            disease_name = str(condition).strip()
+            if not disease_name:
+                continue
+            disease_id = f"DISEASE_NAME:{disease_name.upper()}"
+            if disease_id not in seen_diseases:
+                seen_diseases.add(disease_id)
+                nodes.append({
+                    "id": disease_id,
+                    "label": "Disease",
+                    "name": disease_name,
+                    "_source": "ctgov_v2_api",
+                })
+            edges.append({
+                "src_id": nct_id,
+                "dst_id": disease_id,
+                "rel_type": "investigates",
+                "source": "ctgov_v2_api",
+                "props": {},
+            })
+
+    return {
+        "query": query,
+        "studies_fetched": len(raw_studies),
+        "pages_fetched": pages_fetched,
+        "truncated": truncated,
+        "nodes": nodes,
+        "edges": edges,
+    }

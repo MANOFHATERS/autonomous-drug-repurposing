@@ -1832,6 +1832,26 @@ def uniprot_to_node_records(
         gene_names = list(rec.get("gene_names", []))
         gene_name = rec.get("gene_name", "") or (gene_names[0] if gene_names else "")
 
+        # Task 83 ROOT FIX: populate ``gene_symbol`` on every Protein node.
+        # The previous code set ``gene_name`` and ``gene_names`` but NOT
+        # ``gene_symbol``. Downstream, ``id_crosswalk.py`` resolves
+        # gene->UniProt by indexing the crosswalk on
+        # ``entry.gene_symbol.upper()`` (see ``id_crosswalk.py`` lines
+        # 549 / 1036-1037) and looking up ``self.gene_symbol_to_uniprot``
+        # by upper-cased symbol. With no ``gene_symbol`` field on the
+        # Protein node, the crosswalk's reverse lookup (protein->gene)
+        # always missed, producing the "0% gene->protein match rate"
+        # observed in the audit. The Phase-1 path
+        # (``uniprot_to_node_records_from_phase1``) DOES set
+        # ``gene_symbol`` -- the raw-.dat path did not, creating an
+        # inconsistency where the same protein would be linkable
+        # through the Phase-1 path but not through the raw-.dat path.
+        # The fix: set ``gene_symbol`` to the upper-cased primary
+        # gene name (matching the crosswalk's lookup key form). We
+        # also keep ``gene_name`` (mixed-case, human-readable) for
+        # display so existing consumers are unaffected.
+        gene_symbol = (gene_name or "").strip().upper() if gene_name else ""
+
         # D9-004 -- sanitize free-text fields (defence-in-depth for Neo4j).
         node = _ProteinNodeDict({  # D15-003 -- warns on ['id'] access
             "uniprot_id": accession,           # D2-004 canonical
@@ -1844,6 +1864,12 @@ def uniprot_to_node_records(
             "entry_name": _sanitize_freetext(rec.get("entry_name", "")),
             "gene_name": _sanitize_freetext(gene_name),
             "gene_names": [_sanitize_freetext(g) for g in gene_names],
+            # Task 83: canonical gene symbol, upper-cased to match the
+            # ``id_crosswalk.gene_symbol_to_uniprot`` lookup key. This
+            # is the field the crosswalk actually reads -- without it
+            # the reverse protein->gene lookup returns None for every
+            # raw-.dat-loaded protein.
+            "gene_symbol": gene_symbol,
             "gene_id": gene_id,                # D3-001 verified
             "gene_ids": list(gene_ids),        # D4-004
             "ncbi_taxid": _coerce_ncbi_taxid(rec.get("ncbi_taxid", 0)),  # v69 P2L-019

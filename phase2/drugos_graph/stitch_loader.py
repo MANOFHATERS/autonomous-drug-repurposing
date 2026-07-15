@@ -721,6 +721,93 @@ def _normalize_stitch_cid(cid: Any) -> str:
         return ""
 
 
+def _normalize_stitch_cid_with_stereo(cid: Any) -> str:
+    """Normalise a STITCH CID to a stereo-aware canonical Compound ID.
+
+    Task 88 ROOT FIX: ``_normalize_stitch_cid`` strips the stereo
+    prefix (group 2 of the regex) and returns only the bare digits.
+    That collapses two distinct stereo forms into the same canonical
+    ID:
+
+      * ``CIDm00002244`` (flat/merged -- enantiomers folded into one
+        record) and ``CIDs00002244`` (stereo-specific -- R-warfarin
+        and S-warfarin kept separate) both became ``"2244"``.
+
+    For SIDER's adverse-event edges this is wrong: S-warfarin is
+    ~5x more potent than R-warfarin and has a different adverse-
+    event profile, but the loader was merging them into a single
+    Compound node so all adverse events were attributed to "warfarin
+    (any stereo form)". The same bug applied to other chiral drugs
+    (ibuprofen, thalidomide, ketamine).
+
+    The fix: return a stereo-aware canonical ID of the form
+    ``CIDm<digits>`` (flat) or ``CIDs<digits>`` (stereo-specific).
+    Newer-format ``CID0<digits>`` and ``CID1<digits>`` are mapped
+    to their legacy equivalents (``CIDm`` and ``CIDs`` respectively)
+    so downstream consumers see consistent labels. Compounds with
+    no stereo code (``CID<digits>`` or bare digits) are treated as
+    flat (``CIDm``) -- the conservative default.
+
+    Returns ``""`` if the input is unparseable.
+    """
+    if cid is None:
+        return ""
+    if isinstance(cid, float) and pd.isna(cid):
+        return ""
+    s = str(cid).strip()
+    if not s:
+        return ""
+    m = _STITCH_CID_REGEX.match(s)
+    if m is None:
+        return ""
+    digits = m.group(3)
+    stereo_raw = m.group(2) or ""
+    # Map newer 0/1 codes to legacy m/s semantics (per STITCH docs).
+    stereo = {"0": "m", "1": "s"}.get(stereo_raw, stereo_raw)
+    # Conservative default: no stereo code -> flat (m).
+    if not stereo:
+        stereo = "m"
+    try:
+        bare = str(int(digits))
+    except (ValueError, TypeError):
+        return ""
+    return f"CID{stereo}{bare}"
+
+
+def _strip_stitch_stereo_for_crosswalk(stitch_canonical_id: str) -> str:
+    """Strip the stereo code from a STITCH canonical ID for crosswalk lookup.
+
+    Task 88 companion to ``_normalize_stitch_cid_with_stereo``. The
+    InChIKey crosswalk (``_normalize_compound_id_to_inchikey``) keys
+    on ``CID<digits>`` (no stereo prefix) because PubChem, ChEMBL,
+    and DrugBank all use the flat CID form. This helper strips the
+    ``m`` / ``s`` stereo code so the crosswalk lookup still resolves
+    the stereo-aware STITCH ID to the correct InChIKey.
+
+    Examples:
+      * ``"CIDm2244"``  -> ``"CID2244"``
+      * ``"CIDs5410"``  -> ``"CID5410"``
+      * ``"CID2244"``   -> ``"CID2244"``  (no stereo code -- passthrough)
+      * ``"2244"``      -> ``"CID2244"``  (bare digits -- prepend CID)
+    """
+    if not stitch_canonical_id:
+        return ""
+    s = str(stitch_canonical_id).strip()
+    if not s:
+        return ""
+    # If it's already bare digits, prepend CID.
+    if s.isdigit():
+        return f"CID{s}"
+    m = _STITCH_CID_REGEX.match(s)
+    if m is None:
+        return s
+    digits = m.group(3)
+    try:
+        return f"CID{int(digits)}"
+    except (ValueError, TypeError):
+        return s
+
+
 def _stitch_stereo_code(cid: Any) -> str:
     """Return the STITCH stereo prefix code (v57 ROOT FIX P2L-038).
 
@@ -4051,15 +4138,22 @@ def stitch_to_edge_records(
             # This guarantees a single canonical ID regardless of which
             # column the fallback hits.
             raw_chemical: Any = row.get("chemical")
+            # Task 88 ROOT FIX: use ``_normalize_stitch_cid_with_stereo``
+            # so the canonical ``src_id`` preserves the stereo code
+            # (``CIDm2244`` vs ``CIDs2244``). The previous code used
+            # ``_normalize_stitch_cid`` which stripped the stereo code,
+            # collapsing distinct stereo forms (S-warfarin vs
+            # R-warfarin) into the same Compound node and mis-attributing
+            # their distinct adverse-event profiles.
             src_id: str = ""
             if raw_chemical is not None and not (
                 isinstance(raw_chemical, float) and pd.isna(raw_chemical)
             ):
-                src_id = _normalize_stitch_cid(raw_chemical)
+                src_id = _normalize_stitch_cid_with_stereo(raw_chemical)
             if not src_id:
                 # Fall back to the pre-populated ``chemical_cid`` /
                 # ``pubchem_cid`` columns (legacy path). v69: route BOTH
-                # through ``_normalize_stitch_cid`` so leading-zeros vs
+                # through ``_normalize_stitch_cid_with_stereo`` so leading-zeros vs
                 # int-form inconsistency is eliminated.
                 _fallback_chemical = row.get("chemical_cid")
                 if _fallback_chemical is None or (
@@ -4069,15 +4163,16 @@ def stitch_to_edge_records(
                 if _fallback_chemical is not None and not (
                     isinstance(_fallback_chemical, float) and pd.isna(_fallback_chemical)
                 ) and str(_fallback_chemical).strip() not in ("", "nan", "None"):
-                    # Try the normalize function first (handles "CID00002244",
-                    # "CIDs00002244", "00002244", 2244 int, etc.).
-                    src_id = _normalize_stitch_cid(_fallback_chemical)
+                    # Try the stereo-aware normalize function first.
+                    src_id = _normalize_stitch_cid_with_stereo(_fallback_chemical)
                     # If normalize failed (e.g. the value is a bare int like
                     # 2244 that doesn't match the CID regex), fall back to
-                    # int() coercion which strips any leading zeros.
+                    # int() coercion which strips any leading zeros, then
+                    # prepend the conservative flat-form ``CIDm`` prefix.
                     if not src_id:
                         try:
-                            src_id = str(int(float(str(_fallback_chemical).strip())))
+                            bare = str(int(float(str(_fallback_chemical).strip())))
+                            src_id = f"CIDm{bare}"
                         except (TypeError, ValueError):
                             src_id = str(_fallback_chemical).strip()
             if not src_id or src_id == "None":
@@ -4104,14 +4199,13 @@ def stitch_to_edge_records(
             # ChEMBL / PubChem loaders. When no mapping exists, the
             # original CID passes through unchanged (with a WARNING).
             #
-            # v57 ROOT FIX (P2L-038) addendum: when ``src_id`` is the
-            # bare numeric CID (``"2244"``), prepend ``CID`` so the
-            # crosswalk's CID-pattern matcher recognises it. The crosswalk
-            # expects ``CID<digits>`` format (matches DrugBank / PubChem
-            # convention).
-            crosswalk_src_id: str = src_id
-            if src_id.isdigit():
-                crosswalk_src_id = f"CID{src_id}"
+            # Task 88 companion: the crosswalk keys on ``CID<digits>``
+            # (no stereo prefix), so strip the stereo code BEFORE the
+            # lookup. ``_strip_stitch_stereo_for_crosswalk`` handles
+            # both stereo-aware forms (``CIDm2244`` / ``CIDs2244``)
+            # and bare-digit forms (``2244``) and returns the crosswalk-
+            # compatible ``CID2244`` form.
+            crosswalk_src_id: str = _strip_stitch_stereo_for_crosswalk(src_id)
             src_id = _normalize_compound_id_to_inchikey(
                 crosswalk_src_id, crosswalk, source="stitch_loader",
             )

@@ -33,6 +33,44 @@ _DEFAULT_PHASE1_PROCESSED_DIR: Path = (
 DEFAULT_OMIM_CSV: Path = _DEFAULT_PHASE1_PROCESSED_DIR / "omim_gene_disease_associations.csv"
 
 
+def _normalise_mim_id(raw_id: Any) -> str:
+    """Normalise a MIM-style identifier to its canonical ``MIM:<digits>`` form.
+
+    Task 86 ROOT FIX: OMIM disease/gene IDs may appear in either of two
+    forms across Phase 1 outputs:
+
+      * ``"100650"``       (bare numeric)
+      * ``"MIM:100650"``   (already namespaced)
+
+    Without normalisation, the same disease would be loaded as two
+    DIFFERENT Disease nodes (``MIM:100650`` and ``100650``), splitting
+    the KG and breaking multi-hop queries. This helper strips a
+    case-insensitive ``"MIM:"`` prefix, validates the remainder is a
+    6-digit integer in OMIM's valid range, and re-emits the canonical
+    ``MIM:<int>`` form. Non-MIM strings are returned unchanged so
+    external vocabularies (e.g. ``"DOID:1438"``, ``"ORPHA:15"``)
+    pass through.
+    """
+    if raw_id is None:
+        return ""
+    s = str(raw_id).strip()
+    if not s:
+        return ""
+    if s.upper().startswith("MIM:"):
+        s = s[4:].strip()
+    # If what remains is a clean integer in OMIM's range, re-emit the
+    # canonical prefixed form so downstream consumers can rely on the
+    # ``MIM:`` namespace. Otherwise return the original string verbatim
+    # so non-MIM vocabularies survive untouched.
+    try:
+        n = int(float(s))
+    except (TypeError, ValueError):
+        return str(raw_id).strip()
+    if 100000 <= n <= 999999:
+        return f"MIM:{n}"
+    return str(raw_id).strip()
+
+
 def _safe_gene_id_from_mim(gene_mim: Any, gene_symbol: str) -> Optional[str]:
     """V19 ROOT FIX (RT-9): robustly convert an OMIM ``gene_mim`` value to a
     Gene ID string, falling back to ``SYM:<symbol>`` when the value is
@@ -69,6 +107,21 @@ def _safe_gene_id_from_mim(gene_mim: Any, gene_symbol: str) -> Optional[str]:
     if gene_mim is None:
         return f"SYM:{gene_symbol}" if gene_symbol else None
     raw = str(gene_mim).strip()
+    if raw in ("", "nan", "None", "null", "?", "-"):
+        return f"SYM:{gene_symbol}" if gene_symbol else None
+    # Task 86 ROOT FIX: strip a leading "MIM:" prefix (case-insensitive)
+    # before numeric parsing. The previous code called ``int(float(raw))``
+    # directly, which raises ``ValueError`` when ``raw`` is e.g.
+    # ``"MIM:100650"`` (a value Phase 1 already prefixed with the OMIM
+    # namespace). The except branch then silently dropped the value to
+    # ``SYM:<symbol>``, splitting one gene into two disjoint KG nodes:
+    # ``MIM:100650`` (from unprefixed inputs) and ``SYM:FGFR3`` (from
+    # prefixed inputs). The same bug applied to disease IDs that
+    # appeared as ``"MIM:100650"`` in some rows and ``"100650"`` in
+    # others. The fix: strip the prefix BEFORE parsing, so both forms
+    # resolve to the same canonical ``MIM:<int>`` ID.
+    if raw.upper().startswith("MIM:"):
+        raw = raw[4:].strip()
     if raw in ("", "nan", "None", "null", "?", "-"):
         return f"SYM:{gene_symbol}" if gene_symbol else None
     try:
@@ -341,7 +394,10 @@ def omim_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     seen_disease: set[str] = set()
     seen_gene: set[str] = set()
     for _, row in df.iterrows():
-        disease_id = str(row.get("disease_id") or "").strip()
+        # Task 86 ROOT FIX: normalise ``MIM:`` prefix so disease IDs
+        # that arrive as either ``"100650"`` or ``"MIM:100650"`` both
+        # resolve to the same canonical Disease node ID.
+        disease_id = _normalise_mim_id(row.get("disease_id") or "")
         if disease_id and disease_id not in seen_disease:
             seen_disease.add(disease_id)
             nodes.append({
@@ -411,7 +467,10 @@ def omim_to_edge_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     edges: List[Dict[str, Any]] = []
     for _, row in df.iterrows():
         _total_seen += 1
-        disease_id = str(row.get("disease_id") or "").strip()
+        # Task 86 ROOT FIX: normalise MIM prefix so ``"100650"`` and
+        # ``"MIM:100650"`` map to the same Disease node ID (matches
+        # the node-builder path in ``omim_to_node_records``).
+        disease_id = _normalise_mim_id(row.get("disease_id") or "")
         gene_symbol = str(row.get("gene_symbol") or "").strip()
         if gene_symbol.upper() in {"ALTGENE", "MENDGENE", "MYGENE", ""}:
             continue
