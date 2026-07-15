@@ -138,10 +138,20 @@ CANONICAL_NONSTANDARD_INCHIKEY_REGEX: re.Pattern[str] = re.compile(
 )
 
 # Synthetic InChIKey prefix (for biologics / unknown structures).
-# Loose match: anything starting with "SYNTH" (case-insensitive).
-# Matches the DB CHECK constraint `inchikey LIKE 'SYNTH%'`.
+# v110 Task 32 root fix: tightened from `^SYNTH.+$` (which accepted ANY
+# string starting with SYNTH, including 'SYNTH_GARBAGE_123!!' with
+# punctuation/spaces) to `^SYNTH[A-Z0-9-]{4,30}$` (alphanumeric + dash
+# only, 4-30 chars after SYNTH). This matches the tightened DB CHECK
+# constraint in migration 009 (`inchikey ~ '^SYNTH[A-Z0-9-]{4,30}$'`),
+# keeping Python and DB in lockstep. Accepts the actual synthetic ID
+# formats used in the codebase:
+#   SYNTH0001..SYNTH9999           (test fixtures, 4 digits)
+#   SYNTH-DB-[0-9A-F]{8}           (drugbank synthesized drug IDs)
+#   SYNTH-DB-M\d{6}                (drugbank synthesized mixture IDs)
+# Real InChIKeys follow the canonical 27-char IUPAC format and never
+# start with SYNTH.
 CANONICAL_SYNTHETIC_INCHIKEY_REGEX: re.Pattern[str] = re.compile(
-    r"^SYNTH.+$", re.IGNORECASE
+    r"^SYNTH[A-Z0-9-]{4,30}$", re.IGNORECASE
 )
 
 # Strict SYNTH pattern -- SYNTH + 9 hex + hyphen + 10 hex + hyphen + 1 hex.

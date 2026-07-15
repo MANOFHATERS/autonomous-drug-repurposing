@@ -191,6 +191,11 @@ from config.settings import (
     DISGENET_UNIPROT_MAP_TTL_HOURS,
     DISGENET_URL,
     DISGENET_USE_API,
+    # v110 Task 24 root fix: import license tier settings.
+    DISGENET_LICENSE_TIER,
+    DISGENET_EFFECTIVE_TIER,
+    DISGENET_TIER_WARNING,
+    DISGENET_EXPECTED_RECORDS_BY_TIER,
     DataSourceName,
     PROCESSED_DATA_DIR,
     _validate_disgenet_config,
@@ -1224,6 +1229,31 @@ class DisGeNETPipeline(BasePipeline):
         """
         # v83 P0-C13: sample-mode embedded fallback.
         _download_mode = os.environ.get("DRUGOS_DOWNLOAD_MODE", "sample").lower().strip()
+
+        # v110 Task 24 root fix: log the effective DisGeNET license tier.
+        #
+        # The tier was resolved at import time in config.settings via
+        # _resolve_disgenet_tier(). Here we log it at the start of download()
+        # so operators see which tier is active in each pipeline run. This
+        # makes silent tier downgrades visible (e.g., if an API key expires
+        # and the tier auto-falls-back to free, the log shows it).
+        _expected_records = DISGENET_EXPECTED_RECORDS_BY_TIER.get(
+            DISGENET_EFFECTIVE_TIER, 0
+        )
+        logger.info(
+            "[disgenet] Task 24 v110: license tier=%s (configured=%s), "
+            "expected_records~=%d, api_key=%s. %s",
+            DISGENET_EFFECTIVE_TIER,
+            DISGENET_LICENSE_TIER,
+            _expected_records,
+            "present" if DISGENET_API_KEY else "ABSENT",
+            DISGENET_TIER_WARNING if DISGENET_TIER_WARNING else "(no tier warning)",
+        )
+        if DISGENET_TIER_WARNING:
+            # Re-emit the warning at download() time so it appears in the
+            # pipeline run log (the import-time warning may have been missed
+            # if the module was imported before logging was configured).
+            logger.warning("[disgenet] %s", DISGENET_TIER_WARNING)
 
         # v91 ROOT FIX (E2E sample-mode 401 failure on CI):
         #   The previous code only short-circuited to the embedded sample
