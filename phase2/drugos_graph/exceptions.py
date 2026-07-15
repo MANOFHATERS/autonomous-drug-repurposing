@@ -328,6 +328,13 @@ class DrugOSDataError(DrugosGraphError):
     exception in this module. The two names are interchangeable for catch
     purposes; DrugOSDataError is retained because dozens of existing callers
     import it explicitly.
+
+    Like :class:`DrugosGraphError`, this class accepts a ``context`` keyword
+    argument (a dict of structured key/value pairs describing the failure —
+    URL, accession, line number, parser version, etc.). The ``context``
+    attribute is always present (possibly empty) and is the SOLE structured-
+    data channel between the exception site and the dead-letter writer /
+    structured logger.
     """
 
     def __init__(
