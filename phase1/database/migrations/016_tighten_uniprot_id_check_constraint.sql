@@ -91,6 +91,23 @@ BEGIN
     END IF;
 END $$;
 
+-- ===========================================================================
+-- Step 4: Schema version metadata
+-- ===========================================================================
+-- P1-042 ROOT FIX (v110): the previous version of this migration was MISSING
+-- the INSERT INTO schema_version row. check_migrations() cross-references
+-- schema_version; without the version=16 row, those checks reported
+-- schema_version_matches=False even though the migration had been applied.
+-- ROOT FIX: add the INSERT with ON CONFLICT DO NOTHING for idempotency.
+INSERT INTO schema_version (version, description)
+VALUES (
+    16,
+    'P1-013 ROOT FIX: tighten proteins.uniprot_id CHECK to LENGTH IN (6, 10) '
+    'matching the ORM and UniProt spec. Quarantine rows with invalid length '
+    '(set to NULL) before re-adding the constraint.'
+)
+ON CONFLICT (version) DO NOTHING;
+
 COMMIT;
 
 -- ===========================================================================

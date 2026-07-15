@@ -1,6 +1,6 @@
 -- ============================================================================
 -- Drug Repurposing ETL Platform — PubChem Enrichment Partial Index
--- Migration: 013_drugs_pubchem_cid_partial_index.sql
+-- Migration: 014_drugs_pubchem_cid_partial_index.sql
 -- Version: 1
 -- Author: Team Cosmic
 -- Created: 2026-07-12
@@ -31,8 +31,46 @@
 --   PostgreSQL: full support (partial indexes since 7.2)
 --   SQLite: full support (partial indexes since 3.8.0, 2013)
 --   The migration runner's statement splitter handles both.
+--
+-- P1-042 ROOT FIX (v110): the previous version of this migration had
+--   THREE bugs that the audit found:
+--     1. The file header comment said "Migration: 013_drugs_pubchem_..."
+--        but the FILENAME was 014_drugs_pubchem_cid_partial_index.sql.
+--        A future maintainer searching for "migration 013" would find
+--        TWO files (the real 013_is_fda_approved_nullable.sql and this
+--        one's header), causing confusion.
+--     2. The file had NO BEGIN; ... COMMIT; wrapper. Every other
+--        migration (001-013, 015+) is atomic by file convention. A
+--        partial failure (e.g. CREATE INDEX succeeded but the
+--        schema_version INSERT failed) left the schema half-applied
+--        with no transaction to roll back.
+--     3. The file had NO INSERT INTO schema_version row. check_migrations()
+--        cross-references schema_version; without the version=14 row,
+--        those checks reported schema_version_matches=False even
+--        though the migration had been applied.
+--   ROOT FIX: align the header comment with the filename, wrap in
+--   BEGIN/COMMIT, and add the INSERT INTO schema_version row.
 -- ============================================================================
 
+BEGIN;
+
+-- ===========================================================================
+-- Phase 1: Create the partial index
+-- ===========================================================================
 CREATE INDEX IF NOT EXISTS ix_drugs_pubchem_cid_null_inchikey
     ON drugs (inchikey)
     WHERE pubchem_cid IS NULL;
+
+-- ===========================================================================
+-- Phase 2: Schema version metadata
+-- ===========================================================================
+INSERT INTO schema_version (version, description)
+VALUES (
+    14,
+    'P1-036 ROOT FIX: add partial index ix_drugs_pubchem_cid_null_inchikey on '
+    'drugs(inchikey) WHERE pubchem_cid IS NULL. Covers the PubChem pipeline''s '
+    'enrichment query so it uses an index-only scan instead of a full-table scan.'
+)
+ON CONFLICT (version) DO NOTHING;
+
+COMMIT;

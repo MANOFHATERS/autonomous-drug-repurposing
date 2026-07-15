@@ -80,6 +80,29 @@ BEGIN
     END IF;
 END $$;
 
+-- ===========================================================================
+-- Phase 4: Schema version metadata
+-- ===========================================================================
+-- P1-042 ROOT FIX (v110): the previous version of this migration was MISSING
+-- the INSERT INTO schema_version row. The migration runner's
+-- _is_migration_applied() check uses the _migration_history table (not
+-- schema_version), so the migration was still tracked as applied. BUT
+-- check_migrations() and verify_schema_matches_orm() cross-reference
+-- schema_version to confirm the DB is at the expected version. Without
+-- the version=12 row, those checks reported schema_version_matches=False
+-- even though all 12 migrations had been applied — a false-negative that
+-- blocked CI gates and confused operators.
+-- ROOT FIX: add the INSERT with ON CONFLICT DO NOTHING for idempotency.
+-- Uses bare INTEGER literal 12 (matching migrations 001-011, 013+).
+INSERT INTO schema_version (version, description)
+VALUES (
+    12,
+    'P1-004 ROOT FIX: confidence_tier label alignment with Piñero et al. 2020 §2.3. '
+    'Rename (weak, moderate, strong) -> (sub_weak, weak, strong). Backfill existing '
+    'rows so labels stay scientifically accurate relative to the score.'
+)
+ON CONFLICT (version) DO NOTHING;
+
 COMMIT;
 
 -- ===========================================================================

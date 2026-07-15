@@ -22,4 +22,8 @@ ALTER TABLE drugs ALTER COLUMN is_fda_approved SET DEFAULT FALSE;
 -- Restore NOT NULL.
 ALTER TABLE drugs ALTER COLUMN is_fda_approved SET NOT NULL;
 
+-- P1-042 ROOT FIX (v110): delete the schema_version row so check_migrations()
+-- no longer reports version 13 as applied after the rollback completes.
+DELETE FROM schema_version WHERE version = 13;
+
 COMMIT;
