@@ -4227,6 +4227,12 @@ class DrugRankingEnv(gym.Env):
             # Test env: use TRAIN stats. Map each disease to the train
             # stats. Diseases not in train get GLOBAL AVERAGE of train stats.
             # ROOT FIX (C15): compute global average for unseen-disease fallback
+            # TASK-149 ROOT FIX (v111): DROP bridge-provided disease-context
+            # columns BEFORE building the test-env's disease_agg, so the
+            # merge produces clean column names (no _x/_y suffixes).
+            for _col in ['disease_pair_count', 'disease_avg_gnn', 'disease_avg_safety']:
+                if _col in self.data.columns:
+                    self.data = self.data.drop(columns=[_col])
             if disease_context_stats:
                 global_avg_pair_count = float(np.mean([
                     s['disease_pair_count'] for s in disease_context_stats.values()
@@ -4270,6 +4276,17 @@ class DrugRankingEnv(gym.Env):
             )
         else:
             # Train env: compute stats from own data.
+            # TASK-149 ROOT FIX (v111): DROP any bridge-provided disease-
+            # context columns BEFORE the groupby merge. The bridge now
+            # includes these columns in the CSV (per the audit's 15-column
+            # requirement), but the env RE-DERIVES them from its own
+            # groupby (with min-max normalization). Without this drop,
+            # pandas merge would create _x/_y suffixed columns and the
+            # downstream self.data[self._effective_feature_cols] access
+            # would fail with KeyError.
+            for _col in ['disease_pair_count', 'disease_avg_gnn', 'disease_avg_safety']:
+                if _col in self.data.columns:
+                    self.data = self.data.drop(columns=[_col])
             disease_agg = self.data.groupby(DISEASE_COL).agg(
                 disease_pair_count=(GNN_SCORE_COL, 'size'),
                 disease_avg_gnn=(GNN_SCORE_COL, 'mean'),

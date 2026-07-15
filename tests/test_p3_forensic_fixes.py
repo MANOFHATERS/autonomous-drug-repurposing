@@ -119,7 +119,13 @@ def test_p3_006_patent_returns_none_for_unknown():
 # ============================================================================
 
 def test_p3_008_now_iso_no_nameerror():
-    """P3-008: retrain_on_validated must NOT raise NameError for _now_iso."""
+    """P3-008: retrain_on_validated must NOT raise NameError for _now_iso.
+
+    TASK-158 ROOT FIX (v111): updated to use the CANONICAL schema (outcome
+    column with validated_positive value) per common/validated_hypotheses_schema.py.
+    The previous test used the legacy "validated" column with "true" value,
+    which the current code correctly ignores (it reads OUTCOME_COL="outcome").
+    """
     from graph_transformer.training.trainer import retrain_on_validated
     import tempfile
     tmpdir = tempfile.mkdtemp()
@@ -134,8 +140,10 @@ def test_p3_008_now_iso_no_nameerror():
         "model_config": {"embedding_dim": 32, "num_layers": 2, "num_heads": 2},
     }, ckpt_path)
     csv_path = os.path.join(tmpdir, "validated_hypotheses.csv")
+    # TASK-158: use the CANONICAL schema (outcome column, validated_positive value).
     with open(csv_path, "w") as f:
-        f.write("drug,disease,validated\naspirin,pain,true\n")
+        f.write("drug,disease,outcome,validated_at\n")
+        f.write("aspirin,pain,validated_positive,2026-01-01T00:00:00Z\n")
     result = retrain_on_validated(
         ckpt_path, validated_csv_path=csv_path,
         output_checkpoint_path=ckpt_path, fine_tune_epochs=0,
