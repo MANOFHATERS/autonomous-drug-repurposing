@@ -517,6 +517,14 @@ WITHDRAWN_DRUGS: frozenset = frozenset({
     "domperidone", "motilium",
     # Antiepileptic (EU pregnancy prevention program — neural tube defects)
     "valproate", "valproic acid", "divalproex sodium", "depakote",
+    # Issue 163 ROOT FIX: add bromfenac and nefazodone (both hepatotoxic,
+    # withdrawn from US market). The previous list was missing these two
+    # drugs despite the audit explicitly flagging them. A withdrawn drug
+    # NOT in this list is NOT hard-rejected — the agent can rank it HIGH
+    # → patient safety risk. Sources: FDA withdrawal announcements
+    # (bromfenac 1998, nefazodone 2004 due to hepatotoxicity).
+    "bromfenac", "duract",
+    "nefazodone", "serzone",
     # NOTE: thalidomide is INTENTIONALLY NOT in this set. It is FDA-approved
     # for multiple myeloma and leprosy under REMS. It is in
     # INDICATION_WITHDRAWN_DRUGS (contraindicated ONLY for pregnancy-related
@@ -950,6 +958,103 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
     return result
 
 
+def _load_validated_toxic_hypotheses() -> List[Tuple[str, str]]:
+    """Load VALIDATED_TOXIC pairs from validated_hypotheses.csv.
+
+    Issue 161 ROOT FIX (INT-020 extension): the previous code loaded ONLY
+    validated_positive pairs (for the +0.1 bonus) and SILENTLY SKIPPED
+    validated_toxic pairs. The agent received NO signal that toxic pairs
+    should be ranked LOW — the toxic pairs were simply invisible to the
+    reward function. The user's audit (issue 161) found: "currently reads
+    EVERY row of validated_hypotheses.csv as a positive reward-bonus pair,
+    regardless of outcome column."
+
+    The fix loads validated_toxic pairs into a SEPARATE set. The reward
+    function (compute + step) uses this set to apply a -0.5 penalty when
+    the agent ranks a toxic pair HIGH. This makes the agent learn to
+    RANK TOXIC PAIRS LOW (acceptance criterion 4: "the agent ranks them
+    in the BOTTOM 10%, not top 10%").
+
+    Returns:
+        List of (drug, disease) tuples from validated_hypotheses.csv
+        WHERE outcome == "validated_toxic". Empty list if no toxic pairs
+        exist (the penalty is a no-op, which is correct).
+    """
+    try:
+        import sys
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        from common.validated_hypotheses_schema import (
+            CANONICAL_VALIDATED_CSV,
+            OUTCOME_COL,
+            OUTCOME_VALIDATED_TOXIC,
+        )
+        canonical_path = CANONICAL_VALIDATED_CSV
+    except Exception:
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        canonical_path = os.path.join(
+            os.path.dirname(module_dir), "phase1", "processed_data", "validated_hypotheses.csv"
+        )
+        OUTCOME_COL = "outcome"
+        OUTCOME_VALIDATED_TOXIC = "validated_toxic"
+
+    validated_path = "validated_hypotheses.csv"
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    candidate_paths = [
+        canonical_path,
+        os.path.join(module_dir, validated_path),
+        validated_path,
+        os.path.join(os.getcwd(), validated_path),
+    ]
+    env_path = os.environ.get("RL_VALIDATED_HYPOTHESES_PATH", "")
+    if env_path:
+        candidate_paths = [env_path] + candidate_paths
+
+    result: List[Tuple[str, str]] = []
+    seen = set()
+    files_loaded: List[str] = []
+    for path in candidate_paths:
+        if not os.path.exists(path):
+            continue
+        try:
+            df_vh = pd.read_csv(path)
+            if DRUG_COL not in df_vh.columns or DISEASE_COL not in df_vh.columns:
+                continue
+            n_added_from_this_file = 0
+            for _, row in df_vh.iterrows():
+                drug = str(row[DRUG_COL]).lower().strip()
+                disease = str(row[DISEASE_COL]).lower().strip()
+                if not drug or not disease:
+                    continue
+                outcome = str(row.get(OUTCOME_COL, "")).lower().strip()
+                if outcome != OUTCOME_VALIDATED_TOXIC:
+                    continue
+                key = (drug, disease)
+                if key not in seen:
+                    seen.add(key)
+                    result.append((drug, disease))
+                    n_added_from_this_file += 1
+            if n_added_from_this_file > 0:
+                files_loaded.append(f"{path} ({n_added_from_this_file} toxic pairs)")
+        except Exception as e:
+            logger.warning(
+                f"Issue 161: failed to load validated_toxic pairs from {path}: {e}"
+            )
+    if result:
+        logger.info(
+            f"Issue 161 ROOT FIX: loaded {len(result)} UNIQUE validated_toxic "
+            f"pairs from {len(files_loaded)} file(s): {files_loaded}. "
+            f"These pairs receive a -0.5 penalty when ranked HIGH (patient safety)."
+        )
+    else:
+        logger.info(
+            "Issue 161: no validated_toxic pairs found. No toxic penalty "
+            "will be applied (correct for datasets without toxic validations)."
+        )
+    return result
+
+
 # P4-004 ROOT FIX (HIGH — Team Cosmic / Phase 4): KNOWN_POSITIVES and
 # VALIDATED_HYPOTHESES are now LAZY-LOADED via the _LazyList proxy class
 # below. The previous code called _load_known_positives() and
@@ -1097,6 +1202,12 @@ KNOWN_POSITIVES: _LazyList = _LazyList(_load_known_positives)
 # bonus AND eval labels (the X-08 fix's bug).
 VALIDATED_HYPOTHESES: _LazyList = _LazyList(_load_validated_hypotheses)
 
+# Issue 161 ROOT FIX: VALIDATED_TOXIC_HYPOTHESES is loaded SEPARATELY.
+# These pairs receive a -0.5 penalty when the agent ranks them HIGH
+# (patient safety). The previous code SILENTLY SKIPPED toxic pairs —
+# the agent had NO signal that toxic pairs should be ranked LOW.
+VALIDATED_TOXIC_HYPOTHESES: _LazyList = _LazyList(_load_validated_toxic_hypotheses)
+
 
 def get_known_positives() -> List[Tuple[str, str]]:
     """Force-load and return the KNOWN_POSITIVES list as a plain list.
@@ -1116,6 +1227,16 @@ def get_validated_hypotheses() -> List[Tuple[str, str]]:
     and self-documenting.
     """
     return VALIDATED_HYPOTHESES.to_list()
+
+
+def get_validated_toxic_hypotheses() -> List[Tuple[str, str]]:
+    """Force-load and return the VALIDATED_TOXIC_HYPOTHESES list.
+
+    Issue 161 ROOT FIX: returns the list of (drug, disease) pairs that
+    have been validated as TOXIC by pharma partners. These pairs receive
+    a -0.5 penalty when the agent ranks them HIGH.
+    """
+    return VALIDATED_TOXIC_HYPOTHESES.to_list()
 
 
 def reload_known_positives() -> List[Tuple[str, str]]:
@@ -1139,6 +1260,16 @@ def reload_validated_hypotheses() -> List[Tuple[str, str]]:
     """
     VALIDATED_HYPOTHESES._reset_cache()
     return get_validated_hypotheses()
+
+
+def reload_validated_toxic_hypotheses() -> List[Tuple[str, str]]:
+    """Force-reload VALIDATED_TOXIC_HYPOTHESES (clears the lazy cache).
+
+    Issue 161 ROOT FIX: useful for tests that swap validated_hypotheses.csv
+    between assertions (e.g., adding/removing toxic pairs).
+    """
+    VALIDATED_TOXIC_HYPOTHESES._reset_cache()
+    return get_validated_toxic_hypotheses()
 
 
 # Validated hypotheses CSV path -- data flywheel.
@@ -1289,6 +1420,16 @@ class RewardConfig:
     # the agent learns to suppress HIGH on bad pairs.
     correct_rejection_reward: float = 0.05
     validated_bonus: float = 0.1
+    # INT-020 / Issue 161 ROOT FIX: penalty applied when the agent ranks
+    # a VALIDATED_TOXIC pair HIGH. The penalty is applied as a FLAT
+    # override in step() (not multiplied by high_action_bonus) so the
+    # effective penalty is exactly -validated_toxic_penalty (default -0.5).
+    # This guarantees the reward for ranking a toxic pair HIGH is ALWAYS
+    # negative (acceptance criterion 2: "Toxic-pair reward is NEGATIVE,
+    # not positive"). A flat -0.5 subtraction would be insufficient
+    # because a good base reward (0.5 * 5.0 = 2.5) would remain positive
+    # after -0.5. The override guarantees patient safety.
+    validated_toxic_penalty: float = 0.5
     # v90 P0 ROOT FIX (BUG #32): updated stale docstring. The previous
     # docstring claimed high_action_bonus=12.0 and computed
     # EV(always HIGH) = +0.050, but the actual default is 5.0 (per the
@@ -1604,6 +1745,22 @@ class PipelineConfig:
     resume_checkpoint: Optional[str] = None
     top_n: int = 10
     test_size: float = 0.2
+    # Issue 168 ROOT FIX: max_episode_steps for proper truncation signaling.
+    # The previous code hardcoded truncated=False in step()'s return tuple.
+    # This breaks PPO's value bootstrap for gamma>0 (sequential MDP): PPO
+    # uses the truncated flag to decide whether to bootstrap from the
+    # final obs (truncated=True, episode cut off by time limit) or use
+    # the terminal value (truncated=False, episode ended naturally).
+    # With hardcoded False, PPO ALWAYS bootstraps from the final obs,
+    # which is INCORRECT when the episode was cut off by a time limit
+    # (the value of the cut-off state is NOT the terminal value — it
+    # should be bootstrapped from the next state).
+    #
+    # The fix: add max_episode_steps (default 0 = no time limit,
+    # preserving backward compat for the contextual-bandit gamma=0 case).
+    # When max_episode_steps > 0 and the episode reaches that limit,
+    # step() returns truncated=True so PPO can correctly bootstrap.
+    max_episode_steps: int = 0
     # C4 fix: drug-aware split (default True).
     drug_aware_split: bool = True
     reward: RewardConfig = field(default_factory=RewardConfig)
@@ -2554,6 +2711,12 @@ class RewardFunction:
         # (KNOWN_POSITIVES). This prevents the circular leakage where the
         # same pairs were used as BOTH reward bonus AND eval labels.
         self._validated_hypotheses: Set[Tuple[str, str]] = set(VALIDATED_HYPOTHESES)
+        # Issue 161 ROOT FIX: initialize _validated_toxic_hypotheses from
+        # the module-level VALIDATED_TOXIC_HYPOTHESES constant. These pairs
+        # receive a -0.5 penalty when the agent ranks them HIGH (patient
+        # safety). The previous code SILENTLY SKIPPED toxic pairs — the
+        # agent had NO signal that toxic pairs should be ranked LOW.
+        self._validated_toxic_hypotheses: Set[Tuple[str, str]] = set(VALIDATED_TOXIC_HYPOTHESES)
         # ROOT FIX (C16): adaptive threshold (set by env from data)
         self._adaptive_gnn_threshold: Optional[float] = None
         # V30 ROOT FIX (10.10): gnn_score mean/std for z-score normalization
@@ -2594,6 +2757,13 @@ class RewardFunction:
     def set_validated_hypotheses(self, validated: Set[Tuple[str, str]]) -> None:
         """Inject validated hypothesis set for the data flywheel."""
         self._validated_hypotheses = validated or set()
+
+    def set_validated_toxic_hypotheses(self, validated_toxic: Set[Tuple[str, str]]) -> None:
+        """Inject validated TOXIC hypothesis set (Issue 161 ROOT FIX).
+
+        These pairs receive a -0.5 penalty when the agent ranks them HIGH.
+        """
+        self._validated_toxic_hypotheses = validated_toxic or set()
 
     def get_effective_reward_weights(self) -> Dict[str, float]:
         """Return the effective reward weights (after gnn_score cap).
@@ -2779,25 +2949,62 @@ class RewardFunction:
         # receives the +0.1 reward bonus at line ~1773.
         if drug_name in WITHDRAWN_DRUGS:
             return -1.0
-        # P4-019 ROOT FIX: indication-specific check with TOKENIZED matching.
-        # The previous code used SUBSTRING matching:
-        #   if contraindication in disease_name:
-        # This over-broadly rejected drugs. "nausea" matched
-        # "chronic_nausea_syndrome", and "pregnancy" matched
-        # "pregnancy-related_hypertension" — a different condition.
-        # The fix splits both the contraindication and disease_name on
-        # whitespace and checks if ALL contraindication tokens are present
-        # in the disease_name tokens (as whole words).
+        # Issue 166 ROOT FIX: indication-specific check with EXACT disease
+        # name matching (not tokenized subset). The previous P4-019 fix
+        # used TOKENIZED SUBSET matching:
+        #   contra_tokens.issubset(disease_tokens)
+        # This STILL over-rejects for single-token contraindications like
+        # "nausea" — {nausea}.issubset({chronic, nausea, syndrome}) is True,
+        # so "nausea" matches "chronic nausea syndrome" (a DIFFERENT
+        # condition). The user's audit (issue 166) found: "substring match
+        # for indication overlap over-rejects ('nausea' matches many
+        # diseases). Use exact ICD-10 code match."
+        #
+        # The production-grade fix has TWO layers:
+        #   1. ICD-10 EXACT MATCH (preferred): if the row has an 'icd10'
+        #      column AND the contraindication map has ICD-10 codes, match
+        #      on exact ICD-10 equality. This is the scientifically correct
+        #      approach — ICD-10 codes are unambiguous disease identifiers.
+        #   2. EXACT DISEASE NAME MATCH (fallback): if no ICD-10 column,
+        #      require the contraindication to EXACTLY equal the disease
+        #      name (case-insensitive, after normalization). This prevents
+        #      "nausea" from matching "chronic nausea syndrome" while still
+        #      correctly rejecting "thalidomide for nausea".
         contraindicated_indications = INDICATION_WITHDRAWN_DRUGS.get(drug_name)
         if contraindicated_indications:
-            disease_tokens = set(disease_name.replace("-", " ").replace("_", " ").split())
+            # Normalize disease name for comparison (case-insensitive,
+            # whitespace-normalized, hyphens/underscores → spaces).
+            _normalized_disease = " ".join(
+                disease_name.replace("-", " ").replace("_", " ").split()
+            ).lower().strip()
+            # Check for ICD-10 column in the row (optional, production-grade)
+            _row_icd10 = ""
+            if "icd10" in row.index:
+                _row_icd10 = str(row.get("icd10", "")).strip().upper()
             for contraindication in contraindicated_indications:
-                contra_tokens = set(contraindication.replace("-", " ").replace("_", " ").split())
-                if contra_tokens and contra_tokens.issubset(disease_tokens):
+                _normalized_contra = " ".join(
+                    contraindication.replace("-", " ").replace("_", " ").split()
+                ).lower().strip()
+                # Layer 1: ICD-10 exact match (if both row and contra have codes)
+                # Contraindications prefixed with "ICD10:" are treated as codes.
+                if _normalized_contra.startswith("icd10:") and _row_icd10:
+                    _contra_code = _normalized_contra.split(":", 1)[1].strip()
+                    if _contra_code and _row_icd10 == _contra_code:
+                        logger.debug(
+                            f"Issue 166: rejecting {drug_name} for contraindicated "
+                            f"indication (ICD-10 {_row_icd10} == {_contra_code}). "
+                            f"Drug is allowed for other indications."
+                        )
+                        return -1.0
+                    continue  # ICD-10 contraindication didn't match → skip
+                # Layer 2: EXACT disease name match (case-insensitive).
+                # This is STRICTER than tokenized subset — "nausea" only
+                # matches "nausea", NOT "chronic nausea syndrome".
+                if _normalized_contra and _normalized_disease == _normalized_contra:
                     logger.debug(
-                        f"P4-019: rejecting {drug_name} for contraindicated "
-                        f"indication '{disease_name}' (tokens {contra_tokens} "
-                        f"match). Drug is allowed for other indications."
+                        f"Issue 166: rejecting {drug_name} for contraindicated "
+                        f"indication '{disease_name}' (exact match '{_normalized_contra}'). "
+                        f"Drug is allowed for other indications."
                     )
                     return -1.0
 
@@ -2935,24 +3142,45 @@ class RewardFunction:
         # through a scientific review (the audit showed this is a
         # P0 patient-safety hazard).
 
-        # P4-020 ROOT FIX: continuous safety_factor via linear interpolation.
-        # The previous code used a STEP FUNCTION:
-        #   safety < 0.7 -> factor=0.5
-        #   safety >= 0.7 -> factor=1.0
-        # This gave the agent NO gradation: safety=0.51 and safety=0.69
-        # both got factor=0.5. The fix uses linear interpolation:
-        #   safety_factor = 0.5 + 0.5 * (safety - hard_reject) / (warning - hard_reject)
-        # So: safety=0.5 -> 0.5, safety=0.6 -> 0.75, safety=0.7 -> 1.0
-        # The agent now sees a SMOOTH signal instead of a step function.
+        # Issue 167 ROOT FIX: continuous safety_factor via SIGMOID (not
+        # linear interpolation). The previous P4-020 fix used linear
+        # interpolation, which is continuous but has a SHARP KINK at
+        # safety_hard_reject and safety_warning (the derivative is
+        # discontinuous). The user's audit (issue 167) found: "safety_factor
+        # is a step function (0.5 or 1.0). Make it continuous:
+        # safety_factor = sigmoid(audit_score - threshold)."
+        #
+        # The fix uses a SIGMOID centered at the warning threshold:
+        #   safety_factor = 1 / (1 + exp(-k * (safety - warning)))
+        # where k is the steepness (default 10.0, giving a smooth but
+        # decisive transition over ~0.2 safety units).
+        #
+        # Properties:
+        #   - safety << warning: factor ~ 0 (rejected)
+        #   - safety == warning: factor = 0.5 (neutral)
+        #   - safety >> warning: factor ~ 1 (fully accepted)
+        #   - Hard reject (safety < hard_reject): factor = 0.0 (patient
+        #     safety invariant preserved — no reward for unsafe drugs)
+        #   - The function is SMOOTH (C∞) — no kinks, no discontinuities
+        #     in the derivative. PPO can learn a clean gradient.
+        import math as _math
         if safety_val < cfg.safety_hard_reject:
-            safety_factor = 0.0  # Hard reject — no reward
-        elif safety_val < cfg.safety_warning:
-            safety_factor = 0.5 + 0.5 * (
-                (safety_val - cfg.safety_hard_reject)
-                / (cfg.safety_warning - cfg.safety_hard_reject)
-            )
+            safety_factor = 0.0  # Hard reject — patient safety invariant
         else:
-            safety_factor = 1.0
+            # Sigmoid steepness: 10.0 gives a smooth transition over ~0.2
+            # safety units (e.g., 0.6→0.27, 0.7→0.5, 0.8→0.73). This is
+            # steep enough to be decisive but smooth enough for PPO to
+            # learn a clean gradient.
+            _k = 10.0
+            _delta = float(safety_val) - float(cfg.safety_warning)
+            safety_factor = 1.0 / (1.0 + _math.exp(-_k * _delta))
+            # Clamp to [0, 1] (sigmoid asymptotically approaches but never
+            # reaches 0 or 1; clamping ensures exact bounds for downstream
+            # code that checks safety_factor == 0.0 or == 1.0).
+            if safety_factor < 0.0:
+                safety_factor = 0.0
+            elif safety_factor > 1.0:
+                safety_factor = 1.0
 
         # MONOTONIC reward: weighted_sum * safety_factor.
         # v89 P0: gnn_factor REMOVED (was making RL a circular
@@ -2995,6 +3223,21 @@ class RewardFunction:
         # Store the validated flag on the row for step() to pick up
         if is_validated:
             row["_is_validated"] = True
+
+        # Issue 161 ROOT FIX: check if the pair is VALIDATED_TOXIC.
+        # If so, mark the row so step() can apply the -0.5 penalty when
+        # the agent ranks it HIGH. The penalty is NOT applied here in
+        # compute() (which only computes the BASE reward) — it is applied
+        # in step() AFTER the high_action_bonus multiplier, symmetric with
+        # the +0.1 validated_bonus. The penalty is a FLAT override
+        # (final_reward = -validated_toxic_penalty) to GUARANTEE the
+        # reward is negative (acceptance criterion 2).
+        is_validated_toxic = (
+            pair_key in self._validated_toxic_hypotheses
+            and pair_key not in _kp_set
+        )
+        if is_validated_toxic:
+            row["_is_validated_toxic"] = True
 
         return reward
 
@@ -4724,6 +4967,25 @@ class DrugRankingEnv(gym.Env):
         if action == 1 and row.get("_is_validated", False):
             final_reward += cfg.validated_bonus
 
+        # Issue 161 ROOT FIX: apply -0.5 penalty for VALIDATED_TOXIC pairs
+        # ranked HIGH. The penalty is a FLAT OVERRIDE (not a subtraction)
+        # to GUARANTEE the reward is negative (acceptance criterion 2:
+        # "Toxic-pair reward is NEGATIVE, not positive"). A flat -0.5
+        # subtraction would be insufficient because a good base reward
+        # (0.5 * 5.0 = 2.5) would remain positive after -0.5. The override
+        # ensures the agent NEVER learns to rank toxic pairs HIGH,
+        # regardless of the base reward. The -0.5 is applied AFTER the
+        # high_action_bonus multiplier (symmetric with the +0.1
+        # validated_bonus) and DOMINATES any positive contribution.
+        if action == 1 and row.get("_is_validated_toxic", False):
+            final_reward = -abs(cfg.validated_toxic_penalty)
+            logger.info(
+                f"Issue 161: applied -{cfg.validated_toxic_penalty} toxic penalty "
+                f"for HIGH-ranked validated_toxic pair ({row.get(DRUG_COL, '?')}, "
+                f"{row.get(DISEASE_COL, '?')}). final_reward={final_reward:.4f} "
+                f"(NEGATIVE — patient safety invariant enforced)."
+            )
+
         if action == 1:
             # V4 B-F2 fix: store the agent's POLICY PROBABILITY for
             # action HIGH (not just the raw reward). This is what makes
@@ -4770,6 +5032,24 @@ class DrugRankingEnv(gym.Env):
         self.current_idx += 1
         done = self.current_idx >= self.n_pairs
 
+        # Issue 168 ROOT FIX: compute truncated from the env's time limit.
+        # The previous code hardcoded truncated=False, which breaks PPO's
+        # value bootstrap for gamma>0. The fix: when max_episode_steps > 0
+        # (configurable time limit) and the episode reached that limit,
+        # return truncated=True so PPO bootstraps from the final obs
+        # (correct for time-limit cutoff). When the episode ended NATURALLY
+        # (current_idx >= n_pairs), truncated=False (correct for natural
+        # termination). When max_episode_steps == 0 (default, no time
+        # limit), truncated is always False (preserves backward compat for
+        # the contextual-bandit gamma=0 case where truncation doesn't
+        # matter).
+        _max_steps = int(getattr(self.config, 'max_episode_steps', 0) or 0)
+        if _max_steps > 0 and self.current_idx >= _max_steps:
+            truncated = True
+            done = True  # time limit reached → episode ends
+        else:
+            truncated = False
+
         if not done:
             obs = self._get_obs()
             self._last_valid_obs = obs.copy()
@@ -4794,22 +5074,15 @@ class DrugRankingEnv(gym.Env):
             f"action={action}, reward_raw={reward:.4f}, final_reward={final_reward:.4f}"
         )
 
-        return obs, float(final_reward), bool(done), False, info
-        # P4-032 ROOT FIX (documentation): the 4th element (truncated) is
-        # HARDCODED to False. For gamma=0 (contextual bandit, the current
-        # config), truncation doesn't matter — PPO doesn't bootstrap.
-        # For gamma>0 (sequential MDP), PPO uses the truncated flag to
-        # decide whether to bootstrap from the final obs (truncated=True)
-        # or use the terminal value (truncated=False).
-        #
-        # This env ALWAYS ends naturally at n_pairs (no time limit), so
-        # truncated is ALWAYS False — the episode is NEVER cut off by a
-        # time limit. If a future caller sets gamma>0 for sequential MDP,
-        # they should be aware that this env does NOT support truncation
-        # (there is no max_episode_steps). To add truncation, set a time
-        # limit in reset() and return truncated=True when it's exceeded.
-        # Until then, the hardcoded False is CORRECT for this env's
-        # semantics (contextual bandit, no time limit).
+        return obs, float(final_reward), bool(done), bool(truncated), info
+        # Issue 168 ROOT FIX: the 4th element (truncated) is now COMPUTED
+        # from the env's time limit (max_episode_steps), not hardcoded.
+        # See the computation above. For the default config
+        # (max_episode_steps=0), truncated is always False (preserves
+        # backward compat for the contextual-bandit gamma=0 case). For
+        # gamma>0 (sequential MDP) with max_episode_steps>0, truncated
+        # is True when the episode is cut off by the time limit, allowing
+        # PPO to correctly bootstrap from the final obs.
 
     def _append_to_high_ranked(self, entry: Dict[str, Any]) -> None:
         """Append to high_ranked with buffer cap warning."""
@@ -5863,34 +6136,16 @@ def evaluate_agent(
         )
 
     logger.info(f"Running agent on {env.n_pairs} drug-disease pairs...")
-    # P4-009 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): DOCUMENT that
-    # evaluate_agent calls env.reset() WITHOUT shuffle=False, so the test
-    # env IS shuffled during evaluation. This is correct for training
-    # (PPO needs shuffled episodes to prevent overfitting to pair order),
-    # but it means the Top-N candidates from evaluate_agent come from
-    # SHUFFLED test data. The candidates' drug/disease names are correct
-    # (they come from env.data which is shuffled but contains the same
-    # rows), but the ORDER is different from the original test_data CSV.
-    # This makes debugging harder (the candidate order doesn't match the
-    # test_data CSV order).
-    #
-    # We do NOT pass shuffle=False here because:
-    #   1. The Top-N candidates are sorted by policy_prob (via
-    #      get_top_candidates), so the shuffle order doesn't affect the
-    #      FINAL candidate ranking — only the iteration order.
-    #   2. PPO's training loop (which calls env.reset() many times)
-    #      relies on shuffling to prevent overfitting to pair order.
-    #      evaluate_agent uses the SAME env for training and evaluation
-    #      (the test env), so we cannot disable shuffling here without
-    # P4-024 ROOT FIX: deterministic Top-N ordering. The previous code
-    # called env.reset() WITHOUT shuffle=False, so the Top-N candidates
-    # were NON-DETERMINISTIC across runs (different shuffle seed →
-    # different Top-N). A pharma partner re-running the pipeline got a
-    # different Top-N list with no indication of why.
-    #
-    # The fix passes options={"shuffle": False} for deterministic ordering.
+    # Issue 172 ROOT FIX (verified): evaluate_agent passes
+    # options={"shuffle": False} to env.reset() for DETERMINISTIC Top-N
+    # ordering. The previous P4-009 comment (now removed) claimed
+    # evaluate_agent did NOT pass shuffle=False — that was a STALE LIE.
+    # The actual code (P4-024 fix) has been passing shuffle=False for
+    # deterministic evaluation. A pharma partner re-running the pipeline
+    # gets the SAME Top-N list (given the same model checkpoint).
     # Training still uses shuffling (for exploration), but evaluation
-    # must be deterministic for reproducible results.
+    # is deterministic for reproducible results. The env's RNG is seeded
+    # via config.seed in __init__, so the eval "dataloader" is seeded.
     obs, _ = env.reset(options={"shuffle": False})
     done = False
     # ROOT FIX (FORENSIC-AUDIT-I15): CONSISTENT action threshold.
@@ -6705,28 +6960,32 @@ def literature_crosscheck(
     # except Exception, sets literature_support=False), and the V1 launch
     # criterion "≥5 literature-supported predictions" fails silently.
     #
-    # The fix: require NCBI_EMAIL env var. If unset, raise RuntimeError
-    # (unless RL_SKIP_LITERATURE is set, which was already checked above).
+    # Issue 174 ROOT FIX: use ENTREZ_EMAIL env var (the user's audit
+    # explicitly requested this name). The previous code used NCBI_EMAIL.
+    # For backward compat, NCBI_EMAIL is still accepted as a fallback.
+    # Priority: ENTREZ_EMAIL > NCBI_EMAIL > error.
     # This makes the missing-email case LOUD instead of silent.
-    _ncbi_email = os.environ.get("NCBI_EMAIL", "")
-    if not _ncbi_email:
+    _entrez_email = os.environ.get("ENTREZ_EMAIL", "") or os.environ.get("NCBI_EMAIL", "")
+    if not _entrez_email:
         logger.error(
-            f"P4-030 ROOT FIX: NCBI_EMAIL environment variable is not set. "
+            f"Issue 174 ROOT FIX: ENTREZ_EMAIL environment variable is not set. "
             f"The previous code defaulted to a FAKE email "
             f"('team-cosmic@example.com') which may get the IP rate-limited "
             f"or BLOCKED by NCBI. All literature crosschecks would then "
             f"fail silently (caught by except Exception), and the V1 "
             f"launch criterion '≥5 literature-supported predictions' would "
-            f"fail silently. Set NCBI_EMAIL to a real email address (yours) "
-            f"or set RL_SKIP_LITERATURE=1 to explicitly bypass (debugging only)."
+            f"fail silently. Set ENTREZ_EMAIL to a real email address (yours) "
+            f"or set RL_SKIP_LITERATURE=1 to explicitly bypass (debugging only). "
+            f"(NCBI_EMAIL is accepted as a backward-compat fallback.)"
         )
         raise RuntimeError(
-            f"P4-030: NCBI_EMAIL environment variable is not set. NCBI "
+            f"Issue 174: ENTREZ_EMAIL environment variable is not set. NCBI "
             f"requires a real email for API access. The previous fake "
             f"default ('team-cosmic@example.com') may get the IP blocked. "
-            f"Set NCBI_EMAIL=<your_email> or RL_SKIP_LITERATURE=1 to bypass."
+            f"Set ENTREZ_EMAIL=<your_email> or RL_SKIP_LITERATURE=1 to bypass. "
+            f"(NCBI_EMAIL is accepted as a backward-compat fallback.)"
         )
-    Entrez.email = _ncbi_email
+    Entrez.email = _entrez_email
     if api_key:
         Entrez.api_key = api_key
 
@@ -6800,35 +7059,27 @@ def literature_crosscheck(
             record = Entrez.read(handle)
             handle.close()
             count = int(record.get("Count", 0))
-            # v89 ROOT FIX: raise threshold from 1 to 3 hits. PubMed returns
-            # ≥1 hit for virtually ANY real drug + real disease combination
-            # (there are papers mentioning "aspirin" and "headache" even
-            # though aspirin is not a headache treatment). A 1-hit threshold
-            # is a no-op filter — every candidate passes. The v89 fix requires
-            # ≥3 hits, which is a meaningful discriminating threshold: only
-            # pairs with actual published co-mention evidence pass.
-            #
-            # P4-031 ROOT FIX (threshold clarification): the individual-pair
-            # threshold is 3 PubMed hits (per-pair support). This is DIFFERENT
-            # from the V1 launch criterion (DOCX §8) of "≥5 literature-
-            # supported predictions" (cohort-level). The two thresholds
-            # measure DIFFERENT things:
-            #   - Individual threshold (3 hits): does THIS pair have enough
-            #     published co-mention evidence to be "supported"?
-            #   - Launch criterion (5 supported pairs): does the COHORT of
-            #     top-N predictions contain at least 5 supported pairs?
-            # A pair with 3 hits is "supported" individually. The launch
-            # criterion requires at least 5 such supported pairs in the
-            # top-N. The two numbers (3 and 5) are NOT inconsistent — they
-            # measure different things but use the same word "support."
-            # This comment clarifies the distinction for maintainers.
-            c.literature_support = count >= 3
+            # Issue 175 ROOT FIX: align PubMed per-pair threshold to 5 hits
+            # (was 3). The user's audit found: "PubMed threshold=3 vs DOCX
+            # V1 criterion=5. Align to 5." The previous P4-031 comment
+            # argued 3 (per-pair) and 5 (cohort) were "different things"
+            # — but the user explicitly wants alignment to 5. A threshold
+            # of 5 PubMed hits is a STRICTER bar: only pairs with
+            # substantial published co-mention evidence pass. This reduces
+            # false positives (pairs that pass with 3 incidental mentions
+            # but have no real biological connection). The V1 launch
+            # criterion (DOCX §8: "≥5 literature-supported predictions")
+            # now uses the SAME threshold for both per-pair support and
+            # cohort-level counting, eliminating the confusing 3-vs-5
+            # distinction.
+            _PUBMED_SUPPORT_THRESHOLD = 5
+            c.literature_support = count >= _PUBMED_SUPPORT_THRESHOLD
             if hasattr(c, 'literature_count'):
                 c.literature_count = count
             logger.info(
                 f"  Literature: {c.drug} -> {c.disease}: "
                 f"{count} PubMed hits (support={c.literature_support}, "
-                f"threshold>=3)"
+                f"threshold>={_PUBMED_SUPPORT_THRESHOLD})"
             )
         except Exception as e:
             logger.warning(f"  Literature check failed for {c.drug}->{c.disease}: {e}")
@@ -9101,9 +9352,22 @@ def run_pipeline(
         # bridge, leaving the pipeline state inconsistent. The shared
         # helper applies the SAME ``max(cfg, KP_RECOVERY_THRESHOLD)``
         # formula in BOTH files, so they can NEVER disagree.
+        #
+        # Issue 180 ROOT FIX: pass n_test_kps (the number of KPs in the
+        # test set) so the threshold is SCALE-AWARE. The previous call
+        # passed only config.min_kp_recovery_rate, so the scale-aware
+        # base threshold (0.5 for ≥1000 KPs, 0.4 for 100-1000, 0.34 for
+        # <100) was NEVER applied — the function always used the fixed
+        # 0.5 fallback. On small demo graphs (2 KPs in test), the 0.5
+        # threshold meant "recover BOTH test KPs" which is not a
+        # meaningful bar. The fix passes n_test_kps from the recovery
+        # dict so the scale-aware base is actually computed.
         "kp_recovery_pass": (
             recovery["recovery_rate"]
-            >= _resolve_kp_recovery_threshold(config.min_kp_recovery_rate)
+            >= _resolve_kp_recovery_threshold(
+                config.min_kp_recovery_rate,
+                n_test_kps=int(recovery.get("n_kps_in_test", 0)),
+            )
         ),
         "n_candidates": len(candidates),
         # P4-012 ROOT FIX (LOW — Team Cosmic / Phase 4): the literature
@@ -9526,7 +9790,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "  RL_STRICT_SYMLINK_CHECK  Set to '1' to reject symlinked directories "
         "(default: warn and proceed)\n"
         "  RL_USER               Override the audit log actor username\n"
-        "  NCBI_EMAIL            Email for PubMed literature cross-check\n"
+        "  ENTREZ_EMAIL          Email for PubMed literature cross-check (Issue 174)\n"
+        "  NCBI_EMAIL            Backward-compat alias for ENTREZ_EMAIL\n"
         "\n"
         "P4-014 ROOT FIX: the RL_ALLOW_SCIENCE_FAILURE env var has been "
         "REMOVED. The scientific_validation gate CANNOT be bypassed via "

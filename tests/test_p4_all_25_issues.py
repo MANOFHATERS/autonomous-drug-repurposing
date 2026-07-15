@@ -422,11 +422,17 @@ class TestP4_020_ContinuousSafetyFactor:
         # safety=0.6 should NOT be hard-rejected
         assert reward > 0, f"safety=0.6 should give positive reward, got {reward}"
 
-        # Verify interpolation formula is in the source
+        # Issue 167 ROOT FIX: verify SIGMOID formula is in the source
+        # (replaced the old linear interpolation formula). The sigmoid
+        # is: 1 / (1 + exp(-k * (safety - warning))).
         import inspect
         source = inspect.getsource(RewardFunction.compute)
-        assert "safety_val - cfg.safety_hard_reject" in source, (
-            "Must use continuous interpolation formula"
+        assert "math.exp" in source or "_math.exp" in source, (
+            "Must use sigmoid formula (math.exp) for continuous safety_factor "
+            "(Issue 167 replaced linear interpolation with sigmoid)"
+        )
+        assert "safety_val" in source and "cfg.safety_warning" in source, (
+            "Must reference safety_val and cfg.safety_warning in the sigmoid formula"
         )
 
 
