@@ -140,9 +140,195 @@ CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
 CORE_EDGE_TYPES_SET: frozenset[Tuple[str, str, str]] = frozenset(CORE_EDGE_TYPES)
 
 
+# ─── v108 ROOT FIX (issues 70 & 71): Lowercase canonical node labels & canonical edge-type strings ──
+#
+# Phase 3 (graph_transformer) expects LOWERCASE node labels and canonical
+# `src_verb_dst` edge-type strings. The PascalCase labels above remain the
+# internal storage format (for backward compat with the Neo4j schema and
+# all existing loaders); these new constants provide the canonical export
+# format consumed by Phase 3 and by the KG-builder's `register_node` /
+# `register_edge` methods (issue 65 / 66).
+#
+# Mapping rationale (per the project docx + Phase 3 contract):
+#   * "Compound"  → "drug"        (the docx calls them "Drugs (10,000 FDA-approved compounds)")
+#   * "Protein"   → "protein"
+#   * "Gene"      → "gene"
+#   * "Disease"   → "disease"
+#   * "Pathway"   → "pathway"
+#   * "ClinicalOutcome" → "clinical_outcome"
+#   * "MedDRA_Term"     → "side_effect"   (per Phase 3 audit spec)
+#   * "Side Effect"     → "side_effect"   (legacy alias normalised)
+#   * "Anatomy"        → "anatomy"
+#   * "Pharmacologic Class" → "pharmacologic_class"
+#   * "Symptom"        → "symptom"
+#   * "Biological Process" → "biological_process"
+#   * "Molecular Function" → "molecular_function"
+#   * "Cellular Component" → "cellular_component"
+#   * "Taxonomy"       → "taxonomy"
+#   * "Gene Expression" → "gene_expression"
+#   * "Atc" / "ATC"    → "atc"
+#   * "Tax" / "TAX"    → "tax"
+#   * "Drug"           → "drug"           (literature-validated drug alias)
+NODE_LABEL_LOWERCASE: dict[str, str] = {
+    "Compound": "drug",
+    "Drug": "drug",
+    "Protein": "protein",
+    "Gene": "gene",
+    "Disease": "disease",
+    "Pathway": "pathway",
+    "ClinicalOutcome": "clinical_outcome",
+    "MedDRA_Term": "side_effect",
+    "Side Effect": "side_effect",
+    "Anatomy": "anatomy",
+    "Pharmacologic Class": "pharmacologic_class",
+    "Symptom": "symptom",
+    "Biological Process": "biological_process",
+    "Molecular Function": "molecular_function",
+    "Cellular Component": "cellular_component",
+    "Taxonomy": "taxonomy",
+    "Gene Expression": "gene_expression",
+    "Atc": "atc",
+    "ATC": "atc",
+    "Tax": "tax",
+    "TAX": "tax",
+}
+
+# Reverse mapping: lowercase canonical → primary PascalCase label.
+# For aliases ("Drug"→"drug", "Side Effect"→"side_effect", "ATC"→"atc",
+# "TAX"→"tax"), we map back to the PRIMARY form (the first one listed above).
+NODE_LABEL_PASCALCASE: dict[str, str] = {
+    "drug": "Compound",
+    "protein": "Protein",
+    "gene": "Gene",
+    "disease": "Disease",
+    "pathway": "Pathway",
+    "clinical_outcome": "ClinicalOutcome",
+    "side_effect": "MedDRA_Term",
+    "anatomy": "Anatomy",
+    "pharmacologic_class": "Pharmacologic Class",
+    "symptom": "Symptom",
+    "biological_process": "Biological Process",
+    "molecular_function": "Molecular Function",
+    "cellular_component": "Cellular Component",
+    "taxonomy": "Taxonomy",
+    "gene_expression": "Gene Expression",
+    "atc": "Atc",
+    "tax": "Tax",
+}
+
+
+def canonical_node_label(pascal_or_lower: str) -> str:
+    """Return the lowercase canonical form of a node label.
+
+    Accepts either PascalCase ("Compound") or already-lowercase ("drug").
+    Unknown labels are returned lowercased with non-alphanumerics replaced
+    by underscores (so callers can pass novel labels without crashing).
+    """
+    if pascal_or_lower is None:
+        return ""
+    s = str(pascal_or_lower)
+    if s in NODE_LABEL_LOWERCASE:
+        return NODE_LABEL_LOWERCASE[s]
+    if s in NODE_LABEL_PASCALCASE:
+        return s
+    # Unknown: normalise to lowercase + underscore
+    import re as _re
+    return _re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
+
+
+def pascal_node_label(lower: str) -> str:
+    """Return the PascalCase form of a lowercase canonical node label."""
+    if lower is None:
+        return ""
+    s = str(lower)
+    return NODE_LABEL_PASCALCASE.get(s, s)
+
+
+# ─── Canonical edge-type strings (issue 71) ─────────────────────────────────
+#
+# Each CORE_EDGE_TYPES tuple (src_pascal, verb, dst_pascal) maps to a single
+# canonical `src_verb_dst` string using the LOWERCASE node labels above.
+# Examples:
+#   ("Compound", "treats", "Disease")     → "drug_treats_disease"
+#   ("Compound", "inhibits", "Protein")   → "drug_inhibits_protein"
+#   ("Protein", "interacts_with", "Protein") → "protein_interacts_with_protein"
+#   ("Gene", "encodes", "Protein")        → "gene_encodes_protein"
+#   ("Compound", "causes_adverse_event", "MedDRA_Term") → "drug_causes_adverse_event_side_effect"
+#   ("Compound", "causes_side_effect", "Side Effect")   → "drug_causes_side_effect_side_effect"
+#
+# The verb is kept LITERAL (not collapsed) so each CORE_EDGE_TYPES tuple
+# produces a UNIQUE canonical name. The lowercase dst label is appended
+# even when the verb already contains a related noun (e.g. "causes_adverse_event"
+# + "side_effect" → "drug_causes_adverse_event_side_effect") — this preserves
+# the 1:1 mapping between CORE_EDGE_TYPES tuples and canonical strings.
+EDGE_TYPE_CANONICAL: dict[Tuple[str, str, str], str] = {}
+_EDGE_TYPE_CANONICAL_NAMES: set[str] = set()
+for _src, _verb, _dst in CORE_EDGE_TYPES:
+    _src_l = NODE_LABEL_LOWERCASE.get(_src, _src.lower())
+    _dst_l = NODE_LABEL_LOWERCASE.get(_dst, _dst.lower())
+    _name = f"{_src_l}_{_verb}_{_dst_l}"
+    EDGE_TYPE_CANONICAL[(_src, _verb, _dst)] = _name
+    _EDGE_TYPE_CANONICAL_NAMES.add(_name)
+del _src, _verb, _dst, _src_l, _dst_l, _name
+
+# Reverse map: canonical edge-type string → (src_pascal, verb, dst_pascal).
+# For ambiguous names (e.g. "drug_causes_side_effect" maps to both legacy
+# and canonical forms), we keep the CANONICAL form (MedDRA_Term) — the
+# legacy "Side Effect" form is mapped but not preferred.
+EDGE_TYPE_FROM_CANONICAL: dict[str, Tuple[str, str, str]] = {}
+for _tup, _name in EDGE_TYPE_CANONICAL.items():
+    _existing_tup = EDGE_TYPE_FROM_CANONICAL.get(_name)
+    if _existing_tup is None:
+        EDGE_TYPE_FROM_CANONICAL[_name] = _tup
+    else:
+        # Prefer the non-legacy form. Legacy edges use "Side Effect" as dst.
+        if "Side Effect" in (_existing_tup[0], _existing_tup[2]) and "Side Effect" not in (_tup[0], _tup[2]):
+            EDGE_TYPE_FROM_CANONICAL[_name] = _tup
+
+
+def canonical_edge_type(src: str, verb: str, dst: str) -> str:
+    """Return the canonical `src_verb_dst` string for an edge type.
+
+    Accepts PascalCase OR lowercase src/dst. The verb must already be in
+    snake_case form (e.g. "interacts_with", "treats", "causes_adverse_event").
+
+    Examples:
+        >>> canonical_edge_type("Compound", "treats", "Disease")
+        'drug_treats_disease'
+        >>> canonical_edge_type("drug", "inhibits", "protein")
+        'drug_inhibits_protein'
+    """
+    src_l = canonical_node_label(src)
+    dst_l = canonical_node_label(dst)
+    return f"{src_l}_{verb}_{dst_l}"
+
+
+def parse_canonical_edge_type(name: str) -> Tuple[str, str, str]:
+    """Inverse of :func:`canonical_edge_type`.
+
+    Returns the (PascalCase_src, verb, PascalCase_dst) tuple for a canonical
+    edge-type string. Raises ``KeyError`` if the name is not registered.
+    """
+    if name not in EDGE_TYPE_FROM_CANONICAL:
+        raise KeyError(
+            f"Unknown canonical edge type: {name!r}. "
+            f"Known types: {sorted(_EDGE_TYPE_CANONICAL_NAMES)}"
+        )
+    return EDGE_TYPE_FROM_CANONICAL[name]
+
+
 __all__ = [
     "CORE_NODE_TYPES",
     "DRKG_NODE_TYPES",
     "CORE_EDGE_TYPES",
     "CORE_EDGE_TYPES_SET",
+    # v108 (issues 70 & 71) — lowercase canonical labels & edge-type strings
+    "NODE_LABEL_LOWERCASE",
+    "NODE_LABEL_PASCALCASE",
+    "EDGE_TYPE_CANONICAL",
+    "EDGE_TYPE_FROM_CANONICAL",
+    "canonical_node_label",
+    "pascal_node_label",
+    "canonical_edge_type",
+    "parse_canonical_edge_type",
 ]

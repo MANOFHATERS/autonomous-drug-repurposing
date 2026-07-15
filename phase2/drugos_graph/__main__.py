@@ -704,12 +704,33 @@ def _check_input_files(argv: Sequence[str]) -> int:
     ``FileNotFoundError`` deep inside drkg_loader.py.  Here we list
     every missing file with its full path and recovery options.
 
+    v108 ROOT FIX (issue 75): when ``--from-saved PATH`` is in argv,
+    the pipeline loads a previously-saved ``RecordingGraphBuilder``
+    snapshot from PATH (no DRKG TSV, no DrugBank XML, no Phase 1 CSVs
+    required). Skip the input-files check entirely in that mode —
+    otherwise the check would spuriously fail on a missing
+    ``drkg.tsv`` even though the operator explicitly asked to load
+    from a snapshot.
+
     Returns
     -------
     int
         ``EXIT_SUCCESS`` if all required files exist (or --skip-download
-        not passed), else ``EXIT_ERROR``.
+        not passed, or --from-saved is set), else ``EXIT_ERROR``.
     """
+    # v108 ROOT FIX (issue 75): if --from-saved is set, the pipeline
+    # loads from a RecordingGraphBuilder snapshot — no input files are
+    # needed (no DRKG TSV, no DrugBank XML, no Phase 1 CSVs). Skip the
+    # input-files check entirely. The snapshot path itself is verified
+    # later by ``RecordingGraphBuilder.load()`` in step1_load_phase1.
+    if "--from-saved" in argv:
+        _logger.info(
+            "ISSUE-75: --from-saved is set; skipping input-files "
+            "pre-flight check (loading from RecordingGraphBuilder "
+            "snapshot, not from Phase 1 CSVs or DRKG TSV).",
+        )
+        return EXIT_SUCCESS
+
     if "--skip-download" not in argv:
         return EXIT_SUCCESS
 
@@ -720,10 +741,16 @@ def _check_input_files(argv: Sequence[str]) -> int:
     # processed_data CSVs via the phase1_bridge. The previous code
     # required drkg.tsv unconditionally, silently overriding the
     # --data-source phase1 flag.
+    # v108 ROOT FIX (issue 75): --from-phase1 is a synonym for
+    # --data-source phase1. Treat it the same way for the input-files
+    # check (skip the DRKG TSV requirement).
     data_source_phase1 = (
-        "--data-source" in argv
-        and argv.index("--data-source") + 1 < len(argv)
-        and argv[argv.index("--data-source") + 1] == "phase1"
+        "--from-phase1" in argv
+        or (
+            "--data-source" in argv
+            and argv.index("--data-source") + 1 < len(argv)
+            and argv[argv.index("--data-source") + 1] == "phase1"
+        )
     )
 
     missing: list[str] = []
@@ -1846,6 +1873,49 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     rc = _confirm_proceed(argv_list)
     if rc != EXIT_SUCCESS:
         return rc
+
+    # v108 ROOT FIX (issue 75): log which input mode is active so the
+    # operator can verify their --from-phase1 / --from-saved /
+    # --data-source choice was honored. This runs AFTER all pre-flight
+    # checks pass and BEFORE the pipeline call (the most useful place
+    # for a "what's about to happen" log). The mode is detected by
+    # scanning argv_list directly (the actual argparse parsing happens
+    # inside run_pipeline.main(); we can't import the parsed args
+    # without running main).
+    if "--from-saved" in argv_list:
+        # Find the path arg that follows --from-saved (if present).
+        _saved_path = "(unset)"
+        try:
+            _idx = argv_list.index("--from-saved")
+            if _idx + 1 < len(argv_list):
+                _saved_path = argv_list[_idx + 1]
+        except ValueError:
+            pass
+        _logger.info(
+            "ISSUE-75: input mode = FROM-SAVED — loading "
+            "RecordingGraphBuilder snapshot from %s (skipping Phase 1 "
+            "bridge; Phase 1 contract validation was performed at "
+            "save time).",
+            _saved_path,
+        )
+    elif "--from-phase1" in argv_list:
+        _logger.info(
+            "ISSUE-75: input mode = FROM-PHASE1 — synonym for "
+            "--data-source phase1; running Phase 1 bridge.",
+        )
+    else:
+        # Default mode: log the --data-source choice for traceability.
+        _ds = "phase1"  # default
+        if "--data-source" in argv_list:
+            try:
+                _idx = argv_list.index("--data-source")
+                if _idx + 1 < len(argv_list):
+                    _ds = argv_list[_idx + 1]
+            except ValueError:
+                pass
+        _logger.info(
+            "ISSUE-75: input mode = DATA-SOURCE (%s).", _ds,
+        )
 
     # ─── PHASE 4: PIPELINE INTEGRATION ─────────────────────────────────────
     # D1-ARCH-01 / D8-PERF-01: lazy import -- only triggered when actually

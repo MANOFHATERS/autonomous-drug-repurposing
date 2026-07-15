@@ -121,6 +121,13 @@ except ImportError:
     GraphDatabase = None
     READ_ACCESS = None
 
+# v108 ROOT FIX (issue 72): logger must be defined BEFORE the env-var
+# threshold block below uses it (lines ~165, ~177). Previously this was
+# defined at line ~251, AFTER the block, causing NameError at import time
+# whenever DRUGOS_STATS_MIN_COMPOUNDS or DRUGOS_STATS_MIN_GENES was set in
+# production mode. Moving the definition up here fixes the import-time crash.
+logger = logging.getLogger(__name__)
+
 from .config import (
     AUDIT_TRAIL_ENABLED,
     CANONICAL_IDS,
@@ -248,7 +255,7 @@ SANITY_CHECK_COMPOUNDS: List[Dict[str, str]] = [
     },
 ]
 
-logger = logging.getLogger(__name__)
+# (logger is now defined above, near the top of the module — see v108 issue 72)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1605,19 +1612,42 @@ class GraphStats:
             )
 
         self.report = stats
+        # v108 ROOT FIX (issue 72): surface per-node-type counts, per-edge-type
+        # counts, AND density in the log line — previously only total counts
+        # were logged, making it impossible to diagnose graph-skew issues
+        # (e.g. 0 protein nodes, all disease-treats edges missing) from logs.
+        _node_by_type = stats.get("node_counts_by_type", {}) or {}
+        _edge_by_type = stats.get("edge_counts_by_type", {}) or {}
+        _density = stats.get("density_homogeneous_naive")
+        _density_per_type = stats.get("density_per_edge_type", {}) or {}
         logger.info(
             "Stats computation complete: %s nodes, %s edges, "
-            "%s warnings, profile=%s",
+            "%s warnings, profile=%s. "
+            "Node types (%d): %s. "
+            "Edge types (%d): %s. "
+            "Density (homogeneous): %s. "
+            "Density per edge type (%d): %s.",
             stats.get("total_nodes", 0),
             stats.get("total_edges", 0),
             len(warnings),
             stats_profile,
+            len(_node_by_type),
+            dict(sorted(_node_by_type.items(), key=lambda kv: -kv[1])),
+            len(_edge_by_type),
+            dict(sorted(_edge_by_type.items(), key=lambda kv: -kv[1])),
+            _density if _density is not None else "n/a",
+            len(_density_per_type),
+            dict(sorted(_density_per_type.items(), key=lambda kv: str(kv[0]))),
             extra={
                 "total_nodes": stats.get("total_nodes", 0),
                 "total_edges": stats.get("total_edges", 0),
                 "warnings_count": len(warnings),
                 "correlation_id": CORRELATION_ID,
                 "pipeline_run_id": RUN_ID,
+                "node_counts_by_type": _node_by_type,
+                "edge_counts_by_type": _edge_by_type,
+                "density_homogeneous_naive": _density,
+                "density_per_edge_type": _density_per_type,
             },
         )
         return stats
@@ -2661,25 +2691,57 @@ if __name__ == "__main__":
             output = gs.generate_data_readme(stats=stats)
         else:
             # Text format
+            # v108 ROOT FIX (issue 72): surface per-node-type and per-edge-type
+            # counts AND density in the text CLI output — previously only total
+            # counts and type COUNTS were shown (e.g. "Node types: 4"), making
+            # it impossible to spot a graph with 0 protein nodes or 0 treats
+            # edges from the text output alone.
+            _node_by_type = stats.get("node_counts_by_type", {}) or {}
+            _edge_by_type = stats.get("edge_counts_by_type", {}) or {}
+            _density = stats.get("density_homogeneous_naive")
+            _density_per_type = stats.get("density_per_edge_type", {}) or {}
             lines = [
                 f"DrugOS Graph Stats (v{__version__})",
                 f"Generated: {stats.get('computed_at', 'unknown')}",
                 "",
                 f"Total nodes: {stats.get('total_nodes', 0):,}",
                 f"Total edges: {stats.get('total_edges', 0):,}",
-                f"Node types: "
-                f"{len(stats.get('node_counts_by_type', {}))}",
-                f"Edge types: "
-                f"{len(stats.get('edge_counts_by_type', {}))}",
-                f"Avg out-degree: "
-                f"{stats.get('avg_out_degree', 0)}",
-                f"Isolated nodes: "
-                f"{stats.get('isolated_nodes', 'unknown')}",
+                f"Node types: {len(_node_by_type)}",
+                f"Edge types: {len(_edge_by_type)}",
+                f"Avg out-degree: {stats.get('avg_out_degree', 0)}",
+                f"Isolated nodes: {stats.get('isolated_nodes', 'unknown')}",
+                "",
+                "Node counts by type:",
+            ]
+            if _node_by_type:
+                for _lbl, _cnt in sorted(_node_by_type.items(), key=lambda kv: -kv[1]):
+                    lines.append(f"  {_lbl:<30} {_cnt:>10,}")
+            else:
+                lines.append("  (none)")
+            lines.append("")
+            lines.append("Edge counts by type:")
+            if _edge_by_type:
+                for _rel, _cnt in sorted(_edge_by_type.items(), key=lambda kv: -kv[1]):
+                    lines.append(f"  {_rel:<40} {_cnt:>10,}")
+            else:
+                lines.append("  (none)")
+            lines.append("")
+            lines.append(
+                f"Density (homogeneous naive): "
+                f"{_density if _density is not None else 'n/a'}"
+            )
+            lines.append("Density per edge type:")
+            if _density_per_type:
+                for _rel, _val in sorted(_density_per_type.items(), key=lambda kv: str(kv[0])):
+                    lines.append(f"  {str(_rel):<40} {_val}")
+            else:
+                lines.append("  (none)")
+            lines.extend([
                 "",
                 f"Week {args.week} Exit Criteria: "
                 f"{criteria['passed_count']}/{criteria['total_count']} "
                 f"passed",
-            ]
+            ])
             for crit in criteria.get("criteria", []):
                 status = "PASS" if crit["passed"] else "FAIL"
                 lines.append(

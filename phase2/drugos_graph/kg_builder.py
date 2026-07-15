@@ -163,6 +163,16 @@ SYSTEM_PROPS: frozenset[str] = frozenset({
     "_updated_at",
     "_version",
     "_source_priority",  # BUG-D-011: deterministic dedup ordering
+    # v108 ROOT FIX (issue 65): canonical_id is the full prefixed canonical
+    # ID (e.g. "protein:P12821") stored as a node property by
+    # RecordingGraphBuilder.register_node. It must survive the whitelist
+    # filter so downstream consumers (Phase 3, graph_queries) can use the
+    # prefixed form.
+    "canonical_id",
+    # v108 ROOT FIX (issue 66): _src_canonical_id / _dst_canonical_id are
+    # stored on edges by RecordingGraphBuilder.register_edge for traceability.
+    "_src_canonical_id",
+    "_dst_canonical_id",
 })
 
 # BUG-D-011 root fix: source priority map. The ``deduplicate_edges_deterministic``

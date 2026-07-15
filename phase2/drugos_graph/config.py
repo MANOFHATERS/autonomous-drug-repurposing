@@ -2059,10 +2059,9 @@ GEO_SKIP_RECORD_COUNT_GUARD: bool = (
     os.environ.get("GEO_SKIP_RECORD_COUNT_GUARD", "0") == "1"
 )
 
-# DRUGOS_ENV — environment selector (GEO-12.9). Default "dev".
+# DRUGOS_ENV — environment selector (GEO-12.9). Default "production" (v108 issue 76).
+#   * "production" / "prod" / "staging" / "stage" — production-grade thresholds
 #   * "dev"     — small test series for fast iteration
-#   * "staging" — pinned series GSE92649
-#   * "prod"    — pinned series GSE92649
 # v29 ROOT FIX (audit I-4 — THREE environment selectors): the codebase
 # had THREE different env selectors with DIFFERENT defaults:
 #   DRUGOS_ENV (default "dev") — DEAD, not used anywhere
@@ -3403,8 +3402,11 @@ class TransEConfig:
         default_factory=lambda: int(
             os.environ.get(
                 "DRUGOS_TRANSE_MIN_TRAIN_TRIPLES",
-                "5" if os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
-                not in ("prod", "production")
+                # v108 ROOT FIX (issue 76): use _get_dev_mode() so staging
+                # is treated as production (consistent with the rest of the
+                # codebase). Was: "not in (prod, production)" which let
+                # staging sneak in with dev-level thresholds.
+                "5" if _get_dev_mode()
                 else "100",
             )
         )
@@ -3418,8 +3420,8 @@ class TransEConfig:
         default_factory=lambda: int(
             os.environ.get(
                 "DRUGOS_TRANSE_MIN_VAL_TRIPLES",
-                "2" if os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
-                not in ("prod", "production")
+                # v108 ROOT FIX (issue 76): use _get_dev_mode() (treats staging as production).
+                "2" if _get_dev_mode()
                 else "30",
             )
         )
@@ -5371,7 +5373,9 @@ def assert_auc_meets_threshold(
         # (the default), which raised AUCBelowThresholdError on the toy
         # fixture's AUC 0.67 < 0.85 → V1 launch criteria always failed.
         # Production (DRUGOS_ENVIRONMENT=production) keeps STANDARD.
-        _dev_mode = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() not in ("prod", "production")
+        # v108 ROOT FIX (issue 76): use _get_dev_mode() so staging is treated
+        # as production (consistent with min_train_triples / MIN_POSITIVE_PAIRS).
+        _dev_mode = _get_dev_mode()
         if _dev_mode and not STRICT_AUC_ENFORCEMENT:
             enforcement_level = AUCEnforcementLevel.RELAXED
         elif _dev_mode:
@@ -5487,7 +5491,9 @@ def check_auc_meets_threshold(
     if threshold is None:
         threshold = get_target_auc()
     if enforcement_level is None:
-        _dev_mode = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() not in ("prod", "production")
+        # v108 ROOT FIX (issue 76): use _get_dev_mode() so staging is treated
+        # as production (consistent with min_train_triples / MIN_POSITIVE_PAIRS).
+        _dev_mode = _get_dev_mode()
         if _dev_mode and not STRICT_AUC_ENFORCEMENT:
             enforcement_level = AUCEnforcementLevel.RELAXED
         elif _dev_mode:
@@ -7158,12 +7164,17 @@ def apply_config_overrides(overrides: dict[str, Any] | None = None) -> None:
 
 # Fixes audit issue 12.10 — environment configs
 # v29 ROOT FIX (audit I-4): ENVIRONMENT was defaulting to "development"
-# while DRUGOS_ENVIRONMENT defaults to "dev". These are DIFFERENT
-# strings, so code that checked ENVIRONMENT got "development" while
-# code that checked DRUGOS_ENVIRONMENT got "dev" — contradictory.
-# ROOT FIX: make ENVIRONMENT an alias of DRUGOS_ENVIRONMENT (same
-# default "dev"). The ENVIRONMENT_CONFIGS dict below now keys on
-# "dev" / "staging" / "prod" (matching DRUGOS_ENVIRONMENT values).
+# while DRUGOS_ENVIRONMENT was historically defaulting to "dev". These
+# are DIFFERENT strings, so code that checked ENVIRONMENT got
+# "development" while code that checked DRUGOS_ENVIRONMENT got "dev" —
+# contradictory.
+# v108 ROOT FIX (issue 76): DRUGOS_ENVIRONMENT now defaults to "production"
+# (not "dev"). Dev mode is opt-in via DRUGOS_ENVIRONMENT=dev. All four
+# dev-mode detection sites (min_train_triples, min_val_triples, two AUC
+# enforcement sites) now route through _get_dev_mode() which treats
+# {prod, production, stage, staging} as production. This eliminates the
+# previous inconsistency where staging runs got dev-level triple
+# thresholds but production-level pair thresholds.
 ENVIRONMENT: str = os.environ.get("DRUGOS_ENVIRONMENT", "production")
 
 # v29 ROOT FIX (audit I-5): ENVIRONMENT_CONFIGS + apply_environment_config

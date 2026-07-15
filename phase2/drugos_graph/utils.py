@@ -597,6 +597,35 @@ _RAW_LABEL_ENTRIES: Final[dict[str, LabelEntry]] = {
         ontology_version="26.0",
         source="SIDER",
     ),
+    # v108 ROOT FIX (issue 78 follow-up): ClinicalOutcome is a CORE_NODE_TYPE
+    # (declared in config_schema.py) but was missing from this label map. The
+    # previous utils.validate_schema() silently swallowed this drift; now that
+    # the validator RAISES, the missing entry must be added. ClinicalOutcome
+    # nodes carry the structured clinical trial outcome data (Phase 2 source
+    # ClinicalTrials.gov / AACT) — they are distinct from Disease and from
+    # MedDRA_Term (adverse events). Their canonical ID is clinical_outcome_id
+    # (per config.CANONICAL_IDS).
+    "ClinicalOutcome": LabelEntry(
+        neo4j_label="ClinicalOutcome",
+        ontology="AACT/ClinicalTrials.gov",
+        ontology_version="2024_05",
+        source="ClinicalTrials",
+    ),
+    # v108 ROOT FIX (issue 78 follow-up): "Drug" appears in CORE_EDGE_TYPES
+    # as the source of ("Drug", "validated_treats", "Disease") — the
+    # literature-validated drug-treats-disease edge from the PubMed
+    # cross-check pipeline (Phase 6). "Drug" is a semantic alias of
+    # "Compound" (per the project docx: "Drugs (10,000 FDA-approved
+    # compounds)"); we keep "Drug" as a distinct label so the KG can
+    # distinguish literature-validated treatments from ChEMBL/DrugBank
+    # "Compound" treatments. Their canonical ID is drugbank_id (the
+    # validating source is DrugBank/PubMed).
+    "Drug": LabelEntry(
+        neo4j_label="Drug",
+        ontology="DrugBank/PubMed",
+        ontology_version="current",
+        source="LiteratureValidation",
+    ),
 }
 
 
@@ -2002,8 +2031,12 @@ def validate_schema() -> None:
         )
 
     # Issue 1.2 -- utils dict may have ONLY these non-DRKG extras
-    # (Protein is UniProt-only; ATC/TAX are case aliases of Atc/Tax)
-    allowed_extras = {"Protein", "ATC", "TAX"}
+    # (Protein is UniProt-only; ATC/TAX are case aliases of Atc/Tax;
+    #  ClinicalOutcome is Phase-2-only — sourced from ClinicalTrials.gov /
+    #  AACT, not from DRKG, but is a CORE_NODE_TYPE so must be in the map.
+    #  Drug is a Phase-6 literature-validation alias of Compound — appears
+    #  in CORE_EDGE_TYPES as the source of "validated_treats".)
+    allowed_extras = {"Protein", "ATC", "TAX", "ClinicalOutcome", "Drug"}
     extras = utils_set - cfg_set
     unexpected_extras = extras - allowed_extras
     if unexpected_extras:
@@ -2078,13 +2111,18 @@ except ImportError:
         "validate_schema deferred to runtime (config not yet importable)"
     )
 except ValueError as _schema_err:
-    # Schema drift is a fatal bug, but we don't crash the import -- we log
-    # loudly so operators notice. run_pipeline.py should call
-    # validate_schema() explicitly at startup and fail fast there.
+    # v108 ROOT FIX (issue 78): Schema drift is a FATAL bug — it means the
+    # node labels, edge types, or canonical ID mappings do not match the
+    # Phase 1 contract. Wrong labels → wrong frequencies → wrong safety
+    # tier → patient harm. Previously this was logged as ERROR but the
+    # module continued to load, silently shipping a corrupt label map to
+    # every downstream consumer. Now we re-raise so the import aborts
+    # loudly at the earliest possible point.
     logger.error(
         "schema_validation_failed_at_module_load",
         extra={"error": str(_schema_err)[:500]},
     )
+    raise
 
 
 # ─── Plugin registration ──────────────────────────────────────────────────

@@ -544,6 +544,316 @@ def _load_phase1_entity_mapping_table() -> Optional[Dict[str, "EntityMapping"]]:
         return None
 
 
+# v108 ROOT FIX (issue 68): cache for the AUTHORITATIVE source index.
+# Keyed by ``(source_name, source_id)`` tuples -- e.g.
+# ``("drugbank", "DB00945")`` -> ``"BSYNRYMUTXBXSQ-UHFFFAOYSA-N"``.
+# Built from Phase 1's persistent ``entity_mapping`` table so the
+# resolver can match input records by their drugbank_id / chembl_id /
+# pubchem_cid / inchikey and reuse the persistent canonical_id directly
+# (no re-resolution). See ``_load_phase1_entity_mapping_source_index``.
+_phase1_entity_mapping_source_index_cache: Optional[Dict[Tuple[str, str], str]] = None
+
+
+def _load_phase1_entity_mapping_source_index() -> Optional[Dict[Tuple[str, str], str]]:
+    """v108 ROOT FIX (issue 68): build an AUTHORITATIVE source index from
+    Phase 1's persistent ``entity_mapping`` table.
+
+    The returned dict maps ``(source_name, source_id)`` tuples to the
+    persistent ``canonical_inchikey``. ``source_name`` is one of
+    ``"drugbank"``, ``"chembl"``, ``"pubchem"``, ``"inchikey"`` --
+    corresponding to the ``drugbank_id``, ``chembl_id``, ``pubchem_cid``,
+    and ``canonical_inchikey`` columns of Phase 1's ``EntityMapping`` ORM
+    model (see ``phase1/database/models.py``).
+
+    Why this exists
+    ---------------
+    The prior v38 fix only *seeded* the mapping store from Phase 1's
+    persistent table -- it did NOT make the persistent table
+    AUTHORITATIVE. Phase 2 still re-resolved every input drug record
+    through Phase 1's ``DrugResolver`` algorithm and adopted the freshly
+    computed ``canonical_inchikey``. On edge cases (stereoisomer collapse,
+    salt-form detection, PubChem circuit-breaker disagreements) the fresh
+    resolution could diverge from the persistent record, silently
+    corrupting the knowledge graph (same molecule -> two nodes).
+
+    The fix: callers use this index to look up the persistent
+    ``canonical_inchikey`` for each input record. If found, the persistent
+    ID is used DIRECTLY -- no re-resolution. Only records NOT in the
+    index get re-resolved via Phase 1's ``DrugResolver``, and the new
+    mappings are written BACK to the persistent table by
+    ``_write_back_phase1_entity_mappings`` (so future runs find them in
+    the index).
+
+    Returns
+    -------
+    Optional[Dict[Tuple[str, str], str]]
+        ``None`` if Phase 1's database is unavailable, the table is
+        empty, or any error occurs (graceful degradation -- callers fall
+        back to re-resolution for every record). Otherwise, the index
+        dict (cached for the lifetime of the process).
+
+    Caching
+    -------
+    The index is cached for the lifetime of the process. Phase 1's
+    ``entity_mapping`` table is append-only during a single Phase 2 run,
+    so caching is safe. ``_write_back_phase1_entity_mappings`` updates
+    the cache in-place after each successful write-back so subsequent
+    calls within the same process see the new entries.
+    """
+    global _phase1_entity_mapping_source_index_cache
+    if _phase1_entity_mapping_source_index_cache is not None:
+        return _phase1_entity_mapping_source_index_cache
+
+    try:
+        # Phase 1's database connection module.
+        from database.connection import get_engine  # type: ignore[import-not-found]
+        from database.models import EntityMapping as P1EntityMapping  # type: ignore[import-not-found]
+        from sqlalchemy import select
+    except Exception as exc:
+        logger.warning(
+            "v108 issue-68: Phase 1 database modules not available (%s). "
+            "Cannot build authoritative source index -- every input "
+            "record will be re-resolved via Phase 1's DrugResolver.",
+            exc,
+        )
+        return None
+
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            stmt = select(P1EntityMapping)
+            df = pd.read_sql(stmt, conn)
+        if df.empty:
+            logger.info(
+                "v108 issue-68: Phase 1 entity_mapping table is empty. "
+                "All input records will be re-resolved via Phase 1's "
+                "DrugResolver (and written back after).",
+            )
+            return None
+
+        index: Dict[Tuple[str, str], str] = {}
+        for _, row in df.iterrows():
+            canonical_id = str(row.get("canonical_inchikey", "") or "").strip()
+            if not canonical_id:
+                continue
+            # Index by every available source identifier so callers can
+            # match by whichever ID they have on hand. This implements
+            # the "match by source_id + source_name" requirement from the
+            # issue 68 spec -- source_name corresponds to the column
+            # being matched (drugbank_id, chembl_id, pubchem_cid, or
+            # canonical_inchikey itself).
+            for source_name, col in (
+                ("drugbank", "drugbank_id"),
+                ("chembl", "chembl_id"),
+                ("pubchem", "pubchem_cid"),
+                ("inchikey", "canonical_inchikey"),
+            ):
+                src_id = row.get(col)
+                if src_id is None:
+                    continue
+                src_id_str = str(src_id).strip()
+                if not src_id_str or src_id_str.lower() in (
+                    "nan", "none", "null", "na",
+                ):
+                    continue
+                # First write wins -- if two rows claim the same
+                # source_id (shouldn't happen due to unique partial
+                # indexes on the table, but be defensive), prefer the
+                # row we saw first so the index is deterministic.
+                index.setdefault((source_name, src_id_str), canonical_id)
+
+        if not index:
+            logger.warning(
+                "v108 issue-68: Phase 1 entity_mapping table had %d rows "
+                "but 0 produced source-index entries. All input records "
+                "will be re-resolved.", len(df),
+            )
+            return None
+
+        logger.info(
+            "v108 issue-68: built AUTHORITATIVE source index with %d "
+            "entries from Phase 1's entity_mapping table (%d rows). "
+            "Phase 2 will reuse the persistent canonical_inchikey "
+            "directly for any input record that matches.", len(index), len(df),
+        )
+        _phase1_entity_mapping_source_index_cache = index
+        return index
+    except Exception as exc:
+        logger.warning(
+            "v108 issue-68: could not build source index from Phase 1's "
+            "entity_mapping table (%s). All input records will be "
+            "re-resolved. This is OK in dev (no PostgreSQL) but "
+            "indicates a problem in production.", exc,
+        )
+        return None
+
+
+def _write_back_phase1_entity_mappings(
+    new_mappings: List[Dict[str, Any]],
+) -> int:
+    """v108 ROOT FIX (issue 68): write newly-resolved mappings BACK to
+    Phase 1's persistent ``entity_mapping`` table.
+
+    This ensures future runs do NOT re-resolve the same entities -- they
+    will be found in the persistent table by
+    ``_load_phase1_entity_mapping_source_index`` and reused directly.
+    The write is best-effort: on any failure, the function logs a
+    WARNING and returns 0, never raising. The pipeline continues
+    unchanged (the only consequence of a failed write-back is that the
+    next run will re-resolve the same records -- correctness is
+    preserved, only efficiency is lost).
+
+    Parameters
+    ----------
+    new_mappings : list of dict
+        Each dict has keys: ``canonical_inchikey``, ``canonical_name``,
+        ``drugbank_id``, ``chembl_id``, ``pubchem_cid``,
+        ``match_confidence``, ``match_method``.
+
+    Returns
+    -------
+    int
+        Number of rows successfully written (inserted or updated).
+    """
+    if not new_mappings:
+        return 0
+    try:
+        # Prefer Phase 1's official loader -- it has the correct
+        # ON CONFLICT logic for both PostgreSQL and SQLite, the
+        # match_history bookkeeping (LINE-04), and the input checksum
+        # (LINE-05). If the loader is unavailable (e.g. phase1/ not on
+        # sys.path), fall back to a raw-SQL write below.
+        from database.connection import get_engine  # type: ignore[import-not-found]
+        from database.loaders import bulk_upsert_entity_mapping  # type: ignore[import-not-found]
+        from sqlalchemy.orm import Session
+        _loader_available = True
+    except Exception as exc:
+        logger.warning(
+            "v108 issue-68: cannot import Phase 1 loader for write-back "
+            "(%s). Falling back to raw-SQL write (no match_history "
+            "bookkeeping). The mappings will be re-resolved on the next "
+            "run if the fallback also fails.", exc,
+        )
+        _loader_available = False
+
+    # Deduplicate by canonical_inchikey (the persistent table has a
+    # partial unique index on it). Keep the first occurrence.
+    seen_cik: set = set()
+    deduped: List[Dict[str, Any]] = []
+    for m in new_mappings:
+        cik = (m.get("canonical_inchikey") or "").strip() if m.get("canonical_inchikey") else ""
+        if not cik or cik in seen_cik:
+            continue
+        seen_cik.add(cik)
+        deduped.append(m)
+    if not deduped:
+        return 0
+
+    rows_written = 0
+    if _loader_available:
+        try:
+            df = pd.DataFrame(deduped)
+            # pubchem_cid is BigInteger in the ORM -- coerce to int or NaN.
+            if "pubchem_cid" in df.columns:
+                df["pubchem_cid"] = pd.to_numeric(
+                    df["pubchem_cid"], errors="coerce",
+                )
+            engine = get_engine()
+            with Session(engine) as session:
+                result = bulk_upsert_entity_mapping(session, df)
+                session.commit()
+            rows_written = int(result.inserted) + int(result.updated)
+            logger.info(
+                "v108 issue-68: wrote back %d new mappings to Phase 1's "
+                "entity_mapping table (inserted=%d, updated=%d, "
+                "quarantined=%d, failed=%d).",
+                rows_written, result.inserted, result.updated,
+                result.quarantined, result.failed,
+            )
+        except Exception as exc:
+            logger.warning(
+                "v108 issue-68: Phase 1 loader write-back failed (%s). "
+                "The mappings will be re-resolved on the next run.",
+                exc,
+            )
+            rows_written = 0
+
+    if rows_written == 0:
+        # Last-resort raw-SQL fallback (only used if the loader import
+        # failed OR the loader itself raised). Uses ON CONFLICT DO
+        # NOTHING so we never clobber an existing persistent row that
+        # might have been written by a concurrent Phase 1 pipeline run.
+        try:
+            from database.connection import get_engine  # type: ignore[import-not-found]
+            from sqlalchemy import text as _sa_text
+            engine = get_engine()
+            with engine.begin() as conn:
+                for m in deduped:
+                    conn.execute(_sa_text(
+                        "INSERT INTO entity_mapping "
+                        "(canonical_inchikey, canonical_name, chembl_id, "
+                        " drugbank_id, pubchem_cid, match_confidence, "
+                        " match_method, last_matched_at) "
+                        "VALUES (:cik, :cnm, :cid, :did, :pid, :mc, :mm, :lma) "
+                        "ON CONFLICT DO NOTHING"
+                    ), {
+                        "cik": m.get("canonical_inchikey") or None,
+                        "cnm": m.get("canonical_name") or None,
+                        "cid": m.get("chembl_id") or None,
+                        "did": m.get("drugbank_id") or None,
+                        "pid": m.get("pubchem_cid") or None,
+                        "mc": m.get("match_confidence"),
+                        "mm": m.get("match_method") or "phase1_delegated",
+                        "lma": datetime.now(timezone.utc),
+                    })
+                    rows_written += 1
+            if rows_written > 0:
+                logger.info(
+                    "v108 issue-68: raw-SQL fallback wrote %d new "
+                    "mappings to Phase 1's entity_mapping table.",
+                    rows_written,
+                )
+        except Exception as exc:
+            logger.warning(
+                "v108 issue-68: raw-SQL write-back also failed (%s). "
+                "The mappings will be re-resolved on the next run.",
+                exc,
+            )
+            rows_written = 0
+
+    # Update the in-process source-index cache so subsequent calls to
+    # _load_phase1_entity_mapping_source_index see the new entries
+    # (avoids re-resolving the same records if the resolver is called
+    # again within the same process).
+    if rows_written > 0:
+        global _phase1_entity_mapping_source_index_cache
+        if _phase1_entity_mapping_source_index_cache is None:
+            # If the cache was None (table was empty/unavailable on the
+            # first call), initialize it now so the new entries are
+            # visible.
+            _phase1_entity_mapping_source_index_cache = {}
+        for m in deduped:
+            cik = m.get("canonical_inchikey")
+            if not cik:
+                continue
+            for source_name, key in (
+                ("drugbank", m.get("drugbank_id")),
+                ("chembl", m.get("chembl_id")),
+                ("pubchem", m.get("pubchem_cid")),
+                ("inchikey", cik),
+            ):
+                if key is None:
+                    continue
+                key_str = str(key).strip()
+                if not key_str:
+                    continue
+                _phase1_entity_mapping_source_index_cache.setdefault(
+                    (source_name, key_str), cik,
+                )
+
+    return rows_written
+
+
 def _get_phase1_drug_resolver() -> Optional[Any]:
     """Lazily import and cache Phase 1's :class:`DrugResolver`.
 
@@ -1714,6 +2024,22 @@ class EntityResolver:
                     "drugos_entity_resolver_dead_letter_total",
                     "Total dead-lettered",
                 ),
+                # v108 ROOT FIX (issue 68): two new counters so operators
+                # can see the ratio of records reused from Phase 1's
+                # persistent entity_mapping table vs. newly re-resolved
+                # via Phase 1's DrugResolver. A healthy production
+                # pipeline should show reused >> newly_resolved after the
+                # first run (the table is append-only across runs).
+                "reused_from_phase1": _C(
+                    "drugos_entity_resolver_reused_from_phase1_total",
+                    "Records reused directly from Phase 1's persistent "
+                    "entity_mapping table (no re-resolution)",
+                ),
+                "newly_resolved": _C(
+                    "drugos_entity_resolver_newly_resolved_total",
+                    "Records newly resolved via Phase 1's DrugResolver "
+                    "(not in persistent table; written back after)",
+                ),
             }
         except Exception:
             class _DummyCounter:
@@ -1729,7 +2055,8 @@ class EntityResolver:
             return {
                 k: _DummyCounter()
                 for k in ("lookups", "unresolved", "duplicates",
-                          "conflicts", "dead_letter")
+                          "conflicts", "dead_letter",
+                          "reused_from_phase1", "newly_resolved")
             }
 
     # ------------------------------------------------------------------
@@ -2266,11 +2593,43 @@ class EntityResolver:
         translated from Phase 1's output and returns a stats dict in
         the same shape as ``_resolve_compounds_from_drugbank_impl``.
 
-        v38 ROOT FIX: before re-resolving, SEED the mapping store with
-        Phase 1's persistent ``entity_mapping`` table output. This
-        ensures Phase 2 agrees with Phase 1's authoritative resolution
-        for entities Phase 1 already covered. Only entities NOT in the
-        table are re-resolved from scratch.
+        v38 ROOT FIX (PARTIAL): before re-resolving, SEED the mapping
+        store with Phase 1's persistent ``entity_mapping`` table
+        output. This ensures Phase 2 agrees with Phase 1's
+        authoritative resolution for entities Phase 1 already covered.
+        Only entities NOT in the table are re-resolved from scratch.
+
+        v108 ROOT FIX (issue 68, COMPLETE): the v38 seed was
+        NON-AUTHORITATIVE -- Phase 2 still re-resolved every input
+        drug record through Phase 1's ``DrugResolver`` algorithm and
+        adopted the freshly computed ``canonical_inchikey``, which
+        could diverge from the persistent record on edge cases
+        (stereoisomer collapse, salt-form detection disagreements).
+        The v108 fix makes Phase 1's persistent ``entity_mapping``
+        table AUTHORITATIVE for any input record that matches an
+        existing entry (by ``drugbank_id``, ``chembl_id``,
+        ``pubchem_cid``, or ``inchikey``):
+
+          1. Build a source index from the persistent table
+             (``_load_phase1_entity_mapping_source_index``).
+          2. For each input drug record, look up its persistent
+             ``canonical_inchikey``. If found, use it DIRECTLY -- do
+             NOT re-resolve. Increment the ``reused_from_phase1``
+             counter.
+          3. Only records NOT in the persistent table get re-resolved
+             via Phase 1's ``DrugResolver``. Increment the
+             ``newly_resolved`` counter for each.
+          4. After re-resolution, write the new mappings BACK to the
+             persistent table (``_write_back_phase1_entity_mappings``)
+             so future runs find them in the index.
+
+        Backward compatibility: if the persistent table is empty or
+        unreachable, every input record is re-resolved (the v38
+        behavior) and no write-back is attempted. The new
+        ``reused_from_phase1`` and ``newly_resolved`` counters in the
+        returned stats dict let operators see the reuse ratio at a
+        glance (healthy production: reused >> newly_resolved after
+        the first run).
         """
         # v38 ROOT FIX: seed with Phase 1's entity_mapping table.
         p1_mappings = _load_phase1_entity_mapping_table()
@@ -2307,6 +2666,11 @@ class EntityResolver:
                     "skipped_no_id": 0,
                     "duplicates_detected": 0,
                     "conflicts_detected": 0,
+                    # v108 issue-68: new counters (zero on this path --
+                    # we couldn't reach Phase 1's resolver so neither
+                    # counter applies).
+                    "reused_from_phase1": 0,
+                    "newly_resolved": 0,
                 }
             return None
         try:
@@ -2320,13 +2684,178 @@ class EntityResolver:
                     "rejected_low_confidence": 0,
                     "skipped_no_id": 0,
                     "duplicates_detected": 0, "conflicts_detected": 0,
+                    # v108 issue-68: new counters (zero on this path --
+                    # no input records to process).
+                    "reused_from_phase1": 0,
+                    "newly_resolved": 0,
                 }
 
-            # Phase 1's DrugResolver expects per-source records with
-            # 'name' and ideally 'inchikey' fields. Translate our
-            # DrugBank KG-builder records into Phase 1's ingest format.
-            p1_records: List[Dict[str, Any]] = []
+            # v108 ROOT FIX (issue 68): build the AUTHORITATIVE source
+            # index from Phase 1's persistent entity_mapping table. For
+            # any input record that matches an existing entry (by
+            # drugbank_id or inchikey), reuse the persistent
+            # canonical_inchikey DIRECTLY -- do NOT re-resolve. Only
+            # records NOT in the persistent table get re-resolved via
+            # Phase 1's DrugResolver below.
+            source_index = _load_phase1_entity_mapping_source_index()
+            reused_records: List[Tuple[Dict[str, Any], str]] = []
+            new_drugs: List[Dict[str, Any]] = []
+            seen_reused_keys: set = set()
             for drug in records_list:
+                if not isinstance(drug, dict):
+                    continue
+                db_id = str(drug.get("drugbank_id", "")).strip()
+                if not db_id or db_id == "None":
+                    continue
+                # Look up the persistent canonical_inchikey for this
+                # input record. Try drugbank_id first (most specific),
+                # then fall back to inchikey (covers Phase 1 entries
+                # that lack a drugbank_id but have canonical_inchikey).
+                persistent_canonical_id: Optional[str] = None
+                if source_index is not None:
+                    persistent_canonical_id = source_index.get(
+                        ("drugbank", db_id),
+                    )
+                    if persistent_canonical_id is None:
+                        ik = _normalize_inchikey(drug.get("inchikey", ""))
+                        if ik:
+                            persistent_canonical_id = source_index.get(
+                                ("inchikey", ik),
+                            )
+                if persistent_canonical_id is not None and \
+                        ("drugbank", db_id) not in seen_reused_keys:
+                    reused_records.append((drug, persistent_canonical_id))
+                    seen_reused_keys.add(("drugbank", db_id))
+                else:
+                    new_drugs.append(drug)
+
+            # v108 issue-68: stats dict is initialized here (moved up
+            # from below the Phase 1 call so the reused-records loop
+            # can increment its counters). The ``newly_resolved`` and
+            # ``reused_from_phase1`` keys are new in v108.
+            stats = {
+                "total": len(records_list),
+                "resolved": 0,
+                "rejected_withdrawn": 0,
+                "rejected_deprecated": 0,
+                "rejected_low_confidence": 0,
+                "skipped_no_id": 0,
+                "duplicates_detected": 0,
+                "conflicts_detected": 0,
+                "reused_from_phase1": 0,
+                "newly_resolved": 0,
+            }
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # v108 issue-68: build EntityMapping for each reused record
+            # DIRECTLY from the persistent canonical_inchikey. This is
+            # the AUTHORITATIVE path -- we trust Phase 1's prior
+            # resolution and do NOT re-resolve.
+            for drug, persistent_canonical_id in reused_records:
+                db_id = str(drug.get("drugbank_id", "")).strip()
+                chembl_id = str(drug.get("chembl_id", "") or "").strip()
+                pubchem_cid = str(drug.get("pubchem_cid", "") or "").strip()
+                aliases: Dict[str, Union[str, List[str]]] = {
+                    "inchikey": persistent_canonical_id,
+                }
+                if db_id:
+                    aliases["drugbank_id"] = db_id
+                    aliases["drkg_id"] = db_id
+                if chembl_id:
+                    aliases["chembl_id"] = chembl_id
+                if pubchem_cid:
+                    aliases["pubchem_cid"] = pubchem_cid
+                name = _sanitize_name(
+                    str(drug.get("name", "") or db_id or persistent_canonical_id),
+                    self._name_max_length,
+                )
+                provenance = Provenance(
+                    _source="phase1_entity_mapping_table",
+                    _source_version="v108",
+                    _parsed_at=now_iso,
+                    _parser_version="entity_resolver.issue68.reused_from_phase1",
+                    _input_checksum=_sha256_of_dict({
+                        "drugbank_id": db_id,
+                        "inchikey": persistent_canonical_id,
+                    }),
+                    _license="CC BY-NC 4.0",
+                    _attribution="Phase 1 entity_mapping table (persistent)",
+                )
+                try:
+                    mapping = EntityMapping(
+                        canonical_type=EntityType.COMPOUND,
+                        canonical_id=persistent_canonical_id,
+                        name=name,
+                        aliases=aliases,
+                        confidence=0.99,  # high: Phase 1 already vetted
+                        needs_review=False,
+                        safety_flags=frozenset(),
+                        provenance=provenance,
+                    )
+                except (ResolverConfigurationError, ResolverProvenanceError) as exc:
+                    self._dead_letter(
+                        "Compound", {"drugbank_id": db_id},
+                        f"issue68_reused_mapping_failed: {exc}",
+                        extra={"drugbank_id_prefix": db_id[:4] if db_id else ""},
+                    )
+                    continue
+
+                with self._lock:
+                    existing = self.mappings.get(
+                        "Compound", {},
+                    ).get(persistent_canonical_id)
+                    if existing is None:
+                        self.mappings.setdefault(
+                            "Compound", {},
+                        )[persistent_canonical_id] = mapping
+                        self._reverse_set(
+                            "Compound", "inchikey",
+                            persistent_canonical_id, persistent_canonical_id,
+                        )
+                        if db_id:
+                            self._reverse_set(
+                                "Compound", "drugbank_id",
+                                db_id, persistent_canonical_id,
+                            )
+                            self._reverse_set(
+                                "Compound", "drkg_id",
+                                db_id, persistent_canonical_id,
+                            )
+                        if chembl_id:
+                            self._reverse_set(
+                                "Compound", "chembl_id",
+                                chembl_id, persistent_canonical_id,
+                            )
+                        if pubchem_cid:
+                            self._reverse_set(
+                                "Compound", "pubchem_cid",
+                                pubchem_cid, persistent_canonical_id,
+                            )
+                        self.source_to_canonical.setdefault(
+                            f"DrugBank:{db_id}", [],
+                        ).append(persistent_canonical_id)
+                        stats["resolved"] += 1
+                        stats["reused_from_phase1"] += 1
+                        self._metrics["reused_from_phase1"].inc()
+                    elif existing == mapping:
+                        stats["duplicates_detected"] += 1
+                    else:
+                        stats["conflicts_detected"] += 1
+                        self._dead_letter(
+                            "Compound", {"drugbank_id": db_id},
+                            "issue68_reused_canonical_id_conflict",
+                            extra={
+                                "canonical_id_prefix": persistent_canonical_id[:8],
+                            },
+                        )
+
+            # v108 issue-68: translate ONLY the new (not-yet-persisted)
+            # records into Phase 1's ingest format. Records reused
+            # above are NOT re-resolved. Phase 1's DrugResolver expects
+            # per-source records with 'name' and ideally 'inchikey'
+            # fields.
+            p1_records: List[Dict[str, Any]] = []
+            for drug in new_drugs:
                 if not isinstance(drug, dict):
                     continue
                 db_id = str(drug.get("drugbank_id", "")).strip()
@@ -2343,6 +2872,18 @@ class EntityResolver:
                     "chembl_id": str(drug.get("chembl_id", "") or "").strip() or None,
                     "pubchem_cid": str(drug.get("pubchem_cid", "") or "").strip() or None,
                 })
+
+            # v108 issue-68: if every input record was reused from the
+            # persistent table, short-circuit -- no need to invoke
+            # Phase 1's resolver at all.
+            if not p1_records:
+                self._compound_resolved_from_drugbank = True
+                self._mark_stats_dirty()
+                self.logger.info(
+                    "resolved_compounds_from_drugbank_via_phase1 (all reused)",
+                    extra={k: v for k, v in stats.items()},
+                )
+                return stats
 
             # Reset Phase 1 resolver state so this call is idempotent
             # (matches D7-014 semantics of the legacy implementation).
@@ -2361,17 +2902,11 @@ class EntityResolver:
             # canonical_inchikey, canonical_name, drugbank_id, chembl_id,
             # pubchem_cid, smiles, molecular_weight, match_confidence,
             # match_method, sources, etc.
-            stats = {
-                "total": len(records_list),
-                "resolved": 0,
-                "rejected_withdrawn": 0,
-                "rejected_deprecated": 0,
-                "rejected_low_confidence": 0,
-                "skipped_no_id": 0,
-                "duplicates_detected": 0,
-                "conflicts_detected": 0,
-            }
-            now_iso = datetime.now(timezone.utc).isoformat()
+            #
+            # v108 issue-68: collect newly-resolved mappings for
+            # write-back to Phase 1's persistent entity_mapping table
+            # (populated inside the loop below).
+            new_mappings_for_writeback: List[Dict[str, Any]] = []
             for _, row in result_df.iterrows():
                 canonical_id = str(row.get("canonical_inchikey", "") or "").strip()
                 if not canonical_id:
@@ -2477,6 +3012,25 @@ class EntityResolver:
                             f"DrugBank:{db_id}", []
                         ).append(canonical_id)
                         stats["resolved"] += 1
+                        # v108 issue-68: this is a newly-resolved
+                        # mapping (not in Phase 1's persistent table
+                        # at the start of this call). Count it and
+                        # collect it for write-back so future runs
+                        # find it in the persistent table.
+                        stats["newly_resolved"] += 1
+                        self._metrics["newly_resolved"].inc()
+                        new_mappings_for_writeback.append({
+                            "canonical_inchikey": canonical_id,
+                            "canonical_name": name,
+                            "drugbank_id": db_id or None,
+                            "chembl_id": chembl_id or None,
+                            "pubchem_cid": pubchem_cid or None,
+                            "match_confidence": confidence,
+                            "match_method": str(
+                                row.get("match_method", "phase1_delegated")
+                                or "phase1_delegated"
+                            ),
+                        })
                     elif existing == mapping:
                         # Idempotent re-add -- count as duplicate, no-op.
                         stats["duplicates_detected"] += 1
@@ -2488,6 +3042,33 @@ class EntityResolver:
                             "phase1_delegation_canonical_id_conflict",
                             extra={"canonical_id_prefix": canonical_id[:8]},
                         )
+
+            # v108 ROOT FIX (issue 68): write the newly-resolved
+            # mappings BACK to Phase 1's persistent entity_mapping
+            # table so future runs find them in the source index and
+            # reuse them directly (no re-resolution). Best-effort:
+            # failures are logged but never raised -- the pipeline
+            # continues; the only consequence of a failed write-back
+            # is that the next run re-resolves the same records
+            # (correctness preserved, only efficiency lost).
+            if new_mappings_for_writeback:
+                try:
+                    written = _write_back_phase1_entity_mappings(
+                        new_mappings_for_writeback,
+                    )
+                    if written > 0:
+                        self.logger.info(
+                            "v108 issue-68: wrote back %d new mappings "
+                            "to Phase 1's entity_mapping table (out of "
+                            "%d newly resolved).", written,
+                            len(new_mappings_for_writeback),
+                        )
+                except Exception as exc:  # pragma: no cover - defensive
+                    self.logger.warning(
+                        "v108 issue-68: write-back to Phase 1's "
+                        "entity_mapping table failed (%s). The mappings "
+                        "will be re-resolved on the next run.", exc,
+                    )
 
             self._compound_resolved_from_drugbank = True
             self._mark_stats_dirty()

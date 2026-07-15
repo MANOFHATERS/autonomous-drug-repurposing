@@ -55,6 +55,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -140,13 +141,23 @@ from .utils import (  # noqa: E402
 # monitoring systems. ``_redact_uri`` lives in kg_builder to avoid
 # duplicating the urlparse logic; importing here is safe because
 # kg_builder does not import graph_queries (no circular import).
+#
+# v108 ROOT FIX (issue 73): also import ID_PATTERNS -- the AUTHORITATIVE
+# canonical ID regex patterns per node label (Compound, Disease, Gene,
+# Protein, Pathway, ...). ``_normalize_to_canonical_id`` uses these to
+# detect already-canonical inputs and short-circuit crosswalk resolution.
+# This is the single source of truth for "what counts as a canonical ID"
+# so graph_queries never disagrees with kg_builder's validator.
 try:  # pragma: no cover - defensive: kg_builder should always be importable
-    from .kg_builder import _redact_uri  # noqa: E402
+    from .kg_builder import _redact_uri, ID_PATTERNS  # noqa: E402
 except Exception:  # pragma: no cover
     # Fallback: never expose raw URI; if the helper can't be imported,
     # show a fixed redaction marker instead of the raw URI.
     def _redact_uri(uri: str) -> str:  # type: ignore[no-redef]
         return "<redacted>"
+    # Fallback: empty pattern table -> _normalize_to_canonical_id falls
+    # straight through to the crosswalk (no regex short-circuit).
+    ID_PATTERNS: dict[str, str] = {}  # type: ignore[no-redef]
 
 # ─── Module logger ────────────────────────────────────────────────────────
 logger = logging.getLogger(__name__)
@@ -317,6 +328,7 @@ class GraphQueryService(Protocol):
         exclude_existing_treatments: bool = True,
         min_confidence: float = 0.0,
         exclude_withdrawn: bool = True,
+        disease_id: Optional[str] = None,
     ) -> list[DrugRepurposingCandidate]: ...
 
     def get_mechanistic_pathway(
@@ -828,6 +840,15 @@ class DrugOSGraphQueries:
         # Fixes audit issues 7.7, 7.8 -- lineage tracking
         self._lineage: dict[str, str] = _build_query_metadata()
 
+        # v108 ROOT FIX (issue 73): per-instance cache for
+        # ``_normalize_to_canonical_id``. Keyed on ``f"{entity_type}::{value}"``
+        # so the same free-text name isn't re-resolved (and re-logged) on
+        # every multi-hop branch in a single ``find_drug_candidates`` call.
+        # Bounded by the number of DISTINCT entity inputs per query, which
+        # is tiny (1 disease + ~10 drugs in the worst case) -- no LRU
+        # eviction needed.
+        self._canonical_id_cache: dict[str, str] = {}
+
     # ─── Connection management ─────────────────────────────────────────
 
     def connect(self) -> None:
@@ -1063,11 +1084,192 @@ class DrugOSGraphQueries:
             )
         self._query_timestamps.append(now)
 
+    # ─── Canonical ID normalization (v108 ROOT FIX -- issue 73) ─────────
+
+    def _normalize_to_canonical_id(
+        self,
+        value: str,
+        entity_type: Optional[str] = None,
+    ) -> str:
+        """Normalize a free-text name OR canonical ID to a canonical ID.
+
+        v108 ROOT FIX (issue 73): multi-hop queries were anchored on
+        free-text disease NAMES via ``WHERE d.name STARTS WITH
+        $disease_name`` -- which returns a 0% match rate when the caller
+        passes a canonical disease ID like ``DOID:10652`` (Alzheimer's)
+        or ``C0276426`` (MedDRA). The KG stores diseases by canonical
+        ID, never by free-text name, so ``STARTS WITH`` on name = no
+        matches. The same root cause affected ``validate_known_repurposing``
+        (STARTS WITH pair.drug against canonical InChIKeys) and the
+        three ID-accepting methods (``get_mechanistic_pathway``,
+        ``get_node_neighborhood``, ``get_drug_safety_profile``), which
+        took IDs but performed NO normalization or validation -- a
+        caller passing "aspirin" got 0 results with no WARN.
+
+        ROOT FIX: this helper resolves any input -- canonical ID OR
+        free-text name -- to the canonical ID form. Callers then use
+        the resolved ID in ``WHERE d.id = $disease_id`` (exact match
+        on the indexed ``id`` property).
+
+        Resolution strategy:
+            1. If ``value`` matches the ``ID_PATTERNS[entity_type]``
+               regex (the AUTHORITATIVE per-label pattern from
+               ``kg_builder``), it is ALREADY a canonical ID -- return
+               as-is. When ``entity_type`` is None (e.g.
+               ``get_node_neighborhood`` where the label is optional),
+               try ALL patterns and return as-is on the first match.
+            2. Otherwise, try to resolve via
+               ``id_crosswalk.get_default_crosswalk()`` (lazy import
+               to avoid circular imports):
+                 - Compound -> ``compound_id_to_inchikey(value)``
+                   (accepts any compound alias: DrugBank ID, ChEMBL,
+                   CID, STITCH CIDm/CIDs, ... and returns the InChIKey
+                   -- the canonical Compound ID in the KG).
+                 - Gene -> ``gene_symbol_to_uniprot_ac(value)`` chained
+                   with ``uniprot_ac_to_ncbi_gene_id(ac)`` to get the
+                   NCBI gene ID (canonical Gene ID). Bare numeric input
+                   is also accepted as an NCBI gene ID.
+                 - Protein -> ``gene_symbol_to_uniprot_ac(value)``
+                   (the canonical Protein ID in the KG is the UniProt
+                   AC; gene symbols chain through the crosswalk).
+                 - Disease / other -> no crosswalk resolver exists for
+                   free-text disease names, so ``resolved`` stays None
+                   and the WARN path fires (operator-visible signal).
+            3. If resolution succeeds, return the resolved ID (cached).
+            4. If resolution fails, log a WARN (operator-visible) and
+               return the input UNCHANGED so the query still runs --
+               it will return 0 results, which the operator can now
+               attribute to a missed ID resolution (the WARN tells them
+               so) instead of silently shipping an empty candidate list.
+
+        Args:
+            value: The input value (canonical ID or free-text name).
+                If empty/None/non-str, returned unchanged (no-op).
+            entity_type: One of the ``ID_PATTERNS`` keys ("Compound",
+                "Disease", "Gene", "Protein", "Pathway", ...). When
+                None, all patterns are tried (used by
+                ``get_node_neighborhood`` which doesn't know the
+                entity type ahead of time).
+
+        Returns:
+            The canonical ID if resolution succeeded; otherwise the
+            original input unchanged (with a WARN log). Never raises.
+        """
+        # Defensive: never break a query because of bad input to the
+        # helper itself. Non-str / empty input passes through unchanged.
+        if not value or not isinstance(value, str):
+            return value
+
+        cache_key = f"{entity_type or '*'}::{value}"
+        cached = self._canonical_id_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        # ── Step 1: regex short-circuit ──
+        # If the input matches the AUTHORITATIVE ID_PATTERNS regex for
+        # the given entity_type, it is ALREADY canonical -- no crosswalk
+        # call needed. This is the fast path for callers that pass
+        # canonical IDs (the recommended usage pattern).
+        if entity_type and ID_PATTERNS:
+            pattern = ID_PATTERNS.get(entity_type)
+            if pattern is not None:
+                try:
+                    if re.match(pattern, value):
+                        self._canonical_id_cache[cache_key] = value
+                        return value
+                except Exception:
+                    # Regex engine failure (shouldn't happen) -- fall
+                    # through to crosswalk resolution below.
+                    pass
+        elif not entity_type and ID_PATTERNS:
+            # No entity_type hint (e.g. get_node_neighborhood): try
+            # every pattern. If ANY matches, the input is canonical for
+            # some label -- return as-is.
+            try:
+                for _label, pat in ID_PATTERNS.items():
+                    if re.match(pat, value):
+                        self._canonical_id_cache[cache_key] = value
+                        return value
+            except Exception:
+                pass
+
+        # ── Step 2: crosswalk resolution (best-effort, never raises) ──
+        resolved: Optional[str] = None
+        try:
+            # Lazy import to avoid circular imports (id_crosswalk does
+            # not import graph_queries, but lazy import keeps the module
+            # load order resilient to future refactors).
+            from . import id_crosswalk
+            xwalk = id_crosswalk.get_default_crosswalk()
+            if entity_type == "Compound":
+                # Accept any compound alias (DB ID, ChEMBL, CID, STITCH,
+                # SIDER bare CID, ...) and return the InChIKey (the
+                # canonical Compound ID in the KG).
+                resolved = xwalk.compound_id_to_inchikey(value)
+            elif entity_type == "Gene":
+                # Chain gene symbol -> UniProt AC -> NCBI gene ID.
+                ac = xwalk.gene_symbol_to_uniprot_ac(value)
+                if ac is not None:
+                    gid = xwalk.uniprot_ac_to_ncbi_gene_id(ac)
+                    if gid is not None:
+                        resolved = gid
+                # Also accept bare numeric NCBI gene IDs.
+                if resolved is None and value.isdigit():
+                    resolved = value
+            elif entity_type == "Protein":
+                # Gene symbol -> UniProt AC (the canonical Protein ID).
+                # If the caller passed a gene symbol like "ACE", this
+                # resolves it to P12821.
+                resolved = xwalk.gene_symbol_to_uniprot_ac(value)
+            # else: no crosswalk resolver for this entity_type (e.g.
+            # Disease, Pathway, Anatomy). ``resolved`` stays None and
+            # the WARN path fires below -- operator-visible signal that
+            # the free-text input couldn't be canonicalized.
+        except Exception as exc:
+            # Never let a crosswalk failure break the query -- log and
+            # fall through to the "return input unchanged" path.
+            logger.warning(
+                "id_crosswalk resolution raised for entity_type=%s "
+                "value=%r: %s",
+                entity_type or "<any>",
+                _redact_for_log(value, 40),
+                exc,
+                extra={"run_id": RUN_ID, "entity_type": entity_type or ""},
+            )
+
+        if resolved is not None and isinstance(resolved, str) and resolved:
+            self._canonical_id_cache[cache_key] = resolved
+            logger.debug(
+                "Resolved %s %r -> canonical ID %r",
+                entity_type or "<any>",
+                _redact_for_log(value, 40),
+                _redact_for_log(resolved, 40),
+                extra={"run_id": RUN_ID, "entity_type": entity_type or ""},
+            )
+            return resolved
+
+        # ── Step 3: resolution failed -- WARN and pass through ──
+        # The query will still run (with the unchanged input) but
+        # likely return 0 results. The WARN log makes the failure mode
+        # VISIBLE to operators instead of silently shipping an empty
+        # candidate list (the original issue 73 symptom).
+        logger.warning(
+            "Could not resolve %s %r to a canonical ID -- query will "
+            "likely return 0 results. Pass a canonical ID (e.g. "
+            "DB00945, P12821, DOID:10652, BSYNRYMUTXBXSQ-UHFFFAOYSA-N) "
+            "for indexed lookup.",
+            entity_type or "<any>",
+            _redact_for_log(value, 40),
+            extra={"run_id": RUN_ID, "entity_type": entity_type or ""},
+        )
+        self._canonical_id_cache[cache_key] = value
+        return value
+
     # ─── Drug Candidate Search ──────────────────────────────────────────
 
     def find_drug_candidates(
         self,
-        disease_name: str,
+        disease_name: str = "",
         max_hops: int = 3,
         limit: int = 20,
         exclude_existing_treatments: bool = True,
@@ -1075,6 +1277,7 @@ class DrugOSGraphQueries:
         exclude_withdrawn: bool = True,
         offset: int = 0,
         after_score: Optional[float] = None,
+        disease_id: Optional[str] = None,
     ) -> list[DrugRepurposingCandidate]:
         """Find drug repurposing candidates for a given disease.
 
@@ -1082,13 +1285,29 @@ class DrugOSGraphQueries:
         connections through the knowledge graph. Each hop level queries
         biologically correct node labels and edge types from CORE_EDGE_TYPES.
 
+        v108 ROOT FIX (issue 73): every multi-hop branch previously
+        anchored the traversal on ``WHERE d.name STARTS WITH
+        $disease_name`` -- a FREE-TEXT disease name. The KG stores
+        diseases by canonical ID (DOID:10652, OMIM:104300, ...), NEVER
+        by free-text name, so ``STARTS WITH name`` returned a 0% match
+        rate for every canonical-ID caller. ROOT FIX: when the caller
+        passes ``disease_id``, the helper normalizes it via
+        ``_normalize_to_canonical_id`` and the branches use
+        ``WHERE d.id = $disease_id`` (exact match on the indexed ``id``
+        property). When ``disease_id`` is None, the existing
+        ``disease_name`` STARTS WITH behavior is preserved (backward
+        compat for callers that pass free-text names -- they continue
+        to get the pre-fix behavior, including the 0% match rate when
+        the KG has no name-keyed index).
+
         Scoring uses geometric mean normalization (fixes KILL-7):
             score = (product of edge confidences) ^ (1/num_edges)
         This prevents systematic burial of multi-hop repurposing candidates.
 
         Args:
             disease_name: Disease name for STARTS WITH search (index-optimized).
-                Must be 1-500 characters. (issue 5.1, 8.1)
+                Must be 1-500 characters. (issue 5.1, 8.1) OPTIONAL when
+                ``disease_id`` is provided (issue 73).
             max_hops: Maximum path length (1, 2, or 3). Must be 1-3.
                 (issues 4.18, 4.19)
             limit: Max candidates to return (1-10000). (issue 5.3)
@@ -1102,6 +1321,15 @@ class DrugOSGraphQueries:
             offset: Pagination offset for result paging. (issue 2.13)
             after_score: Cursor-based pagination -- return results with score
                 below this value. (issue 2.13)
+            disease_id: Canonical disease ID (e.g. ``DOID:10652``,
+                ``OMIM:104300``, ``C0276426``). When provided, anchors
+                the multi-hop traversal on ``WHERE d.id = $disease_id``
+                (exact match on the indexed ``id`` property) instead of
+                ``WHERE d.name STARTS WITH $disease_name``. The ID is
+                normalized via ``_normalize_to_canonical_id`` so a
+                caller may pass either a canonical ID OR a free-text
+                name (the latter triggers a WARN log + likely 0
+                results -- operator-visible). (issue 73)
 
         Returns:
             List of DrugRepurposingCandidate objects, sorted by score
@@ -1115,7 +1343,11 @@ class DrugOSGraphQueries:
         Example:
             >>> queries = DrugOSGraphQueries()
             >>> queries.connect()
+            >>> # Backward-compat: free-text name (STARTS WITH index scan)
             >>> candidates = queries.find_drug_candidates("Alzheimer")
+            >>> # v108: canonical ID (exact match on indexed id property)
+            >>> candidates = queries.find_drug_candidates(
+            ...     disease_id="DOID:10652")
             >>> for c in candidates[:5]:
             ...     print(f"{c.drug_name}: score={c.score:.3f}")
 
@@ -1125,10 +1357,10 @@ class DrugOSGraphQueries:
             3.3-3.6, 3.18, 3.19, 3.20, 3.22-3.25,
             4.9, 4.10, 4.18-4.20, 5.1, 5.2, 5.3, 5.8,
             7.1, 7.10, 8.1-8.5, 9.1, 9.9,
-            11.3, 11.4, 11.6, 11.8, 11.9, 13.2-13.4
+            11.3, 11.4, 11.6, 11.8, 11.9, 13.2-13.4,
+            73 (v108 ROOT FIX -- canonical ID anchoring)
         """
         # ── Input validation (issues 5.1, 5.2, 5.3) ──
-        disease_name = _validate_string_param(disease_name, "disease_name")
         max_hops = _validate_int_param(max_hops, "max_hops", 1, 3)
         limit = _validate_int_param(limit, "limit", 1, MAX_LIMIT)
         offset = _validate_int_param(offset, "offset", 0, MAX_LIMIT)
@@ -1138,9 +1370,33 @@ class DrugOSGraphQueries:
                 f"min_confidence must be in [0.0, 1.0], got {min_confidence}"
             )
 
+        # v108 ROOT FIX (issue 73): canonical-ID anchoring.
+        # When ``disease_id`` is provided, normalize it (which may
+        # translate free-text names to canonical IDs via id_crosswalk,
+        # or short-circuit on the ID_PATTERNS regex match) and use
+        # ``WHERE d.id = $disease_id`` (exact match on the indexed ``id``
+        # property). When ``disease_id`` is None, fall back to the
+        # pre-fix ``STARTS WITH $disease_name`` behavior (backward compat).
+        disease_id_provided: bool = disease_id is not None
+        if disease_id_provided:
+            disease_id = self._normalize_to_canonical_id(disease_id, "Disease")
+            disease_anchor = "WHERE d.id = $disease_id"
+            # ``disease_name`` is optional when ``disease_id`` is provided;
+            # skip strict validation (kept for logging/back-compat only).
+            if not disease_name:
+                disease_name = ""
+        else:
+            # Backward-compat: anchor on disease name STARTS WITH.
+            # This requires a non-empty name (the pre-fix behavior).
+            disease_name = _validate_string_param(disease_name, "disease_name")
+            disease_anchor = "WHERE d.name STARTS WITH $disease_name"
+
         logger.info(
-            "find_drug_candidates called: disease=%s, max_hops=%d, limit=%d",
+            "find_drug_candidates called: disease=%s, disease_id=%s, "
+            "anchor=%s, max_hops=%d, limit=%d",
             _redact_for_log(disease_name),
+            _redact_for_log(disease_id) if disease_id else "<none>",
+            "id" if disease_id_provided else "name",
             max_hops,
             limit,
             extra={"run_id": RUN_ID, "correlation_id": CORRELATION_ID},
@@ -1163,7 +1419,7 @@ class DrugOSGraphQueries:
             edges_str = ", ".join(f"'{e}'" for e in hop1_edges)
             queries.append(f"""
                 MATCH (d:`{_LABEL_DISEASE}`)
-                WHERE d.name STARTS WITH $disease_name
+                {disease_anchor}
                 MATCH (c:`{_LABEL_COMPOUND}`)-[r]->(d)
                 WHERE type(r) IN [{edges_str}]
                 RETURN c.id AS drug_id, c.name AS drug_name,
@@ -1186,7 +1442,7 @@ class DrugOSGraphQueries:
             if gene_compound_edges and gene_disease_edges:
                 queries.append(f"""
                     MATCH (d:`{_LABEL_DISEASE}`)
-                    WHERE d.name STARTS WITH $disease_name
+                    {disease_anchor}
                     MATCH (c:`{_LABEL_COMPOUND}`)-[r1]->(g:`{_LABEL_GENE}`)-[r2]->(d)
                     WHERE type(r1) IN [{gene_compound_edges}]
                       AND type(r2) IN [{gene_disease_edges}]
@@ -1208,7 +1464,7 @@ class DrugOSGraphQueries:
             if prot_compound_edges and prot_disease_edges:
                 queries.append(f"""
                     MATCH (d:`{_LABEL_DISEASE}`)
-                    WHERE d.name STARTS WITH $disease_name
+                    {disease_anchor}
                     MATCH (c:`{_LABEL_COMPOUND}`)-[r1]->(p:`{_LABEL_PROTEIN}`)-[r2]->(d)
                     WHERE type(r1) IN [{prot_compound_edges}]
                       AND type(r2) IN [{prot_disease_edges}]
@@ -1231,7 +1487,7 @@ class DrugOSGraphQueries:
             if gene_compound_edges and gene_pw_edges and pw_disease_edges:
                 queries.append(f"""
                     MATCH (d:`{_LABEL_DISEASE}`)
-                    WHERE d.name STARTS WITH $disease_name
+                    {disease_anchor}
                     MATCH (c:`{_LABEL_COMPOUND}`)-[r1]->(g:`{_LABEL_GENE}`)-[r2]->(pw:`{_LABEL_PATHWAY}`)-[r3]->(d)
                     WHERE type(r1) IN [{gene_compound_edges}]
                       AND type(r2) IN [{gene_pw_edges}]
@@ -1253,7 +1509,7 @@ class DrugOSGraphQueries:
             if prot_compound_edges and prot_pw_edges and pw_disease_edges:
                 queries.append(f"""
                     MATCH (d:`{_LABEL_DISEASE}`)
-                    WHERE d.name STARTS WITH $disease_name
+                    {disease_anchor}
                     MATCH (c:`{_LABEL_COMPOUND}`)-[r1]->(p:`{_LABEL_PROTEIN}`)-[r2]->(pw:`{_LABEL_PATHWAY}`)-[r3]->(d)
                     WHERE type(r1) IN [{prot_compound_edges}]
                       AND type(r2) IN [{prot_pw_edges}]
@@ -1285,6 +1541,11 @@ class DrugOSGraphQueries:
         params: dict[str, Any] = {
             "disease_name": disease_name,
         }
+        # v108 ROOT FIX (issue 73): only bind ``$disease_id`` when the
+        # caller actually provided it. Neo4j ignores unused params, but
+        # binding None would break the ``=`` comparison in the anchor.
+        if disease_id_provided:
+            params["disease_id"] = disease_id
 
         if min_confidence > 0.0:
             where_clauses.append("raw_score >= $min_confidence")
@@ -1459,6 +1720,17 @@ class DrugOSGraphQueries:
         # Fixes 4.1: int cast + range validation to prevent Cypher injection
         max_depth = _validate_int_param(max_depth, "max_depth", 2, 10)
 
+        # v108 ROOT FIX (issue 73): normalize drug_id/disease_id to
+        # canonical form. The Cypher below uses ``{{id: $drug_id}}`` /
+        # ``{{id: $disease_id}}`` exact-match on the indexed ``id``
+        # property -- so a free-text name like "aspirin" returned 0
+        # results (no Compound node has id="aspirin"). The helper
+        # short-circuits on canonical IDs (regex match) and best-effort
+        # resolves free-text names via id_crosswalk. Failure is
+        # operator-visible (WARN log) instead of silent 0 results.
+        drug_id = self._normalize_to_canonical_id(drug_id, "Compound")
+        disease_id = self._normalize_to_canonical_id(disease_id, "Disease")
+
         logger.info(
             "get_mechanistic_pathway called: drug=%s, disease=%s, depth=%d",
             _redact_for_log(drug_id),
@@ -1569,6 +1841,16 @@ class DrugOSGraphQueries:
         # Fixes 4.8: depth is documented as 1-hop only
         depth = _validate_int_param(depth, "depth", 1, 1)
         limit = _validate_int_param(limit, "limit", 1, DEFAULT_NEIGHBORHOOD_LIMIT)
+
+        # v108 ROOT FIX (issue 73): normalize node_id to canonical form.
+        # The Cypher below uses ``{{id: $node_id}}`` exact-match on the
+        # indexed ``id`` property -- so a free-text name like "aspirin"
+        # returned 0 results (no node has id="aspirin"). The helper
+        # short-circuits on canonical IDs (regex match against ALL
+        # ID_PATTERNS labels since the caller didn't specify one) and
+        # best-effort resolves free-text names via id_crosswalk. Failure
+        # is operator-visible (WARN log) instead of silent 0 results.
+        node_id = self._normalize_to_canonical_id(node_id, node_label)
 
         logger.info(
             "get_node_neighborhood called: node=%s, label=%s, limit=%d",
@@ -1686,6 +1968,17 @@ class DrugOSGraphQueries:
             9.9 (audit log), 11.3, 11.9, 13.7
         """
         drug_id = _validate_string_param(drug_id, "drug_id")
+
+        # v108 ROOT FIX (issue 73): normalize drug_id to canonical form.
+        # The Cypher below uses ``{{id: $drug_id}}`` exact-match on the
+        # indexed ``id`` property -- so a free-text name like "aspirin"
+        # returned 0 results (no Compound node has id="aspirin"). The
+        # helper short-circuits on canonical IDs (regex match) and
+        # best-effort resolves free-text names via id_crosswalk (e.g.
+        # "DB00945" -> InChIKey if the KG uses InChIKey as the
+        # canonical Compound ID). Failure is operator-visible (WARN
+        # log) instead of silent 0 results.
+        drug_id = self._normalize_to_canonical_id(drug_id, "Compound")
 
         logger.info(
             "get_drug_safety_profile called: drug=%s",
@@ -1916,24 +2209,46 @@ class DrugOSGraphQueries:
         Uses UNWIND batch query for performance (issue 4.13).
         Each pair is wrapped in try/except for fault tolerance (issue 6.11).
 
+        v108 ROOT FIX (issue 73): each pair may now carry canonical IDs
+        in addition to (or instead of) free-text names. When a pair
+        provides ``drug_id`` and/or ``disease_id``, the WHERE clause
+        uses EXACT ``c.id = pair.drug_id`` / ``d.id = pair.disease_id``
+        matching on the indexed ``id`` property (the only form that
+        matches canonical KG nodes). When a pair provides ONLY names,
+        the existing ``STARTS WITH pair.drug`` / ``STARTS WITH
+        pair.disease`` behavior is preserved (backward compat -- and
+        still produces the 0% match rate the audit flagged when the
+        KG stores nodes by canonical ID, not by name). IDs are
+        normalized via ``_normalize_to_canonical_id`` so a caller may
+        pass either a canonical ID OR a free-text name in the
+        ``drug_id`` / ``disease_id`` fields too (the latter triggers
+        a WARN log + likely 0 results -- operator-visible).
+
         Args:
-            known_pairs: List of dicts with 'drug_name' and 'disease_name' keys.
-                Each must have both keys present. (issue 5.7)
+            known_pairs: List of dicts. Each dict MAY contain any of:
+                'drug_name', 'disease_name' (free-text, STARTS WITH),
+                'drug_id', 'disease_id' (canonical, exact match).
+                At least one drug identifier (name OR id) AND one
+                disease identifier (name OR id) must be present.
+                (issues 5.7, 73)
 
         Returns:
-            Dict mapping "drug_name -> disease_name" to True/False.
+            Dict mapping "drug -> disease" (using whichever identifier
+            was provided) to True/False.
 
         Raises:
             InputValidationError: If known_pairs format is invalid.
 
         Fixes audit issues:
             3.17, 4.3, 4.4, 4.12, 4.13, 5.7,
-            6.11, 7.4, 8.3, 11.3, 11.13, 13.8
+            6.11, 7.4, 8.3, 11.3, 11.13, 13.8,
+            73 (v108 ROOT FIX -- canonical ID exact-match anchoring)
         """
         # Fixes 5.7: validate known_pairs structure
         if not isinstance(known_pairs, list):
             raise InputValidationError(
-                "known_pairs must be a list of dicts with 'drug_name' and 'disease_name'"
+                "known_pairs must be a list of dicts with 'drug_name'/'drug_id' "
+                "and 'disease_name'/'disease_id'"
             )
 
         logger.info(
@@ -1947,18 +2262,60 @@ class DrugOSGraphQueries:
         min_conf = ENTITY_CONFIDENCE_REJECT_THRESHOLD
 
         # Build UNWIND parameter list
-        pairs_param: list[dict[str, str]] = []
+        # v108 ROOT FIX (issue 73): each pair may carry drug_id/disease_id
+        # (canonical, exact match) IN ADDITION TO OR INSTEAD OF the legacy
+        # drug_name/disease_name (STARTS WITH). At least one identifier per
+        # endpoint is required; the Cypher below uses the ID form when
+        # available, falling back to the name form otherwise.
+        pairs_param: list[dict[str, Any]] = []
         for pair in known_pairs:
-            drug_name = _safe_get(pair, "drug_name", "")
-            disease_name = _safe_get(pair, "disease_name", "")
-            if not drug_name or not disease_name:
+            if not isinstance(pair, dict):
                 logger.warning(
-                    "Skipping pair with missing keys: %s",
+                    "Skipping non-dict pair: %r", pair,
+                    extra={"run_id": RUN_ID},
+                )
+                continue
+            drug_name = _safe_get(pair, "drug_name", "") or ""
+            disease_name = _safe_get(pair, "disease_name", "") or ""
+            drug_id = _safe_get(pair, "drug_id", "") or ""
+            disease_id = _safe_get(pair, "disease_id", "") or ""
+
+            # v108: require (drug_name OR drug_id) AND (disease_name OR
+            # disease_id). Previously required BOTH names -- which forced
+            # callers to invent fake disease names when they only had IDs.
+            if not (drug_name or drug_id):
+                logger.warning(
+                    "Skipping pair with no drug identifier (need drug_name "
+                    "or drug_id): keys=%s",
                     list(pair.keys()),
                     extra={"run_id": RUN_ID},
                 )
                 continue
-            pairs_param.append({"drug": drug_name, "disease": disease_name})
+            if not (disease_name or disease_id):
+                logger.warning(
+                    "Skipping pair with no disease identifier (need "
+                    "disease_name or disease_id): keys=%s",
+                    list(pair.keys()),
+                    extra={"run_id": RUN_ID},
+                )
+                continue
+
+            # v108: normalize IDs to canonical form. Free-text inputs
+            # trigger a WARN log inside the helper (operator-visible).
+            if drug_id:
+                drug_id = self._normalize_to_canonical_id(drug_id, "Compound")
+            if disease_id:
+                disease_id = self._normalize_to_canonical_id(disease_id, "Disease")
+
+            # Neo4j UNWIND params must be non-null. Use None sentinel
+            # (becomes Cypher null) when the field wasn't provided so
+            # the WHERE clause's ``pair.X IS NULL`` check works.
+            pairs_param.append({
+                "drug": drug_name,
+                "disease": disease_name,
+                "drug_id": drug_id if drug_id else None,
+                "disease_id": disease_id if disease_id else None,
+            })
 
         if not pairs_param:
             logger.warning("No valid pairs to validate", extra={"run_id": RUN_ID})
@@ -1966,11 +2323,23 @@ class DrugOSGraphQueries:
 
         # Fixes 4.13: Batch with UNWIND for performance
         # Fixes 8.3: Use STARTS WITH instead of CONTAINS (index-optimized)
+        # v108 ROOT FIX (issue 73): when the pair carries a canonical ID,
+        # use EXACT ``c.id = pair.drug_id`` matching (the only form that
+        # matches canonical KG nodes). When only a name is provided, fall
+        # back to the legacy STARTS WITH behavior (backward compat).
         batch_query = f"""
             UNWIND $pairs AS pair
             MATCH (c:`{_LABEL_COMPOUND}`)-[r]->(d:`{_LABEL_DISEASE}`)
-            WHERE (c.name STARTS WITH pair.drug OR c.id STARTS WITH pair.drug)
-              AND (d.name STARTS WITH pair.disease OR d.id STARTS WITH pair.disease)
+            WHERE (
+                  (pair.drug_id IS NOT NULL AND c.id = pair.drug_id)
+                  OR
+                  (pair.drug_id IS NULL AND (c.name STARTS WITH pair.drug OR c.id STARTS WITH pair.drug))
+                 )
+              AND (
+                  (pair.disease_id IS NOT NULL AND d.id = pair.disease_id)
+                  OR
+                  (pair.disease_id IS NULL AND (d.name STARTS WITH pair.disease OR d.id STARTS WITH pair.disease))
+                 )
               AND coalesce(r.confidence, {dc}) >= $min_conf
             RETURN pair.drug AS drug, pair.disease AS disease, count(r) AS path_count
         """
