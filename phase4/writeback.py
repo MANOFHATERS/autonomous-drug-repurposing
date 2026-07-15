@@ -115,7 +115,26 @@ from common.validated_hypotheses_schema import (
 )
 
 # Backward-compatible env var lookup (falls back to canonical schema path).
-PHASE1_VALIDATED_CSV = os.environ.get("PHASE1_VALIDATED_CSV") or get_validated_csv_path()
+# Read LAZILY via _get_phase1_validated_csv() so tests and runtime config
+# can override the env var without reloading the module. The previous code
+# cached the path at import time, making it impossible to override in tests.
+def _get_phase1_validated_csv() -> str:
+    """Return the Phase 1 validated hypotheses CSV path (lazy env var lookup).
+
+    Reads PHASE1_VALIDATED_CSV and VALIDATED_HYPOTHESES_CSV at CALL TIME
+    (not import time) so tests and runtime config can override without
+    reloading the module.
+    """
+    return (
+        os.environ.get("PHASE1_VALIDATED_CSV")
+        or get_validated_csv_path()  # reads VALIDATED_HYPOTHESES_CSV lazily
+    )
+
+
+# Backward-compat: keep the module-level constant for code that imports
+# it directly. Reflects the value at import time. New code should call
+# ``_get_phase1_validated_csv()`` instead.
+PHASE1_VALIDATED_CSV = _get_phase1_validated_csv()
 
 
 def writeback_to_phase1(vh: ValidatedHypothesis) -> Path:
@@ -134,7 +153,9 @@ def writeback_to_phase1(vh: ValidatedHypothesis) -> Path:
     Returns the path to the CSV. The CSV is created if it doesn't exist
     (with a header row).
     """
-    csv_path = Path(PHASE1_VALIDATED_CSV)
+    # Read the CSV path LAZILY (at call time, not import time) so tests
+    # and runtime config can override the env var without reloading.
+    csv_path = Path(_get_phase1_validated_csv())
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     file_exists = csv_path.exists() and csv_path.stat().st_size > 0
 
@@ -357,13 +378,33 @@ def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
 # Phase 3 writeback: trigger GT model retraining
 # ---------------------------------------------------------------------------
 
-PHASE3_RETRAIN_TRIGGER = os.environ.get(
-    "PHASE3_RETRAIN_TRIGGER",
-    str(Path(__file__).resolve().parent.parent / "graph_transformer" / "retrain_triggered.json"),
+# Default trigger path — read LAZILY via _get_retrain_trigger_path() so
+# tests and runtime config can override the env var without reloading
+# the module. The previous code read the env var ONCE at import time,
+# which made it impossible to override in tests (the module cached the
+# path before the test set the env var).
+_DEFAULT_RETRAIN_TRIGGER_PATH = str(
+    Path(__file__).resolve().parent.parent / "graph_transformer" / "retrain_triggered.json"
 )
 
 
-def writeback_to_phase3(vh: ValidatedHypothesis) -> bool:
+def _get_retrain_trigger_path() -> str:
+    """Return the retrain trigger path, respecting the env var override.
+
+    Reads PHASE3_RETRAIN_TRIGGER at CALL TIME (not import time) so tests
+    and runtime config can override it without reloading the module.
+    """
+    return os.environ.get("PHASE3_RETRAIN_TRIGGER", _DEFAULT_RETRAIN_TRIGGER_PATH)
+
+
+# Backward-compat: keep the module-level constant for code that imports
+# it directly (e.g., ``from phase4.writeback import PHASE3_RETRAIN_TRIGGER``).
+# It reflects the value at import time. New code should call
+# ``_get_retrain_trigger_path()`` instead for runtime-configurable path.
+PHASE3_RETRAIN_TRIGGER = _get_retrain_trigger_path()
+
+
+def writeback_to_phase3(vh: ValidatedHypothesis) -> Path:
     """Append the validated hypothesis to the GT retraining trigger file.
 
     The GT trainer reads this file at the start of each training run
@@ -375,8 +416,16 @@ def writeback_to_phase3(vh: ValidatedHypothesis) -> bool:
     is added to a NEGATIVE_VALIDATED list — the trainer must score
     these pairs LOW. This corrects model errors (e.g., warfarin ->
     epilepsy predicted at 0.85 but validated as toxic).
+
+    Returns the Path to the trigger JSON file (so callers can report
+    the actual file path, not just a success bool). The previous code
+    returned ``True`` which caused ``write_validated_hypothesis`` to
+    report ``phase3_trigger_path: "True"`` in its response dict — a
+    stringified bool, not a path. That broke the API contract.
     """
-    trigger_path = Path(PHASE3_RETRAIN_TRIGGER)
+    # Read the trigger path LAZILY (at call time, not import time) so
+    # tests and runtime config can override the env var.
+    trigger_path = Path(_get_retrain_trigger_path())
     trigger_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Read existing triggers (if any)
@@ -439,7 +488,7 @@ def writeback_to_phase3(vh: ValidatedHypothesis) -> bool:
         "(%s, %s, outcome=%s) in its known_pairs.",
         trigger_path, vh.drug, vh.disease, vh.outcome,
     )
-    return True
+    return trigger_path
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +580,8 @@ def list_validated_hypotheses() -> List[Dict[str, Any]]:
     Reads the Phase 1 CSV (the canonical record). Useful for the
     dashboard to display "Validated Hypotheses" to pharma partners.
     """
-    csv_path = Path(PHASE1_VALIDATED_CSV)
+    # Lazy path lookup — respects env var overrides at call time.
+    csv_path = Path(_get_phase1_validated_csv())
     if not csv_path.exists():
         return []
     out: List[Dict[str, Any]] = []
