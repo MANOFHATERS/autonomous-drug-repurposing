@@ -3966,12 +3966,29 @@ def split_drkg_relation(relation: str) -> Tuple[str, str, str]:
             f"Expected 'SrcType::relation::DstType'"
         )
     parts = relation.split(DRKG_RELATION_SEPARATOR)
-    if len(parts) < 3:
+    if len(parts) != 3:
+        # Task 91 ROOT FIX: the previous check was ``len(parts) < 3``
+        # and the return used ``parts[-1]``. For a malformed relation
+        # with 4+ ``::``-separated tokens (e.g. an accidental
+        # ``"Hetionet::CtD::Compound::Disease"`` where the third
+        # ``::`` should have been a single ``:``), the old code would
+        # silently truncate -- returning ``("Hetionet", "CtD",
+        # "Disease")`` and dropping the head-type ``"Compound"``
+        # entirely. That truncated value was then split on ``:`` to
+        # derive head_type/tail_type, producing a tail_type of
+        # ``"Disease"`` and an EMPTY head_type, which propagated to
+        # the KG as a malformed edge with no head entity type. The
+        # fix: require EXACTLY 3 parts (canonical DRKG format) and
+        # raise ``ValueError`` on anything else so the malformed row
+        # is dead-lettered at parse time rather than silently
+        # corrupting the graph.
         raise ValueError(
             f"Invalid DRKG relation format: {relation!r}. "
-            f"Expected 'SrcType::relation::DstType'"
+            f"Expected exactly 3 '{DRKG_RELATION_SEPARATOR}'-separated "
+            f"tokens in the form 'SrcType::relation::HeadType:TailType' "
+            f"but got {len(parts)} tokens."
         )
-    return parts[0], parts[1], parts[-1]
+    return parts[0], parts[1], parts[2]
 
 
 def parse_drkg_relation_head_tail(head_tail_str: str) -> Tuple[str, str]:

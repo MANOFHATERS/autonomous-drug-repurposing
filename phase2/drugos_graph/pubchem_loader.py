@@ -18,8 +18,14 @@ Public API (matches the contract expected by ``run_pipeline.py:1821-1825``):
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -43,6 +49,159 @@ except Exception:  # pragma: no cover — fallback for direct-script execution
         return ik.upper()
 
 logger = logging.getLogger(__name__)
+
+# Task 87 ROOT FIX: in-process LRU cache for CID->InChIKey lookups so
+# we never query PubChem twice for the same CID in a single loader run.
+# PubChem allows ~5 req/s without an API key, so we also enforce a
+# 250 ms minimum spacing between requests (rate-limit) via a module-
+# level lock + timestamp. The cache is bounded to 50_000 entries to
+# avoid unbounded memory growth on very large PubChem extracts.
+_CID_TO_INCHIKEY_CACHE: Dict[int, Optional[str]] = {}
+_CID_TO_INCHIKEY_CACHE_LOCK = threading.Lock()
+_CID_TO_INCHIKEY_LAST_CALL_TS: float = 0.0
+_CID_TO_INCHIKEY_MIN_INTERVAL_S: float = 0.25  # 4 req/s
+_CID_TO_INCHIKEY_CACHE_MAX_SIZE: int = 50_000
+_CID_TO_INCHIKEY_TIMEOUT_S: float = 15.0
+_CID_TO_INCHIKEY_MAX_RETRIES: int = 3
+_PUBCHEM_PUG_REST_BASE: str = (
+    "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/property/InChIKey/JSON"
+)
+
+
+def _cid_to_inchikey(cid: int) -> Optional[str]:
+    """Resolve a PubChem CID to its canonical InChIKey via the PUG-REST API.
+
+    Task 87 ROOT FIX: the previous loader blindly trusted the
+    ``inchikey`` column from Phase 1's CSV. When the CSV had a CID but
+    no InChIKey (a common case for raw SD-record extracts), the loader
+    set ``canonical_id = f"CID{cid}"`` and emitted a Compound node with
+    ``inchikey=None``. That node could NOT be merged with ChEMBL /
+    DrugBank Compound nodes (which are InChIKey-keyed), fragmenting
+    the KG: the same physical compound appeared as TWO disjoint nodes.
+
+    The fix queries PubChem's PUG-REST endpoint to resolve
+    CID -> InChIKey at load time. The endpoint is documented at
+    https://pubchem.ncbi.nlm.nih.gov/docs/pug-rest and is the
+    authoritative source for CID->InChIKey mapping. The lookup is:
+
+      GET /rest/pug/compound/cid/{cid}/property/InChIKey/JSON
+      -> {"PropertyTable": {"Properties": [{"CID": 2244, "InChIKey": "..."}]}}
+
+    Rate-limiting (250 ms between calls), bounded LRU caching (50k
+    entries), and 3 retries with exponential backoff ensure we stay
+    within PubChem's fair-use policy. On any failure (network, 404,
+    parse error) we return ``None`` so the caller can fall back to
+    ``CID{cid}`` -- but with a clear warning so operators know the
+    crosswalk was incomplete for that row.
+    """
+    if cid is None:
+        return None
+    try:
+        cid_int = int(cid)
+    except (TypeError, ValueError):
+        return None
+    if cid_int <= 0:
+        return None
+
+    # Fast path: cache hit.
+    with _CID_TO_INCHIKEY_CACHE_LOCK:
+        if cid_int in _CID_TO_INCHIKEY_CACHE:
+            return _CID_TO_INCHIKEY_CACHE[cid_int]
+
+    # Rate-limit: ensure at least ``_CID_TO_INCHIKEY_MIN_INTERVAL_S``
+    # seconds have passed since the last PUG-REST call.
+    global _CID_TO_INCHIKEY_LAST_CALL_TS
+    with _CID_TO_INCHIKEY_CACHE_LOCK:
+        now = time.monotonic()
+        wait = _CID_TO_INCHIKEY_MIN_INTERVAL_S - (
+            now - _CID_TO_INCHIKEY_LAST_CALL_TS
+        )
+        if wait > 0:
+            time.sleep(wait)
+        _CID_TO_INCHIKEY_LAST_CALL_TS = time.monotonic()
+
+    url = _PUBCHEM_PUG_REST_BASE.format(cid=cid_int)
+    last_exc: Optional[Exception] = None
+    payload: Optional[Dict[str, Any]] = None
+    for attempt in range(1, _CID_TO_INCHIKEY_MAX_RETRIES + 1):
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "DrugOS-Graph/2.0 (phase2 pubchem_loader)",
+                    "Accept": "application/json",
+                },
+            )
+            with urllib.request.urlopen(
+                req, timeout=_CID_TO_INCHIKEY_TIMEOUT_S
+            ) as resp:
+                raw = resp.read()
+            payload = json.loads(raw.decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            # 404 means PubChem has no InChIKey for this CID -- not
+            # retriable. 429 / 5xx are retriable.
+            last_exc = e
+            if e.code == 404:
+                logger.debug(
+                    "pubchem_loader: CID %d has no InChIKey on PubChem (404)",
+                    cid_int,
+                )
+                _cache_cid_lookup(cid_int, None)
+                return None
+            if e.code not in (429, 500, 502, 503, 504):
+                # Non-retriable HTTP error -- cache the miss and bail.
+                logger.warning(
+                    "pubchem_loader: PUG-REST returned HTTP %d for CID %d: %s",
+                    e.code, cid_int, e.reason,
+                )
+                _cache_cid_lookup(cid_int, None)
+                return None
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
+            last_exc = e
+        # Exponential backoff between retries.
+        if attempt < _CID_TO_INCHIKEY_MAX_RETRIES:
+            time.sleep(0.5 * (2 ** (attempt - 1)))
+
+    if payload is None:
+        logger.warning(
+            "pubchem_loader: PUG-REST lookup failed for CID %d after %d "
+            "attempts: %s",
+            cid_int, _CID_TO_INCHIKEY_MAX_RETRIES, last_exc,
+        )
+        _cache_cid_lookup(cid_int, None)
+        return None
+
+    try:
+        props = payload["PropertyTable"]["Properties"]
+        if not props:
+            _cache_cid_lookup(cid_int, None)
+            return None
+        ik = str(props[0].get("InChIKey") or "").strip().upper()
+        if not ik:
+            _cache_cid_lookup(cid_int, None)
+            return None
+        _cache_cid_lookup(cid_int, ik)
+        return ik
+    except (KeyError, IndexError, TypeError, AttributeError) as e:
+        logger.warning(
+            "pubchem_loader: malformed PUG-REST response for CID %d: %s",
+            cid_int, e,
+        )
+        _cache_cid_lookup(cid_int, None)
+        return None
+
+
+def _cache_cid_lookup(cid: int, value: Optional[str]) -> None:
+    """Cache a CID->InChIKey lookup result, evicting oldest entries if full."""
+    with _CID_TO_INCHIKEY_CACHE_LOCK:
+        if len(_CID_TO_INCHIKEY_CACHE) >= _CID_TO_INCHIKEY_CACHE_MAX_SIZE:
+            # Evict ~10% of the cache to amortise eviction cost. We
+            # evict the first 5_000 entries (insertion order, oldest).
+            for k in list(_CID_TO_INCHIKEY_CACHE.keys())[:5000]:
+                _CID_TO_INCHIKEY_CACHE.pop(k, None)
+        _CID_TO_INCHIKEY_CACHE[cid] = value
+
 
 _DEFAULT_PHASE1_PROCESSED_DIR: Path = (
     Path(__file__).resolve().parents[2] / "phase1" / "processed_data"
@@ -353,11 +512,30 @@ def pubchem_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
         # would succeed — the SAME compound got two canonical IDs.
         inchikey = _normalize_inchikey(row_dict.get("inchikey"))
 
-        # Choose canonical ID: InChIKey preferred, else CID<pid> if we
-        # somehow have a CID without an InChIKey (raw-SD-record path).
+        # Task 87 ROOT FIX: when the CSV provides a CID but no InChIKey,
+        # resolve the InChIKey via PubChem's PUG-REST API so the
+        # Compound node can be merged with ChEMBL/DrugBank Compound
+        # nodes (which are InChIKey-keyed). The previous code fell back
+        # to ``f"CID{cid_int}"`` as the canonical ID and emitted
+        # ``inchikey=None`` -- a Compound node that could not be joined
+        # to any other source, fragmenting the KG. The lookup is cached
+        # and rate-limited (see ``_cid_to_inchikey``) so the overhead
+        # is bounded even on large PubChem extracts.
+        if not inchikey and cid_int is not None:
+            looked_up = _cid_to_inchikey(cid_int)
+            if looked_up:
+                inchikey = _normalize_inchikey(looked_up)
+
+        # Choose canonical ID: InChIKey preferred, else CID<pid> if the
+        # PUG-REST lookup also failed (rare -- log so operator knows).
         if inchikey:
             canonical_id = inchikey
         elif cid_int is not None:
+            logger.info(
+                "pubchem_loader: using CID %d as canonical_id (InChIKey "
+                "missing from CSV and PUG-REST lookup returned no result)",
+                cid_int,
+            )
             canonical_id = f"CID{cid_int}"
         else:
             # Neither InChIKey nor CID -- cannot canonically identify

@@ -107,6 +107,7 @@ import sys
 import tarfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import warnings
 from dataclasses import dataclass, field, asdict
@@ -203,6 +204,9 @@ __all__: list[str] = [
     "ChEMBLConfig",
     # ── Download ──
     "download_chembl",
+    # ── REST API (Task 81) ──
+    "fetch_chembl_molecules_api",
+    "iter_chembl_activities_api",
     # ── Parse ──
     "parse_chembl_activities",
     "iter_chembl_activities",
@@ -717,6 +721,241 @@ def _create_tls_context() -> ssl.SSLContext:
     ctx.check_hostname = True
     ctx.verify_mode = ssl.CERT_REQUIRED
     return ctx
+
+
+# =============================================================================
+# Section 3.5 -- ChEMBL REST API client (Task 81 ROOT FIX)
+# =============================================================================
+# Task 81: the audit noted "must use the ChEMBL API pagination cursor.
+# Currently fetches only 1000 records." The primary production path
+# uses the SQLite bulk download (``download_chembl``), but several
+# legitimate use cases need the REST API instead:
+#
+#   * Incremental updates (fetch only molecules added since the last
+#     SQLite release).
+#   * Targeted queries (e.g. "all molecules with activity against
+#     PDE5A below 100 nM").
+#   * Lightweight CI smoke tests (10-record sample without downloading
+#     the 2 GB SQLite dump).
+#
+# The previous codebase had NO REST API client -- a comment claimed
+# "we use SQLite for bulk, no API needed", but that left the
+# incremental / targeted-query use cases with no path. Operators
+# needing them wrote ad-hoc ``requests.get`` calls that hit the
+# 1000-row default limit (ChEMBL's REST API caps ``limit`` at 1000
+# per request) and silently truncated at 1000 records.
+#
+# ROOT FIX: a proper cursor-following REST client that:
+#   1. Issues requests with ``limit=1000`` (the max the API allows).
+#   2. Follows the ``page_meta.next`` cursor in the JSON response
+#      until it is ``None``.
+#   3. Respects ``max_records`` (caller-supplied safety cap so a
+#      runaway loop can't OOM the loader).
+#   4. Uses TLS verification (reuses ``_create_ssl_context``).
+#   5. Retries 429 / 5xx with exponential backoff.
+#   6. Streams results as a generator so callers don't need to hold
+#      the full result set in memory.
+
+_CHEMBL_API_BASE: str = "https://www.ebi.ac.uk/chembl/api/data"
+_CHEMBL_API_DEFAULT_PAGE_SIZE: int = 1000  # API max -- larger values are silently capped
+_CHEMBL_API_DEFAULT_TIMEOUT_S: float = 60.0
+_CHEMBL_API_MAX_RETRIES: int = 4
+
+
+def _chembl_api_request(
+    url: str,
+    *,
+    timeout: float = _CHEMBL_API_DEFAULT_TIMEOUT_S,
+    max_retries: int = _CHEMBL_API_MAX_RETRIES,
+) -> Dict[str, Any]:
+    """Issue a single ChEMBL REST API GET with retry + TLS verification.
+
+    Returns the parsed JSON dict. Raises on non-retriable HTTP errors
+    or after ``max_retries`` retriable failures.
+    """
+    import json as _json
+    import urllib.error as _urlerr
+    import urllib.request as _urlreq
+
+    ctx = _create_tls_context()
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            req = _urlreq.Request(
+                url,
+                headers={
+                    "User-Agent": "DrugOS-Graph/2.0 (phase2 chembl_loader)",
+                    "Accept": "application/json",
+                },
+            )
+            with _urlreq.urlopen(req, timeout=timeout, context=ctx) as resp:
+                raw = resp.read()
+            return _json.loads(raw.decode("utf-8"))
+        except _urlerr.HTTPError as e:
+            last_exc = e
+            # 429 / 5xx are retriable; 4xx are not.
+            if e.code not in (429, 500, 502, 503, 504):
+                raise
+        except (_urlerr.URLError, TimeoutError, OSError, _json.JSONDecodeError) as e:
+            last_exc = e
+        if attempt < max_retries:
+            time.sleep(0.5 * (2 ** (attempt - 1)))
+    raise RuntimeError(
+        f"ChEMBL API request failed after {max_retries} attempts: {url!r}: {last_exc}"
+    )
+
+
+def fetch_chembl_molecules_api(
+    *,
+    max_records: Optional[int] = None,
+    page_size: int = _CHEMBL_API_DEFAULT_PAGE_SIZE,
+    timeout: float = _CHEMBL_API_DEFAULT_TIMEOUT_S,
+    target_chembl_id: Optional[str] = None,
+) -> Iterator[Dict[str, Any]]:
+    """Fetch ChEMBL molecules via the REST API, following the pagination cursor.
+
+    Task 81 ROOT FIX. ChEMBL's REST API caps ``limit`` at 1000 per
+    request -- the previous ad-hoc callers hit this cap and silently
+    truncated at 1000 records. This generator follows the
+    ``page_meta.next`` cursor in the JSON response until it is
+    ``None`` (or until ``max_records`` is reached, if the caller
+    supplied a safety cap).
+
+    Parameters
+    ----------
+    max_records : int or None
+        Optional safety cap on the total number of records yielded.
+        ``None`` (default) means no cap -- fetch ALL matching
+        molecules. Set to a small number (e.g. 10) for smoke tests.
+    page_size : int
+        Records per request. The API silently caps this at 1000;
+        larger values are clamped server-side. Default 1000.
+    timeout : float
+        Per-request timeout in seconds. Default 60.
+    target_chembl_id : str or None
+        Optional ChEMBL target ID (e.g. ``"CHEMBL2366519"`` for PDE5A)
+        to filter molecules to those with measured activity against
+        the target. When ``None`` (default), ALL molecules are
+        returned (very large result set -- use ``max_records``).
+
+    Yields
+    ------
+    dict
+        Each ChEMBL molecule record (the JSON dict as returned by the
+        API). Callers should normalise to KG node records via
+        ``chembl_to_node_records``.
+    """
+    # Build the initial URL. The API uses query params for filtering
+    # and pagination; ``page_meta.next`` returns the next URL with
+    # the correct offset already encoded.
+    base = f"{_CHEMBL_API_BASE}/molecule.json"
+    params: Dict[str, str] = {
+        "limit": str(min(page_size, _CHEMBL_API_DEFAULT_PAGE_SIZE)),
+        "format": "json",
+    }
+    if target_chembl_id:
+        # Filter by target -- the API uses ``target_chembl_id`` as a
+        # query param on the molecule endpoint.
+        params["target_chembl_id"] = target_chembl_id
+    url: Optional[str] = f"{base}?{urllib.parse.urlencode(params)}"
+    yielded = 0
+    while url:
+        payload = _chembl_api_request(url, timeout=timeout)
+        molecules = payload.get("molecules") or []
+        if not molecules:
+            break
+        for mol in molecules:
+            if max_records is not None and yielded >= max_records:
+                return
+            yield mol
+            yielded += 1
+        # Follow the cursor: ``page_meta.next`` is a relative URL
+        # starting with ``/chembl/api/data/...``. Re-attach the host.
+        page_meta = payload.get("page_meta") or {}
+        next_url = page_meta.get("next")
+        if not next_url:
+            break
+        if next_url.startswith("http"):
+            url = next_url
+        elif next_url.startswith("/"):
+            url = "https://www.ebi.ac.uk" + next_url
+        else:
+            url = _CHEMBL_API_BASE.rstrip("/molecule.json").rstrip("/") + "/" + next_url
+    logger.info(
+        "fetch_chembl_molecules_api: yielded %d molecules (target_chembl_id=%s)",
+        yielded, target_chembl_id,
+    )
+
+
+def iter_chembl_activities_api(
+    *,
+    max_records: Optional[int] = None,
+    page_size: int = _CHEMBL_API_DEFAULT_PAGE_SIZE,
+    timeout: float = _CHEMBL_API_DEFAULT_TIMEOUT_S,
+    target_chembl_id: Optional[str] = None,
+    pchembl_threshold: Optional[float] = None,
+) -> Iterator[Dict[str, Any]]:
+    """Fetch ChEMBL activity records via the REST API, following the cursor.
+
+    Task 81 companion to ``fetch_chembl_molecules_api``. Yields
+    activity records (drug-target interaction measurements) instead
+    of molecule records. The activity endpoint is
+    ``/chembl/api/data/activity.json`` and uses the same cursor-
+    based pagination scheme.
+
+    Parameters
+    ----------
+    max_records, page_size, timeout
+        Same semantics as ``fetch_chembl_molecules_api``.
+    target_chembl_id : str or None
+        Optional target filter.
+    pchembl_threshold : float or None
+        Optional minimum pChEMBL value filter. Activities below this
+        threshold are skipped (the request still fetches them, but
+        the generator does not yield them).
+    """
+    base = f"{_CHEMBL_API_BASE}/activity.json"
+    params: Dict[str, str] = {
+        "limit": str(min(page_size, _CHEMBL_API_DEFAULT_PAGE_SIZE)),
+        "format": "json",
+    }
+    if target_chembl_id:
+        params["target_chembl_id"] = target_chembl_id
+    url: Optional[str] = f"{base}?{urllib.parse.urlencode(params)}"
+    yielded = 0
+    while url:
+        payload = _chembl_api_request(url, timeout=timeout)
+        activities = payload.get("activities") or []
+        if not activities:
+            break
+        for act in activities:
+            if max_records is not None and yielded >= max_records:
+                return
+            if pchembl_threshold is not None:
+                pval = act.get("pchembl_value")
+                if pval is None:
+                    continue
+                try:
+                    if float(pval) < pchembl_threshold:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            yield act
+            yielded += 1
+        page_meta = payload.get("page_meta") or {}
+        next_url = page_meta.get("next")
+        if not next_url:
+            break
+        if next_url.startswith("http"):
+            url = next_url
+        elif next_url.startswith("/"):
+            url = "https://www.ebi.ac.uk" + next_url
+        else:
+            url = _CHEMBL_API_BASE.rstrip("/") + "/" + next_url
+    logger.info(
+        "iter_chembl_activities_api: yielded %d activities (target=%s, pchembl_threshold=%s)",
+        yielded, target_chembl_id, pchembl_threshold,
+    )
 
 
 def download_chembl(

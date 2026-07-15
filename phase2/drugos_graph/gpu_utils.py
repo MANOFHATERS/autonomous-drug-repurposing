@@ -136,9 +136,25 @@ def test_batch_memory(
         result["fits_gpu"] = total_estimated_gb < free_gb
 
         # Test actual mini-batch allocation ON THE REQUESTED DEVICE.
-        # P2-051: previously this used ``device="cuda"`` which is
-        # always cuda:0; multi-GPU operators testing cuda:2 got a false
-        # OOM from cuda:0. Now we allocate on the resolved device.
+        # Task 96 ROOT FIX: the previous except clause referenced
+        # ``torch.cuda.OutOfMemoryError`` directly. That attribute does
+        # NOT exist on PyTorch < 1.13 -- on those versions the import
+        # itself succeeds but the attribute access raises
+        # AttributeError when the except clause is evaluated, turning
+        # every OOM into a CRASH. Even on PyTorch >= 1.13, OOM from
+        # inside ``torch.randn`` is raised as ``RuntimeError`` in some
+        # code paths (notably when the CUDA driver refuses the
+        # allocation). The fix: (a) resolve the exception class via
+        # ``getattr`` with a ``RuntimeError`` fallback; (b) catch BOTH
+        # the dedicated OOM exception and ``RuntimeError``; (c)
+        # narrow RuntimeError matches by inspecting the message so
+        # non-OOM runtime errors (e.g. device-side assert) re-raise;
+        # (d) set ``fits_gpu=False`` in the OOM branch so callers that
+        # branch on ``fits_gpu`` do not proceed to allocate a real
+        # training batch and crash. Previously ``fits_gpu`` retained
+        # the pre-OOM estimate (which could be True) -- a "false PASS"
+        # that misled operators into thinking the GPU was usable.
+        _OOMExc = getattr(torch.cuda, "OutOfMemoryError", RuntimeError)
         try:
             test_batch = torch.randn(batch_size, feat_dim, device=_dev)
             result["batch_test"] = "PASS"
@@ -146,8 +162,30 @@ def test_batch_memory(
             # P2-051: empty the cache on the tested device, not the
             # default device.
             torch.cuda.empty_cache()
-        except torch.cuda.OutOfMemoryError:
+        except _OOMExc:
+            # Task 96: dedicated OOM exception path.
             result["batch_test"] = f"FAIL — OOM on cuda:{_dev_idx}"
+            result["fits_gpu"] = False
+            try:
+                torch.cuda.empty_cache()
+            except Exception:  # noqa: BLE001 -- best-effort cache clear
+                pass
+        except RuntimeError as exc:
+            # Task 96: older PyTorch versions raise plain RuntimeError
+            # on OOM. Narrow by message so genuine device errors
+            # (e.g. device-side assert, misaligned access) still
+            # propagate and surface as real bugs rather than being
+            # silently swallowed as "OOM".
+            msg = str(exc).lower()
+            if "out of memory" in msg or "cuda memory" in msg or "oom" in msg:
+                result["batch_test"] = f"FAIL — OOM on cuda:{_dev_idx}"
+                result["fits_gpu"] = False
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                raise
     else:
         result["fits_gpu"] = False
         result["batch_test"] = "SKIP -- no GPU"
