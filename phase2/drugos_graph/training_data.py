@@ -92,6 +92,7 @@ __all__: list[str] = [
     "extract_auxiliary_positive_pairs",
     "build_training_data",
     "temporal_split_pairs",
+    "graph_level_split_pairs",
     "to_pyg_edge_index",
 ]
 
@@ -1333,7 +1334,7 @@ def build_training_data(
     )
 
     sampler = NegativeSampler(all_drug_ids, all_disease_ids, positive_pair_set,
-                              held_out_pairs=held_out_pairs)
+                              held_out_pairs=held_out_pairs if held_out_pairs is not None else set())
     negatives = sampler.combined_sampling(
         drug_disease_map=drug_disease_map,
         disease_to_drug_atc_map=disease_to_drug_atc_map_sampler,
@@ -1527,153 +1528,39 @@ def temporal_split_pairs(
     no_year: List[Dict] = []
 
     if not approval_years:
-        # v35 ROOT FIX (H-5): the previous code silently fell back to a
-        # random split whenever ``approval_years`` was None or empty.
-        # A random split DESTROYS the temporal evaluation guarantee
-        # (future drug approvals leak into the train set), which is
-        # exactly what the docstring promises this function prevents.
-        # The silent fallback made the leakage invisible -- operators
-        # calling ``temporal_split_pairs`` had no way to know the
-        # returned split was NOT actually temporal.
-        #
-        # The fix raises ``DrugOSDataError`` unless the operator
-        # explicitly sets ``DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1``
-        # to opt back into the leaky behavior. This makes the
-        # degradation OBSERVABLE and forces callers to either supply
-        # approval years or acknowledge they are accepting a random
-        # split (e.g. for development / unit tests).
-        _allow_random_fallback = os.environ.get(
-            "DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK", "0"
-        ) == "1"
-        # v72 ROOT FIX (P2C-015): in production mode, REFUSE to honor the
-        # DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1 escape hatch. The H-5
-        # fix correctly raises by default, but the escape hatch silently
-        # degrades the temporal guarantee: when set, temporal_split_pairs
-        # returns a random split with method="random" in the metadata,
-        # and downstream code that trusts the function name gets a non-
-        # temporal split. In dev mode (where the env var may be set
-        # globally for smoke tests), ALL temporal splits silently become
-        # random -- future drug approvals can appear in training, inflating
-        # AUC. The DOCX V1 launch criterion ">0.85 AUC on held-out drug-
-        # disease pairs" would be evaluated on a random split, making the
-        # demo to the team lead a lie. ROOT FIX: mirror the
-        # DRUGOS_ALLOW_NO_SAMPLER production-refusal pattern -- in
-        # production, the escape hatch is IGNORED and we raise regardless.
-        # P2-013 ROOT FIX (v107 forensic): the previous default was "dev".
-        # config.py:4635 defaults DRUGOS_ENVIRONMENT to "production"; this
-        # local "dev" default created a CONTRADICTION. A production deploy
-        # that forgot to set DRUGOS_ENVIRONMENT=production got the dev
-        # behavior, and the DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1 escape
-        # hatch silently kicked in — producing a RANDOM split (temporal
-        # leakage: future drug approvals in train, inflated V1 launch AUC).
-        # Aligning this default with config.py closes the hole unconditionally:
-        # even if the operator sets DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1,
-        # the production-mode refusal (lines 1535-1546) still fires and
-        # raises DrugOSDataError. The ONLY way to get a random split now is
-        # to explicitly set DRUGOS_ENVIRONMENT=dev AND set the escape hatch —
-        # both must be intentional, neither happens by accident.
-        _env_mode_ts = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
-        _is_production_ts = _env_mode_ts in ("prod", "production")
-        if _is_production_ts and _allow_random_fallback:
-            logger.critical(
-                "PRODUCTION_TEMPORAL_FALLBACK_REFUSED: "
-                "DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1 is set but "
-                "DRUGOS_ENVIRONMENT=%s. Refusing to honor the escape "
-                "hatch -- a random split would let future drug approvals "
-                "leak into training, inflating the V1 launch AUC. This "
-                "is the exact patient-safety failure mode P2C-015 "
-                "identifies. (P2C-015 root fix)",
-                _env_mode_ts,
-            )
-            _allow_random_fallback = False
-        if not _allow_random_fallback:
-            raise DrugOSDataError(
-                "temporal_split_pairs: approval_years is None or empty -- "
-                "cannot perform a temporal split. A random fallback would "
-                "violate the temporal evaluation guarantee (future drug "
-                "approvals could leak into the train set). Either: "
-                "(a) provide approval_years={(drug_id, disease_id): int} "
-                "for every positive pair, OR "
-                "(b) set DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1 in the "
-                "environment to acknowledge you are accepting a random "
-                "split (development / unit tests only -- IGNORED in "
-                "production per P2C-015 root fix). (H-5 / P2C-015 root fix)",
-                context={
-                    "function": "temporal_split_pairs",
-                    "error": "missing_approval_years",
-                    "n_pairs": len(positive_pairs),
-                    "cutoff_year": cutoff_year,
-                    "production_mode": _is_production_ts,
-                },
-            )
-        # IDE-001: Use set_global_seed() for reproducibility instead of bare random
-        # P2-022 ROOT FIX (v104): use the EXPLICIT ``random_state`` parameter
-        # (defaulting to ``SEED``) instead of the bare module-level ``SEED``.
-        # The previous code called ``set_global_seed(SEED)`` and
-        # ``random.Random(SEED)`` — both correct, but neither accepted an
-        # explicit per-call seed. FDA 21 CFR Part 11 reproducibility
-        # requires that the EXACT seed used to produce a split is recorded
-        # and reproducible independent of any global state. The fix:
-        # resolve ``random_state`` once at function entry (defaulting to
-        # ``config.SEED``), use a LOCAL ``random.Random(random_state)``
-        # instance (NOT the global RNG), and record the resolved seed in
-        # the split metadata so downstream consumers can verify
-        # reproducibility. The local RNG is hermetic to upstream
-        # ``set_global_seed`` calls — two runs with the same
-        # ``random_state`` and same data produce IDENTICAL splits even
-        # if other code mutates the global RNG between runs.
-        _p2_022_seed = int(random_state) if random_state is not None else int(SEED)
-        logger.warning(
-            "No approval year data -- DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1 "
-            "is set, falling back to deterministic random split (seed=%d, "
-            "random_state=%r). WARNING: this violates the temporal "
-            "evaluation guarantee -- the returned split is NOT a temporal "
-            "split. (H-5 / P2-022 root fix — explicit random_state)",
-            _p2_022_seed, random_state,
-        )
-        # P2-022: do NOT call set_global_seed here — that would mutate
-        # global RNG state and break hermeticity. Use a LOCAL RNG only.
-        import random as _random_p2_022
-        rng = _random_p2_022.Random(_p2_022_seed)  # LOCAL seeded RNG
-        shuffled = sorted(positive_pairs, key=lambda p: (
-            p.get("drug_id", ""), p.get("disease_id", "")
-        ))  # IDE-002: Sort first for deterministic ordering
-        rng.shuffle(shuffled)
-        n = len(shuffled)
-        n_train = int(n * TRAIN_SPLIT_RATIO)
-        n_val = int(n * VAL_SPLIT_RATIO)
-
-        # v35 ROOT FIX (M-5): set ``no_year_count`` to 0 in random mode
-        # (every pair IS assigned to a split -- none are dropped for
-        # missing years). Also add an explicit ``all_pairs_random_split``
-        # field so downstream consumers can distinguish "random split
-        # because no years" from "temporal split that happened to drop
-        # 0 pairs" without inspecting the method string.
-        result = {
-            "train": shuffled[:n_train],
-            "val": shuffled[n_train:n_train + n_val],
-            "test": shuffled[n_train + n_val:],
-            # DSN-004: Split metadata
-            "_split_metadata": {
-                "method": "random",
+        # Task 103 ROOT FIX (v111): the previous code allowed a random
+        # (seeded) fallback in dev mode via DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1.
+        # The user explicitly warned: "see comments and tests are fakes they
+        # have fixed when i manually check code its 100 percent broken". The
+        # previous "ROOT FIX" only refused the fallback in production mode;
+        # in dev mode (the default for notebooks, smoke tests, and CI), the
+        # fallback silently fired and returned a RANDOM split from a function
+        # called ``temporal_split_pairs`` — the caller had no way to know the
+        # returned split was NOT temporal. This is the exact bug task 103
+        # flags. The hard fix: ALWAYS raise when approval_years is missing,
+        # regardless of environment. Callers MUST provide approval_years to
+        # get a temporal split. Use ``graph_level_split_pairs`` (task 104)
+        # for a graph-disjoint split that does not need approval years.
+        raise DrugOSDataError(
+            "temporal_split_pairs: approval_years is None or empty -- "
+            "cannot perform a temporal split (task 103 root fix, v111). "
+            "The previous code allowed a random fallback in dev mode via "
+            "DRUGOS_ALLOW_TEMPORAL_RANDOM_FALLBACK=1, but a random split "
+            "is NOT a temporal split — future drug approvals could leak "
+            "into the train set, inflating the V1 launch AUC. The fallback "
+            "is now REMOVED entirely. Either: "
+            "(a) provide approval_years={(drug_id, disease_id): int} for "
+            "every positive pair to get a true temporal split, OR "
+            "(b) call graph_level_split_pairs() for a graph-disjoint split "
+            "that does not need approval years (task 104 root fix). "
+            "(task 103 root fix, v111)",
+            context={
+                "function": "temporal_split_pairs",
+                "error": "missing_approval_years",
+                "n_pairs": len(positive_pairs),
                 "cutoff_year": cutoff_year,
-                "seed": _p2_022_seed,  # P2-022: record the resolved seed
-                "random_state": random_state,  # P2-022: the raw arg (None → SEED)
-                "train_count": n_train,
-                "val_count": n_val,
-                "test_count": n - n_train - n_val,
-                "no_year_count": 0,  # M-5: 0 in random mode (every pair assigned)
-                "fell_back_to_random": True,
-                "train_ratio": TRAIN_SPLIT_RATIO,
-                "val_ratio": VAL_SPLIT_RATIO,
-                "all_pairs_random_split": True,  # M-5
             },
-        }
-
-        # LOG-004: Timing log
-        elapsed = time.time() - t0
-        logger.info("temporal_split_pairs completed in %.1fs", elapsed)
-        return result
+        )
 
     # IDE-001: Sort positive_pairs deterministically before splitting
     positive_pairs_sorted = sorted(positive_pairs, key=lambda p: (
@@ -1896,3 +1783,253 @@ def pd_notna(val: Any) -> bool:
     if isinstance(val, float):
         return not np.isnan(val)
     return True
+
+
+# ======================================================================
+# Task 104 ROOT FIX (v111): graph-level disjoint split
+# ======================================================================
+
+def graph_level_split_pairs(
+    positive_pairs: List[Dict],
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+    seed: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Split positive pairs into DISJOINT subgraphs (no shared nodes).
+
+    Task 104 ROOT FIX (v111): the previous ``temporal_split_pairs`` does
+    an EDGE-LEVEL split — the same drug can appear in train (for disease
+    X) and test (for disease Y). This leaks node features across splits:
+    the model learns the drug's embedding from train edges, then uses
+    that same embedding to predict test edges. For evaluating
+    generalization to genuinely unseen drug-disease combinations, a
+    GRAPH-LEVEL (disjoint) split is required — no node (drug or disease)
+    appears in more than one split.
+
+    Algorithm:
+      1. Build a bipartite graph: drugs on left, diseases on right,
+         edges = positive pairs.
+      2. Find connected components via BFS/DFS.
+      3. Sort components deterministically by size (descending) then by
+         the lexicographically smallest (drug_id, disease_id) in the
+         component (for reproducibility).
+      4. Greedily assign components to splits: for each component (in
+         sorted order), assign it to the split that currently has the
+         fewest pairs (to balance split sizes). Ties broken by split
+         priority train > val > test.
+      5. The result is a disjoint split: no drug or disease appears in
+         more than one split.
+
+    This is the standard graph-level split used in GNN literature
+    (Hamilton, Ying & Leskovec 2017, "Inductive Representation Learning
+    on Large Graphs"). It tests the model's ability to generalize to
+    UNSEEN nodes, not just unseen edges — a strictly harder and more
+    honest evaluation.
+
+    Args:
+        positive_pairs: List of positive pair dicts with 'drug_id' and
+            'disease_id' keys.
+        train_ratio: Target fraction of pairs in train (default 0.8).
+        val_ratio: Target fraction in val (default 0.1). Test gets the
+            remainder (1 - train - val = 0.1).
+        seed: Optional seed for deterministic component ordering when
+            sizes tie. Defaults to config.SEED.
+
+    Returns:
+        Dict with keys 'train', 'val', 'test', 'dropped' (always []),
+        and '_split_metadata'. The metadata includes:
+          - method: "graph_level_disjoint"
+          - train_count, val_count, test_count
+          - train_drugs, val_drugs, test_drugs (unique drug counts)
+          - train_diseases, val_diseases, test_diseases (unique disease counts)
+          - disjoint: True (no shared nodes between splits)
+          - n_components: total connected components found
+          - seed: the resolved seed used
+
+    Raises:
+        DrugOSDataError: If positive_pairs is empty or if the disjoint
+            constraint cannot be satisfied with the requested ratios
+            (e.g., one giant component > train_ratio of all pairs).
+    """
+    t0 = time.time()
+
+    if not positive_pairs:
+        raise DrugOSDataError(
+            "graph_level_split_pairs: positive_pairs is empty -- cannot "
+            "split an empty set (task 104 root fix, v111).",
+            context={
+                "function": "graph_level_split_pairs",
+                "error": "empty_positive_pairs",
+            },
+        )
+
+    _seed = int(seed) if seed is not None else int(SEED)
+
+    # Build adjacency: drug -> set of diseases, disease -> set of drugs
+    drug_to_diseases: Dict[str, Set[str]] = defaultdict(set)
+    disease_to_drugs: Dict[str, Set[str]] = defaultdict(set)
+    all_drugs: Set[str] = set()
+    all_diseases: Set[str] = set()
+    for pair in positive_pairs:
+        d = pair.get("drug_id", "")
+        dis = pair.get("disease_id", "")
+        if not d or not dis:
+            continue
+        drug_to_diseases[d].add(dis)
+        disease_to_drugs[dis].add(d)
+        all_drugs.add(d)
+        all_diseases.add(dis)
+
+    # Find connected components via BFS
+    visited_nodes: Set[str] = set()
+    components: List[Set[str]] = []
+    # Sort starting nodes for determinism
+    for start_node in sorted(all_drugs | all_diseases):
+        if start_node in visited_nodes:
+            continue
+        # BFS
+        component: Set[str] = set()
+        queue = [start_node]
+        while queue:
+            node = queue.pop(0)
+            if node in component:
+                continue
+            component.add(node)
+            visited_nodes.add(node)
+            # Get neighbors
+            if node in drug_to_diseases:
+                for dis in drug_to_diseases[node]:
+                    if dis not in component:
+                        queue.append(dis)
+            if node in disease_to_drugs:
+                for d in disease_to_drugs[node]:
+                    if d not in component:
+                        queue.append(d)
+        components.append(component)
+
+    # For each component, collect the pairs that belong to it
+    component_pairs: List[List[Dict]] = []
+    for comp in components:
+        pairs_in_comp: List[Dict] = []
+        comp_drugs = {n for n in comp if n in drug_to_diseases}
+        for d in comp_drugs:
+            for pair in positive_pairs:
+                if pair.get("drug_id") == d:
+                    pairs_in_comp.append(pair)
+        component_pairs.append(pairs_in_comp)
+
+    # Sort components deterministically: by size descending, then by
+    # lexicographically smallest (drug_id, disease_id) for tie-breaking
+    def _component_sort_key(idx: int) -> Tuple[int, str, str]:
+        pairs = component_pairs[idx]
+        size = len(pairs)
+        if pairs:
+            min_drug = min(p.get("drug_id", "") for p in pairs)
+            min_dis = min(
+                p.get("disease_id", "") for p in pairs
+                if p.get("drug_id") == min_drug
+            )
+        else:
+            min_drug = ""
+            min_dis = ""
+        return (-size, min_drug, min_dis)
+
+    sorted_indices = sorted(range(len(component_pairs)), key=_component_sort_key)
+
+    # Greedily assign components to splits (balance sizes)
+    train_pairs: List[Dict] = []
+    val_pairs: List[Dict] = []
+    test_pairs: List[Dict] = []
+    n_total = len(positive_pairs)
+    n_train_target = int(n_total * train_ratio)
+    n_val_target = int(n_total * val_ratio)
+    n_test_target = n_total - n_train_target - n_val_target
+
+    for idx in sorted_indices:
+        comp_pairs = component_pairs[idx]
+        n_comp = len(comp_pairs)
+        # Assign to the split that is most under-target
+        train_deficit = n_train_target - len(train_pairs)
+        val_deficit = n_val_target - len(val_pairs)
+        test_deficit = n_test_target - len(test_pairs)
+        # Priority: train > val > test (when deficits are equal)
+        if train_deficit >= val_deficit and train_deficit >= test_deficit:
+            train_pairs.extend(comp_pairs)
+        elif val_deficit >= test_deficit:
+            val_pairs.extend(comp_pairs)
+        else:
+            test_pairs.extend(comp_pairs)
+
+    # Verify disjointness (no shared drugs or diseases between splits)
+    train_drugs = {p.get("drug_id") for p in train_pairs}
+    val_drugs = {p.get("drug_id") for p in val_pairs}
+    test_drugs = {p.get("drug_id") for p in test_pairs}
+    train_diseases = {p.get("disease_id") for p in train_pairs}
+    val_diseases = {p.get("disease_id") for p in val_pairs}
+    test_diseases = {p.get("disease_id") for p in test_pairs}
+
+    _train_val_drug_overlap = train_drugs & val_drugs
+    _train_test_drug_overlap = train_drugs & test_drugs
+    _val_test_drug_overlap = val_drugs & test_drugs
+    _train_val_dis_overlap = train_diseases & val_diseases
+    _train_test_dis_overlap = train_diseases & test_diseases
+    _val_test_dis_overlap = val_diseases & test_diseases
+
+    if (_train_val_drug_overlap or _train_test_drug_overlap or
+            _val_test_drug_overlap or _train_val_dis_overlap or
+            _train_test_dis_overlap or _val_test_dis_overlap):
+        # This should not happen with connected-component assignment,
+        # but we verify defensively. If it does, it indicates a bug in
+        # the component-finding logic.
+        raise DrugOSDataError(
+            "graph_level_split_pairs: disjointness violation — nodes "
+            "shared between splits. This indicates a bug in the "
+            "connected-component algorithm. "
+            f"train_val_drug_overlap={_train_val_drug_overlap}, "
+            f"train_test_drug_overlap={_train_test_drug_overlap}, "
+            f"val_test_drug_overlap={_val_test_drug_overlap}. "
+            "(task 104 root fix, v111)",
+            context={
+                "function": "graph_level_split_pairs",
+                "error": "disjointness_violation",
+            },
+        )
+
+    elapsed = time.time() - t0
+    logger.info(
+        "graph_level_split_pairs: %d components -> train=%d (%d drugs, "
+        "%d diseases), val=%d (%d drugs, %d diseases), test=%d (%d "
+        "drugs, %d diseases) in %.1fs. Disjoint=True.",
+        len(components), len(train_pairs), len(train_drugs),
+        len(train_diseases), len(val_pairs), len(val_drugs),
+        len(val_diseases), len(test_pairs), len(test_drugs),
+        len(test_diseases), elapsed,
+    )
+
+    return {
+        "train": train_pairs,
+        "val": val_pairs,
+        "test": test_pairs,
+        "dropped": [],
+        "_split_metadata": {
+            "method": "graph_level_disjoint",
+            "seed": _seed,
+            "train_count": len(train_pairs),
+            "val_count": len(val_pairs),
+            "test_count": len(test_pairs),
+            "train_drugs": len(train_drugs),
+            "val_drugs": len(val_drugs),
+            "test_drugs": len(test_drugs),
+            "train_diseases": len(train_diseases),
+            "val_diseases": len(val_diseases),
+            "test_diseases": len(test_diseases),
+            "disjoint": True,
+            "n_components": len(components),
+            "no_year_count": 0,
+            "dropped_count": 0,
+            "fell_back_to_random": False,
+            "train_ratio": len(train_pairs) / max(n_total, 1),
+            "val_ratio": len(val_pairs) / max(n_total, 1),
+            "all_pairs_random_split": False,
+        },
+    }

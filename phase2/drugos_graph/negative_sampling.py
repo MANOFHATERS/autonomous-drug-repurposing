@@ -274,7 +274,9 @@ class NegativeSampler:
         positive_pairs: Set[Tuple[str, str]],
         max_cache_size: int = DEFAULT_NEGATIVE_CACHE_SIZE,
         seed: Optional[int] = None,
-        held_out_pairs: Optional[Set[Tuple[str, str]]] = None,
+        *,
+        held_out_pairs: Set[Tuple[str, str]],
+        reachability_pairs: Optional[Set[Tuple[str, str]]] = None,
     ):
         """Initialize the NegativeSampler.
 
@@ -298,10 +300,22 @@ class NegativeSampler:
             seed: Random seed for reproducibility. Overrides
                 ``config.SEED`` when provided. Critical for FDA 21
                 CFR Part 11 reproducibility.
-            held_out_pairs: Optional val/test set of (drug_id,
-                disease_id) tuples. Added to the rejection set so
-                negative sampling never produces a held-out true pair
-                (false negative). v5 Tier-2 bug #14 fix.
+            held_out_pairs: REQUIRED (task 101 root fix). Val/test set
+                of (drug_id, disease_id) tuples. Added to the rejection
+                set so negative sampling never produces a held-out true
+                pair (false negative). Callers MUST pass this explicitly
+                — the previous ``None`` default silently allowed val/test
+                positives to be sampled as false negatives, corrupting
+                evaluation. Pass an empty set ``set()`` ONLY for
+                pure-train samplers that have no val/test split (e.g.
+                KG-embedding pre-training with no held-out evaluation).
+            reachability_pairs: Optional set of (drug_id, disease_id)
+                tuples that are reachable via multi-hop paths
+                (drug→protein→pathway→disease). Added to the rejection
+                set so negative sampling never produces a pair that is
+                biologically reachable through the KG (task 102 root
+                fix). When None, only direct positive pairs and
+                held_out_pairs are rejected.
         """
         # Fix 12.1: Configurable cache size via env var
         env_cache = os.environ.get("DRUGOS_NEGATIVE_CACHE_SIZE")
@@ -345,67 +359,58 @@ class NegativeSampler:
         # Fix 5.2: Validate positive_pairs structure
         self.positive_pairs = self._validate_positive_pairs(positive_pairs)
 
-        # Audit fix (v5 Tier-2 bug #14): the previous code only filtered
-        # generated negatives against self.positive_pairs (the train
-        # split). Validation and test triples were NEVER filtered, so
-        # corrupted pairs that were actually true held-out positives
-        # (false negatives) polluted training and leaked test signal.
-        # Fix: accept an optional held_out_pairs set (val ∪ test) and
-        # include it in the rejection filter.
-        #
-        # P2-006 ROOT FIX (v107 forensic): the audit found that
-        # ``held_out_pairs`` defaults to ``None`` and the rejection set
-        # silently falls back to train positives only. Val/test positives
-        # are NOT excluded from negative sampling → false negatives that
-        # corrupt evaluation. AUC is deflated; the V1 launch criterion
-        # (>0.85 AUC) may fail or pass for the wrong reasons; the RL
-        # ranker trains on corrupted negatives.
-        # ROOT FIX: in production mode (DRUGOS_ENVIRONMENT=production),
-        # REFUSE to construct a NegativeSampler without held_out_pairs —
-        # this is a hard patient-safety failure. In dev mode, log a
-        # prominent WARNING so the operator knows the evaluation is
-        # compromised. We do NOT remove the default ``None`` because
-        # doing so breaks 14+ existing legitimate callers (notebooks,
-        # smoke tests, the KG embedding trainer that does not split
-        # val/test). Instead, we enforce it at runtime: production
-        # raises, dev warns. This mirrors the P2-013 fix pattern.
+        # Task 101 ROOT FIX (v111): held_out_pairs is now a REQUIRED
+        # argument (no default). The previous code defaulted to None and
+        # only raised in production mode — but the user explicitly
+        # warned: "see comments and tests are fakes they have fixed when
+        # i manually check code its 100 percent broken". The previous
+        # "ROOT FIX" only raised in DRUGOS_ENVIRONMENT=production; in
+        # dev/CI mode (the default for notebooks, smoke tests, and most
+        # caller code paths), the sampler silently constructed with an
+        # empty rejection set, and val/test positives were sampled as
+        # false negatives. This is the exact bug the audit (task 101)
+        # flags. The hard fix: refuse to construct at all without an
+        # explicit held_out_pairs argument. Callers that genuinely have
+        # no val/test split (e.g. pure KG-embedding pre-training) MUST
+        # pass an explicit empty set ``set()`` to acknowledge they
+        # accept the false-negative risk.
         if held_out_pairs is None:
-            _p2_006_env = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
-            _p2_006_is_prod = _p2_006_env in ("prod", "production")
-            if _p2_006_is_prod:
-                raise DrugOSDataError(
-                    "P2-006 ROOT FIX: NegativeSampler constructed without "
-                    "held_out_pairs in DRUGOS_ENVIRONMENT=production. Val/test "
-                    "positives would NOT be excluded from negative sampling → "
-                    "false negatives that corrupt evaluation. The V1 launch "
-                    "criterion (>0.85 AUC) is evaluated on a corrupted set. "
-                    "Pass held_out_pairs=val_pairs ∪ test_pairs explicitly. "
-                    "(P2-006 root fix, v107)",
-                    context={
-                        "function": "NegativeSampler.__init__",
-                        "error": "missing_held_out_pairs",
-                        "n_positive_pairs": len(self.positive_pairs),
-                        "production_mode": _p2_006_is_prod,
-                    },
-                )
-            logger.warning(
-                "P2-006 ROOT FIX: NegativeSampler constructed without "
-                "held_out_pairs in DRUGOS_ENVIRONMENT=%s. Val/test "
-                "positives will NOT be excluded from negative sampling → "
-                "false negatives that corrupt evaluation. The V1 launch "
-                "AUC may be deflated or inflated for the wrong reasons. "
-                "Pass held_out_pairs=val_pairs ∪ test_pairs to silence "
-                "this warning. (P2-006 root fix, v107)",
-                _p2_006_env,
+            raise TypeError(
+                "NegativeSampler.__init__ missing required argument: "
+                "held_out_pairs (task 101 root fix, v111). The previous "
+                "default of None allowed val/test positive pairs to be "
+                "sampled as false negatives, corrupting evaluation AUC. "
+                "Pass held_out_pairs=val_pairs ∪ test_pairs explicitly. "
+                "For pure-train samplers with no val/test split, pass an "
+                "explicit empty set set() to acknowledge the risk."
             )
+        # Task 102 ROOT FIX (v111): multi-hop reachability check.
+        # Pairs reachable via drug→protein→pathway→disease in the KG
+        # are NOT true negatives — they are unstudied-but-biologically-
+        # plausible pairs. Sampling them as negatives teaches the model
+        # that biologically connected pairs are negative, which inverts
+        # the learned ranking. The previous code only rejected direct
+        # (drug, disease) positive pairs. The fix accepts an optional
+        # reachability_pairs set (computed upstream from the KG adjacency)
+        # and adds it to the rejection set.
+        self.reachability_pairs: Set[Tuple[str, str]] = (
+            self._validate_positive_pairs(reachability_pairs)
+            if reachability_pairs
+            else set()
+        )
         self.held_out_pairs: Set[Tuple[str, str]] = (
             self._validate_positive_pairs(held_out_pairs)
             if held_out_pairs
             else set()
         )
         # Combined rejection set for fast O(1) lookup.
+        # Includes: train positives + val/test held-out pairs + multi-hop
+        # reachable pairs (task 102). Any candidate (drug, disease) in
+        # this set is NEVER sampled as a negative.
         self._rejection_pairs: Set[Tuple[str, str]] = (
-            self.positive_pairs | self.held_out_pairs
+            self.positive_pairs
+            | self.held_out_pairs
+            | self.reachability_pairs
         )
 
         # Fix 5.3: O(1) lookup sets for entity validation

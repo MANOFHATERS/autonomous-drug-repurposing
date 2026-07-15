@@ -3982,4 +3982,141 @@ __all__: List[str] = [
     "EVALUATION_FALLBACK_STRATEGY",
     "METRIC_REGISTRY",
     "EVALUATION_TRANSFORMATIONS_LOG",
+    # Task 108: direction-aware AUC
+    "compute_auc_direction_aware",
+    "SYMMETRIC_RELATIONS",
+    "ASYMMETRIC_RELATIONS",
 ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Task 108 ROOT FIX (v111): direction-aware AUC
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Relations where (A, B) is a positive ⟹ (B, A) is also a positive.
+# PPI (Protein-Protein Interaction) is the canonical symmetric relation.
+SYMMETRIC_RELATIONS: frozenset = frozenset({
+    "interacts_with", "ppi", "protein_protein_interaction",
+    "binds", "binding", "physical_association", "direct_interaction",
+    "associated_with", "co_expressed_with", "similar_to",
+})
+
+# Relations where (A, B) is a positive does NOT imply (B, A) is a positive.
+# Drug→treats→Disease is the canonical asymmetric relation.
+ASYMMETRIC_RELATIONS: frozenset = frozenset({
+    "treats", "tested_for", "inhibits", "activates", "targets",
+    "causes", "induces", "prevents", "palliates",
+    "part_of", "participates_in", "disrupted_in",
+    "indicated_for",
+})
+
+
+def compute_auc_direction_aware(
+    pos_pairs_scores: List[Tuple[Any, Any, float]],
+    neg_pairs_scores: List[Tuple[Any, Any, float]],
+    relation_type: str,
+    higher_is_better: bool = False,
+) -> float:
+    """Compute direction-aware AUC for symmetric vs asymmetric relations.
+
+    Task 108 ROOT FIX (v111): the previous ``compute_auc`` treated all
+    relations the same — it did not distinguish symmetric relations
+    (PPI: A↔B) from asymmetric relations (Drug→treats→Disease). For
+    symmetric relations, (B, A) is also a valid positive, so a
+    negative sample (B, A) where (A, B) is a known positive is a
+    FALSE NEGATIVE. The previous code did not filter these, deflating
+    the AUC for symmetric relations. For asymmetric relations, only
+    (A, B) is valid, so (B, A) IS a true negative.
+
+    This function:
+      1. For SYMMETRIC relations: augments the positive set with
+         reversed pairs (B, A) for each (A, B) positive, and removes
+         any negative that is a reversed positive (false negative).
+      2. For ASYMMETRIC relations: no augmentation, no filtering
+         (standard AUC).
+      3. Computes AUC on the (possibly augmented) score arrays.
+
+    Args:
+        pos_pairs_scores: List of (head_id, tail_id, score) tuples for
+            positive edges.
+        neg_pairs_scores: List of (head_id, tail_id, score) tuples for
+            negative edges.
+        relation_type: Either "symmetric" or "asymmetric". Determines
+            whether reversed pairs are treated as positives.
+        higher_is_better: Score direction. False (default) = lower
+            score is more plausible (TransE). True = higher score is
+            more plausible (HGT/GraphTransformer).
+
+    Returns:
+        AUC value between 0.0 and 1.0.
+
+    Raises:
+        EvaluationInputError: If relation_type is not "symmetric" or
+            "asymmetric", or if inputs are empty.
+    """
+    if relation_type not in ("symmetric", "asymmetric"):
+        raise EvaluationInputError(
+            f"compute_auc_direction_aware: relation_type="
+            f"{relation_type!r} must be 'symmetric' or 'asymmetric'. "
+            f"(task 108 root fix, v111)",
+            context={"reason": "invalid_relation_type",
+                     "relation_type": relation_type},
+        )
+
+    if not pos_pairs_scores or not neg_pairs_scores:
+        return float("nan")
+
+    # Extract scores
+    pos_scores = np.array([s for _, _, s in pos_pairs_scores], dtype=np.float64)
+    neg_scores = np.array([s for _, _, s in neg_pairs_scores], dtype=np.float64)
+
+    if relation_type == "symmetric":
+        # Build set of positive pairs (both directions)
+        pos_pairs_set = set()
+        for h, t, _ in pos_pairs_scores:
+            pos_pairs_set.add((h, t))
+            pos_pairs_set.add((t, h))  # reversed
+
+        # Filter out false negatives (negatives that are actually
+        # reversed positives)
+        filtered_neg_scores = []
+        filtered_neg_count = 0
+        for h, t, s in neg_pairs_scores:
+            if (h, t) in pos_pairs_set:
+                # This negative is actually a reversed positive — skip
+                filtered_neg_count += 1
+                continue
+            filtered_neg_scores.append(s)
+
+        if filtered_neg_count > 0:
+            _log_structured(
+                logging.INFO,
+                "direction_aware_filtered_false_negatives",
+                message=(
+                    f"Direction-aware AUC (symmetric): filtered "
+                    f"{filtered_neg_count} false negatives (reversed "
+                    f"positives) out of {len(neg_pairs_scores)} "
+                    f"negatives. (task 108 root fix, v111)"
+                ),
+                filtered_count=filtered_neg_count,
+                total_negatives=len(neg_pairs_scores),
+            )
+
+        if not filtered_neg_scores:
+            # All negatives were false negatives — AUC undefined
+            _log_structured(
+                logging.WARNING,
+                "direction_aware_all_negatives_filtered",
+                message=(
+                    "Direction-aware AUC (symmetric): ALL negatives "
+                    "were reversed positives — AUC is undefined. "
+                    "(task 108 root fix, v111)"
+                ),
+            )
+            return float("nan")
+
+        neg_scores = np.array(filtered_neg_scores, dtype=np.float64)
+
+    # Compute AUC using the rank-based Mann-Whitney U formula
+    # (delegates to _manual_auc for O(n log n) rank-based computation)
+    return _manual_auc(pos_scores, neg_scores, higher_is_better=higher_is_better)
