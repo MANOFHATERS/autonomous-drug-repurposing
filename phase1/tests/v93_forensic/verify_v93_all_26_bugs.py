@@ -650,7 +650,7 @@ check("P1-046 docstring matches default", test_p1_046_docstring_matches_default)
 # P1-047: embedded_samples gene_mim != disease_id
 # ============================================================================
 def test_p1_047_gene_mim_distinct():
-    from pipelines._embedded_samples import embedded_omim_gda
+    from pipelines._dev_samples import embedded_omim_gda
     df = embedded_omim_gda()
     # For each row, gene_mim should be DIFFERENT from the numeric part
     # of disease_id (no self-loops).

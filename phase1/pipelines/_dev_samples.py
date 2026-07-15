@@ -35,6 +35,60 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# TM1 TASK 1 — HARD IMPORT-TIME PRODUCTION GUARD
+# =============================================================================
+# The user's audit (TM1 Issue 1) requires: "Add an assertion that the file
+# cannot be imported in production." This is enforced at IMPORT TIME, not at
+# function-call time, so even an accidental ``from pipelines._dev_samples
+# import embedded_chembl_molecules`` in a production code path fails loudly
+# the moment the module is loaded — BEFORE any function runs.
+#
+# The check is defensive: treats unset/empty DRUGOS_ENVIRONMENT as production
+# (matches settings.py). Only the EXPLICIT value ``DRUGOS_ENVIRONMENT=development``
+# (or ``DRUGOS_ENVIRONMENT=dev`` / ``staging`` / ``test``) permits the import.
+# This makes it impossible for a misconfigured Helm chart to silently pull
+# 10 mock drugs into a production KG.
+#
+# The check is ALSO reflection-safe: tests that need to import this module
+# MUST set ``DRUGOS_ENVIRONMENT=development`` (the conftest does this for the
+# phase1/tests/ suite). There is NO escape hatch, no env var to bypass, no
+# "trust me" flag. Production imports are forbidden, period.
+def _check_dev_environment_at_import_time() -> None:
+    """Raise ImportError if DRUGOS_ENVIRONMENT is not a development value.
+
+    Allowed values (case-insensitive): development, dev, staging, test,
+    testing, ci, local. Everything else (including unset/empty/production)
+    raises ImportError with a clear remediation message.
+    """
+    _env = (
+        os.environ.get("DRUGOS_ENVIRONMENT")
+        or os.environ.get("ENVIRONMENT")
+        or ""
+    )
+    _env_norm = _env.lower().strip()
+    _ALLOWED_DEV_VALUES = frozenset({
+        "development", "dev", "staging", "test", "testing", "ci", "local",
+    })
+    if _env_norm not in _ALLOWED_DEV_VALUES:
+        raise ImportError(
+            "TM1 TASK 1 ROOT FIX: phase1.pipelines._dev_samples is a "
+            "DEVELOPMENT-ONLY module containing 11 embedded mock CSV "
+            "writers (10 fake FDA-approved drugs each). Importing it in "
+            f"DRUGOS_ENVIRONMENT={_env!r} is FORBIDDEN — the KG would be "
+            "built on fake drug records, the GNN would learn from fake "
+            "edges, and the RL ranker would recommend drugs based on FAKE "
+            "evidence. To import this module, set "
+            "DRUGOS_ENVIRONMENT=development (or dev/staging/test/ci/local). "
+            "Production code MUST use the real API downloaders in "
+            "phase1.pipelines._v50_downloaders (download_chembl_full, "
+            "download_uniprot_full, download_string_full, etc.)."
+        )
+
+
+_check_dev_environment_at_import_time()
+
+
 def _is_production_environment() -> bool:
     """Return True iff the current environment is production.
 

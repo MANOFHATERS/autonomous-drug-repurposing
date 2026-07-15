@@ -408,6 +408,20 @@ NODE_PROPERTY_WHITELIST: dict[str, frozenset[str]] = {
         # when the primary id differs (e.g. biotech drugs without
         # InChIKey). Stored as a Neo4j list property.
         "compound_id_aliases",
+        # ── TM1 TASK 15 ROOT FIX: critical patient-safety fields that
+        # were previously SILENTLY STRIPPED by _whitelist_filter.
+        # ``is_globally_approved`` is the v93 patient-safety fix for
+        # EMA-only drugs (max_phase=4 means globally approved, not
+        # FDA-specific). Without this in the whitelist, the Neo4j export
+        # dropped it on every Compound node — the RL ranker's
+        # market-opportunity scoring then treated globally-approved
+        # drugs as not-approved, corrupting the ranker's output.
+        # ``indication_source`` records WHERE the indication text came
+        # from (FDA / EMA / manual / RxNorm) — critical for audit trails
+        # and for the clinical-trial cross-referencing logic. Without
+        # it, the dashboard could not tell whether an indication was
+        # FDA-confirmed or crowd-sourced.
+        "is_globally_approved", "indication_source",
     }),
     "Disease": frozenset({
         "id", "name", "icd10", "icd9", "mesh", "umls_cui",

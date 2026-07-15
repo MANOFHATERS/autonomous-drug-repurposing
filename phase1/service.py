@@ -78,18 +78,23 @@ def _processed_data_dir() -> Path:
 def _load_dataset_stats() -> Dict[str, Any]:
     """Load real dataset stats from processed_data CSVs (or DB if available).
 
-    Tier-2 fallback: if no CSVs exist, write the embedded sample CSVs
-    so the service always returns non-zero counts (matches the
-    run_4phase.py behavior). We never fabricate numbers.
+    TM1 TASK 2 ROOT FIX: the previous Tier-2 fallback wrote embedded sample
+    CSVs (10 fake drugs) when processed_data was empty. This violated the
+    "NEVER overwrite real data with mock samples" mandate. Now we return
+    zero counts with a clear ``data_status="empty"`` flag so the dashboard
+    honestly reports the absence of data instead of fabricating numbers.
+    The operator must run ``python -m phase1.pipelines all`` to populate
+    real data. For local dev, ``DRUGOS_ENVIRONMENT=development python -m
+    phase1.pipelines samples`` writes mock CSVs to a directory of choice.
     """
     pdir = _processed_data_dir()
     if not pdir.exists() or not any(pdir.glob("*.csv*")):
-        try:
-            from pipelines._embedded_samples import write_all_samples
-            write_all_samples(str(pdir))
-            logger.info("Phase 1 service: wrote embedded sample CSVs to %s", pdir)
-        except Exception as exc:
-            logger.warning("Phase 1 service: could not write embedded samples: %s", exc)
+        logger.warning(
+            "Phase 1 service: processed_data dir %s is empty. Returning "
+            "zero counts with data_status='empty'. Run "
+            "`python -m phase1.pipelines all` to populate real data.",
+            pdir,
+        )
 
     # Count rows per source CSV. These are the REAL Phase 1 outputs.
     sources: List[Dict[str, Any]] = []

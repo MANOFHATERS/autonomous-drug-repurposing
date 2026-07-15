@@ -537,10 +537,10 @@ class TestP1_019_EmbeddedSamplesProductionGuard:
         monkeypatch.setenv("ENVIRONMENT", "production")
         # Re-import to pick up the env.
         import importlib
-        from pipelines import _embedded_samples
-        importlib.reload(_embedded_samples)
+        from pipelines import _dev_samples
+        importlib.reload(_dev_samples)
         with pytest.raises(RuntimeError, match="P1-019 ROOT FIX"):
-            _embedded_samples.embedded_chembl_molecules()
+            _dev_samples.embedded_chembl_molecules()
 
     def test_raises_in_production_with_samples_env(self, monkeypatch):
         """Even with SAMPLES=embedded, production must raise."""
@@ -548,14 +548,14 @@ class TestP1_019_EmbeddedSamplesProductionGuard:
         monkeypatch.setenv("ENVIRONMENT", "production")
         monkeypatch.setenv("SAMPLES", "embedded")
         import importlib
-        from pipelines import _embedded_samples
-        importlib.reload(_embedded_samples)
+        from pipelines import _dev_samples
+        importlib.reload(_dev_samples)
         with pytest.raises(RuntimeError, match="P1-019 ROOT FIX"):
-            _embedded_samples.embedded_chembl_molecules()
+            _dev_samples.embedded_chembl_molecules()
         with pytest.raises(RuntimeError, match="P1-019 ROOT FIX"):
-            _embedded_samples.embedded_drugbank_drugs()
+            _dev_samples.embedded_drugbank_drugs()
         with pytest.raises(RuntimeError, match="P1-019 ROOT FIX"):
-            _embedded_samples.embedded_uniprot_proteins()
+            _dev_samples.embedded_uniprot_proteins()
 
     def test_returns_data_in_development(self, monkeypatch):
         """In development, the functions return sample DataFrames."""
@@ -563,9 +563,9 @@ class TestP1_019_EmbeddedSamplesProductionGuard:
         monkeypatch.setenv("ENVIRONMENT", "development")
         monkeypatch.setenv("SAMPLES", "embedded")
         import importlib
-        from pipelines import _embedded_samples
-        importlib.reload(_embedded_samples)
-        df = _embedded_samples.embedded_chembl_molecules()
+        from pipelines import _dev_samples
+        importlib.reload(_dev_samples)
+        df = _dev_samples.embedded_chembl_molecules()
         assert isinstance(df, pd.DataFrame)
         assert len(df) > 0
         assert "chembl_id" in df.columns

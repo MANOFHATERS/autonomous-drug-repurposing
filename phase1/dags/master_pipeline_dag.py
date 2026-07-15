@@ -585,6 +585,44 @@ def load_uniprot() -> None:
 
 
 @task(retries=0, execution_timeout=TASK_TIMEOUT, trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+# TM1 TASK 8 ROOT FIX: Phase 1 contract validation as the FINAL task
+# before trigger_phase2. This task validates every Phase 1 output CSV
+# against the canonical schema in ``phase1/contracts/phase1_schema.py``.
+# If any required column is missing, any any-of group is unsatisfied,
+# or any non-nullable column has NULLs, the task FAILS — blocking
+# trigger_phase2 and preventing a corrupted KG from being built.
+# Warnings (e.g. empty optional sources like DrugBank when license is
+# paused) do NOT fail the task — the bridge degrades gracefully.
+@fail_fast_on_http_4xx
+def _validate_phase1_contract() -> None:
+    """TM1 Task 8: validate Phase 1 outputs against the canonical schema.
+
+    Runs ``phase1.contracts.validate_output.validate_output_dir`` against
+    the processed_data directory. Returns 0 on success; raises
+    ``SystemExit(1)`` on any ERROR issue so the Airflow task fails RED.
+    """
+    import sys as _sys
+    from pathlib import Path as _Path
+    _project_root = _Path(__file__).resolve().parent.parent.parent
+    if str(_project_root) not in _sys.path:
+        _sys.path.insert(0, str(_project_root))
+    # Phase 1 contracts live in phase1/contracts/.
+    _p1_root = _Path(__file__).resolve().parent.parent
+    if str(_p1_root) not in _sys.path:
+        _sys.path.insert(0, str(_p1_root))
+    from contracts.validate_output import validate_output_dir
+    from config.settings import PROCESSED_DATA_DIR
+    exit_code = validate_output_dir(_Path(PROCESSED_DATA_DIR))
+    if exit_code != 0:
+        raise SystemExit(
+            f"TM1 Task 8: Phase 1 contract validation FAILED (exit {exit_code}). "
+            f"The KG build is BLOCKED — fix the Phase 1 output CSVs above "
+            f"before re-running. See phase1/contracts/README.md for the "
+            f"canonical schema."
+        )
+
+
+@task(retries=0, execution_timeout=TASK_TIMEOUT, trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
 # v89 ROOT FIX (BUG #24 — inconsistent application of fail-fast policy):
 #   The comment at lines 99-118 (v83 DAG-2) says "Apply
 #   ``@fail_fast_on_http_4xx`` to EVERY @task below so 4xx errors
@@ -1165,6 +1203,12 @@ def master_pipeline() -> None:
     #   and ``check=False`` on the ``_trigger_phase2`` task — the
     #   default is now strict coupling per the v29 ROOT FIX.
     trigger_phase2 = _trigger_phase2()
+    # TM1 TASK 8: instantiate the Phase 1 contract validation task.
+    # It runs AFTER all loads finish (chembl_load, drugbank_load,
+    # uniprot_load, string_load, disgenet_load, omim_load, pubchem_load)
+    # and BEFORE trigger_phase2. If validation fails, trigger_phase2 is
+    # blocked (UPSTREAM_FAILED) — no corrupted KG is built.
+    validate_phase1_contract = _validate_phase1_contract()
 
     # ── Wire dependencies ───────────────────────────────────────────────
     # v76 ROOT FIX (T-040 — rewrite list-bitshift as explicit statements
@@ -1294,24 +1338,20 @@ def master_pipeline() -> None:
     #   next run picks up the enrichment. This is the scientifically
     #   correct trade-off: a KG with 6/7 sources is far more useful than
     #   no KG at all because PubChem was unreachable.
-    chembl_load >> trigger_phase2
-    drugbank_load >> trigger_phase2
-    uniprot_load >> trigger_phase2
-    string_load >> trigger_phase2
-    disgenet_load >> trigger_phase2
-    omim_load >> trigger_phase2
-    # P1-018 ROOT FIX (Team-2): wire pubchem_load >> trigger_phase2 so
-    # Phase 2 waits for PubChem enrichment to FINISH (either SUCCEED or
-    # SKIP) before reading the ``drugs`` table. Combined with the
-    # ``trigger_rule=NONE_FAILED_MIN_ONE_SUCCESS`` on ``_trigger_phase2``
-    # (set at the decorator above), this:
-    #   * Lets trigger_phase2 fire when pubchem_load is SKIPPED (PubChem
-    #     API outage → graceful degradation, KG builds with 6/7 sources).
-    #   * Blocks trigger_phase2 when pubchem_load FAILED (real load bug
-    #     — operator investigation required before KG build).
-    #   * Eliminates the race where pubchem_load was writing to the
-    #     ``drugs`` table WHILE trigger_phase2 was reading it.
-    pubchem_load >> trigger_phase2
+    chembl_load >> validate_phase1_contract
+    drugbank_load >> validate_phase1_contract
+    uniprot_load >> validate_phase1_contract
+    string_load >> validate_phase1_contract
+    disgenet_load >> validate_phase1_contract
+    omim_load >> validate_phase1_contract
+    # P1-018 ROOT FIX (Team-2): wire pubchem_load >> validate_phase1_contract
+    # so contract validation runs AFTER PubChem enrichment FINISHES.
+    pubchem_load >> validate_phase1_contract
+    # TM1 TASK 8: validate_phase1_contract >> trigger_phase2 — Phase 2
+    # is BLOCKED until every Phase 1 output CSV passes the contract.
+    # If validation fails, trigger_phase2 is SKIPPED (UPSTREAM_FAILED)
+    # and the operator must fix the Phase 1 outputs before re-running.
+    validate_phase1_contract >> trigger_phase2
 
 
 # v89 ROOT FIX (BUG #40): consistent DAG-instance naming convention.

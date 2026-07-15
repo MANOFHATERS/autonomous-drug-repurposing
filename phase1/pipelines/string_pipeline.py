@@ -654,7 +654,7 @@ class StringPipeline(BasePipeline):
         # If the PPI file had no uniprot columns, use embedded data.
         if not pairs:
             try:
-                from pipelines._embedded_samples import embedded_string_ppi
+                from pipelines._dev_samples import embedded_string_ppi
                 emb_df = embedded_string_ppi()
                 for _, row in emb_df.iterrows():
                     p1 = str(row.get("protein1") or "").strip()

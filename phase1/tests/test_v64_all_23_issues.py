@@ -53,7 +53,7 @@ def test_p1_001_uniprot_method_name_matches():
 # =========================================================================
 def test_p1_002_chembl_activity_type_in_enum():
     """P1-002: no 'Potency' in embedded ChEMBL activities."""
-    from pipelines._embedded_samples import embedded_chembl_activities
+    from pipelines._dev_samples import embedded_chembl_activities
     df = embedded_chembl_activities()
     valid_types = {"IC50", "Ki", "Kd", "EC50"}
     actual = set(df["activity_type"].dropna().unique())
@@ -69,7 +69,7 @@ def test_p1_002_chembl_activity_type_in_enum():
 # =========================================================================
 def test_p1_003_omim_association_type_in_enum():
     """P1-003: no 'causative' in embedded OMIM GDA."""
-    from pipelines._embedded_samples import embedded_omim_gda
+    from pipelines._dev_samples import embedded_omim_gda
     df = embedded_omim_gda()
     valid_types = {
         "causal", "susceptibility", "non_disease", "provisional",
@@ -239,7 +239,7 @@ def test_p1_010_drugbank_id_no_collision():
 # =========================================================================
 def test_p1_011_chembl_target_name_matches_uniprot():
     """P1-011: CHEMBL218 + P23219 -> target_name must be PTGS1 (COX-1)."""
-    from pipelines._embedded_samples import embedded_chembl_activities
+    from pipelines._dev_samples import embedded_chembl_activities
     df = embedded_chembl_activities()
     # The acetaminophen row (CHEMBL21) targets CHEMBL218 / P23219 = PTGS1.
     row = df[(df["molecule_chembl_id"] == "CHEMBL21") & (df["uniprot_id"] == "P23219")]
@@ -357,7 +357,7 @@ def test_p1_015_pubchem_url_encoded():
 # =========================================================================
 def test_p1_016_gene_id_is_integer():
     """P1-016: gene_id in embedded OMIM + DisGeNET samples is integer."""
-    from pipelines._embedded_samples import embedded_omim_gda, embedded_disgenet_gda
+    from pipelines._dev_samples import embedded_omim_gda, embedded_disgenet_gda
     omim_df = embedded_omim_gda()
     disgenet_df = embedded_disgenet_gda()
     # OMIM gene_id must be integer dtype (not object/string).
@@ -380,7 +380,7 @@ def test_p1_016_gene_id_is_integer():
 # =========================================================================
 def test_p1_017_drugbank_has_chembl_and_pubchem():
     """P1-017: embedded_drugbank_drugs has chembl_id and pubchem_cid columns."""
-    from pipelines._embedded_samples import embedded_drugbank_drugs
+    from pipelines._dev_samples import embedded_drugbank_drugs
     df = embedded_drugbank_drugs()
     assert "chembl_id" in df.columns, (
         "P1-017 regression: drugbank_drugs missing chembl_id column"
@@ -403,7 +403,7 @@ def test_p1_017_drugbank_has_chembl_and_pubchem():
 # =========================================================================
 def test_p1_018_no_self_interaction():
     """P1-018: embedded STRING PPI has no self-interaction edges."""
-    from pipelines._embedded_samples import embedded_string_ppi
+    from pipelines._dev_samples import embedded_string_ppi
     df = embedded_string_ppi()
     # No row where uniprot_ac_a == uniprot_ac_b.
     self_edges = df[df["uniprot_ac_a"] == df["uniprot_ac_b"]]
@@ -549,14 +549,14 @@ def test_p1_023_inchikey_pattern_documented():
 # =========================================================================
 # Phase 1 ↔ Phase 2 integration: embedded samples -> Phase 2 staging
 # =========================================================================
-def test_phase1_phase2_integration_embedded_samples():
+def test_phase1_phase2_integration_dev_samples():
     """Phase 1 embedded samples flow through the Phase 2 bridge cleanly.
 
     This is the user's core requirement: 'phase 1 and phase 2 100 percent
     connected -- the graph explorer should be 100 percent connected with the
     dataset part of phase 1'.
     """
-    from pipelines._embedded_samples import (
+    from pipelines._dev_samples import (
         embedded_drugbank_drugs,
         embedded_chembl_molecules,
         embedded_uniprot_proteins,
@@ -642,7 +642,7 @@ if __name__ == "__main__":
         test_p1_021_decimal_nan_handled,
         test_p1_022_disgenet_omim_range,
         test_p1_023_inchikey_pattern_documented,
-        test_phase1_phase2_integration_embedded_samples,
+        test_phase1_phase2_integration_dev_samples,
     ]
     passed = 0
     failed = 0

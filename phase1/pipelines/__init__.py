@@ -2820,54 +2820,31 @@ def _main(argv: list[str]) -> None:
         if failed:
             for name, err in failed:
                 print(f"  FAIL  {name}: {err}")
-        # v107 FORENSIC ROOT FIX (ISSUE-P1-001 + ISSUE-P1-032 — `all`
-        #   command silently overwrites real data with mock samples):
-        #   The previous v49 ROOT FIX unconditionally called
-        #   ``write_all_samples(PROCESSED_DATA_DIR)`` after the pipeline
-        #   loop, OVERWRITING ``drugs.csv``, ``proteins.csv``, etc. with
-        #   10 mock records each. In dev/staging, a successful run that
-        #   downloaded 10K real drugs from ChEMBL was silently replaced
-        #   by 10 mock drugs — the KG was then built on 10 mock compounds,
-        #   the GNN trained on 10 mock edges, and the RL ranker produced
-        #   recommendations based on 10 mock predictions. The platform
-        #   appeared to "work" but was scientifically meaningless.
+        # TM1 TASK 2 ROOT FIX: Remove ALL write_all_samples fallback paths
+        #   from the `all` command. The pipeline must NEVER overwrite real
+        #   data with mock samples, regardless of whether the operator set
+        #   DRUGOS_ALLOW_MOCK_FALLBACK=1. The previous v107 fix kept a
+        #   conditional fallback (DRUGOS_ALLOW_MOCK_FALLBACK=1 + all
+        #   pipelines failed) — but the user's audit (TM1 Issue 2) requires
+        #   the pipeline to NEVER overwrite real data, period. A misconfigured
+        #   env var in production would still inject 10 mock drugs into the
+        #   KG, silently corrupting the GNN's training signal and the RL
+        #   ranker's recommendations.
         #
-        # ROOT FIX: write embedded samples ONLY when BOTH conditions hold:
-        #   1. ALL 7 pipelines failed (``succeeded`` is empty) — i.e.
-        #      there is no real data to fall back to.
-        #   2. The operator has explicitly opted in via
-        #      ``DRUGOS_ALLOW_MOCK_FALLBACK=1`` (or "true"/"yes") — i.e.
-        #      they understand they are about to load mock data and have
-        #      authorized it.
-        # This preserves the "100% connected" guarantee for genuine
-        # cold-start scenarios (no API reachable, no cached data) while
-        # eliminating the silent-overwrite footgun in normal dev/staging
-        # runs where at least one pipeline succeeded.
+        # If all pipelines failed, the operator must diagnose the failure
+        # (network, API keys, rate limit) and re-run. The pipeline exits 1
+        # so the failure is visible to Airflow / Kubernetes / cron.
         if not succeeded:
-            import os as _os
-            _allow_mock = _os.environ.get("DRUGOS_ALLOW_MOCK_FALLBACK", "").strip().lower() in ("1", "true", "yes")
-            if _allow_mock:
-                try:
-                    from pipelines._embedded_samples import write_all_samples
-                    from config.settings import PROCESSED_DATA_DIR
-                    written = write_all_samples(PROCESSED_DATA_DIR)
-                    print(f"\n[v107 P1-001/P1-032] Embedded sample CSVs written to "
-                          f"{PROCESSED_DATA_DIR} (DRUGOS_ALLOW_MOCK_FALLBACK=1, "
-                          f"all {len(order)} pipelines failed)")
-                    for key, path in written.items():
-                        print(f"  {key}: {path.name}")
-                except Exception as exc:
-                    print(f"[v107 P1-001/P1-032] WARN: failed to write embedded "
-                          f"samples: {exc}")
-            else:
-                print(f"\n[v107 P1-001/P1-032] All {len(order)} pipelines failed and "
-                      f"DRUGOS_ALLOW_MOCK_FALLBACK is not set to '1' — NOT "
-                      f"writing mock data. To proceed with embedded samples, "
-                      f"re-run with DRUGOS_ALLOW_MOCK_FALLBACK=1.")
+            print(f"\n[TM1-T2] All {len(order)} pipelines FAILED — NOT writing "
+                  f"mock data. The `all` command never writes embedded "
+                  f"samples (TM1 Task 2 root fix). Diagnose the failures "
+                  f"above and re-run. For LOCAL DEV ONLY, run "
+                  f"`DRUGOS_ENVIRONMENT=development python -m phase1.pipelines "
+                  f"samples <dir>` to write mock CSVs to a directory of "
+                  f"your choice (the `samples` command is dev-only and "
+                  f"gated by the import-time production guard).")
         else:
-            # At least one pipeline succeeded — real data exists in
-            # PROCESSED_DATA_DIR. Do NOT overwrite with mock samples.
-            print(f"\n[v107 P1-001/P1-032] {len(succeeded)} pipeline(s) succeeded — "
+            print(f"\n[TM1-T2] {len(succeeded)} pipeline(s) succeeded — "
                   f"preserving real data, NOT writing embedded samples.")
         # v104 FORENSIC ROOT FIX (P1-007 -- python -m pipelines all NEVER
         #   calls run_entity_resolution()):
@@ -2925,9 +2902,29 @@ def _main(argv: list[str]) -> None:
             _sys.exit(0)
         _sys.exit(1)
     elif cmd == "samples":
-        # v49 ROOT FIX: write ONLY the embedded sample CSVs, no API calls.
+        # TM1 TASK 2 ROOT FIX: The `samples` command is DEVELOPMENT-ONLY.
+        #   It writes 11 mock CSV files (10 fake FDA-approved drugs each)
+        #   to a target directory. The import-time guard in
+        #   ``pipelines._dev_samples`` ALREADY raises ImportError if
+        #   DRUGOS_ENVIRONMENT is not a development value, so attempting
+        #   ``python -m phase1.pipelines samples`` in production fails
+        #   with a clear ImportError before any CSV is written. This
+        #   command is kept for local-dev convenience ONLY (e.g.Bootstrapping
+        #   a fresh dev environment before the real APIs are reachable).
+        #   Production code MUST use `python -m phase1.pipelines all`
+        #   (which never writes mock data — see TM1 Task 2 above).
         import os
-        from pipelines._embedded_samples import write_all_samples
+        import sys as _sys
+        _env = (os.environ.get("DRUGOS_ENVIRONMENT") or os.environ.get("ENVIRONMENT") or "").lower().strip()
+        _ALLOWED_DEV = {"development", "dev", "staging", "test", "testing", "ci", "local"}
+        if _env not in _ALLOWED_DEV:
+            print(f"[TM1-T2] ERROR: `samples` command is DEVELOPMENT-ONLY. "
+                  f"DRUGOS_ENVIRONMENT={_env!r} is not a dev value "
+                  f"(allowed: {sorted(_ALLOWED_DEV)}). The pipeline must "
+                  f"NEVER write mock data in production. Use "
+                  f"`python -m phase1.pipelines all` to download real data.")
+            _sys.exit(1)
+        from pipelines._dev_samples import write_all_samples
         from config.settings import PROCESSED_DATA_DIR
         target_dir = argv[1] if len(argv) > 1 else str(PROCESSED_DATA_DIR)
         written = write_all_samples(target_dir)

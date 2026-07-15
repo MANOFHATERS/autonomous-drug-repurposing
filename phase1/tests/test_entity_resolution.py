@@ -521,9 +521,12 @@ class TestEntityMappingDataframeOutput:
         # Audit C.17 -- output columns expanded to include smiles,
         # smiles_form, molecular_formula, molecular_weight, created_at,
         # and data_quality_score.  Audit 2.7 -- ``sources`` is JSON-encoded.
+        # TM1 TASK 10 ROOT FIX: ``drug_id`` added as a canonical output
+        # column with priority InChIKey → PubChem CID → ChEMBL ID.
         expected_cols = [
             "canonical_inchikey",
             "canonical_name",
+            "drug_id",  # TM1 TASK 10: canonical priority
             "chembl_id",
             "drugbank_id",
             "pubchem_cid",
@@ -627,3 +630,195 @@ class TestIndexBuilders:
         index = build_inchikey_index(records)
         assert "AAA-BBB-C" in index
         assert "DDD-EEE-F" in index
+
+
+# =============================================================================
+# TM1 Task 18: Aspirin (CHEMBL25) source-independence test
+# =============================================================================
+# The user's audit (TM1 Issue 18) requires: "verifies Aspirin (CHEMBL25)
+# resolves to the same `drug_id` regardless of which source it came from
+# (ChEMBL, DrugBank, PubChem)."
+#
+# This test class feeds the SAME drug (Aspirin, InChIKey
+# BSYNRYMUTXBXSQ-UHFFFAOYSA-N, CHEMBL25, PubChem CID 2244) to the
+# resolver from three different "sources" (chembl, drugbank, pubchem),
+# each providing a DIFFERENT subset of identifiers. The resolver MUST
+# merge all three into a SINGLE canonical entry, and the ``drug_id``
+# field MUST be the same for all three (because the InChIKey is the
+# same — InChIKey wins priority over PubChem CID and ChEMBL ID).
+# =============================================================================
+
+
+class TestTm1Task18AspirinSourceIndependence:
+    """TM1 Task 18: Aspirin resolves to the same drug_id across sources."""
+
+    ASPIRIN_INCHIKEY = "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
+    ASPIRIN_CHEMBL_ID = "CHEMBL25"
+    ASPIRIN_PUBCHEM_CID = 2244
+    ASPIRIN_DRUGBANK_ID = "DB00945"
+    ASPIRIN_NAME = "Aspirin"
+    ASPIRIN_SMILES = "CC(=O)OC1=CC=CC=C1C(=O)O"
+
+    def _build_resolver_with_three_sources(self) -> "DrugResolver":
+        """Build a DrugResolver with Aspirin ingested from 3 sources."""
+        resolver = DrugResolver()
+
+        # Source 1: ChEMBL provides chembl_id + inchikey + name + smiles.
+        resolver.add_source_records(
+            source="chembl",
+            records=[{
+                "name": self.ASPIRIN_NAME,
+                "inchikey": self.ASPIRIN_INCHIKEY,
+                "chembl_id": self.ASPIRIN_CHEMBL_ID,
+                "smiles": self.ASPIRIN_SMILES,
+            }],
+        )
+
+        # Source 2: DrugBank provides drugbank_id + inchikey + name.
+        # The InChIKey is the SAME — resolver MUST merge with source 1.
+        resolver.add_source_records(
+            source="drugbank",
+            records=[{
+                "name": self.ASPIRIN_NAME,
+                "inchikey": self.ASPIRIN_INCHIKEY,
+                "drugbank_id": self.ASPIRIN_DRUGBANK_ID,
+            }],
+        )
+
+        # Source 3: PubChem provides pubchem_cid + inchikey + name.
+        # Again, the InChIKey is the SAME — resolver MUST merge.
+        resolver.add_source_records(
+            source="pubchem",
+            records=[{
+                "name": self.ASPIRIN_NAME,
+                "inchikey": self.ASPIRIN_INCHIKEY,
+                "pubchem_cid": self.ASPIRIN_PUBCHEM_CID,
+            }],
+        )
+
+        return resolver
+
+    def test_aspirin_merges_into_single_canonical_entry(self):
+        """TM1 Task 18: 3 source records with the SAME InChIKey merge
+        into ONE canonical entry (not 3 separate entries).
+        """
+        resolver = self._build_resolver_with_three_sources()
+        assert len(resolver.mapping) == 1, (
+            f"Expected 1 canonical entry for Aspirin (3 sources merged), "
+            f"got {len(resolver.mapping)}. Entries: "
+            f"{list(resolver.mapping.keys())}"
+        )
+
+    def test_aspirin_canonical_inchikey_is_correct(self):
+        """TM1 Task 18: the canonical InChIKey is Aspirin's real InChIKey."""
+        resolver = self._build_resolver_with_three_sources()
+        canonical_ik = list(resolver.mapping.keys())[0]
+        assert canonical_ik == self.ASPIRIN_INCHIKEY, (
+            f"Expected canonical InChIKey {self.ASPIRIN_INCHIKEY}, "
+            f"got {canonical_ik}."
+        )
+
+    def test_aspirin_drug_id_is_inchikey_priority(self):
+        """TM1 Task 18 + Task 10: the canonical ``drug_id`` is the
+        InChIKey (priority 1), NOT the PubChem CID or ChEMBL ID.
+        """
+        from entity_resolution.drug_resolver import compute_canonical_drug_id
+        resolver = self._build_resolver_with_three_sources()
+        canonical_ik = list(resolver.mapping.keys())[0]
+        entry = resolver.mapping[canonical_ik]
+
+        # The drug_id must be computed via the priority function.
+        drug_id = compute_canonical_drug_id(
+            canonical_ik,
+            entry.get("pubchem_cid"),
+            entry.get("chembl_id"),
+        )
+        assert drug_id == self.ASPIRIN_INCHIKEY, (
+            f"drug_id must be the InChIKey (priority 1) when InChIKey is "
+            f"present. Got {drug_id!r}, expected {self.ASPIRIN_INCHIKEY!r}."
+        )
+
+    def test_aspirin_drug_id_in_to_dataframe(self):
+        """TM1 Task 10 + 18: ``to_dataframe()`` includes the ``drug_id``
+        column and it equals the InChIKey for Aspirin.
+        """
+        resolver = self._build_resolver_with_three_sources()
+        df = resolver.to_dataframe()
+        assert "drug_id" in df.columns, (
+            f"drug_id column must be in to_dataframe() output. "
+            f"Columns: {list(df.columns)}"
+        )
+        assert len(df) == 1, f"Expected 1 row, got {len(df)}."
+        assert df.iloc[0]["drug_id"] == self.ASPIRIN_INCHIKEY, (
+            f"drug_id in dataframe must be the InChIKey. "
+            f"Got {df.iloc[0]['drug_id']!r}."
+        )
+
+    def test_aspirin_drug_id_in_to_records(self):
+        """TM1 Task 10 + 18: ``to_records()`` includes the ``drug_id``
+        field and it equals the InChIKey for Aspirin.
+        """
+        resolver = self._build_resolver_with_three_sources()
+        records = resolver.to_records()
+        assert len(records) == 1
+        assert "drug_id" in records[0], (
+            f"drug_id must be in to_records() output. "
+            f"Keys: {list(records[0].keys())}"
+        )
+        assert records[0]["drug_id"] == self.ASPIRIN_INCHIKEY, (
+            f"drug_id in records must be the InChIKey. "
+            f"Got {records[0]['drug_id']!r}."
+        )
+
+    def test_aspirin_sources_list_contains_all_three(self):
+        """TM1 Task 18: the merged entry's ``sources`` list contains
+        all three source labels (chembl, drugbank, pubchem).
+        """
+        resolver = self._build_resolver_with_three_sources()
+        canonical_ik = list(resolver.mapping.keys())[0]
+        entry = resolver.mapping[canonical_ik]
+        sources = set(entry.get("sources", []))
+        assert sources == {"chembl", "drugbank", "pubchem"}, (
+            f"Expected sources {{chembl, drugbank, pubchem}}, got {sources}."
+        )
+
+    def test_drug_id_priority_inchikey_over_pubchem_over_chembl(self):
+        """TM1 Task 10: explicit priority-order test.
+
+        - InChIKey present → drug_id == InChIKey (priority 1).
+        - InChIKey absent, PubChem CID present → drug_id == "PUBCHEM:<cid>".
+        - InChIKey + PubChem absent, ChEMBL ID present → drug_id == "CHEMBL:<id>".
+        - All absent → drug_id is None.
+        """
+        from entity_resolution.drug_resolver import compute_canonical_drug_id
+
+        # Priority 1: InChIKey wins.
+        assert compute_canonical_drug_id(
+            self.ASPIRIN_INCHIKEY, self.ASPIRIN_PUBCHEM_CID, self.ASPIRIN_CHEMBL_ID
+        ) == self.ASPIRIN_INCHIKEY
+
+        # Priority 2: PubChem CID wins when InChIKey is None.
+        assert compute_canonical_drug_id(
+            None, self.ASPIRIN_PUBCHEM_CID, self.ASPIRIN_CHEMBL_ID
+        ) == f"PUBCHEM:{self.ASPIRIN_PUBCHEM_CID}"
+
+        # Priority 3: ChEMBL ID wins when InChIKey + PubChem are None.
+        assert compute_canonical_drug_id(
+            None, None, self.ASPIRIN_CHEMBL_ID
+        ) == f"CHEMBL:{self.ASPIRIN_CHEMBL_ID}"
+
+        # All None → None.
+        assert compute_canonical_drug_id(None, None, None) is None
+
+        # Empty string InChIKey is treated as None.
+        assert compute_canonical_drug_id(
+            "", self.ASPIRIN_PUBCHEM_CID, self.ASPIRIN_CHEMBL_ID
+        ) == f"PUBCHEM:{self.ASPIRIN_PUBCHEM_CID}"
+
+        # Non-positive PubChem CID is treated as None.
+        assert compute_canonical_drug_id(
+            None, 0, self.ASPIRIN_CHEMBL_ID
+        ) == f"CHEMBL:{self.ASPIRIN_CHEMBL_ID}"
+        assert compute_canonical_drug_id(
+            None, -1, self.ASPIRIN_CHEMBL_ID
+        ) == f"CHEMBL:{self.ASPIRIN_CHEMBL_ID}"
