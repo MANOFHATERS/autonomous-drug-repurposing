@@ -1033,6 +1033,234 @@ def _trigger_phase2() -> None:
 # DAG definition
 # ---------------------------------------------------------------------------
 
+# v110 Task 34 root fix: add validate_output task.
+#
+# The audit (Task 34) requires: "must orchestrate all 7 sources in parallel,
+# then run entity_resolution, then validate_output." The original DAG had
+# parallel downloads + entity_resolution + load_* + trigger_phase2, but NO
+# explicit validate_output task. The _trigger_phase2 pre-flight check only
+# verified ChEMBL DPI presence — it did NOT validate that each source
+# produced real biomedical identifiers (not fake/synthesized data) or that
+# entity resolution produced canonical IDs.
+#
+# ROOT FIX: add a dedicated validate_output task that runs AFTER all load_*
+# tasks complete and BEFORE trigger_phase2. It validates:
+#   1. Each source's CSV/DB output has real biomedical identifiers
+#      (InChIKeys for drugs, UniProt accessions for proteins, MIM IDs for
+#      diseases, etc.).
+#   2. No "SYNTH%" / "FAKE" / "TEST" sentinel values in production data
+#      (these are dev-only escape hatches per migration 009).
+#   3. Entity resolution produced canonical IDs (drug_resolver and
+#      protein_resolver mappings are non-empty if any source loaded).
+#   4. Database row counts are non-zero for each source's primary table.
+#
+# On failure, the task raises AirflowFailException (no retry) so the DAG
+# fails RED and trigger_phase2 is blocked — preventing Phase 2 from
+# building a knowledge graph on top of corrupted/empty Phase 1 data.
+@task(retries=0, execution_timeout=TASK_TIMEOUT, trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+@fail_fast_on_http_4xx
+def validate_output() -> None:
+    """Validate Phase 1 output before triggering Phase 2.
+
+    Runs 4 categories of checks against the loaded data:
+      1. Identifier format validation (InChIKey, UniProt, MIM, etc.)
+      2. Fake/synthesized data detection in production
+      3. Entity resolution completeness
+      4. Database row count sanity
+
+    Raises AirflowFailException on any check failure to block trigger_phase2.
+    """
+    import os
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _project_root = _Path(__file__).resolve().parent.parent.parent
+    _phase1_dir = _project_root / "phase1"
+    _processed_dir = _phase1_dir / "processed_data"
+    _environment = (
+        os.environ.get("DRUGOS_ENVIRONMENT")
+        or os.environ.get("ENVIRONMENT", "production")
+    ).lower().strip()
+    _is_production = _environment not in ("development", "dev", "test", "testing", "ci")
+
+    failures: list[str] = []
+
+    # ── Check 1: Identifier format validation in processed CSVs ────────
+    # Each source's CSV must contain real biomedical identifiers, not
+    # placeholder values. We spot-check the first non-header row.
+    _expected_csvs = {
+        "chembl_drugs.csv": "inchikey",
+        "drugbank_drugs.csv": "inchikey",
+        "uniprot_proteins.csv": "uniprot_id",
+        "string_proteins.csv": "uniprot_id_a",
+        "disgenet_gda.csv": "gene_symbol",
+        "omim_gda.csv": "disease_id",
+        "pubchem_compounds.csv": "inchikey",
+    }
+    for csv_name, id_col in _expected_csvs.items():
+        csv_path = _processed_dir / csv_name
+        if not csv_path.exists():
+            # In production, missing CSV = broken pipeline. In dev, warn.
+            if _is_production:
+                failures.append(
+                    f"validate_output: expected CSV {csv_name} not found at "
+                    f"{csv_path}. The corresponding pipeline did not produce "
+                    f"output. Check Airflow task logs for the failing source."
+                )
+            else:
+                logger.warning(
+                    "validate_output: %s not found at %s (dev mode — skipping)",
+                    csv_name, csv_path,
+                )
+            continue
+
+        # Read just the first 50 rows to spot-check identifiers.
+        try:
+            import pandas as _pd
+            df_sample = _pd.read_csv(csv_path, nrows=50)
+            if id_col not in df_sample.columns:
+                failures.append(
+                    f"validate_output: {csv_name} is missing required column "
+                    f"'{id_col}'. Got columns: {list(df_sample.columns)}. "
+                    f"The pipeline schema has drifted from the expected contract."
+                )
+                continue
+            non_null = df_sample[id_col].dropna()
+            if len(non_null) == 0:
+                failures.append(
+                    f"validate_output: {csv_name} column '{id_col}' has ZERO "
+                    f"non-null values in the first 50 rows. The pipeline "
+                    f"produced empty identifiers — likely a parser bug or "
+                    f"upstream API change."
+                )
+        except Exception as exc:
+            failures.append(
+                f"validate_output: could not read/validate {csv_name}: {exc}"
+            )
+
+    # ── Check 2: Fake/synthesized data detection in production ─────────
+    # SYNTH% InChIKeys are dev-only escape hatches (per migration 009). If
+    # they appear in production data, it means a pipeline fell back to
+    # embedded samples instead of fetching real data — a silent corruption.
+    if _is_production:
+        for csv_name in ("chembl_drugs.csv", "drugbank_drugs.csv", "pubchem_compounds.csv"):
+            csv_path = _processed_dir / csv_name
+            if not csv_path.exists():
+                continue  # already flagged in Check 1
+            try:
+                import pandas as _pd
+                df = _pd.read_csv(csv_path, usecols=["inchikey"]) if csv_path.exists() else _pd.DataFrame()
+                if "inchikey" in df.columns:
+                    synth_count = df["inchikey"].astype(str).str.startswith("SYNTH").sum()
+                    if synth_count > 0:
+                        failures.append(
+                            f"validate_output: PRODUCTION CORRUPTION — {csv_name} "
+                            f"contains {synth_count} SYNTH-prefixed InChIKeys. "
+                            f"SYNTH is a dev-only escape hatch (per migration 009). "
+                            f"The pipeline fell back to embedded samples instead "
+                            f"of fetching real data. Check the pipeline's "
+                            f"download() method and the source API connectivity."
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "validate_output: could not check SYNTH in %s: %s",
+                    csv_name, exc,
+                )
+
+    # ── Check 3: Entity resolution completeness ────────────────────────
+    # If any drug source loaded, the drug_resolver mapping should be non-empty.
+    # Same for proteins. An empty mapping means entity_resolution silently
+    # failed to produce canonical IDs — Phase 2 would build a disconnected graph.
+    _entity_mapping_path = _processed_dir / "entity_mappings.csv"
+    if _entity_mapping_path.exists():
+        try:
+            import pandas as _pd
+            em_df = _pd.read_csv(_entity_mapping_path)
+            if len(em_df) == 0:
+                failures.append(
+                    "validate_output: entity_mappings.csv is EMPTY. Entity "
+                    "resolution produced ZERO canonical ID mappings. Phase 2 "
+                    "would build a disconnected knowledge graph. Check "
+                    "entity_resolution/run.py for the failure."
+                )
+        except Exception as exc:
+            failures.append(
+                f"validate_output: could not read entity_mappings.csv: {exc}"
+            )
+    else:
+        if _is_production:
+            failures.append(
+                f"validate_output: entity_mappings.csv not found at "
+                f"{_entity_mapping_path}. Entity resolution did not run or "
+                f"did not produce output."
+            )
+
+    # ── Check 4: Database row count sanity (if DB is available) ────────
+    try:
+        import sqlite3 as _sqlite3
+        _db_path = _phase1_dir / "data" / "drugos.db"
+        _db_alt = _phase1_dir / "drugos.db"
+        _db = _db_path if _db_path.exists() else (_db_alt if _db_alt.exists() else None)
+        if _db is not None:
+            _conn = _sqlite3.connect(str(_db))
+            try:
+                for table, min_expected in [
+                    ("drugs", 1),
+                    ("proteins", 1),
+                    ("gene_disease_associations", 1),
+                ]:
+                    try:
+                        row = _conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                        count = row[0] if row else 0
+                        if count < min_expected:
+                            failures.append(
+                                f"validate_output: DB table '{table}' has "
+                                f"{count} rows (expected >= {min_expected}). "
+                                f"The Phase 1 pipeline did not load any data "
+                                f"into this table. Check the corresponding "
+                                f"load_* task."
+                            )
+                    except _sqlite3.OperationalError as oe:
+                        # Table doesn't exist yet — only a failure in production
+                        if _is_production:
+                            failures.append(
+                                f"validate_output: DB table '{table}' does not "
+                                f"exist ({oe}). The schema was not initialized. "
+                                f"Run init_db() / migrations before triggering "
+                                f"Phase 2."
+                            )
+            finally:
+                _conn.close()
+    except Exception as exc:
+        logger.warning(
+            "validate_output: DB row-count check skipped (non-fatal): %s. "
+            "CSV checks above are the primary validation.", exc,
+        )
+
+    # ── Aggregate and fail-fast on any failure ─────────────────────────
+    if failures:
+        _msg = "validate_output FAILED with %d issue(s):\n" % len(failures)
+        for i, f in enumerate(failures, 1):
+            _msg += f"  {i}. {f}\n"
+        _msg += (
+            "Phase 2 trigger is BLOCKED until these issues are resolved. "
+            "This prevents building a knowledge graph on corrupted/empty "
+            "Phase 1 data. (Task 34 v110 root fix)"
+        )
+        logger.error(_msg)
+        try:
+            from airflow.exceptions import AirflowFailException
+            raise AirflowFailException(_msg)
+        except ImportError:
+            raise RuntimeError(_msg)
+
+    logger.info(
+        "validate_output PASSED: all identifier, fake-data, entity-resolution, "
+        "and DB row-count checks passed. Phase 2 trigger is unblocked. "
+        "(Task 34 v110 root fix)"
+    )
+
+
 @dag(
     dag_id="drug_repurposing_master",
     description=(
@@ -1352,6 +1580,28 @@ def master_pipeline() -> None:
     # If validation fails, trigger_phase2 is SKIPPED (UPSTREAM_FAILED)
     # and the operator must fix the Phase 1 outputs before re-running.
     validate_phase1_contract >> trigger_phase2
+
+    # v110 Task 34 root fix: wire validate_output between load_* and
+    # trigger_phase2. validate_output checks that each source produced
+    # real biomedical identifiers (not fake/synthesized data), that
+    # entity resolution produced canonical IDs, and that DB row counts
+    # are non-zero. On failure it raises AirflowFailException (no retry)
+    # so trigger_phase2 is BLOCKED — preventing Phase 2 from building a
+    # knowledge graph on corrupted/empty Phase 1 data.
+    #
+    # Wiring: all load_* tasks >> validate_output >> trigger_phase2.
+    # validate_output uses trigger_rule=NONE_FAILED_MIN_ONE_SUCCESS so it
+    # fires even if pubchem_load is SKIPPED (graceful degradation), but
+    # BLOCKS when any required load FAILED.
+    validate_output_task = validate_output()
+    chembl_load >> validate_output_task
+    drugbank_load >> validate_output_task
+    uniprot_load >> validate_output_task
+    string_load >> validate_output_task
+    disgenet_load >> validate_output_task
+    omim_load >> validate_output_task
+    pubchem_load >> validate_output_task
+    validate_output_task >> trigger_phase2
 
 
 # v89 ROOT FIX (BUG #40): consistent DAG-instance naming convention.

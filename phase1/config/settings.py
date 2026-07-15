@@ -924,17 +924,33 @@ if CHEMBL_RETRY_BACKOFF_BASE < 1.0:
         f"got {CHEMBL_RETRY_BACKOFF_BASE}"
     )
 
-# Proactive rate limit (P1). ChEMBL's soft limit is ~2 req/sec for short
-# bursts; 0.5s average keeps us safely under the threshold while allowing
-# the token-bucket to absorb bursts (P4).
+# Proactive rate limit (P1, Task 37 v110 root fix). ChEMBL's documented
+# public API rate limit is 5 req/sec (https://chembl.gitbook.io/chembl-interface-documentation/web-services).
+# Default interval of 0.2s = 5 req/sec, utilizing the full allowance.
+# The token-bucket in _chembl_http_client.py enforces this with bounded
+# burst capacity, so we stay at or below 5 req/sec even under concurrent load.
+# v110 root fix: previous default of 0.5s (2 req/sec) was 60% under-utilization
+# of the ChEMBL allowance, needlessly throttling throughput on multi-million
+# record pulls. Set env CHEMBL_MIN_REQUEST_INTERVAL=0.5 to restore the
+# conservative 2 req/sec behavior if a deployer observes 429s.
 CHEMBL_MIN_REQUEST_INTERVAL: float = _getenv_float(
-    "CHEMBL_MIN_REQUEST_INTERVAL", 0.5
+    "CHEMBL_MIN_REQUEST_INTERVAL", 0.2
 )
 if CHEMBL_MIN_REQUEST_INTERVAL < 0.0:
     raise ValueError(
         f"env var 'CHEMBL_MIN_REQUEST_INTERVAL' must be >= 0.0, "
         f"got {CHEMBL_MIN_REQUEST_INTERVAL}"
     )
+if CHEMBL_MIN_REQUEST_INTERVAL > 0.0:
+    _effective_rate = 1.0 / CHEMBL_MIN_REQUEST_INTERVAL
+    if _effective_rate > 5.0:
+        raise ValueError(
+            f"env var 'CHEMBL_MIN_REQUEST_INTERVAL'={CHEMBL_MIN_REQUEST_INTERVAL} "
+            f"implies {_effective_rate:.1f} req/sec, which EXCEEDS ChEMBL's "
+            f"documented 5 req/sec public API rate limit. This would violate "
+            f"ChEMBL's TOS and trigger 429 responses. Use a value >= 0.2 "
+            f"(= 5 req/sec). (Task 37 v110 root fix)"
+        )
 
 # HTTP timeout tuple (connect, read) in seconds (SEC-2, C37).
 CHEMBL_HTTP_TIMEOUT: tuple[float, float] = (
@@ -1410,6 +1426,104 @@ DISGENET_API_URL: str = _getenv(
 DISGENET_API_KEY: str = _getenv("DISGENET_API_KEY", "")
 DISGENET_USE_API: bool = _parse_bool(_getenv("DISGENET_USE_API", "true"))
 
+# v110 Task 24 root fix: DisGeNET license tier management.
+#
+# DisGeNET offers three license tiers (per https://www.disgenet.org/plans):
+#   - "curated"  : paid license, full curated GDA records (all sources,
+#                  including BEFREE, CURATED, etc.). ~1.2M+ GDAs.
+#   - "premium"  : paid license, includes animal model + predicted data.
+#   - "free"     : free tier, limited to ~620K GDAs from public sources
+#                  (CURATED + ALL_OMIM + ALL_HPO + INFILER + etc. minus
+#                  premium-only sources). Requires free API key.
+#
+# The audit (Task 24) requires: "must use the curated license if available,
+# fallback to free tier with a warning."
+#
+# ROOT FIX: add DISGENET_LICENSE_TIER setting (default "auto").
+#   - "auto" (default): if DISGENET_API_KEY is present, assume curated tier
+#     (the key was provisioned for a paid plan). If key is absent, fall back
+#     to free tier with a clear warning that the dataset is limited.
+#   - "curated": explicitly use the curated endpoint (fails if no key).
+#   - "free"   : explicitly use the free endpoint (key optional but recommended).
+#   - "premium": explicitly use the premium endpoint (fails if no key).
+#
+# The tier affects:
+#   1. The API endpoint path (curated uses /gda/summary, free uses the same
+#      path but the server returns a limited record set based on the key's
+#      entitlements).
+#   2. The expected record count (curated: ~1.2M+, free: ~620K). The
+#      pipeline logs the expected count so operators can detect a
+#      silent tier downgrade.
+#   3. The warning emitted when falling back to free.
+DISGENET_LICENSE_TIER: str = _getenv("DISGENET_LICENSE_TIER", "auto").lower().strip()
+if DISGENET_LICENSE_TIER not in ("auto", "curated", "premium", "free"):
+    raise ValueError(
+        f"env var 'DISGENET_LICENSE_TIER' must be one of "
+        f"'auto', 'curated', 'premium', 'free' — got {DISGENET_LICENSE_TIER!r}. "
+        f"(Task 24 v110 root fix)"
+    )
+
+# Expected GDA record counts per tier (for silent-downgrade detection).
+# Source: DisGeNET pricing page + Piñero et al. 2020 §3.1.
+DISGENET_EXPECTED_RECORDS_BY_TIER: dict[str, int] = {
+    "curated": 1_200_000,   # curated + ALL sources
+    "premium": 1_500_000,   # premium includes animal model + predicted
+    "free": 620_000,        # free tier (public sources only)
+}
+
+
+def _resolve_disgenet_tier() -> tuple[str, str]:
+    """Resolve the effective DisGeNET license tier and emit warnings.
+
+    Returns
+    -------
+    tuple of (effective_tier, warning_message)
+        effective_tier : str — "curated", "premium", or "free"
+        warning_message : str — empty string if no warning, else the message
+    """
+    if DISGENET_LICENSE_TIER == "auto":
+        if DISGENET_API_KEY:
+            # Key present — assume curated (paid plans provision keys).
+            return ("curated", "")
+        else:
+            # No key — fall back to free tier with warning.
+            _warn = (
+                "DISGENET_LICENSE_TIER=auto and DISGENET_API_KEY is NOT set. "
+                "Falling back to FREE tier — the dataset will be LIMITED to "
+                "~620K public-source GDAs (vs ~1.2M+ for curated). Curated-only "
+                "sources (BEFREE, GWAS_CATALOG_FULL, etc.) will be ABSENT. "
+                "For institutional-grade coverage, set DISGENET_API_KEY with "
+                "a curated/paid plan key, or set DISGENET_LICENSE_TIER=curated "
+                "explicitly. (Task 24 v110 root fix)"
+            )
+            return ("free", _warn)
+    elif DISGENET_LICENSE_TIER in ("curated", "premium"):
+        if not DISGENET_API_KEY:
+            raise ValueError(
+                f"DISGENET_LICENSE_TIER={DISGENET_LICENSE_TIER!r} requires "
+                f"a DISGENET_API_KEY (paid license), but the key is NOT set. "
+                f"Either set DISGENET_API_KEY with a {DISGENET_LICENSE_TIER} "
+                f"plan key, or set DISGENET_LICENSE_TIER=auto/free. "
+                f"(Task 24 v110 root fix)"
+            )
+        return (DISGENET_LICENSE_TIER, "")
+    else:  # "free"
+        if not DISGENET_API_KEY:
+            _warn = (
+                "DISGENET_LICENSE_TIER=free and DISGENET_API_KEY is NOT set. "
+                "DisGeNET's free tier REQUIRES a free API key (register at "
+                "https://www.disgenet.org/plans). Without a key, the API "
+                "will return 401 Unauthorized. (Task 24 v110 root fix)"
+            )
+            return ("free", _warn)
+        return ("free", "")
+
+
+# Resolve the effective tier at import time (so warnings fire once).
+DISGENET_EFFECTIVE_TIER, DISGENET_TIER_WARNING = _resolve_disgenet_tier()
+if DISGENET_TIER_WARNING:
+    warnings.warn(DISGENET_TIER_WARNING, UserWarning)
+
 # The primary URL now points to the API by default (SCI-3)
 DISGENET_URL: str = DISGENET_API_URL
 
@@ -1597,10 +1711,45 @@ DISGENET_API_MAX_RETRY_AFTER: int = _getenv_int(
 
 # SEC-20: Client-side rate limiting.
 DISGENET_API_RATE_LIMIT: float = _getenv_float(
-    "DISGENET_API_RATE_LIMIT", default=2.0
+    "DISGENET_API_RATE_LIMIT", default=1.0
 )
-"""Maximum API requests per second (token-bucket).  Default 2.0 (DisGeNET
-free tier)."""
+"""Maximum API requests per second (token-bucket).
+
+v110 Task 23 root fix: default changed from 2.0 to 1.0 to comply with
+DisGeNET's free-tier TOS (1 req/sec per https://www.disgenet.org/api/).
+The previous default of 2.0 SILENTLY VIOLATED the free-tier TOS and could
+trigger 429 rate-limit responses or API key suspension.
+
+For curated/premium tiers, DisGeNET allows higher rates (up to 5 req/sec
+per the curated plan docs). Deployers on paid plans can set
+DISGENET_API_RATE_LIMIT=5.0 explicitly. The tier-aware clamp below
+prevents accidental TOS violations on the free tier.
+"""
+# v110 Task 23 root fix: tier-aware rate-limit clamp.
+# Free tier: max 1.0 req/sec (DisGeNET TOS).
+# Curated/premium: max 5.0 req/sec (paid plan allowance).
+_MAX_RATE_BY_TIER: dict[str, float] = {
+    "free": 1.0,
+    "curated": 5.0,
+    "premium": 5.0,
+}
+_max_allowed = _MAX_RATE_BY_TIER.get(DISGENET_EFFECTIVE_TIER, 1.0)
+if DISGENET_API_RATE_LIMIT > _max_allowed:
+    _original_rate = DISGENET_API_RATE_LIMIT
+    DISGENET_API_RATE_LIMIT = _max_allowed
+    warnings.warn(
+        f"DISGENET_API_RATE_LIMIT={_original_rate} exceeds the maximum "
+        f"allowed for tier={DISGENET_EFFECTIVE_TIER} ({_max_allowed} req/sec "
+        f"per DisGeNET TOS). Clamped to {_max_allowed}. To use a higher rate, "
+        f"upgrade to a curated/premium plan and set DISGENET_LICENSE_TIER=curated. "
+        f"(Task 23 v110 root fix)",
+        UserWarning,
+    )
+elif DISGENET_API_RATE_LIMIT < 0.0:
+    raise ValueError(
+        f"DISGENET_API_RATE_LIMIT must be >= 0.0, got {DISGENET_API_RATE_LIMIT}. "
+        f"(Task 23 v110 root fix)"
+    )
 
 # REL-8: Circuit breaker.
 DISGENET_CIRCUIT_BREAKER_THRESHOLD: int = _getenv_int(
