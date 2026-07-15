@@ -16,10 +16,12 @@ from pathlib import Path
 
 import pytest
 
-# Ensure phase2 is on sys.path
+# Ensure phase2 is on sys.path so `from drugos_graph import ...` works.
+# The test file is at phase2/tests/test_kg_builder_canonical_ids.py, so
+# parents[1] = phase2/. We add phase2/ to sys.path (NOT the repo root).
 _PHASE2_ROOT = Path(__file__).resolve().parents[1]
-if str(_PHASE2_ROOT.parent) not in sys.path:
-    sys.path.insert(0, str(_PHASE2_ROOT.parent))
+if str(_PHASE2_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PHASE2_ROOT))
 
 
 # ---------------------------------------------------------------------------
