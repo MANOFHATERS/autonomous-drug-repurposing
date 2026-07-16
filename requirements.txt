@@ -22,7 +22,16 @@ numpy>=1.26.3
 # v54 ROOT FIX (ROOT-5): use official `rdkit` package (has Python 3.13
 # wheels) instead of deprecated `rdkit-pypi` (no Python 3.13 wheels).
 # Both provide the same `rdkit` import — code is unchanged.
-rdkit>=2024.3.1; platform_machine=="x86_64"
+#
+# Task 365 ROOT FIX: removed the `platform_machine=="x86_64"` marker.
+# The canonical `rdkit` package (maintained by the RDKit project)
+# ships multi-arch wheels — both x86_64 AND arm64 (Apple Silicon,
+# AWS Graviton). The previous marker prevented installation on arm64,
+# forcing developers on M1/M2 Macs to install rdkit via conda
+# separately. With the marker removed, `pip install -r requirements.txt`
+# works on both architectures. The pipeline degrades gracefully if
+# rdkit is somehow still unavailable (DRUGOS_ALLOW_NO_RDKIT=1).
+rdkit>=2024.3.1
 sqlalchemy>=2.0.25
 psycopg2-binary>=2.9.9
 lxml>=5.1.0
@@ -33,7 +42,34 @@ python-dotenv>=1.0.0
 # apache-airflow installed, every DAG crashes at import time and
 # phase1/tests/test_dag_structure.py used to pytest.importorskip("airflow"),
 # silently SKIPPING all DAG structure validation. The Docker base image
-# (apache/airflow:2.8.1) includes it for prod, but dev/CI envs need it too.
+# (apache/airflow:2.10.5-python3.11) includes it for prod, but dev/CI envs
+# need it too.
+#
+# Task 364 ROOT FIX: the audit demanded pinning apache-airflow==2.10.5 in
+# requirements.txt to match the Dockerfile.airflow base image. We tried
+# THREE variations:
+#   (a) apache-airflow==2.10.5 + sqlalchemy==2.0.30 (Airflow's constraint)
+#   (b) apache-airflow==2.10.5 + sqlalchemy>=2.0.25 (loose)
+#   (c) apache-airflow>=2.10.0,<3.0.0 + sqlalchemy>=2.0.25 (major-version)
+# All three triggered pip ResolutionImpossible because Airflow 2.10.x's
+# transitive deps (provider packages like apache-airflow-providers-postgres
+# or the SQLAlchemy<2.0 pin in some 2.10.x provider) conflict with
+# sqlalchemy>=2.0.25 (which allows sqlalchemy 2.1+).
+#
+# ROOT FIX: keep the original `apache-airflow>=2.8.0` pin (which was
+# working on main before this PR) and rely on the CANONICAL production
+# pin in Dockerfile.airflow (apache/airflow:2.10.5-python3.11 base image).
+# The audit's concern was "no Airflow DAG is registered" — that's
+# addressed by the new Dockerfile.airflow + docker-compose service
+# (Tasks 356 + 357 + 369). The literal version pin in requirements.txt
+# is NOT required to satisfy the audit's concern; the production
+# version is enforced by the Dockerfile.
+#
+# Why not remove Airflow entirely? Because phase1/dags/*.py do
+# `from airflow.decorators import dag, task` at module top level, and
+# phase1/tests/test_dag_structure.py imports the DAGs. Without Airflow
+# installed, those tests skip (pytest.importorskip) and DAG structure
+# validation is silently disabled.
 apache-airflow>=2.8.0
 
 # ─── Phase 2: Knowledge Graph Construction ─────────────────────────────────
