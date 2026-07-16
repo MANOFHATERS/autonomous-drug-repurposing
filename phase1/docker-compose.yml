@@ -94,6 +94,11 @@ services:
       # the compose network.
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_EXPERIMENT_NAME: ${MLFLOW_EXPERIMENT_NAME:-drug_repurposing}
+      # IN-009 v113 ROOT FIX: MLflow auth credentials so Phase 2's
+      # mlflow_tracker.py (invoked from the master DAG's _trigger_phase2
+      # task) can authenticate to the auth-protected MLflow server.
+      MLFLOW_TRACKING_USERNAME: ${MLFLOW_ADMIN_USERNAME:-mlflow_admin}
+      MLFLOW_TRACKING_PASSWORD: "${MLFLOW_ADMIN_PASSWORD:?MLFLOW_ADMIN_PASSWORD env var must be set - IN-009 v113 security fix removed the no-auth default}"
     volumes:
       - ./dags:/opt/airflow/dags
       - ./pipelines:/opt/airflow/pipelines
@@ -229,6 +234,11 @@ services:
       # v75 ROOT FIX (T-027): MLFLOW_TRACKING_URI propagated to webserver.
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_EXPERIMENT_NAME: ${MLFLOW_EXPERIMENT_NAME:-drug_repurposing}
+      # IN-009 v113 ROOT FIX: MLflow auth credentials so Phase 2's
+      # mlflow_tracker.py (invoked from the master DAG's _trigger_phase2
+      # task) can authenticate to the auth-protected MLflow server.
+      MLFLOW_TRACKING_USERNAME: ${MLFLOW_ADMIN_USERNAME:-mlflow_admin}
+      MLFLOW_TRACKING_PASSWORD: "${MLFLOW_ADMIN_PASSWORD:?MLFLOW_ADMIN_PASSWORD env var must be set - IN-009 v113 security fix removed the no-auth default}"
     volumes:
       - ./dags:/opt/airflow/dags
       - ./pipelines:/opt/airflow/pipelines
@@ -281,6 +291,11 @@ services:
       # var, the Phase 2 task had no idea where the mlflow server was.
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_EXPERIMENT_NAME: ${MLFLOW_EXPERIMENT_NAME:-drug_repurposing}
+      # IN-009 v113 ROOT FIX: MLflow auth credentials so Phase 2's
+      # mlflow_tracker.py (invoked from the master DAG's _trigger_phase2
+      # task) can authenticate to the auth-protected MLflow server.
+      MLFLOW_TRACKING_USERNAME: ${MLFLOW_ADMIN_USERNAME:-mlflow_admin}
+      MLFLOW_TRACKING_PASSWORD: "${MLFLOW_ADMIN_PASSWORD:?MLFLOW_ADMIN_PASSWORD env var must be set - IN-009 v113 security fix removed the no-auth default}"
     volumes:
       - ./dags:/opt/airflow/dags
       - ./pipelines:/opt/airflow/pipelines
@@ -413,41 +428,30 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.mlflow
+    # IN-009 v113 ROOT FIX: port 5000 is NOT bound to the host in production.
+    # It's reachable only inside the compose network. Dev operators who need
+    # the MLflow UI can set MLFLOW_BIND_HOST_PORT=5000:5000 in .env.
     ports:
-      - "5000:5000"
+      - "${MLFLOW_BIND_HOST_PORT:-127.0.0.1:5000}:5000"
     volumes:
       - mlflow_data:/mlruns
     depends_on:
       postgres:
         condition: service_healthy
-    # v75 ROOT FIX (T-027): create the mlflow database before mlflow
-    # starts (mlflow does NOT auto-create the postgres database — it
-    # expects it to already exist). The entrypoint is a one-shot that
-    # runs psql to CREATE DATABASE IF NOT EXISTS, then exec's the
-    # mlflow command. This mirrors the airflow-init pattern. The
-    # Dockerfile's CMD is overridden by this entrypoint.
-    entrypoint: >
-      bash -c "PGPASSWORD=${POSTGRES_PASSWORD:-cosmic} psql -h postgres -U ${POSTGRES_USER:-cosmic} -d postgres -c \"SELECT 'CREATE DATABASE mlflow' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'mlflow')\\gexec\" &&
-      exec mlflow server
-      --host 0.0.0.0
-      --port 5000
-      --workers 4
-      --backend-store-uri postgresql://${POSTGRES_USER:-cosmic}:${POSTGRES_PASSWORD:-cosmic}@postgres/mlflow
-      --default-artifact-root /mlruns"
+    # IN-009 v113 ROOT FIX: the entrypoint generates the auth config from
+    # MLFLOW_ADMIN_PASSWORD (sha256-hashed) and starts `mlflow server
+    # --app-name basic-auth`. Every endpoint except /health requires
+    # HTTP Basic Auth. The airflow services below set
+    # MLFLOW_TRACKING_USERNAME / MLFLOW_TRACKING_PASSWORD so they can
+    # authenticate when Phase 2's mlflow_tracker.py logs metrics.
     environment:
-      # MLFLOW_TRACKING_URI is set INSIDE the mlflow container so any
-      # mlflow CLI command run from inside the container (e.g. for
-      # debugging) uses the right URI. The airflow services have their
-      # OWN MLFLOW_TRACKING_URI env var (set above in their environment
-      # blocks) so they can reach the mlflow service via the compose
-      # network.
+      MLFLOW_ADMIN_USERNAME: ${MLFLOW_ADMIN_USERNAME:-mlflow_admin}
+      MLFLOW_ADMIN_PASSWORD: "${MLFLOW_ADMIN_PASSWORD:?MLFLOW_ADMIN_PASSWORD env var must be set - IN-009 v113 security fix removed the no-auth default}"
+      POSTGRES_USER: ${POSTGRES_USER:-cosmic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cosmic}
       MLFLOW_TRACKING_URI: http://mlflow:5000
-    # v75 ROOT FIX (T-027): healthcheck hits mlflow's /health endpoint.
-    # mlflow 2.x exposes a JSON health endpoint at /health that returns
-    # 200 OK when the server is ready to accept requests. The check
-    # uses ``curl -f`` (fail on HTTP 4xx/5xx). ``start_period: 30s``
-    # gives the container time to start before the first check fires.
     healthcheck:
+      # /health does NOT require auth (it's the only unauthenticated endpoint).
       test: ["CMD-SHELL", "curl -f http://localhost:5000/health || exit 1"]
       interval: 30s
       timeout: 10s

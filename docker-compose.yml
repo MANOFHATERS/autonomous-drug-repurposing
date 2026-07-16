@@ -90,14 +90,36 @@ services:
     environment:
       MLFLOW_BACKEND_STORE_URI: postgresql://drugos:drugos_dev_password@postgres:5432/drugos
       MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlruns
-    ports:
-      - "5000:5000"
+      # IN-009 v113 ROOT FIX: MLflow auth. The entrypoint reads
+      # MLFLOW_ADMIN_PASSWORD and sha256-hashes it into the auth config.
+      # The admin username defaults to "mlflow_admin" (see mlflow-entrypoint.sh).
+      # In production, override MLFLOW_ADMIN_PASSWORD with a strong secret.
+      MLFLOW_ADMIN_USERNAME: mlflow_admin
+      MLFLOW_ADMIN_PASSWORD: "${MLFLOW_ADMIN_PASSWORD:?ERROR: MLFLOW_ADMIN_PASSWORD env var must be set -- IN-009 v113 security fix removed the no-auth default}"
+      POSTGRES_USER: drugos
+      POSTGRES_PASSWORD: drugos_dev_password
+      # MLFLOW_TRACKING_URI is set INSIDE the mlflow container so any
+      # mlflow CLI command run from inside the container (e.g. for
+      # debugging) uses the right URI. The dependent services have their
+      # OWN MLFLOW_TRACKING_URI + MLFLOW_TRACKING_USERNAME + MLFLOW_TRACKING_PASSWORD
+      # env vars (set in their environment blocks) so they can authenticate.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    # IN-009 v113 ROOT FIX: port 5000 is NOT bound to the host. MLflow is
+    # reachable only inside the compose network (http://mlflow:5000) so an
+    # attacker on the host network cannot reach the auth-protected API.
+    # Operators who need to access the MLflow UI from the host can SSH-tunnel
+    # or use `docker exec` -- do NOT re-add the host port binding in production.
+    expose:
+      - "5000"
     volumes:
       - mlflow_data:/mlruns
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
+      # IN-009 v113: the /health endpoint does NOT require auth (it's the
+      # only unauthenticated endpoint). A 401 on /api/2.0/mlflow/experiments/search
+      # would prove auth is working, but /health is sufficient for liveness.
       test: ["CMD-SHELL", "curl -fsS http://localhost:5000/health || exit 1"]
       interval: 30s
       timeout: 10s
@@ -201,6 +223,11 @@ services:
       PHASE1_PROCESSED_DIR: /opt/phase1/processed_data
       KG_SERVICE_PORT: "8001"
       PYTHONPATH: /opt/repo:/opt/repo/phase1:/opt/repo/phase2
+      # IN-009 v113 ROOT FIX: MLflow auth credentials so phase2-kg-builder
+      # can authenticate to the auth-protected MLflow tracking server.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_USERNAME: mlflow_admin
+      MLFLOW_TRACKING_PASSWORD: "${MLFLOW_ADMIN_PASSWORD:?ERROR: MLFLOW_ADMIN_PASSWORD env var must be set}"
     ports:
       - "8001:8001"
     volumes:
@@ -237,6 +264,14 @@ services:
       GT_SERVICE_PORT: "8002"
       GT_CHECKPOINT_DIR: /opt/ml_artifacts/checkpoints
       PYTHONPATH: /opt/repo:/opt/repo/phase1:/opt/repo/phase2
+      # IN-009 v113 ROOT FIX: MLflow auth credentials so phase3-trainer
+      # can authenticate to the auth-protected MLflow tracking server.
+      # This is the service that loads model checkpoints from MLflow --
+      # without auth, an attacker could register a malicious pickle model
+      # and achieve RCE on this container.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_USERNAME: mlflow_admin
+      MLFLOW_TRACKING_PASSWORD: "${MLFLOW_ADMIN_PASSWORD:?ERROR: MLFLOW_ADMIN_PASSWORD env var must be set}"
     ports:
       - "8002:8002"
     volumes:
@@ -272,6 +307,11 @@ services:
       RL_SERVICE_PORT: "8003"
       RL_OUTPUT_DIR: /opt/ml_artifacts
       PYTHONPATH: /opt/repo:/opt/repo/phase1:/opt/repo/phase2:/opt/repo/rl
+      # IN-009 v113 ROOT FIX: MLflow auth credentials so phase4-rl
+      # can authenticate to the auth-protected MLflow tracking server.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_USERNAME: mlflow_admin
+      MLFLOW_TRACKING_PASSWORD: "${MLFLOW_ADMIN_PASSWORD:?ERROR: MLFLOW_ADMIN_PASSWORD env var must be set}"
     ports:
       - "8003:8003"
     volumes:

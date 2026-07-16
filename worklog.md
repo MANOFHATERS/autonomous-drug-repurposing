@@ -271,3 +271,38 @@ Stage Summary:
 - SH-009 CRITICAL ROOT FIX complete
 - Files touched: docker-compose.yml (root)
 - Impact: frontend /api/dataset requests now proxy to a real service that runs phase1/service.py; /datasets, /stats, /datasets/{drug}/mechanism endpoints are reachable; the dashboard will show real Phase 1 CSV row counts instead of silently falling back to stale local data
+
+---
+Task ID: TM3-IN-009
+Agent: main (Teammate 3 swim lane)
+Task: Fix IN-009 (HIGH security) — MLflow server has no authentication
+
+Work Log:
+- Read phase1/docker/Dockerfile.mlflow (49 lines) — confirmed no auth, no mlflow[auth] extras, no MLFLOW_AUTH_CONFIG_PATH
+- Read docker-compose.yml (root) lines 85-106 — confirmed mlflow with ports 5000:5000 exposed to host, no auth
+- Read phase1/docker-compose.yml lines 412-455 — confirmed mlflow with ports 5000:5000, no auth, entrypoint runs mlflow server without --app-name basic-auth
+- Created phase1/docker/mlflow_auth_config.yaml — template auth config with basic_auth, admin_username, admin_password_hash (placeholder, overwritten at startup), sqlite auth DB, authorization_function
+- Created phase1/docker/mlflow-entrypoint.sh — entrypoint script that:
+  * Creates the mlflow database in Postgres if it doesn't exist
+  * Generates /tmp/mlflow_auth_config.yaml at startup from MLFLOW_ADMIN_PASSWORD env var (sha256-hashed)
+  * Starts `mlflow server --app-name basic-auth` so every endpoint except /health requires HTTP Basic Auth
+- Updated phase1/docker/Dockerfile.mlflow:
+  * Install `mlflow[auth]==2.15.1` (adds auth middleware deps)
+  * Install postgresql-client (for entrypoint psql) and curl (for healthcheck)
+  * Copy mlflow_auth_config.yaml + mlflow-entrypoint.sh into image
+  * Set ENTRYPOINT to mlflow-entrypoint.sh
+- Updated root docker-compose.yml mlflow service:
+  * Removed `ports: - "5000:5000"` (host binding) — replaced with `expose: - "5000"` (internal only)
+  * Added MLFLOW_ADMIN_USERNAME, MLFLOW_ADMIN_PASSWORD (required, no default), POSTGRES_USER, POSTGRES_PASSWORD env vars
+- Added MLFLOW_TRACKING_USERNAME + MLFLOW_TRACKING_PASSWORD to phase2-kg-builder, phase3-trainer, phase4-rl in root docker-compose.yml
+- Updated phase1/docker-compose.yml mlflow service: removed old entrypoint, added auth env vars, bound port to 127.0.0.1 by default (MLFLOW_BIND_HOST_PORT override)
+- Added MLFLOW_TRACKING_USERNAME + MLFLOW_TRACKING_PASSWORD to airflow-init, airflow-webserver, airflow-scheduler in phase1/docker-compose.yml
+- Verified both compose files parse with pyyaml
+- Verified mlflow has no host port binding in root compose (expose-only)
+- Verified all 3 airflow services + 3 ML-dependent services have auth credentials
+
+Stage Summary:
+- IN-009 HIGH security ROOT FIX complete
+- Files touched (all in TM3 swim lane): phase1/docker/Dockerfile.mlflow, phase1/docker/mlflow_auth_config.yaml (new), phase1/docker/mlflow-entrypoint.sh (new), docker-compose.yml (root), phase1/docker-compose.yml
+- Security impact: MLflow REST API + UI now require HTTP Basic Auth; port 5000 not exposed to host in root compose; remote unauthenticated RCE vector (malicious pickle model registration -> phase3-trainer code execution) is closed; all dependent services authenticate with MLFLOW_TRACKING_USERNAME/PASSWORD
+- Production deployment note: operators MUST set MLFLOW_ADMIN_PASSWORD env var (compose fails fast with clear error if unset)
