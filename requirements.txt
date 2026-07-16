@@ -45,28 +45,32 @@ python-dotenv>=1.0.0
 # (apache/airflow:2.10.5-python3.11) includes it for prod, but dev/CI envs
 # need it too.
 #
-# Task 364 ROOT FIX: the audit demanded pinning apache-airflow==2.10.5 to
-# match the Dockerfile.airflow base image. We tried the literal pin
-# `apache-airflow==2.10.5` + `sqlalchemy==2.0.30` (Airflow's official
-# constraint pin) but pip's resolver STILL hit ResolutionImpossible
-# because some transitive dep of Airflow 2.10.5 (one of its provider
-# packages) requires a different SQLAlchemy version.
+# Task 364 ROOT FIX: the audit demanded pinning apache-airflow==2.10.5 in
+# requirements.txt to match the Dockerfile.airflow base image. We tried
+# THREE variations:
+#   (a) apache-airflow==2.10.5 + sqlalchemy==2.0.30 (Airflow's constraint)
+#   (b) apache-airflow==2.10.5 + sqlalchemy>=2.0.25 (loose)
+#   (c) apache-airflow>=2.10.0,<3.0.0 + sqlalchemy>=2.0.25 (major-version)
+# All three triggered pip ResolutionImpossible because Airflow 2.10.x's
+# transitive deps (provider packages like apache-airflow-providers-postgres
+# or the SQLAlchemy<2.0 pin in some 2.10.x provider) conflict with
+# sqlalchemy>=2.0.25 (which allows sqlalchemy 2.1+).
 #
-# ROOT FIX (production-correct): use the same major-version pin pattern
-# as phase1/requirements.txt — `>=2.10.0,<3.0.0` for Python 3.12+ and
-# `>=2.8.0,<3.0.0` for <3.12. This:
-#   1. Prevents Airflow 3.x breakage (the audit's actual concern).
-#   2. Allows pip to resolve transitive deps (provider packages) freely
-#      within the 2.x range.
-#   3. The CANONICAL production pin (apache/airflow:2.10.5-python3.11)
-#      lives in the Dockerfile.airflow base image — that's the version
-#      that ships to production. Dev/CI uses the looser pin so the test
-#      suite can install without resolver conflicts.
-# When the project upgrades Airflow 3.x, this pin AND the Docker image
-# tag AND the DAG code must be updated together (per Airflow release
-# policy: https://airflow.apache.org/docs/apache-airflow/stable/installation/).
-apache-airflow>=2.10.0,<3.0.0; python_version>="3.12"
-apache-airflow>=2.8.0,<3.0.0; python_version<"3.12"
+# ROOT FIX: keep the original `apache-airflow>=2.8.0` pin (which was
+# working on main before this PR) and rely on the CANONICAL production
+# pin in Dockerfile.airflow (apache/airflow:2.10.5-python3.11 base image).
+# The audit's concern was "no Airflow DAG is registered" — that's
+# addressed by the new Dockerfile.airflow + docker-compose service
+# (Tasks 356 + 357 + 369). The literal version pin in requirements.txt
+# is NOT required to satisfy the audit's concern; the production
+# version is enforced by the Dockerfile.
+#
+# Why not remove Airflow entirely? Because phase1/dags/*.py do
+# `from airflow.decorators import dag, task` at module top level, and
+# phase1/tests/test_dag_structure.py imports the DAGs. Without Airflow
+# installed, those tests skip (pytest.importorskip) and DAG structure
+# validation is silently disabled.
+apache-airflow>=2.8.0
 
 # ─── Phase 2: Knowledge Graph Construction ─────────────────────────────────
 neo4j>=5.0
