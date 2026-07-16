@@ -2,39 +2,61 @@ import { NextRequest, NextResponse } from "next/server";
 import { searchDiseasesByName } from "@/lib/services/mesh";
 import { badRequest, internalError } from "@/lib/api-helpers";
 import {
-  requireAuthAndRateLimit,
-  recordApiRequestForUser,
+  requireAuthAndRateLimitV2,
+  recordApiRequestForUserV2,
 } from "@/lib/auth/api-proxy-guard";
+// Task 252 ROOT FIX: Zod validation for query params.
+import { validateQueryParams, DiseasesSearchQuery } from "@/lib/zod-schemas";
 
-// FE-006 ROOT FIX: This route previously had NO authentication. Anyone on
-// the internet could use it as an open proxy to deplete our MeSH / NLM
-// API quota. Now it requires auth + enforces a per-user rate limit.
+/**
+ * GET /api/diseases/search?q=<name>&limit=N
+ *
+ * Task 244 ROOT FIX:
+ *
+ * ROOT CAUSE: the audit named a type mismatch — `DiseaseSearchResult.descriptorUI`
+ * (uppercase 'I') vs the actual `descriptorUi` (lowercase 'i') returned by the
+ * MeSH service. The previous "fix" already renamed the api-client type to
+ * `descriptorUi` — BUT the route's response shape came from `MeshDescriptor`
+ * which also uses `descriptorUi`. So at the type level this was already aligned.
+ *
+ * However, the route had two real defects:
+ *   1. No Zod validation — invalid `q` values reached MeSH and produced
+ *      opaque 400s.
+ *   2. Used the V1 rate limit (60 req/MIN). Audit spec calls for 5 req/sec.
+ *
+ * ROOT FIX:
+ *   1. Validate query params with Zod (`DiseasesSearchQuery` schema).
+ *      The schema enforces a biomedical-name allowlist on `q` and a
+ *      1-100 clamped integer on `limit`.
+ *   2. Use `requireAuthAndRateLimitV2` for the 5 req/sec per-user limit.
+ *   3. The underlying MeSH calls are wrapped in `monitoredFetch` so
+ *      operators see every NLM call's duration and status (Task 260).
+ *
+ * NO MOCK DATA. Every successful response is real MeSH data.
+ */
 export async function GET(req: NextRequest) {
-  const guard = await requireAuthAndRateLimit(req);
+  // Task 252: Zod validation fires FIRST.
+  const parsed = validateQueryParams(DiseasesSearchQuery, req.nextUrl.searchParams);
+  if (!parsed.ok) return parsed.response;
+  const { q, limit } = parsed.data;
+
+  // Task 253: 5 req/sec per-user rate limit (V2 guard).
+  const guard = await requireAuthAndRateLimitV2(req);
   if (guard.response !== null) return guard.response;
 
-  const q = req.nextUrl.searchParams.get("q") || "";
+  // The Zod schema already enforces min 2 chars, but TypeScript narrowing
+  // doesn't propagate through validateQueryParams's union return — keep
+  // the explicit check for runtime safety.
   if (!q || q.trim().length < 2) {
     return badRequest("Query parameter 'q' (min 2 chars) is required");
   }
-  const limit = parseInt(req.nextUrl.searchParams.get("limit") || "10", 10);
+
   try {
     const results = await searchDiseasesByName(q, limit);
-    recordApiRequestForUser(guard.user);
-    // FE-005 ROOT FIX (Team Member 13): Standardize on {items: [...]}.
-    //
-    // Previously this route returned `{ query, results }` while the
-    // api-client.ts's searchDiseases() expected `{ items: DiseaseResult[] }`
-    // and accessed response.items.map(...). Since `items` was undefined,
-    // the .map() call threw "Cannot read properties of undefined
-    // (reading 'map')" and the disease search UI crashed on every search.
-    //
-    // ROOT FIX: return `{ items: results }`. We also keep `query` and
-    // `total` for clients that want them, but `items` is the canonical
-    // field that the api-client and every list endpoint agrees on.
+    recordApiRequestForUserV2(guard.user);
+    // FE-005 ROOT FIX: Standardize on {items: [...]}.
     return NextResponse.json({ items: results, total: results.length, query: q });
   } catch (e: unknown) {
-    // FE-063: never use `e: any` — narrow with instanceof.
     const msg = e instanceof Error ? e.message : String(e);
     return internalError(`MeSH search failed: ${msg}`);
   }

@@ -15,6 +15,8 @@
  * causation.
  */
 
+import { monitoredFetch } from "@/lib/external-api-monitor";
+
 const OPENFDA_BASE = "https://api.fda.gov";
 
 /**
@@ -140,7 +142,10 @@ export async function getDrugSafetySummary(drugName: string): Promise<DrugSafety
 
   // Note: openFDA responses can exceed Next.js's 2MB fetch cache limit, so
   // we do not pass `next: { revalidate }` here — we always fetch fresh.
-  const res = await fetch(url, {
+  // Task 260: monitored for observability — every openFDA call is logged
+  // with URL, duration, and status so operators can detect slow or
+  // degraded upstream responses.
+  const res = await monitoredFetch("openfda", url, {
     headers: { Accept: "application/json" },
   });
   if (res.status === 404) {

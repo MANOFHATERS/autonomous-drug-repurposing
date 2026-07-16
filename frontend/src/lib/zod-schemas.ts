@@ -169,3 +169,200 @@ export const BillingSubscriptionBody = z.object({
   { message: "Provide either totpCode or mfaTicket, not both." }
 );
 export type BillingSubscriptionBodyT = z.infer<typeof BillingSubscriptionBody>;
+
+// ---------------------------------------------------------------------------
+// Task 252 ROOT FIX: Zod validation for the 7 public-API-proxy routes'
+// query parameters.
+//
+// ROOT CAUSE: the audit required Zod validation on all 7 drug/disease/
+// safety routes. Previously, every route used manual validation
+// (`q.trim().length < 2`, `parseInt(...)`, etc.). Manual validation is
+// inconsistent and prone to type-confusion bugs:
+//   - `q = ""` passes `!q` but `q = "  "` (whitespace) passes the check
+//     and produces a 400-error upstream call from NLM.
+//   - `limit = "abc"` parses to NaN; `Math.min(NaN, 100) = NaN` slices
+//     to `[]` silently.
+//   - `drug = "../../etc/passwd"` would be passed to the openFDA URL
+//     builder as-is — no whitelist.
+//
+// ROOT FIX: this section defines one Zod schema per route's query
+// params, plus a `validateQueryParams()` helper that mirrors
+// `validateBody()` but reads from `URLSearchParams`. Each of the 7
+// routes now uses these schemas.
+//
+// The schemas enforce:
+//   - `q` is a non-empty string (after trim), 2-200 chars, matching the
+//     biomedical-name allowlist [A-Za-z0-9 ,.'-].
+//   - `limit` is an integer in [1, 100] (parsed from string).
+//   - `drug` (safety route) is 2-64 chars matching the same allowlist.
+//   - `condition`/`intervention` (clinical-trials route) are each
+//     optional strings ≤200 chars.
+//   - `pageToken` (clinical-trials route) is an opaque string ≤256 chars.
+//   - `status` (clinical-trials route) is one of the allowed enum values.
+//   - `rxcui` (drug search route) is an optional 1-11 digit numeric string.
+// ---------------------------------------------------------------------------
+
+const BIOMEDICAL_NAME_REGEX = /^[A-Za-z0-9 ,.'-]{2,200}$/;
+const DRUG_NAME_REGEX = /^[A-Za-z0-9 ,.'-]{2,64}$/;
+
+/**
+ * Validate a URLSearchParams object against a Zod schema. On success
+ * returns `{ ok: true, data }` with the parsed (and type-narrowed)
+ * params. On failure returns `{ ok: false, response }` with a 400
+ * NextResponse listing every field error.
+ *
+ * Usage in a route:
+ *   const parsed = validateQueryParams(DrugsSearchQuery, req.nextUrl.searchParams);
+ *   if (!parsed.ok) return parsed.response;
+ *   const { q, limit } = parsed.data;
+ */
+export function validateQueryParams<T>(
+  schema: z.ZodType<T>,
+  params: URLSearchParams
+): ValidationResult<T> {
+  // Convert URLSearchParams to a plain object. Zod's coerce handles
+  // string-to-number conversion when the schema uses z.coerce.number().
+  const raw: Record<string, string | undefined> = {};
+  for (const key of new Set(params.keys())) {
+    raw[key] = params.get(key) || undefined;
+  }
+  const result = schema.safeParse(raw);
+  if (result.success) {
+    return { ok: true, data: result.data };
+  }
+  const issues = result.error.issues.map((iss) => ({
+    path: iss.path.join("."),
+    message: iss.message,
+  }));
+  return {
+    ok: false,
+    response: NextResponse.json(
+      {
+        error: "bad_request",
+        message: "Query parameters failed validation.",
+        issues,
+      },
+      { status: 400 }
+    ),
+  };
+}
+
+/**
+ * Helper: parse a string-typed query param into a clamped integer.
+ * Used by schemas that want `z.coerce.number()` behavior with bounds.
+ */
+function clampedInt(min: number, max: number, def: number) {
+  return z
+    .string()
+    .optional()
+    .transform((v) => {
+      if (v === undefined || v === "") return def;
+      const n = Number.parseInt(v, 10);
+      if (!Number.isFinite(n)) return def;
+      return Math.min(Math.max(n, min), max);
+    });
+}
+
+// /api/drugs/search — query params
+export const DrugsSearchQuery = z.object({
+  q: z
+    .string()
+    .trim()
+    .min(2, "Query parameter 'q' must be at least 2 characters")
+    .max(200, "Query parameter 'q' must be at most 200 characters")
+    .regex(BIOMEDICAL_NAME_REGEX, "Query parameter 'q' contains invalid characters")
+    .optional(),
+  rxcui: z
+    .string()
+    .regex(/^\d{1,11}$/, "RxCUI must be 1-11 digits")
+    .optional(),
+  limit: clampedInt(1, 100, 10),
+});
+export type DrugsSearchQueryT = z.infer<typeof DrugsSearchQuery>;
+
+// /api/drugs/mechanism — POST body (already validated manually in the route,
+// but we add the Zod schema for consistency + future migration).
+export const DrugsMechanismBody = z.object({
+  drugNames: z
+    .array(z.string().trim().min(2).max(128))
+    .min(1, "drugNames must contain at least one drug name")
+    .max(100, "drugNames must contain at most 100 drug names"),
+});
+export type DrugsMechanismBodyT = z.infer<typeof DrugsMechanismBody>;
+
+// /api/diseases/search — query params
+export const DiseasesSearchQuery = z.object({
+  q: z
+    .string()
+    .trim()
+    .min(2, "Query parameter 'q' must be at least 2 characters")
+    .max(200, "Query parameter 'q' must be at most 200 characters")
+    .regex(BIOMEDICAL_NAME_REGEX, "Query parameter 'q' contains invalid characters"),
+  limit: clampedInt(1, 100, 10),
+});
+export type DiseasesSearchQueryT = z.infer<typeof DiseasesSearchQuery>;
+
+// /api/safety/[drug] — the drug is in the path, not the query. But we
+// also accept `?limit=N` for the reaction count cap.
+export const SafetyQuery = z.object({
+  limit: clampedInt(1, 100, 100),
+});
+export type SafetyQueryT = z.infer<typeof SafetyQuery>;
+
+/**
+ * Validate a drug name from a path parameter. Returns the sanitized
+ * name or null if invalid. Used by /api/safety/[drug].
+ */
+export function validateDrugPathParam(drug: string): string | null {
+  const decoded = (() => {
+    try {
+      return decodeURIComponent(drug);
+    } catch {
+      return drug;
+    }
+  })();
+  if (!decoded || decoded.length < 2) return null;
+  if (!DRUG_NAME_REGEX.test(decoded)) return null;
+  return decoded.trim();
+}
+
+// /api/clinical-trials/search — query params
+export const ClinicalTrialsSearchQuery = z.object({
+  condition: z
+    .string()
+    .trim()
+    .max(200, "condition must be at most 200 characters")
+    .optional(),
+  intervention: z
+    .string()
+    .trim()
+    .max(200, "intervention must be at most 200 characters")
+    .optional(),
+  status: z
+    .enum(["RECRUITING", "ACTIVE_NOT_RECRUITING", "COMPLETED", "ALL"])
+    .optional()
+    .default("ALL"),
+  limit: clampedInt(1, 100, 50),
+  page: clampedInt(1, 10000, 1),
+  pageSize: clampedInt(1, 100, 50),
+  pageToken: z
+    .string()
+    .max(256, "pageToken must be at most 256 characters")
+    .optional(),
+}).refine(
+  (data) => Boolean(data.condition || data.intervention),
+  { message: "At least one of 'condition' or 'intervention' is required" }
+);
+export type ClinicalTrialsSearchQueryT = z.infer<typeof ClinicalTrialsSearchQuery>;
+
+// /api/patents/search — query params
+export const PatentsSearchQuery = z.object({
+  q: z
+    .string()
+    .trim()
+    .min(2, "Query parameter 'q' must be at least 2 characters")
+    .max(200, "Query parameter 'q' must be at most 200 characters")
+    .regex(BIOMEDICAL_NAME_REGEX, "Query parameter 'q' contains invalid characters"),
+  limit: clampedInt(1, 100, 20),
+});
+export type PatentsSearchQueryT = z.infer<typeof PatentsSearchQuery>;

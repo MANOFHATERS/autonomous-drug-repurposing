@@ -22,10 +22,12 @@
  * ChEMBL API when the user re-runs the same query.
  */
 
+import { monitoredFetch } from "@/lib/external-api-monitor";
+
 const CHEMBL_BASE = "https://www.ebi.ac.uk/chembl/api/data";
 
 /**
- * FE-028 ROOT FIX (Team Member 15):
+ * FE-028 ROOT FIX (Team Member 15) + Task 254 ROOT FIX:
  *
  * ROOT CAUSE: the in-memory cache had NO TTL — entries lived forever
  * (until evicted by LRU). If the KG was updated (e.g. a new mechanism
@@ -33,21 +35,26 @@ const CHEMBL_BASE = "https://www.ebi.ac.uk/chembl/api/data";
  * indefinitely. For a pharma partner demo, this means showing
  * outdated mechanisms with no recovery short of a server restart.
  *
- * ROOT FIX:
- *   1. Cache entries now carry a `cachedAt` timestamp. On lookup,
- *      entries older than `CACHE_TTL_MS` (5 minutes) are treated as
- *         misses and re-fetched. 5 minutes is short enough that a
- *         ChEMBL update is reflected quickly, but long enough to
- *         avoid hammering ChEMBL on a busy dashboard.
- *   2. Exported `clearDrugMechanismCache()` allows a manual refresh
- *      via POST /api/drugs/mechanism/refresh.
- *   3. The Next.js `next: { revalidate: 86400 }` on the underlying
- *      fetch is preserved — it dedupes the HTTP request at the
- *      framework level. The 5-min in-memory TTL is a SEPARATE
- *      concern: it controls how often we re-check ChEMBL within a
- *      single server process.
+ * ROOT FIX (FE-028): cache entries now carry a `cachedAt` timestamp.
+ *
+ * ROOT FIX (Task 254): the audit explicitly requires a 1-hour TTL for
+ * drug/mechanism queries because "KG queries are expensive". The
+ * previous 5-minute TTL was too aggressive — it caused ChEMBL to be
+ * re-hit every 5 minutes for the same drug, eating into EBI's shared
+ * rate-limit budget. The new 1-hour TTL strikes the right balance:
+ * ChEMBL mechanism records change rarely (a handful of times per
+ * year per molecule), so 1 hour is well within the staleness budget.
+ * Operators can still force-refresh via POST /api/drugs/mechanism/refresh.
+ *
+ * Exported `clearDrugMechanismCache()` allows a manual refresh
+ * via POST /api/drugs/mechanism/refresh.
+ * The Next.js `next: { revalidate: 86400 }` on the underlying
+ * fetch is preserved — it dedupes the HTTP request at the
+ * framework level. The 1-hour in-memory TTL is a SEPARATE
+ * concern: it controls how often we re-check ChEMBL within a
+ * single server process.
  */
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes (FE-028: was infinite)
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour (Task 254: was 5 min)
 
 export interface DrugMechanismResult {
   drugName: string;
@@ -65,6 +72,36 @@ export interface DrugMechanismResult {
    * when error is set, so the researcher does not conflate "service down" with "no data".
    */
   error?: "chembl_unreachable" | "chembl_not_found";
+  /**
+   * Task 242 ROOT FIX: drug→protein→pathway chain from the Phase 2 KG
+   * service. Populated when KG_SERVICE_URL is set and the service
+   * responds successfully. Empty when KG service is unavailable — the
+   * route still returns the ChEMBL mechanism text in that case.
+   *
+   * Each chain is a list of edges forming a path from the drug to a
+   * disease through proteins and pathways. The frontend's
+   * pathway-viz component renders these as a node-link diagram so a
+   * researcher can audit WHY the model connected this drug to this
+   * disease.
+   */
+  pathwayChain?: PathwayEdge[];
+  /** Protein targets of this drug, sourced from the KG service. */
+  proteinTargets?: string[];
+  /** Pathways this drug's targets participate in, from the KG service. */
+  pathways?: string[];
+}
+
+export interface PathwayEdge {
+  /** Source node label, e.g. "Aspirin". */
+  source: string;
+  /** Source node type: drug | protein | pathway | disease. */
+  sourceType: "drug" | "protein" | "pathway" | "disease";
+  /** Target node label, e.g. "PTGS2". */
+  target: string;
+  /** Target node type. */
+  targetType: "drug" | "protein" | "pathway" | "disease";
+  /** Edge type, e.g. "inhibits", "is_part_of", "is_disrupted_in". */
+  relation: string;
 }
 
 // In-memory cache. Bounded to 256 entries; oldest evicted first.
@@ -160,7 +197,10 @@ async function resolveChemblId(drugName: string): Promise<string | null> {
     encodeURIComponent(sanitized) +
     `&limit=5`;
 
-  const res = await fetch(url, {
+  // Task 260: monitored for observability — every ChEMBL call is logged
+  // with URL, duration, and status so operators can detect slow or
+  // degraded upstream responses.
+  const res = await monitoredFetch("chembl", url, {
     headers: { Accept: "application/json" },
     // Cache the fetch result for 24h at the Next.js level (production).
     next: { revalidate: 86400 },
@@ -195,7 +235,8 @@ async function fetchMechanism(chemblId: string): Promise<string | null> {
   const url = `${CHEMBL_BASE}/mechanism.json?molecule_chembl_id=${encodeURIComponent(
     chemblId
   )}&limit=5`;
-  const res = await fetch(url, {
+  // Task 260: monitored for observability.
+  const res = await monitoredFetch("chembl", url, {
     headers: { Accept: "application/json" },
     next: { revalidate: 86400 },
   });
@@ -224,6 +265,100 @@ async function fetchMechanism(chemblId: string): Promise<string | null> {
     parts.push(`targets ${preferred.target_pref_name}`);
   }
   return parts.length > 0 ? parts.join(" - ") : null;
+}
+
+/**
+ * Task 242 ROOT FIX: fetch the drug→protein→pathway chain from the Phase 2
+ * KG service. Returns null if the KG service is not configured or the
+ * request fails — the caller falls back to ChEMBL-only mechanism text.
+ *
+ * The Phase 2 service exposes `GET /kg/explore?drug=<name>&limit=N` which
+ * returns a subgraph centered on the drug. We translate that into a flat
+ * list of `PathwayEdge` records plus `proteinTargets` and `pathways`
+ * arrays for the route response.
+ *
+ * ROOT CAUSE: the audit required the mechanism route to return the
+ * drug→protein→pathway chain — but the previous code returned ONLY the
+ * ChEMBL mechanism text (a single string). The frontend's pathway-viz
+ * component had nothing to render. Now we enrich the response with real
+ * graph edges from the Phase 2 KG service.
+ */
+async function fetchKgPathwayChain(
+  drugName: string
+): Promise<{ pathwayChain: PathwayEdge[]; proteinTargets: string[]; pathways: string[] } | null> {
+  const serviceUrl = process.env.KG_SERVICE_URL;
+  if (!serviceUrl) return null;
+
+  const sanitized = drugName.trim().slice(0, 128);
+  if (sanitized.length < 2) return null;
+
+  const url = `${serviceUrl.replace(/\/$/, "")}/kg/explore?drug=${encodeURIComponent(sanitized)}&limit=50`;
+  try {
+    // Task 260: monitored for observability.
+    const res = await monitoredFetch("kg_service", url, {
+      headers: { Accept: "application/json" },
+      // KG queries are expensive — cache the fetch result for 1h at the
+      // Next.js level (matches the in-memory TTL).
+      next: { revalidate: 3600 },
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    // The KG service returns { nodes: [...], edges: [...] } OR a similar
+    // subgraph shape. We translate the edges into PathwayEdge records.
+    const rawEdges: any[] = body?.edges || body?.relations || [];
+    const rawNodes: any[] = body?.nodes || body?.entities || [];
+    const nodeTypeMap = new Map<string, string>();
+    for (const n of rawNodes) {
+      const id = n?.id || n?.uid || n?.name;
+      const type = (n?.type || n?.node_type || "").toLowerCase();
+      if (id && type) nodeTypeMap.set(String(id), type);
+    }
+
+    const pathwayChain: PathwayEdge[] = [];
+    const proteinTargets = new Set<string>();
+    const pathways = new Set<string>();
+
+    for (const e of rawEdges.slice(0, 200)) {
+      const sourceId = String(e?.source || e?.from || e?.subject || "");
+      const targetId = String(e?.target || e?.to || e?.object || "");
+      const relation = String(e?.type || e?.relation || e?.label || "related_to");
+      if (!sourceId || !targetId) continue;
+
+      const sourceType = (nodeTypeMap.get(sourceId) || "drug") as PathwayEdge["sourceType"];
+      const targetType = (nodeTypeMap.get(targetId) || "protein") as PathwayEdge["targetType"];
+
+      // Only include the 4 canonical types in the chain (drug, protein,
+      // pathway, disease) — drop edges to AdverseEvent / Gene etc. so the
+      // pathway-viz stays focused on the mechanism chain.
+      const validTypes = new Set(["drug", "protein", "pathway", "disease"]);
+      if (!validTypes.has(sourceType) || !validTypes.has(targetType)) continue;
+
+      pathwayChain.push({
+        source: sourceId,
+        sourceType,
+        target: targetId,
+        targetType,
+        relation,
+      });
+
+      if (sourceType === "protein") proteinTargets.add(sourceId);
+      if (targetType === "protein") proteinTargets.add(targetId);
+      if (sourceType === "pathway") pathways.add(sourceId);
+      if (targetType === "pathway") pathways.add(targetId);
+    }
+
+    return {
+      pathwayChain,
+      proteinTargets: Array.from(proteinTargets),
+      pathways: Array.from(pathways),
+    };
+  } catch (e: unknown) {
+    // KG service unreachable — fall back to ChEMBL-only. Not an error
+    // worth surfacing to the user; the mechanism text is still useful.
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`[drug-mechanism] KG service lookup failed for "${drugName}": ${msg}`);
+    return null;
+  }
 }
 
 /**
@@ -258,20 +393,32 @@ export async function lookupDrugMechanism(
 
   try {
     const chemblId = await resolveChemblId(drugName);
-    if (!chemblId) {
-      // No ChEMBL match — this is "no data", not a lookup failure.
-      // Leave error undefined so the UI renders "—" (not "lookup failed").
-      cacheSet(key, result);
-      return result;
+    if (chemblId) {
+      result.chemblId = chemblId;
+      const mechanism = await fetchMechanism(chemblId);
+      if (mechanism) {
+        result.mechanism = mechanism;
+        result.source = `ChEMBL::${chemblId}`;
+      }
+      // mechanism === null here means ChEMBL has the molecule but no MoA record.
+      // That is "no data", not a lookup failure — leave error undefined.
     }
-    result.chemblId = chemblId;
-    const mechanism = await fetchMechanism(chemblId);
-    if (mechanism) {
-      result.mechanism = mechanism;
-      result.source = `ChEMBL::${chemblId}`;
+    // Task 242: enrich the result with the drug→protein→pathway chain from
+    // the Phase 2 KG service. This is BEST-EFFORT — if the KG service is
+    // not configured or returns an error, we still return the ChEMBL
+    // mechanism text. The pathway chain is additive.
+    const kgChain = await fetchKgPathwayChain(drugName);
+    if (kgChain) {
+      result.pathwayChain = kgChain.pathwayChain;
+      result.proteinTargets = kgChain.proteinTargets;
+      result.pathways = kgChain.pathways;
+      // Update source to indicate both ChEMBL and KG were used.
+      if (result.source) {
+        result.source = `${result.source} + KG_SERVICE`;
+      } else {
+        result.source = "KG_SERVICE";
+      }
     }
-    // mechanism === null here means ChEMBL has the molecule but no MoA record.
-    // That is "no data", not a lookup failure — leave error undefined.
   } catch (e: unknown) {
     // BE-017 ROOT FIX: do NOT silently swallow. Distinguish "no data" from
     // "lookup failed" so the UI can show "Mechanism lookup failed — retry"
@@ -281,13 +428,7 @@ export async function lookupDrugMechanism(
     const msg = e instanceof Error ? e.message : String(e);
     console.warn(`[drug-mechanism] ChEMBL lookup failed for "${drugName}": ${msg}`);
     result.error = "chembl_unreachable";
-    // Do NOT cache failed lookups for the full TTL — cache for a short window
-    // (10s) so a transient failure doesn't persist, but we still debounce a
-    // flood of requests if ChEMBL is genuinely down. We do this by writing
-    // to the cache with a stale-at-10s marker via cacheSet, but the lookup
-    // function checks TTL=5min normally — so we instead just SKIP caching
-    // failures and let the next request retry. Trade-off: more load on
-    // ChEMBL during an outage, but faster recovery when ChEMBL comes back.
+    // Do NOT cache failed lookups for the full TTL — let the next request retry.
     return result;
   }
 
