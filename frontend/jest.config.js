@@ -19,6 +19,7 @@ module.exports = {
     "<rootDir>/src/lib/auth/__tests__/**/*.test.ts",
     "<rootDir>/src/app/api/**/__tests__/**/*.test.ts",
     "<rootDir>/tests/api/**/*.test.ts",
+    "<rootDir>/tests/e2e/**/*.e2e.ts",
   ],
   setupFiles: ["<rootDir>/tests/api/env.ts"],
   setupFilesAfterEnv: ["<rootDir>/tests/api/setup.ts"],

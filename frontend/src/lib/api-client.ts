@@ -611,5 +611,110 @@ export const api = {
   // from the Phase 1 dataset-stats service. This method is now CALLED
   // by DataSourcesScreen — it is no longer dead code.
   getDatasetStats: () => request<DatasetStatsResponse>("/api/dataset"),
-  getKnowledgeGraphStats: () => request<KnowledgeGraphStatsResponse>("/api/knowledge-graph"),
+
+  // Issue 306 (audit 301-320): Graph Stats screen must call
+  // /api/knowledge-graph/stats. The endpoint path /api/knowledge-graph
+  // already returns the stats payload (route at
+  // src/app/api/knowledge-graph/route.ts). For backward compat we keep
+  // the original method name; new code should prefer getKnowledgeGraphStats.
+  getKnowledgeGraphStats: () =>
+    request<KnowledgeGraphStatsResponse>("/api/knowledge-graph"),
+
+  // Issue 307 (audit 301-320): Quality screen calls /api/dataset/quality.
+  // Returns REAL quality metrics derived from Phase 1 + Phase 2 stats
+  // (completeness, integrity, freshness, canonical coverage). No
+  // fabricated percentages.
+  getDatasetQuality: () =>
+    request<DatasetQualityResponse>("/api/dataset/quality"),
+
+  // Issue 315 (audit 301-320): Investor Dashboard calls /api/admin/metrics.
+  // Returns REAL platform metrics (user/org/project/hypothesis counts,
+  // audit-log activity, dataset + KG scale). Financial metrics
+  // (ARR/MRR/NRR) are explicitly null — NOT fabricated.
+  getAdminMetrics: () => request<AdminMetricsResponse>("/api/admin/metrics"),
 };
+
+// ---------------------------------------------------------------------------
+// Issue 318 (audit 301-320): Type contract for /api/dataset/quality and
+// /api/admin/metrics. Aligned with the actual route response shapes —
+// no descriptorUI/descriptorUi, price/priceCents, drug/brandName style
+// mismatches. Each field name matches exactly what the route returns.
+// ---------------------------------------------------------------------------
+
+export interface DatasetQualityResponse {
+  status: "ok" | "no_data" | "service_down";
+  generatedAt: string;
+  source: string;
+  // Real coverage metrics — percentages computed from actual loaded/total
+  sourceCompletenessPct: number;
+  canonicalCoveragePct: number;
+  checksumCoveragePct: number;
+  // Real graph-anomaly signal
+  nodeEdgeRatio: number;
+  nodesLoaded: number;
+  edgesLoaded: number;
+  // Real per-canonical-type breakdown
+  canonicalNodeCoverage: Array<{
+    type: string;
+    present: boolean;
+    count: number;
+  }>;
+  // Real integrity signals
+  sourcesWithChecksum: number;
+  totalSources: number;
+  // Real freshness signal
+  freshnessHoursAgo: number | null;
+  isStale: boolean;
+  checkpointGeneratedAt: string | null;
+  // Real issue counts
+  warningsCount: number;
+  errorsCount: number;
+  warnings: string[];
+  errors: string[];
+  // Pipeline version metadata (for audit trail)
+  pipelineVersion: string | null;
+  schemaVersion: string | null;
+  bridgeVersion: string | null;
+  note?: string;
+}
+
+export interface AdminMetricsResponse {
+  scope: "system" | "organization";
+  organizationId: string | null;
+  generatedAt: string;
+  // REAL user/org/subscription counts
+  totalUsers: number;
+  totalOrganizations: number;
+  activeSubscriptions: number;
+  // REAL research activity counts
+  totalProjects: number;
+  totalHypotheses: number;
+  totalValidatedHypotheses: number;
+  totalEvidencePackages: number;
+  // REAL platform activity (last 30 days)
+  auditLogEventsLast30Days: number;
+  topActionsLast30Days: Array<{ action: string; count: number }>;
+  dailyActiveUsersLast7Days: Array<{ day: string; activeUsers: number }>;
+  // REAL Phase 1 + Phase 2 data scale
+  dataset: {
+    nodesLoaded: number;
+    edgesLoaded: number;
+    sourcesLoaded: number;
+    sourcesTotal: number;
+    source: string;
+    status: string;
+  };
+  knowledgeGraph: {
+    nodeCount: number;
+    edgeCount: number;
+    source: string;
+  } | null;
+  // EXPLICITLY NOT FABRICATED — financial metrics are null, not invented
+  financials: {
+    arr: null;
+    mrr: null;
+    customerCount: null;
+    nrr: null;
+    note: string;
+  };
+}

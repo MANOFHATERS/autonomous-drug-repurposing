@@ -21,11 +21,21 @@ beforeAll(async () => {
   } catch (e) {
     // Schema push may fail silently if DB is already in sync — that's fine
   }
-  const { PrismaClient } = await import("@prisma/client");
-  prismaClient = new PrismaClient({
-    datasources: { db: { url: process.env.DATABASE_URL } },
-  });
-  (globalThis as any).__testPrisma = prismaClient;
+  // Issue 319 (audit 301-320): wrap PrismaClient init in try/catch so
+  // filesystem-only e2e tests (like no-mock-data-in-production.e2e.ts)
+  // do not fail when the test DB is unavailable. The prismaClient will
+  // remain null and beforeEach will skip table cleanup — that's fine
+  // because the e2e test does not touch the DB.
+  try {
+    const { PrismaClient } = await import("@prisma/client");
+    prismaClient = new PrismaClient({
+      datasources: { db: { url: process.env.DATABASE_URL } },
+    });
+    (globalThis as any).__testPrisma = prismaClient;
+  } catch (e) {
+    // Prisma client not available (e.g. not generated yet, or DB
+    // unreachable). Non-DB tests can still run.
+  }
 });
 
 afterAll(async () => {
