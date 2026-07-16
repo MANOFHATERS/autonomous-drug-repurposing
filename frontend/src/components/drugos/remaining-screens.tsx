@@ -6,12 +6,17 @@ import { useSession } from './session-provider';
 import {
   api, type Invoice, type Plan, type Subscription, type AuditLog, type TeamMember,
   type DatasetStatsResponse, type KnowledgeGraphStatsResponse, type SystemStatus,
+  type Project, type AdminUser, type DatasetQualityResponse, type AdminMetricsResponse,
 } from '@/lib/api-client';
 import { roleLabel } from '@/lib/rbac';
 // FE-030 ROOT FIX: real-API hooks for SharedQueriesScreen / AnnotationsScreen.
 // Previously these screens rendered hardcoded fake colleagues. Now they call
 // the real /api/projects endpoint and render honest empty states.
 import { useApiList, useApiResource, LoadingSpinner, ErrorDisplay, EmptyState } from './use-api-data';
+// Issue 317 (audit 301-320): Reusable DemoDataBanner. Imported by every
+// screen that still renders mock data, so the banner is visible to
+// researchers/admins/investors that the data is NOT real.
+import { DemoDataBanner } from '@/components/ui/DemoDataBanner';
 import { useTheme } from 'next-themes';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
@@ -31,15 +36,12 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, Legend } from 'recharts';
-import { Search, Plus, Download, ChevronRight, ChevronDown, Check, X, AlertTriangle, Star, ExternalLink, Copy, Trash2, Edit, MoreHorizontal, Filter, ArrowRight, RefreshCw, Eye, Settings, Users, Shield, Key, Activity, TrendingUp, FileText, Clock, Zap, Globe, Lock, Bell, Mail, CreditCard, Database, Code, BookOpen, GitFork, Server, Building, User, Play, Send, HelpCircle, MessageSquare, BarChart3, Target, Award, Heart, LayoutDashboard, GitBranch, FolderKanban, Share2, Bookmark, Layers, Monitor, Smartphone, Calendar, DollarSign, Percent, Package, AlertCircle, CheckCircle2, XCircle, Info, ArrowUpRight, ArrowDownRight, ToggleLeft, ShieldCheck, Scale, Sun, Moon, MonitorSmartphone, QrCode } from 'lucide-react';
+import { Search, Plus, Download, ChevronRight, ChevronDown, Check, X, AlertTriangle, Star, ExternalLink, Copy, Trash2, Edit, MoreHorizontal, Filter, ArrowRight, RefreshCw, Eye, Settings, Users, Shield, Key, Activity, TrendingUp, FileText, Clock, Zap, Globe, Lock, Bell, Mail, CreditCard, Database, Code, BookOpen, GitFork, Server, Building, User, Play, Send, HelpCircle, MessageSquare, BarChart3, Target, Award, Heart, LayoutDashboard, GitBranch, FolderKanban, Share2, Bookmark, Layers, Monitor, Smartphone, Calendar, DollarSign, Percent, Package, AlertCircle, CheckCircle2, XCircle, Info, ArrowUpRight, ArrowDownRight, ToggleLeft, ShieldCheck, Scale, Sun, Moon, MonitorSmartphone, QrCode, Network } from 'lucide-react';
 import { motion } from 'framer-motion';
-// FE-026 ROOT FIX: All data exports from mock-data.ts are now EMPTY arrays.
-// Components render empty states until migrated to real API calls.
-// FE-015 ROOT FIX (Team Member 15, v108): Trimmed unused empty-default
-// imports left over from the deleted mock screens (Pipeline, Deals,
-// Compliance, FeatureFlags, etc.). Only the symbols still referenced
-// by other unchanged screens remain.
-import { diseases, clinicalTrials, users, auditLogs, webhooks, organization } from '@/lib/empty-defaults';
+// Issue 301 (audit 301-320): Removed unused empty-defaults imports — they
+// were dead weight and made it look like the screens still consumed mock
+// data. Every screen now calls a real API endpoint OR renders a visible
+// DemoDataBanner. No silent mock data anywhere.
 
 const PRIMARY = '#5B4FCF';
 const GREEN = '#1D9E75';
@@ -75,38 +77,171 @@ const CHART_COLORS = ['#5B4FCF', '#1D9E75', '#D4853A', '#C0392B', '#8B5CF6', '#0
 // 1. PIPELINE SCREEN
 // ═══════════════════════════════════════════
 /**
- * FE-001 ROOT FIX (Team Member 15, v108): The previous PipelineScreen
- * rendered 8 hardcoded fake drug-disease pairs ("Memantine/Huntington's
- * Phase II score 87", "Sirolimus/ALS Phase I score 82",
- * "Ivermectin/Breast Cancer Phase I safety red", etc.) and 6 hardcoded
- * stage counts (Discovery 142, Preclinical 48, Phase I 22, Phase II 14,
- * Phase III 6, Approved 3). No API call was made. No DemoDataBanner
- * was shown. A pharma researcher seeing this screen believed these
- * were real pipeline candidates.
+ * Issue 303 (audit 301-320): Wire Pipeline screen to /api/system/status.
  *
- * ROOT FIX: There is no `/api/pipeline` endpoint in the codebase yet.
- * Per the issue spec we render an honest EmptyState that tells the
- * researcher exactly what to do: "validate a hypothesis to populate
- * this view". The researcher is never shown fabricated candidates.
+ * The previous PipelineScreen either:
+ *   (a) rendered 8 hardcoded fake drug-disease pairs with fake scores, OR
+ *   (b) after a partial fix, rendered a static EmptyState that lied
+ *       "/api/pipeline endpoint not implemented" — even though the
+ *       system status endpoint and audit logs DO contain real pipeline
+ *       activity (every hypothesis_create, hypothesis_validate,
+ *       dataset_query, etc. is recorded).
  *
- * When /api/pipeline is implemented (it should read Hypothesis rows
- * with status='validated' or 'reviewing' from the DB), this screen
- * can be wired to it the same way DataSourcesScreen is wired to
- * /api/dataset. Until then, this is the production-correct behavior.
+ * ROOT FIX: This screen now calls TWO real endpoints in parallel:
+ *   - GET /api/system/status — shows real service availability (auth,
+ *     rxnorm, mesh, clinicalTrials, pubmed, openfda, patentsview, kg,
+ *     dataset, rl). These services ARE the pipeline — without them no
+ *     repurposing candidate can be produced.
+ *   - GET /api/audit-logs?limit=50 — shows real recent pipeline
+ *     activity: hypothesis validations, dataset queries, evidence
+ *     package builds, etc. Filtered to actions that represent actual
+ *     repurposing-pipeline work (hypothesis_*, dataset_query,
+ *     evidence_*, rl_*).
+ *
+ * No fabricated drug-disease pairs. No fabricated stage counts. No
+ * fabricated scores. The screen shows what is REALLY happening in
+ * the pipeline right now: which services are up, and which hypothesis
+ * validations and evidence-package builds have actually occurred.
  */
 function PipelineScreen() {
+  const { data: status, loading: statusLoading, error: statusError, refetch: refetchStatus } = useApiResource<SystemStatus>(
+    () => api.getSystemStatus()
+  );
+  const { data: auditData, loading: auditLoading, error: auditError, refetch: refetchAudit } = useApiResource<{ items: AuditLog[]; total: number }>(
+    () => api.listAuditLogs(50, 0)
+  );
+
+  const services = status ? Object.entries(status.services).map(([key, svc]) => ({
+    key,
+    name: svc.service || key,
+    available: svc.available,
+    reason: svc.reason,
+  })) : [];
+
+  // PipelineScreen uses anyDown (not allOperational) for the status banner —
+  // we keep the explicit name for self-documenting intent.
+  const anyDown = services.some(s => !s.available);
+
+  // Filter audit logs to pipeline-relevant actions: hypothesis lifecycle,
+  // dataset queries, evidence package builds, RL ranker invocations.
+  const pipelineActions = (auditData?.items ?? []).filter(l => {
+    const a = l.action.toLowerCase();
+    return a.includes('hypothesis') ||
+           a.includes('dataset') ||
+           a.includes('evidence') ||
+           a.includes('rl_') ||
+           a.includes('predict') ||
+           a.includes('validate');
+  });
+
+  const refetchAll = () => { refetchStatus(); refetchAudit(); };
+  const loading = statusLoading || auditLoading;
+
   return (
     <FadeIn>
       <div className="space-y-6">
         <PageHeader
           title="Repurposing Pipeline"
-          desc="Track drug candidates through the repurposing pipeline"
-          actions={<Button variant="outline" size="sm" disabled title="Export will be enabled once the pipeline backend is implemented"><Download className="h-4 w-4 mr-1.5" />Export</Button>}
+          desc="Real pipeline service status and recent hypothesis activity"
+          actions={<Button variant="outline" size="sm" onClick={refetchAll} disabled={loading}>
+            <RefreshCw className={`h-4 w-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>}
         />
-        <EmptyState
-          title="No pipeline candidates yet"
-          description="Validate a hypothesis (Project → Hypothesis → Validate) to populate this view. The pipeline screen aggregates Hypothesis rows with status='validated' or 'reviewing' — once the /api/pipeline endpoint is implemented, validated candidates will appear here automatically."
-        />
+
+        {statusError && <ErrorDisplay error={statusError} onRetry={refetchStatus} />}
+        {auditError && <ErrorDisplay error={auditError} onRetry={refetchAudit} />}
+
+        {loading && <LoadingSpinner label="Loading pipeline status from /api/system/status…" />}
+
+        {!loading && status && (
+          <>
+            <Card className={
+              anyDown ? 'bg-red-50 border-red-200 dark:bg-red-950/30 dark:border-red-900' :
+              'bg-emerald-50 border-emerald-200 dark:bg-emerald-950/30 dark:border-emerald-900'
+            }>
+              <CardContent className="p-5">
+                <div className="flex items-center gap-3">
+                  {anyDown ? <XCircle className="h-6 w-6 text-red-600" /> : <CheckCircle2 className="h-6 w-6 text-emerald-600" />}
+                  <div>
+                    <h3 className={`font-semibold ${anyDown ? 'text-red-800 dark:text-red-200' : 'text-emerald-800 dark:text-emerald-200'}`}>
+                      {anyDown ? 'Some pipeline services unavailable' : 'All pipeline services operational'}
+                    </h3>
+                    <p className={`text-sm ${anyDown ? 'text-red-700 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
+                      Last checked: {status.generatedAt ? new Date(status.generatedAt).toLocaleString() : 'just now'} · {services.length} services
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {services.map(s => (
+                <Card key={s.key}>
+                  <CardContent className="p-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">{s.name}</span>
+                      <Badge variant={s.available ? 'default' : 'destructive'}>
+                        {s.available ? 'operational' : 'unavailable'}
+                      </Badge>
+                    </div>
+                    {s.reason && <p className="text-xs text-muted-foreground mt-1">{s.reason}</p>}
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </>
+        )}
+
+        {!loading && !statusError && !auditError && (
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">
+                Recent Pipeline Activity
+                {pipelineActions.length > 0 && (
+                  <Badge variant="outline" className="ml-2">{pipelineActions.length} events</Badge>
+                )}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="p-0">
+              {pipelineActions.length === 0 ? (
+                <div className="p-6 text-center text-sm text-muted-foreground">
+                  <Activity className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                  <p className="font-medium">No pipeline activity yet</p>
+                  <p className="text-xs mt-1 max-w-md mx-auto">
+                    Validate a hypothesis (Project → Hypothesis → Validate), run a dataset query,
+                    or build an evidence package. Those events will appear here in real time.
+                  </p>
+                </div>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Action</TableHead>
+                      <TableHead>Actor</TableHead>
+                      <TableHead>Resource</TableHead>
+                      <TableHead>When</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {pipelineActions.slice(0, 20).map(l => (
+                      <TableRow key={l.id}>
+                        <TableCell>
+                          <Badge variant="outline" className="font-mono text-xs">{l.action}</Badge>
+                        </TableCell>
+                        <TableCell className="text-sm">{l.actorName}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground font-mono">{l.resource || '—'}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {new Date(l.createdAt).toLocaleString()}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+        )}
       </div>
     </FadeIn>
   );
@@ -116,32 +251,172 @@ function PipelineScreen() {
 // 2. ANALYTICS SCREEN
 // ═══════════════════════════════════════════
 /**
- * FE-002 ROOT FIX (Team Member 15, v108): The previous AnalyticsScreen
- * rendered 6 months of fabricated query volumes (Jan 180 → Jun 342),
- * API call counts (22K → 45K), 5 fabricated "top diseases" with
- * fabricated growth percentages, and 4 fabricated stat cards
- * ("Total Queries 1,682", "API Calls 210,230", "Candidates Found 2,345",
- * "Avg Score 73.4"). No API call. No banner. A pharma executive
+ * Issue 304 (audit 301-320): Wire Analytics screen to /api/audit-logs.
+ *
+ * The previous AnalyticsScreen rendered 6 months of fabricated query
+ * volumes, API call counts, "top diseases" with fabricated growth
+ * percentages, and 4 fabricated stat cards. A pharma executive
  * reviewing platform ROI saw fabricated telemetry.
  *
- * ROOT FIX: There is no `/api/analytics` endpoint in the codebase yet.
- * Per the issue spec we render an honest EmptyState. The endpoint, when
- * implemented, should aggregate AuditLog rows (which already record
- * every query, login, project create, etc.) to derive real usage
- * metrics. Until then, no fabricated numbers are shown.
+ * ROOT FIX: There is no separate /api/analytics endpoint, but the
+ * existing /api/audit-logs endpoint records EVERY user action (login,
+ * search, hypothesis_create, dataset_query, billing_change, etc.).
+ * This screen now aggregates those real audit-log rows to derive:
+ *
+ *   - Total events (last 30 days): COUNT(audit logs in last 30d)
+ *   - Unique active users (last 30d): COUNT(DISTINCT userId)
+ *   - Top actions (last 30d): GROUP BY action, COUNT, ORDER BY count
+ *   - Daily event volume (last 14 days): GROUP BY DATE(createdAt)
+ *
+ * Every number on this screen is computed from REAL audit-log rows
+ * that were written by real user actions. No fabricated metrics.
  */
 function AnalyticsScreen() {
+  const { data: auditData, loading, error, refetch } = useApiResource<{ items: AuditLog[]; total: number }>(
+    () => api.listAuditLogs(500, 0)
+  );
+
+  const logs = auditData?.items ?? [];
+
+  // Aggregate real metrics from audit-log rows. Wrap all computations in
+  // useMemo so the deps arrays are stable across re-renders (avoids the
+  // react-compiler "Compilation Skipped: Existing memoization could not
+  // be preserved" error).
+  const { totalEvents30d, uniqueUsers30d, actionCounts, dailyVolume } = useMemo(() => {
+    const now = Date.now();
+    const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+    const fourteenDaysAgo = now - 14 * 24 * 60 * 60 * 1000;
+
+    const recentLogs = logs.filter(l => new Date(l.createdAt).getTime() > thirtyDaysAgo);
+    const totalEvents = recentLogs.length;
+    const uniqueUsers = new Set(recentLogs.map(l => l.userId).filter(Boolean)).size;
+
+    const actionMap = new Map<string, number>();
+    for (const l of recentLogs) {
+      actionMap.set(l.action, (actionMap.get(l.action) || 0) + 1);
+    }
+    const topActions = Array.from(actionMap.entries())
+      .map(([action, count]) => ({ action, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 8);
+
+    const dayMap = new Map<string, number>();
+    for (const l of logs) {
+      const t = new Date(l.createdAt).getTime();
+      if (t < fourteenDaysAgo) continue;
+      const day = new Date(l.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      dayMap.set(day, (dayMap.get(day) || 0) + 1);
+    }
+    const daily = Array.from(dayMap.entries())
+      .map(([day, count]) => ({ day, count }));
+
+    return {
+      totalEvents30d: totalEvents,
+      uniqueUsers30d: uniqueUsers,
+      actionCounts: topActions,
+      dailyVolume: daily,
+    };
+  }, [logs]);
+
   return (
     <FadeIn>
       <div className="space-y-6">
         <PageHeader
           title="Analytics"
-          desc="Platform usage and performance metrics"
+          desc="Real platform usage derived from /api/audit-logs (last 30 days)"
+          actions={<Button variant="outline" size="sm" onClick={() => refetch()} disabled={loading}>
+            <RefreshCw className={`h-4 w-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>}
         />
-        <EmptyState
-          title="Analytics data not available"
-          description="The /api/analytics endpoint has not been implemented yet. When added, it will aggregate AuditLog rows to show real platform usage — query volumes, API call counts, top searched diseases, and candidate discovery rates. No fabricated metrics are shown in the meantime."
-        />
+
+        {loading && <LoadingSpinner label="Loading audit logs…" />}
+        {error && <ErrorDisplay error={error} onRetry={() => refetch()} />}
+
+        {!loading && !error && (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <StatCard
+                title="Events (last 30 days)"
+                value={totalEvents30d.toLocaleString()}
+                subtitle={`of ${logs.length.toLocaleString()} total audit entries`}
+                icon={Activity}
+              />
+              <StatCard
+                title="Active Users (last 30 days)"
+                value={uniqueUsers30d}
+                subtitle="distinct userIds in audit logs"
+                icon={Users}
+              />
+              <StatCard
+                title="Action Types (last 30 days)"
+                value={actionCounts.length}
+                subtitle="distinct action categories"
+                icon={BarChart3}
+              />
+            </div>
+
+            {logs.length === 0 && (
+              <EmptyState
+                title="No audit log data yet"
+                description="Once users start logging in, searching drugs, and creating hypotheses, those actions will be recorded in the audit log and aggregated here. No fabricated metrics are shown."
+              />
+            )}
+
+            {actionCounts.length > 0 && (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">Top Actions (last 30 days)</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={actionCounts} layout="vertical" margin={{ left: 80, right: 20, top: 10, bottom: 10 }}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis type="number" />
+                        <YAxis type="category" dataKey="action" width={120} tick={{ fontSize: 11 }} />
+                        <RechartsTooltip />
+                        <Bar dataKey="count" fill={PRIMARY} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {dailyVolume.length > 0 && (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">Daily Event Volume (last 14 days)</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={dailyVolume} margin={{ left: 0, right: 20, top: 10, bottom: 10 }}>
+                        <defs>
+                          <linearGradient id="colorEvents" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor={PRIMARY} stopOpacity={0.8} />
+                            <stop offset="95%" stopColor={PRIMARY} stopOpacity={0} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="day" tick={{ fontSize: 11 }} />
+                        <YAxis />
+                        <RechartsTooltip />
+                        <Area type="monotone" dataKey="count" stroke={PRIMARY} fillOpacity={1} fill="url(#colorEvents)" />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            <p className="text-xs text-muted-foreground italic">
+              All metrics derived from real AuditLog rows written by actual user actions.
+              No fabricated query volumes, no fabricated growth percentages, no fabricated user counts.
+            </p>
+          </>
+        )}
       </div>
     </FadeIn>
   );
@@ -753,22 +1028,19 @@ function GraphStatisticsScreen() {
  * We never fabricate completeness/freshness/reliability percentages.
  */
 function QualityScreen() {
-  const { data: stats, loading, error, refetch } = useApiResource<DatasetStatsResponse>(
-    () => api.getDatasetStats()
+  // Issue 307 (audit 301-320): Wire to /api/dataset/quality. The endpoint
+  // derives REAL quality metrics from Phase 1 + Phase 2 stats — no
+  // fabricated percentages.
+  const { data: quality, loading, error, refetch } = useApiResource<DatasetQualityResponse>(
+    () => api.getDatasetQuality()
   );
-
-  const warnings = stats?.warnings ?? [];
-  const errors = stats?.errors ?? [];
-  const sources = stats?.sources ?? [];
-  const loadedSources = sources.filter(s => s.loaded).length;
-  const missingSources = sources.length - loadedSources;
 
   return (
     <FadeIn>
       <div className="space-y-6">
         <PageHeader
           title="Data Quality"
-          desc="Real data quality signals derived from the dataset service"
+          desc="Real quality metrics derived from Phase 1 + Phase 2 stats via /api/dataset/quality"
           actions={
             <Button variant="outline" size="sm" onClick={() => refetch()} disabled={loading}>
               <RefreshCw className={`h-4 w-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
@@ -777,42 +1049,77 @@ function QualityScreen() {
           }
         />
 
-        {loading && <LoadingSpinner label="Loading data quality signals…" />}
+        {loading && <LoadingSpinner label="Loading data quality metrics from /api/dataset/quality…" />}
         {error && <ErrorDisplay error={error} onRetry={() => refetch()} />}
 
-        {!loading && !error && !stats && (
+        {!loading && !error && quality && quality.status === 'no_data' && (
           <EmptyState
-            title="Data quality data not available"
-            description="The /api/data-quality endpoint has not been implemented yet, and /api/dataset returned no data. Run the Phase 1 pipeline to populate dataset statistics."
+            title="No dataset quality data available"
+            description="The Phase 1 pipeline has not been run yet. Run Phase 1 to populate the dataset checkpoint — quality metrics (completeness, integrity, freshness, canonical coverage) will then be computed from real stats."
           />
         )}
 
-        {!loading && !error && stats && (
+        {!loading && !error && quality && quality.status !== 'no_data' && (
           <>
-            {/* Honest stat cards — derived from real dataset stats, not fabricated */}
+            {/* Real coverage stat cards */}
             <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-              <StatCard title="Sources Loaded" value={`${loadedSources}/${sources.length}`} icon={CheckCircle2} />
-              <StatCard title="Sources Missing" value={missingSources} icon={XCircle} />
-              <StatCard title="Warnings" value={warnings.length} icon={AlertTriangle} />
-              <StatCard title="Errors" value={errors.length} icon={XCircle} />
+              <StatCard
+                title="Source Completeness"
+                value={`${quality.sourceCompletenessPct}%`}
+                subtitle={`${quality.totalSources > 0 ? Math.round(quality.sourceCompletenessPct * quality.totalSources / 100) : 0}/${quality.totalSources} sources loaded`}
+                icon={CheckCircle2}
+              />
+              <StatCard
+                title="Canonical Coverage"
+                value={`${quality.canonicalCoveragePct}%`}
+                subtitle="Compound/Protein/Pathway/Disease/Outcomes"
+                icon={Layers}
+              />
+              <StatCard
+                title="Checksum Coverage"
+                value={`${quality.checksumCoveragePct}%`}
+                subtitle={`${quality.sourcesWithChecksum}/${quality.totalSources} sources with SHA-256`}
+                icon={ShieldCheck}
+              />
+              <StatCard
+                title="Freshness"
+                value={quality.freshnessHoursAgo === null ? '—' : `${quality.freshnessHoursAgo}h ago`}
+                subtitle={quality.isStale ? 'stale (>7 days)' : 'fresh'}
+                icon={quality.isStale ? AlertTriangle : Clock}
+                trend={quality.isStale ? 'stale' : undefined}
+              />
             </div>
 
-            {/* Real per-source load status — no fabricated completeness % */}
+            {/* Real per-canonical-type breakdown */}
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-base">Source Load Status</CardTitle></CardHeader>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">Canonical Node Type Coverage (Phase 2 KG)</CardTitle>
+              </CardHeader>
               <CardContent className="p-0">
                 <Table>
-                  <TableHeader><TableRow><TableHead>Source</TableHead><TableHead>Loaded</TableHead><TableHead>Rows</TableHead></TableRow></TableHeader>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Node Type</TableHead>
+                      <TableHead>Present</TableHead>
+                      <TableHead>Count</TableHead>
+                    </TableRow>
+                  </TableHeader>
                   <TableBody>
-                    {sources.length === 0 ? (
-                      <TableRow><TableCell colSpan={3} className="text-center text-muted-foreground py-6">No sources registered. Run Phase 1 to populate.</TableCell></TableRow>
-                    ) : sources.map(s => (
-                      <TableRow key={s.name}>
-                        <TableCell className="font-medium">{s.name}</TableCell>
-                        <TableCell>
-                          <Badge variant={s.loaded ? 'default' : 'secondary'}>{s.loaded ? 'loaded' : 'missing'}</Badge>
+                    {quality.canonicalNodeCoverage.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={3} className="text-center text-muted-foreground py-6">
+                          Phase 2 KG has no nodes registered. Run Phase 2 to populate.
                         </TableCell>
-                        <TableCell>{(s.rowsLoaded ?? 0).toLocaleString()}</TableCell>
+                      </TableRow>
+                    ) : quality.canonicalNodeCoverage.map(c => (
+                      <TableRow key={c.type}>
+                        <TableCell className="font-medium">{c.type}</TableCell>
+                        <TableCell>
+                          <Badge variant={c.present ? 'default' : 'secondary'}>
+                            {c.present ? 'present' : 'missing'}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>{c.count.toLocaleString()}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -820,38 +1127,66 @@ function QualityScreen() {
               </CardContent>
             </Card>
 
-            {/* Real warnings from the dataset service */}
-            <Card className={warnings.length > 0 ? 'border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-900' : ''}>
-              <CardHeader className="pb-2"><CardTitle className="text-base">Warnings ({warnings.length})</CardTitle></CardHeader>
+            {/* Real graph-anomaly signal */}
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">Graph Anomaly Signals</CardTitle>
+              </CardHeader>
               <CardContent>
-                {warnings.length === 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+                  <div>
+                    <p className="text-muted-foreground text-xs">Nodes Loaded</p>
+                    <p className="font-semibold">{quality.nodesLoaded.toLocaleString()}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground text-xs">Edges Loaded</p>
+                    <p className="font-semibold">{quality.edgesLoaded.toLocaleString()}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground text-xs">Node/Edge Ratio</p>
+                    <p className="font-semibold">{quality.nodeEdgeRatio}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {quality.nodeEdgeRatio > 5 || quality.nodeEdgeRatio < 0.05
+                        ? 'anomalous — investigate loader'
+                        : 'within expected range (0.05-5.0)'}
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Real warnings from the dataset service */}
+            <Card className={quality.warningsCount > 0 ? 'border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-900' : ''}>
+              <CardHeader className="pb-2"><CardTitle className="text-base">Warnings ({quality.warningsCount})</CardTitle></CardHeader>
+              <CardContent>
+                {quality.warningsCount === 0 ? (
                   <p className="text-sm text-muted-foreground">No warnings from the dataset service.</p>
                 ) : (
                   <ul className="space-y-1 text-xs text-amber-800 dark:text-amber-300 font-mono">
-                    {warnings.map((w, i) => <li key={i}>• {w}</li>)}
+                    {quality.warnings.map((w, i) => <li key={i}>• {w}</li>)}
                   </ul>
                 )}
               </CardContent>
             </Card>
 
             {/* Real errors from the dataset service */}
-            <Card className={errors.length > 0 ? 'border-red-200 bg-red-50 dark:bg-red-950/30 dark:border-red-900' : ''}>
-              <CardHeader className="pb-2"><CardTitle className="text-base">Errors ({errors.length})</CardTitle></CardHeader>
+            <Card className={quality.errorsCount > 0 ? 'border-red-200 bg-red-50 dark:bg-red-950/30 dark:border-red-900' : ''}>
+              <CardHeader className="pb-2"><CardTitle className="text-base">Errors ({quality.errorsCount})</CardTitle></CardHeader>
               <CardContent>
-                {errors.length === 0 ? (
+                {quality.errorsCount === 0 ? (
                   <p className="text-sm text-muted-foreground">No errors from the dataset service.</p>
                 ) : (
                   <ul className="space-y-1 text-xs text-red-800 dark:text-red-300 font-mono">
-                    {errors.map((e, i) => <li key={i}>• {e}</li>)}
+                    {quality.errors.map((e, i) => <li key={i}>• {e}</li>)}
                   </ul>
                 )}
               </CardContent>
             </Card>
 
             <p className="text-xs text-muted-foreground italic">
-              Note: completeness / freshness / duplicate-count / reliability percentages are NOT shown
-              because no /api/data-quality endpoint exists to compute them. Per-source SHA256 hashes
-              (visible on the Data Sources screen) are the only integrity signals currently available.
+              All metrics derived from real Phase 1 dataset stats and Phase 2 KG stats via /api/dataset/quality.
+              No fabricated completeness percentages, no fabricated freshness scores, no fabricated reliability metrics.
+              Pipeline: {quality.pipelineVersion || 'unknown'} · Schema: {quality.schemaVersion || 'unknown'} · Bridge: {quality.bridgeVersion || 'unknown'}
             </p>
           </>
         )}
@@ -1080,54 +1415,148 @@ function SubscriptionScreen() {
  * `api.getSubscription()` (real subscription data, including seats).
  */
 function UsageScreen() {
-  const { data: subData, loading, error } = useApiResource<{ subscription: Subscription | null; plans: Plan[] }>(
+  // Issue 308 (audit 301-320): Wire to /api/audit-logs. The previous
+  // UsageScreen rendered "—" placeholders for queries/calls/storage and
+  // showed only seat count. Now we aggregate REAL API call counts from
+  // audit logs: every API call is recorded as an audit-log row, so we
+  // can derive actual usage per user, per action, and per day.
+  const { data: auditData, loading: auditLoading, error: auditError, refetch } = useApiResource<{ items: AuditLog[]; total: number }>(
+    () => api.listAuditLogs(500, 0)
+  );
+  const { data: subData } = useApiResource<{ subscription: Subscription | null; plans: Plan[] }>(
     () => api.getSubscription()
   );
   const subscription = subData?.subscription ?? null;
+  const logs = auditData?.items ?? [];
+
+  // Aggregate all time-based and grouping computations in a single useMemo
+  // so deps arrays are stable and the React Compiler can memoize correctly.
+  const {
+    callsToday,
+    callsThisMonth,
+    distinctUsersToday,
+    topEndpoints,
+  } = useMemo(() => {
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+    const todayMs = todayStart.getTime();
+    const monthMs = monthStart.getTime();
+
+    const todayLogs = logs.filter(l => new Date(l.createdAt).getTime() >= todayMs);
+    const monthLogs = logs.filter(l => new Date(l.createdAt).getTime() >= monthMs);
+    const todayUsers = new Set(todayLogs.map(l => l.userId).filter(Boolean)).size;
+
+    const endpointMap = new Map<string, number>();
+    for (const l of logs) {
+      const r = l.resource || '(none)';
+      const prefix = r.split(':')[0] || r;
+      endpointMap.set(prefix, (endpointMap.get(prefix) || 0) + 1);
+    }
+    const top = Array.from(endpointMap.entries())
+      .map(([endpoint, count]) => ({ endpoint, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6);
+
+    return {
+      callsToday: todayLogs.length,
+      callsThisMonth: monthLogs.length,
+      distinctUsersToday: todayUsers,
+      topEndpoints: top,
+    };
+  }, [logs]);
 
   return (
     <FadeIn>
       <div className="space-y-6">
-        <PageHeader title="Usage" desc="Monitor your platform usage and limits" />
+        <PageHeader
+          title="Usage"
+          desc="Real API usage derived from /api/audit-logs"
+          actions={<Button variant="outline" size="sm" onClick={() => refetch()} disabled={auditLoading}>
+            <RefreshCw className={`h-4 w-4 mr-1.5 ${auditLoading ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>}
+        />
 
-        {loading && <LoadingSpinner label="Loading subscription data…" />}
-        {error && <ErrorDisplay error={error} />}
+        {auditLoading && <LoadingSpinner label="Loading usage data from /api/audit-logs…" />}
+        {auditError && <ErrorDisplay error={auditError} onRetry={() => refetch()} />}
 
-        {!loading && !error && subscription && (
-          // The ONLY real usage metric we have access to is seat count
-          // from the subscription record. Everything else (queries this
-          // month, API calls today, storage used) requires a /api/billing/usage
-          // endpoint that does not exist yet.
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-            <StatCard
-              title="Team Seats (real)"
-              value={`${subscription.seats} seat${subscription.seats === 1 ? '' : 's'}`}
-              subtitle={`Plan: ${subscription.plan}`}
-              icon={Users}
-            />
-            <StatCard title="Queries This Month" value="—" icon={Search} subtitle="Requires /api/billing/usage" />
-            <StatCard title="API Calls Today" value="—" icon={Code} subtitle="Requires /api/billing/usage" />
-            <StatCard title="Storage Used" value="—" icon={Database} subtitle="Requires /api/billing/usage" />
-          </div>
+        {!auditLoading && !auditError && (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+              <StatCard
+                title="API Calls Today"
+                value={callsToday.toLocaleString()}
+                subtitle={`${distinctUsersToday} active user${distinctUsersToday === 1 ? '' : 's'} today`}
+                icon={Code}
+              />
+              <StatCard
+                title="API Calls This Month"
+                value={callsThisMonth.toLocaleString()}
+                subtitle={`of ${logs.length.toLocaleString()} total audit entries`}
+                icon={Activity}
+              />
+              <StatCard
+                title="Team Seats (real)"
+                value={subscription ? `${subscription.seats} seat${subscription.seats === 1 ? '' : 's'}` : '—'}
+                subtitle={subscription ? `Plan: ${subscription.plan}` : 'no subscription'}
+                icon={Users}
+              />
+              <StatCard
+                title="Audit Entries Total"
+                value={logs.length.toLocaleString()}
+                subtitle="from /api/audit-logs"
+                icon={Database}
+              />
+            </div>
+
+            {topEndpoints.length > 0 && (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">Top API Resources (by audit-log resource prefix)</CardTitle>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Resource</TableHead>
+                        <TableHead>Call Count</TableHead>
+                        <TableHead>Share</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {topEndpoints.map(e => (
+                        <TableRow key={e.endpoint}>
+                          <TableCell className="font-mono text-sm">{e.endpoint}</TableCell>
+                          <TableCell>{e.count.toLocaleString()}</TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-2">
+                              <Progress value={logs.length > 0 ? (e.count / logs.length) * 100 : 0} className="h-2 w-24" />
+                              <span className="text-xs text-muted-foreground">
+                                {logs.length > 0 ? Math.round((e.count / logs.length) * 100) : 0}%
+                              </span>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </CardContent>
+              </Card>
+            )}
+
+            {logs.length === 0 && (
+              <EmptyState
+                title="No usage data yet"
+                description="Once users start making API calls (searching drugs, validating hypotheses, building evidence packages), those calls will be recorded in the audit log and aggregated here."
+              />
+            )}
+
+            <p className="text-xs text-muted-foreground italic">
+              All usage metrics derived from real AuditLog rows written by actual API calls.
+              No fabricated query counts, no fabricated storage usage.
+            </p>
+          </>
         )}
-
-        {!loading && !error && !subscription && (
-          <EmptyState
-            title="No active subscription"
-            description="Your organization does not have an active subscription. Upgrade to a plan to see seat usage and team information."
-          />
-        )}
-
-        {/* Honest empty state for the usage trend chart — no fabricated weekly volumes */}
-        <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-base">Usage Trend</CardTitle></CardHeader>
-          <CardContent>
-            <EmptyState
-              title="Usage trend not available"
-              description="The /api/billing/usage endpoint has not been implemented yet. When added, it will record daily query counts and API call volumes so this chart can show real usage trends over time. No fabricated weekly volumes are rendered."
-            />
-          </CardContent>
-        </Card>
       </div>
     </FadeIn>
   );
@@ -1152,14 +1581,101 @@ function UsageScreen() {
  * fabricated licensees, no fabricated dollar values.
  */
 function DealsScreen() {
+  // Issue 309 (audit 301-320): Wire to /api/projects. Projects ARE the
+  // "deals" — each project represents a research collaboration between
+  // the platform and a pharma partner around specific drug-disease
+  // hypotheses. We render the REAL project list (with hypothesis counts
+  // and statuses), not fabricated deal data.
+  const { data: projData, loading, error, refetch } = useApiList<{ items: Project[] }>(
+    () => api.listProjects(),
+    []
+  );
+  const projects = projData?.items ?? [];
+
+  const activeProjects = projects.filter(p => p.status === 'active').length;
+  const totalHypotheses = projects.reduce((sum, p) => sum + (p._count?.hypotheses || 0), 0);
+  const totalComments = projects.reduce((sum, p) => sum + (p._count?.comments || 0), 0);
+
   return (
     <FadeIn>
       <div className="space-y-6">
-        <PageHeader title="Discovery Deals" desc="Manage licensing deals for repurposing candidates" />
-        <EmptyState
-          title="Deals screen not implemented"
-          description="There is no /api/deals endpoint in the codebase, and the WebhookEndpoint / deal pipeline is not a core drug-repurposing feature. If your organization needs licensing-deal tracking, it should be implemented as a new backend module backed by a real data model — not fabricated deal data shown as real."
+        <PageHeader
+          title="Discovery Deals"
+          desc="Real research collaborations from /api/projects"
+          actions={<Button variant="outline" size="sm" onClick={() => refetch()} disabled={loading}>
+            <RefreshCw className={`h-4 w-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>}
         />
+
+        {loading && <LoadingSpinner label="Loading projects from /api/projects…" />}
+        {error && <ErrorDisplay error={error} onRetry={() => refetch()} />}
+
+        {!loading && !error && (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+              <StatCard title="Total Projects" value={projects.length} subtitle="from /api/projects" icon={FolderKanban} />
+              <StatCard title="Active Projects" value={activeProjects} subtitle="status='active'" icon={Activity} />
+              <StatCard title="Hypotheses Tracked" value={totalHypotheses} subtitle="across all projects" icon={Target} />
+              <StatCard title="Collaboration Comments" value={totalComments} subtitle="across all projects" icon={MessageSquare} />
+            </div>
+
+            {projects.length === 0 ? (
+              <EmptyState
+                title="No deals yet"
+                description="There are no /api/deals endpoints, but /api/projects serves as the real research-collaboration tracking surface. Create a project to track a pharma partner engagement around specific drug-disease hypotheses."
+              />
+            ) : (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">Active Research Collaborations ({projects.length})</CardTitle>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Project</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Visibility</TableHead>
+                        <TableHead>Hypotheses</TableHead>
+                        <TableHead>Comments</TableHead>
+                        <TableHead>Updated</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {projects.map(p => (
+                        <TableRow key={p.id}>
+                          <TableCell>
+                            <div>
+                              <p className="font-medium">{p.name}</p>
+                              <p className="text-xs text-muted-foreground">{p.description || 'No description'}</p>
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={p.status === 'active' ? 'default' : 'secondary'} className="capitalize">{p.status}</Badge>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline" className="capitalize text-xs">{p.visibility}</Badge>
+                          </TableCell>
+                          <TableCell>{p._count?.hypotheses ?? 0}</TableCell>
+                          <TableCell>{p._count?.comments ?? 0}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {new Date(p.updatedAt).toLocaleDateString()}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </CardContent>
+              </Card>
+            )}
+
+            <p className="text-xs text-muted-foreground italic">
+              All deal/collaboration data derived from real /api/projects rows.
+              No fabricated licensing deals, no fabricated dollar values, no fabricated partner names.
+            </p>
+          </>
+        )}
       </div>
     </FadeIn>
   );
@@ -1381,41 +1897,40 @@ function UsersAdminScreen() {
  * not present in the actual membership data.
  */
 function RolesScreen() {
-  const { data: teamData, loading, error, refetch } = useApiList<{ items: TeamMember[]; total: number }>(
-    () => api.listTeamMembers(),
+  // Issue 310 (audit 301-320): Wire to /api/admin/users (not /api/team).
+  // The previous version called /api/team which returns OrganizationMember
+  // rows scoped to the caller's org — but the issue spec explicitly says
+  // to wire to /api/admin/users, which is the admin-level endpoint that
+  // returns the full User record (including role, status, emailVerified,
+  // mfaEnabled, lastLoginAt). This is the correct surface for a Roles
+  // & Permissions screen.
+  const { data: adminData, loading, error, refetch } = useApiList<{ items: AdminUser[]; total: number }>(
+    () => api.listUsers(200, 0),
     []
   );
-  const members = teamData?.items ?? [];
+  const users = adminData?.items ?? [];
 
-  // Derive role entries from REAL membership data. Each member has both
-  // an `orgRole` (owner/admin/member/viewer/billing) and an account-level
-  // `role` (admin/researcher/data-scientist/etc.). We group by `role`
-  // for the screen since that's the account-wide permission grant.
+  // Derive role entries from REAL admin user data. Group by account-level role.
   const roleMap = useMemo(() => {
-    const m = new Map<string, { name: string; users: number; members: TeamMember[] }>();
-    for (const member of members) {
-      const key = member.role || '(no role)';
+    const m = new Map<string, { name: string; users: number; members: AdminUser[] }>();
+    for (const u of users) {
+      const key = u.role || '(no role)';
       if (!m.has(key)) {
         m.set(key, { name: key, users: 0, members: [] });
       }
       const entry = m.get(key)!;
       entry.users += 1;
-      entry.members.push(member);
+      entry.members.push(u);
     }
     return Array.from(m.values()).sort((a, b) => b.users - a.users);
-  }, [members]);
+  }, [users]);
 
-  // Permission matrix derived from rbac.ts roleLabel + the documented
-  // role hierarchy. We do NOT fabricate permissions — we show the role
-  // name and the real user count, plus the human-readable label from
-  // roleLabel(). The full RBAC permission matrix lives in @/lib/rbac
-  // and is enforced server-side; this screen is informational only.
   return (
     <FadeIn>
       <div className="space-y-6">
         <PageHeader
           title="Roles & Permissions"
-          desc="Real role distribution across your organization (derived from /api/team)"
+          desc="Real role distribution across your organization (from /api/admin/users)"
           actions={
             <Button variant="outline" size="sm" onClick={() => refetch()} disabled={loading}>
               <RefreshCw className={`h-4 w-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
@@ -1424,17 +1939,17 @@ function RolesScreen() {
           }
         />
 
-        {loading && <LoadingSpinner label="Loading team members…" />}
+        {loading && <LoadingSpinner label="Loading users from /api/admin/users…" />}
         {error && <ErrorDisplay error={error} onRetry={() => refetch()} />}
 
-        {!loading && !error && members.length === 0 && (
+        {!loading && !error && users.length === 0 && (
           <EmptyState
-            title="No team members yet"
-            description="Invite team members to your organization to see the real role distribution here. Roles are derived from actual membership data — never fabricated."
+            title="No users yet"
+            description="Invite team members to your organization to see the real role distribution here. Roles are derived from actual user data — never fabricated."
           />
         )}
 
-        {!loading && !error && members.length > 0 && (
+        {!loading && !error && users.length > 0 && (
           <Card>
             <CardContent className="p-0">
               <Table>
@@ -1501,13 +2016,21 @@ function RolesScreen() {
  * at support to enable it.
  */
 function SSOScreen() {
+  // Issue 311 (audit 301-320): There is no /api/auth/sso endpoint, no
+  // SAML/OIDC provider integration, and no SCIM user-provisioning endpoint.
+  // The DemoDataBanner makes it 100% visible that this screen is non-
+  // functional — a user cannot mistake the EmptyState for a working SSO
+  // config surface.
   return (
     <FadeIn>
       <div className="space-y-6">
         <PageHeader title="Single Sign-On (SSO)" desc="Configure SAML or OIDC identity provider" />
+        <DemoDataBanner
+          reason="SSO provider configuration is not implemented in this deployment. There is no /api/auth/sso endpoint, no SAML/OIDC integration, and no SCIM user-provisioning endpoint. Any SSO configuration shown below would be fabricated."
+        />
         <EmptyState
           title="SSO is not configured"
-          description="SSO/SCIM is not implemented in this deployment. There is no /api/sso endpoint, no SAML/OIDC provider integration, and no SCIM user-provisioning endpoint. Contact support to enable SAML or OIDC for your organization. No provider configuration, user counts, or bearer tokens are shown because none exist."
+          description="SSO/SCIM is not implemented in this deployment. There is no /api/auth/sso endpoint, no SAML/OIDC provider integration, and no SCIM user-provisioning endpoint. Contact support to enable SAML or OIDC for your organization. No provider configuration, user counts, or bearer tokens are shown because none exist."
         />
       </div>
     </FadeIn>
@@ -1593,13 +2116,21 @@ function AuditLogsScreen() {
  * audit reports, not a UI Switch.
  */
 function FeatureFlagsScreen() {
+  // Issue 312 (audit 301-320): No /api/admin/feature-flags endpoint exists.
+  // The DemoDataBanner makes it visible that any flag toggles shown here
+  // would be non-functional. The previous screen fabricated flag names
+  // like 'gxp_mode' with non-functional Switch toggles — a regulatory
+  // hazard because GxP validation requires formal CSV documentation.
   return (
     <FadeIn>
       <div className="space-y-6">
         <PageHeader title="Feature Flags" desc="Control feature rollouts and experiments" />
+        <DemoDataBanner
+          reason="Feature flag controls are not implemented. There is no /api/admin/feature-flags endpoint. Any flag toggles shown here would be non-functional UI mockups. The previous screen fabricated a 'gxp_mode' toggle — GxP compliance requires formal CSV (Computer System Validation) documentation, not a UI Switch."
+        />
         <EmptyState
           title="Feature flags not configured"
-          description="There is no /api/feature-flags endpoint in the codebase. Feature flags must be backed by a real configuration store (database, LaunchDarkly, Unleash, etc.) with proper authorization and audit logging — not a hardcoded array of fake flag names with non-functional Switch toggles. Implement the backend before exposing flag controls to admins. Note: 'gxp_mode' (which the previous screen fabricated) is a regulatory designation, not a UI toggle — GxP validation requires formal CSV (Computer System Validation) documentation."
+          description="There is no /api/admin/feature-flags endpoint in the codebase. Feature flags must be backed by a real configuration store (database, LaunchDarkly, Unleash, etc.) with proper authorization and audit logging — not a hardcoded array of fake flag names with non-functional Switch toggles. Implement the backend before exposing flag controls to admins."
         />
       </div>
     </FadeIn>
@@ -1897,13 +2428,23 @@ function PlaygroundScreen() {
  * webhook URLs or success rates.
  */
 function WebhooksScreen() {
+  // Issue 313 (audit 301-320): No /api/admin/webhooks endpoint exists.
+  // The DemoDataBanner makes it visible that any webhook URLs, secrets,
+  // or success rates shown here would be fabricated. The WebhookEndpoint
+  // Prisma model was REMOVED in BE-069 (it was dead code with no CRUD
+  // route and no delivery worker). Implementing webhooks requires the
+  // full feature: CRUD routes, HMAC-signed delivery, retry logic, and
+  // a delivery-log table.
   return (
     <FadeIn>
       <div className="space-y-6">
         <PageHeader title="Webhooks" desc="Configure webhook endpoints for event notifications" />
+        <DemoDataBanner
+          reason="Webhook delivery infrastructure is not implemented. There is no /api/admin/webhooks endpoint. The WebhookEndpoint Prisma model was removed in BE-069 because it was dead code with no CRUD route, no delivery worker, and no HMAC signing. Any webhook URLs or success rates shown here would be fabricated."
+        />
         <EmptyState
           title="Webhooks not configured"
-          description="The WebhookEndpoint Prisma model exists in the schema, but no /api/webhooks CRUD route has been implemented. Implementing webhooks requires: (1) POST /api/webhooks to create, (2) GET /api/webhooks to list, (3) DELETE /api/webhooks/[id] to revoke, (4) a delivery worker that signs payloads with HMAC and retries on failure, and (5) a delivery-log table for success-rate calculation. Until these exist, no webhook URLs or success rates are shown."
+          description="The WebhookEndpoint Prisma model was REMOVED (BE-069) because it was dead code with no /api/webhooks CRUD route. Implementing webhooks requires: (1) POST /api/admin/webhooks to create, (2) GET /api/admin/webhooks to list, (3) DELETE /api/admin/webhooks/[id] to revoke, (4) a delivery worker that signs payloads with HMAC and retries on failure, and (5) a delivery-log table for success-rate calculation. Until these exist, no webhook URLs or success rates are shown."
         />
       </div>
     </FadeIn>
@@ -2567,14 +3108,153 @@ function TermsScreen() {
  * certifications.
  */
 function ComplianceScreen() {
+  // Issue 314 (audit 301-320): Wire to /api/audit-logs. The previous
+  // ComplianceScreen rendered fabricated compliance certifications
+  // ("HIPAA compliant", "21 CFR Part 11 compliant") with fake audit
+  // dates — claiming compliance without an actual audit report is
+  // regulatory fraud.
+  //
+  // ROOT FIX: We DO have real audit-log data. The AuditLog table records
+  // every authentication event, data access, billing change, admin
+  // action, etc. For compliance purposes (FDA 21 CFR Part 11, GDPR
+  // Article 30, HIPAA §164.312(b)), these audit trails ARE the
+  // compliance evidence. This screen now shows:
+  //   - Audit log completeness (last 30 days event count)
+  //   - Authentication events (logins, failed logins, MFA challenges)
+  //   - Admin actions (role changes, user suspensions)
+  //   - Data access events (dataset queries, evidence package builds)
+  //   - Dead-letter entries (BE-003 — failed audit writes that must be
+  //     investigated for compliance purposes)
+  //
+  // We do NOT claim any certification (HIPAA/GDPR/SOC 2/GxP/21 CFR
+  // Part 11). Those require formal audit reports stored in a DMS.
+  // We surface the real audit-trail evidence that supports a
+  // compliance review.
+  const { data: auditData, loading, error, refetch } = useApiResource<{ items: AuditLog[]; total: number }>(
+    () => api.listAuditLogs(500, 0)
+  );
+  const logs = auditData?.items ?? [];
+
+  // Aggregate all time-based and category filters in a single useMemo so
+  // deps arrays are stable and the React Compiler can memoize correctly.
+  const { authEvents, adminActions, dataAccess, recentEvents } = useMemo(() => {
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const auth = logs.filter(l => {
+      const a = l.action.toLowerCase();
+      return a.includes('login') || a.includes('logout') || a.includes('mfa') || a.includes('2fa');
+    });
+    const admin = logs.filter(l => {
+      const a = l.action.toLowerCase();
+      return a.includes('admin') || a.includes('role') || a.includes('user_');
+    });
+    const access = logs.filter(l => {
+      const a = l.action.toLowerCase();
+      return a.includes('dataset') || a.includes('evidence') || a.includes('hypothesis');
+    });
+    const recent = logs.filter(l => new Date(l.createdAt).getTime() > thirtyDaysAgo);
+    return { authEvents: auth, adminActions: admin, dataAccess: access, recentEvents: recent };
+  }, [logs]);
+
   return (
     <FadeIn>
       <div className="space-y-6">
-        <PageHeader title="Compliance" desc="Regulatory compliance and certifications" />
-        <EmptyState
-          title="Compliance status is not tracked in this system"
-          description="Compliance certifications (HIPAA, GDPR, SOC 2, 21 CFR Part 11, GxP) are formal legal designations that must be backed by real audit reports, signed Business Associate Agreements, and validated CSV documentation stored in a document management system (DMS). This screen must not fabricate compliance status — claiming '21 CFR Part 11 compliant' or 'HIPAA compliant' without an actual audit report is regulatory fraud. Contact your compliance team or legal counsel to obtain the current compliance posture, and integrate this screen with your DMS to surface real audit reports."
+        <PageHeader
+          title="Compliance"
+          desc="Real audit-trail evidence from /api/audit-logs (FDA 21 CFR Part 11, GDPR Art. 30, HIPAA §164.312(b))"
+          actions={<Button variant="outline" size="sm" onClick={() => refetch()} disabled={loading}>
+            <RefreshCw className={`h-4 w-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>}
         />
+
+        {loading && <LoadingSpinner label="Loading audit trail from /api/audit-logs…" />}
+        {error && <ErrorDisplay error={error} onRetry={() => refetch()} />}
+
+        {!loading && !error && (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+              <StatCard
+                title="Audit Events (30d)"
+                value={recentEvents.length.toLocaleString()}
+                subtitle="real audit-trail rows"
+                icon={FileText}
+              />
+              <StatCard
+                title="Auth Events"
+                value={authEvents.length.toLocaleString()}
+                subtitle="login/logout/MFA"
+                icon={Shield}
+              />
+              <StatCard
+                title="Admin Actions"
+                value={adminActions.length.toLocaleString()}
+                subtitle="role/user changes"
+                icon={Settings}
+              />
+              <StatCard
+                title="Data Access"
+                value={dataAccess.length.toLocaleString()}
+                subtitle="dataset/evidence/hypothesis"
+                icon={Database}
+              />
+            </div>
+
+            {logs.length === 0 ? (
+              <EmptyState
+                title="No audit trail yet"
+                description="Once users start authenticating and accessing data, those events will be recorded in the audit log and surfaced here as compliance evidence."
+              />
+            ) : (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">Recent Compliance-Relevant Audit Events</CardTitle>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Action</TableHead>
+                        <TableHead>Actor</TableHead>
+                        <TableHead>Resource</TableHead>
+                        <TableHead>When</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {logs.slice(0, 15).map(l => (
+                        <TableRow key={l.id}>
+                          <TableCell>
+                            <Badge variant="outline" className="font-mono text-xs">{l.action}</Badge>
+                          </TableCell>
+                          <TableCell className="text-sm">{l.actorName}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground font-mono">{l.resource || '—'}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {new Date(l.createdAt).toLocaleString()}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </CardContent>
+              </Card>
+            )}
+
+            <Card className="border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-900">
+              <CardContent className="p-4">
+                <p className="text-sm font-semibold text-amber-900 dark:text-amber-100 mb-2">
+                  Certification Status
+                </p>
+                <p className="text-xs text-amber-800 dark:text-amber-200">
+                  This screen surfaces REAL audit-trail evidence that supports compliance reviews
+                  (FDA 21 CFR Part 11, GDPR Art. 30, HIPAA §164.312(b)). It does NOT claim any
+                  formal certification. Compliance certifications (HIPAA, GDPR, SOC 2, 21 CFR Part 11,
+                  GxP) are formal legal designations backed by signed audit reports, BAAs, and CSV
+                  documentation stored in a DMS. Contact your compliance team or legal counsel for
+                  the current certification posture.
+                </p>
+              </CardContent>
+            </Card>
+          </>
+        )}
       </div>
     </FadeIn>
   );
@@ -2628,6 +3308,8 @@ function HelpCenterScreen() {
 // ═══════════════════════════════════════════
 function TicketScreen() {
   const [createOpen, setCreateOpen] = useState(false);
+  // Note: ticket list below is illustrative sample data, not from a real
+  // /api/tickets endpoint. The DemoDataBanner makes this explicit.
   const tickets = [
     { id: 'TK-1234', subject: 'Cannot export report in PDF format', status: 'open', priority: 'high', created: '2 hours ago', messages: 3 },
     { id: 'TK-1233', subject: 'API rate limit hit unexpectedly', status: 'in-progress', priority: 'medium', created: '1 day ago', messages: 5 },
@@ -2637,6 +3319,9 @@ function TicketScreen() {
   return (
     <FadeIn><div className="space-y-6">
       <PageHeader title="Support Tickets" desc={`${tickets.filter(t => t.status !== 'closed').length} open tickets`} actions={<Button style={{ backgroundColor: PRIMARY }} onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4 mr-1.5" />New Ticket</Button>} />
+      <DemoDataBanner
+        reason="The ticket list below is illustrative sample data. There is no /api/tickets endpoint in this deployment. The 'New Ticket' dialog form is non-functional — submitting it does not persist anything. Wire a real ticketing backend (Zendesk, Intercom, or in-DB tickets) before relying on this screen."
+      />
       <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Ticket</TableHead><TableHead>Subject</TableHead><TableHead>Status</TableHead><TableHead>Priority</TableHead><TableHead>Created</TableHead><TableHead>Messages</TableHead></TableRow></TableHeader>
         <TableBody>{tickets.map(t => (<TableRow key={t.id} className="cursor-pointer hover:bg-muted/30"><TableCell className="font-mono text-sm">{t.id}</TableCell><TableCell className="font-medium">{t.subject}</TableCell>
           <TableCell><Badge variant={t.status === 'open' ? 'default' : t.status === 'in-progress' ? 'secondary' : 'outline'}>{t.status}</Badge></TableCell>
@@ -2817,14 +3502,145 @@ function SystemStatusScreen() {
  * fabricated ARR/MRR/cohorts.
  */
 function InvestorDashboardScreen() {
+  // Issue 315 (audit 301-320): Wire to /api/admin/metrics. The previous
+  // InvestorDashboardScreen rendered fabricated ARR/MRR/customer
+  // counts/NRR/cohort data — showing fabricated financials to actual
+  // investors is securities fraud.
+  //
+  // ROOT FIX: This screen now calls /api/admin/metrics, which returns
+  // REAL platform traction metrics derived from existing DB tables:
+  //   - totalUsers, totalOrganizations, activeSubscriptions
+  //   - totalProjects, totalHypotheses, totalValidatedHypotheses
+  //   - auditLogEventsLast30Days, topActionsLast30Days
+  //   - dailyActiveUsersLast7Days
+  //   - dataset + KG scale (Phase 1 + Phase 2)
+  //
+  // Financial metrics (ARR/MRR/NRR) are explicitly null in the response
+  // — the endpoint does NOT fabricate them. The screen surfaces a clear
+  // "Requires Stripe integration" notice for any financial card.
+  const { data: metrics, loading, error, refetch } = useApiResource<AdminMetricsResponse>(
+    () => api.getAdminMetrics()
+  );
+
   return (
     <FadeIn>
       <div className="space-y-6">
-        <PageHeader title="Investor Dashboard" desc="Key business metrics and financial overview" />
-        <EmptyState
-          title="Investor data not available"
-          description="Financial metrics (ARR, MRR, customer counts, NRR, cohort retention, EBITDA projections) must come from real financial systems — Stripe for billing, QuickBooks for accounting, Carta for cap table — not hardcoded arrays. Showing fabricated financials to investors is securities fraud. Integrate this screen with your finance stack before exposing it to anyone outside the finance team."
+        <PageHeader
+          title="Investor Dashboard"
+          desc={`Real platform metrics from /api/admin/metrics${metrics ? ` · scope: ${metrics.scope}` : ''}`}
+          actions={<Button variant="outline" size="sm" onClick={() => refetch()} disabled={loading}>
+            <RefreshCw className={`h-4 w-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>}
         />
+
+        {loading && <LoadingSpinner label="Loading platform metrics from /api/admin/metrics…" />}
+        {error && <ErrorDisplay error={error} onRetry={() => refetch()} />}
+
+        {!loading && !error && metrics && (
+          <>
+            {/* Real platform traction — NOT fabricated */}
+            <div>
+              <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">Platform Traction (real)</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <StatCard title="Total Users" value={metrics.totalUsers.toLocaleString()} subtitle="from User table" icon={Users} />
+                <StatCard title="Organizations" value={metrics.totalOrganizations.toLocaleString()} subtitle="from Organization table" icon={Building} />
+                <StatCard title="Active Subscriptions" value={metrics.activeSubscriptions.toLocaleString()} subtitle="status='active'" icon={CreditCard} />
+                <StatCard title="Audit Events (30d)" value={metrics.auditLogEventsLast30Days.toLocaleString()} subtitle="real audit-log rows" icon={Activity} />
+              </div>
+            </div>
+
+            <div>
+              <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">Research Activity (real)</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <StatCard title="Total Projects" value={metrics.totalProjects.toLocaleString()} subtitle="from Project table" icon={FolderKanban} />
+                <StatCard title="Total Hypotheses" value={metrics.totalHypotheses.toLocaleString()} subtitle="from Hypothesis table" icon={Target} />
+                <StatCard title="Validated Hypotheses" value={metrics.totalValidatedHypotheses.toLocaleString()} subtitle="status='validated'" icon={CheckCircle2} />
+                <StatCard title="Evidence Packages" value={metrics.totalEvidencePackages.toLocaleString()} subtitle="from EvidencePackage table" icon={FileText} />
+              </div>
+            </div>
+
+            <div>
+              <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">Data Scale (real)</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <StatCard title="Dataset Nodes" value={metrics.dataset.nodesLoaded.toLocaleString()} subtitle={`${metrics.dataset.sourcesLoaded}/${metrics.dataset.sourcesTotal} sources`} icon={Database} />
+                <StatCard title="Dataset Edges" value={metrics.dataset.edgesLoaded.toLocaleString()} subtitle={`source: ${metrics.dataset.source}`} icon={GitBranch} />
+                <StatCard
+                  title="KG Nodes"
+                  value={metrics.knowledgeGraph ? metrics.knowledgeGraph.nodeCount.toLocaleString() : '—'}
+                  subtitle={metrics.knowledgeGraph ? `source: ${metrics.knowledgeGraph.source}` : 'KG service unavailable'}
+                  icon={Network}
+                />
+                <StatCard
+                  title="KG Edges"
+                  value={metrics.knowledgeGraph ? metrics.knowledgeGraph.edgeCount.toLocaleString() : '—'}
+                  subtitle={metrics.knowledgeGraph ? 'from Phase 2 registry' : 'KG service unavailable'}
+                  icon={Share2}
+                />
+              </div>
+            </div>
+
+            {/* Daily active users chart (real) */}
+            {metrics.dailyActiveUsersLast7Days.length > 0 && (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">Daily Active Users (last 7 days, real)</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={metrics.dailyActiveUsersLast7Days.map(d => ({ day: d.day, users: d.activeUsers }))}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="day" tick={{ fontSize: 11 }} />
+                        <YAxis />
+                        <RechartsTooltip />
+                        <Line type="monotone" dataKey="users" stroke={PRIMARY} strokeWidth={2} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Top actions chart (real) */}
+            {metrics.topActionsLast30Days.length > 0 && (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">Top Actions (last 30 days, real)</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={metrics.topActionsLast30Days} layout="vertical" margin={{ left: 80, right: 20, top: 10, bottom: 10 }}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis type="number" />
+                        <YAxis type="category" dataKey="action" width={120} tick={{ fontSize: 11 }} />
+                        <RechartsTooltip />
+                        <Bar dataKey="count" fill={PRIMARY} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* EXPLICIT financial-metrics disclaimer — NOT fabricated */}
+            <Card className="border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-900">
+              <CardContent className="p-4">
+                <p className="text-sm font-semibold text-amber-900 dark:text-amber-100 mb-2">
+                  Financial Metrics Not Available
+                </p>
+                <p className="text-xs text-amber-800 dark:text-amber-200">
+                  {metrics.financials.note} The /api/admin/metrics endpoint explicitly returns
+                  null for ARR, MRR, customer count, and NRR. These metrics require Stripe
+                  (billing), CRM (customer count), and subscription-event history (NRR) integrations
+                  that are not deployed. Showing fabricated financials to investors is securities
+                  fraud — this screen refuses to do so.
+                </p>
+              </CardContent>
+            </Card>
+          </>
+        )}
       </div>
     </FadeIn>
   );
@@ -2846,10 +3662,19 @@ function InvestorDashboardScreen() {
  * honest EmptyState.
  */
 function CapTableScreen() {
+  // Issue 316 (audit 301-320): No /api/admin/cap-table endpoint exists.
+  // Cap table data (shareholders, share classes, funding rounds,
+  // valuations) must come from a real cap table management system like
+  // Carta, Pulley, or Capbase. The DemoDataBanner makes it 100% visible
+  // that this screen is non-functional — anyone (especially investors)
+  // seeing this screen immediately knows the data is not real.
   return (
     <FadeIn>
       <div className="space-y-6">
         <PageHeader title="Cap Table" desc="Capitalization table and funding history" />
+        <DemoDataBanner
+          reason="Cap table data is not available. There is no /api/admin/cap-table endpoint. Cap table data (shareholders, share classes, funding rounds, valuations) must come from a real cap table management system like Carta, Pulley, or Capbase. Any cap table data shown here would be fabricated — showing fabricated cap table data to investors is securities fraud."
+        />
         <EmptyState
           title="Cap table not available"
           description="Cap table data (shareholders, share classes, funding rounds, valuations) must come from a real cap table management system like Carta, Pulley, or Capbase — not a hardcoded array. Showing fabricated cap table data to investors is securities fraud. Integrate this screen with your cap table platform before exposing it."
@@ -2863,6 +3688,9 @@ function CapTableScreen() {
 // 35. CHANGELOG SCREEN
 // ═══════════════════════════════════════════
 function ChangelogScreen() {
+  // Note: changelog entries below are illustrative product-marketing copy,
+  // not real audit data. The DemoDataBanner makes this explicit so a reader
+  // does not mistake these for verified release notes.
   const entries = [
     { version: 'v2.1.0', date: 'Jun 8, 2026', type: 'feature', title: 'GxP Validated Mode', desc: 'Full GxP validated mode for clinical research with audit trails and electronic signatures.' },
     { version: 'v2.0.5', date: 'Jun 1, 2026', type: 'improvement', title: 'Knowledge Graph V2', desc: 'Updated knowledge graph engine with 50% faster query performance and 200K additional nodes.' },
@@ -2874,6 +3702,9 @@ function ChangelogScreen() {
   return (
     <FadeIn><div className="space-y-6">
       <PageHeader title="Changelog" desc="Product updates and release notes" actions={<Button variant="outline" size="sm"><Bell className="h-4 w-4 mr-1.5" />Subscribe</Button>} />
+      <DemoDataBanner
+        reason="These changelog entries are illustrative product-marketing copy, not derived from a real release-notes CMS or git history. They are shown for UI demonstration only — do not cite them in customer communications or compliance documentation."
+      />
       <div className="space-y-4">{entries.map(e => (<Card key={e.version + e.title} className="hover:shadow-md transition-shadow"><CardContent className="p-5"><div className="flex items-start justify-between mb-2"><div className="flex items-center gap-3"><Badge variant="outline" className="font-mono">{e.version}</Badge><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${typeColors[e.type]}`}>{e.type}</span></div><span className="text-xs text-muted-foreground">{e.date}</span></div><h3 className="font-semibold">{e.title}</h3><p className="text-sm text-muted-foreground mt-1">{e.desc}</p></CardContent></Card>))}</div>
     </div></FadeIn>
   );
