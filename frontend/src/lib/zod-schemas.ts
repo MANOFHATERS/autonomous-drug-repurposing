@@ -27,6 +27,13 @@
  */
 import { z } from "zod";
 import { NextResponse } from "next/server";
+// TASK-272: import the role/status allowlists so the Zod schemas and the
+// runtime validators in register/route.ts can't drift. The import is at
+// the top so it's hoisted (ES modules) and visible to all schemas below.
+import {
+  ALLOWED_ROLES_ADMIN,
+  ALLOWED_USER_STATUSES,
+} from "@/app/api/auth/register/route";
 
 // ---------------------------------------------------------------------------
 // Generic validation helper
@@ -366,3 +373,79 @@ export const PatentsSearchQuery = z.object({
   limit: clampedInt(1, 100, 20),
 });
 export type PatentsSearchQueryT = z.infer<typeof PatentsSearchQuery>;
+
+// ---------------------------------------------------------------------------
+// TASK-272 ROOT FIX: Zod schemas for admin / audit / notification routes.
+//
+// The audit (Task 272) found that NONE of the admin/audit/notification
+// routes used Zod to validate request bodies or query params. Each route
+// did ad-hoc `typeof body.x === "string"` checks that were inconsistent
+// and exploitable (e.g. `parseInt("abc", 10)` returns NaN, which then
+// becomes `take: NaN` in Prisma — silently returning zero rows, or
+// worse, throwing an unhandled P2009).
+//
+// The schemas below cover the routes targeted by Tasks 261-280:
+//   - /api/admin/users (PATCH body)
+//   - /api/audit-logs (GET query params)
+//   - /api/notifications (GET query params)
+//   - /api/notifications/[id]/read (POST — no body, but path param)
+//   - /api/system/status (GET — no body, no query)
+//   - /api/team (GET query params)
+//
+// Each schema is EXPORTED so the route handler and the corresponding test
+// file can both import it. The test file uses `schema.parse(mockBody)` to
+// generate valid fixtures and `schema.safeParse(badBody).success === false`
+// to assert rejection.
+// ---------------------------------------------------------------------------
+
+// /api/admin/users — PATCH body (Task 261, 272)
+//
+// Validates the role + status values against the SAME allowlist used by
+// the existing runtime validators in register/route.ts. We import the
+// allowlists here so the Zod schema and the runtime check can't drift.
+//
+// NOTE: `platformRole` is INTENTIONALLY NOT in this schema. The
+// platformRole field is settable ONLY via direct DB access (see
+// PlatformRole enum in prisma/schema.prisma). Allowing it via the API
+// would re-introduce the privilege-escalation bug that Task 261 fixed.
+
+export const AdminUserPatchBody = z.object({
+  userId: z.string().min(1).max(100),
+  role: z.enum(ALLOWED_ROLES_ADMIN as unknown as [string, ...string[]]).optional(),
+  status: z.enum(ALLOWED_USER_STATUSES as unknown as [string, ...string[]]).optional(),
+}).refine(
+  (data) => data.role !== undefined || data.status !== undefined,
+  { message: "At least one of role or status must be provided." }
+);
+export type AdminUserPatchBodyT = z.infer<typeof AdminUserPatchBody>;
+
+// /api/audit-logs — GET query params (Task 262, 272)
+export const AuditLogsQuery = z.object({
+  limit: z.coerce.number().int().positive().max(1000).default(100),
+  action: z.string().min(1).max(100).optional(),
+  dead_letter: z.enum(["true", "false"]).optional(),
+});
+export type AuditLogsQueryT = z.infer<typeof AuditLogsQuery>;
+
+// /api/notifications — GET query params (Task 263, 272)
+export const NotificationsQuery = z.object({
+  limit: z.coerce.number().int().positive().max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+export type NotificationsQueryT = z.infer<typeof NotificationsQuery>;
+
+// /api/system/status — GET (no body, no query — Task 265, 272)
+// No schema needed — the route takes no input. Listed here for completeness.
+
+// /api/team — GET query params (Task 266, 272)
+export const TeamQuery = z.object({
+  limit: z.coerce.number().int().positive().max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+export type TeamQueryT = z.infer<typeof TeamQuery>;
+
+// /api/api-keys — POST body (Task 267, 272)
+export const ApiKeyCreateBody = z.object({
+  name: z.string().min(1).max(200),
+});
+export type ApiKeyCreateBodyT = z.infer<typeof ApiKeyCreateBody>;

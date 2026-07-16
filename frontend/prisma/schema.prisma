@@ -76,6 +76,60 @@ enum UserStatus {
   pending_approval
 }
 
+// ---------------------------------------------------------------------------
+// TASK-261 / TASK-269 ROOT FIX: PlatformRole enum — a SEPARATE field from
+// UserRole that gates access to /api/admin/* (platform operator console).
+//
+// WHY A SEPARATE FIELD (not a new UserRole value):
+//   The previous architecture overloaded `UserRole` for two distinct concerns:
+//     (a) the user's FUNCTIONAL role inside their organization (researcher,
+//         pi, billing, admin, owner) — drives in-app RBAC and is granted
+//         via PATCH /api/admin/users by an existing admin.
+//     (b) the user's PLATFORM-OPERATOR status (SaaS staff who can suspend
+//         tenants, read cross-tenant audit logs, rotate platform secrets).
+//   Mixing these concerns meant `role === "owner"` was interpreted as
+//   "org owner" in some routes and "platform superuser" in others — the
+//   audit (Task 261) found that any user promoted to `owner` could
+//   enumerate every user in every org and read every audit log across
+//   all tenants. Even after the prior `platformOwner` enum-value patch,
+//   the coupling remained: an `admin` (functional role) could not be
+//   distinguished from a `platformOwner` (operator) at the JWT level,
+//   and the only way to grant platform access was to change `role` —
+//   which then changed the user's in-app permissions as a side effect.
+//
+//   The clean fix is a SEPARATE column. `role` keeps its existing meaning
+//   (functional, org-scoped). `platformRole` is the orthogonal operator
+//   flag: `none` (default) for every regular user, `admin` for SaaS
+//   operator staff. The two fields are independently grantable and
+//   independently revocable, which is the OWASP-recommended pattern for
+//   multi-tenant SaaS (see "Separation of Duties" in OWASP ASVS V1.2).
+//
+//   Only `platformRole === "admin"` can access /api/admin/* routes —
+//   enforced by the new `requirePlatformAdmin()` middleware in
+//   lib/auth/require-platform-admin.ts. The `role === "owner"` /
+//   `platformOwner` checks in api-helpers.ts are KEPT for backwards
+//   compatibility with org-scoped admin routes (/api/audit-logs,
+//   /api/team, /api/billing/*), but they NO LONGER grant access to
+//   /api/admin/* — that gate is exclusively on `platformRole`.
+//
+//   platformRole is settable ONLY via direct DB access by the SaaS
+//   operator (UPDATE "User" SET "platformRole" = 'admin' WHERE id = '...').
+//   No API route can grant it — the self-registration allowlist does
+//   not include it, and the PATCH /api/admin/users route rejects any
+//   attempt to set it (the Zod schema does not accept `platformRole`
+//   in the request body). This is fail-closed: the only way to become
+//   a platform admin is to already have DB access, which is the
+//   SaaS operator's staff.
+// ---------------------------------------------------------------------------
+enum PlatformRole {
+  // Default for every user — no platform-operator access.
+  none
+  // SaaS operator staff. Can access /api/admin/* (platform console),
+  // read cross-tenant audit logs, suspend tenants, rotate platform
+  // secrets. Settable ONLY via direct DB access.
+  admin
+}
+
 enum OrgMemberRole {
   owner
   admin
@@ -133,6 +187,14 @@ model User {
   // free-form String. DB-level enforcement prevents invalid role values
   // from being inserted via raw SQL or migration errors.
   role              UserRole      @default(researcher)
+  // TASK-261 / TASK-269 ROOT FIX: platformRole is a SEPARATE field from
+  // role. It gates access to /api/admin/* (platform operator console).
+  // See the PlatformRole enum above for the full rationale. Default is
+  // `none` — every user starts without platform-operator access. The
+  // SaaS operator grants `admin` via direct DB access (no API route).
+  // The index supports fast lookups of all platform admins (e.g. for
+  // the "platform operators" view in the admin console).
+  platformRole      PlatformRole  @default(none)
   title             String?       // e.g. "Principal Scientist"
   bio               String?
   // BE-066 ROOT FIX: status is now a Prisma enum (UserStatus) instead of
@@ -188,6 +250,10 @@ model User {
 
   @@index([status])
   @@index([role])
+  // TASK-261: index on platformRole so the /api/admin/users route can
+  // quickly list all platform admins (SELECT * FROM "User" WHERE
+  // "platformRole" = 'admin') without a full table scan.
+  @@index([platformRole])
 }
 
 model Organization {

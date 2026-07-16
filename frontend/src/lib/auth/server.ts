@@ -139,6 +139,12 @@ export interface AccessTokenPayload {
   sub: string; // user id
   email: string;
   role: string;
+  // TASK-261 ROOT FIX: platformRole is a SEPARATE claim from `role`.
+  // `role` is the user's functional role in their org (researcher, pi,
+  // admin, owner). `platformRole` is the SaaS-operator flag (none | admin).
+  // Only `platformRole === "admin"` can access /api/admin/* routes.
+  // See PlatformRole enum in prisma/schema.prisma for the full rationale.
+  platformRole?: string;
   orgId?: string;
   type: "access";
 }
@@ -147,6 +153,12 @@ export interface AuthenticatedUser {
   userId: string;
   email: string;
   role: string;
+  // TASK-261 ROOT FIX: carried from the User row (DB) → access token (JWT)
+  // → AuthenticatedUser (request scope). Optional because some call sites
+  // construct an AuthenticatedUser just to pass to writeAuditLog (which
+  // doesn't read platformRole). The `requirePlatformAdmin()` middleware
+  // treats undefined as "none" (fail-closed) — see lib/auth/require-platform-admin.ts.
+  platformRole?: string;
   orgId?: string;
 }
 
@@ -220,6 +232,10 @@ export function signAccessToken(payload: AuthenticatedUser): string {
     sub: payload.userId,
     email: payload.email,
     role: payload.role,
+    // TASK-261: stamp platformRole into the JWT so the gate can be
+    // evaluated without a DB round-trip on every /api/admin/* request.
+    // Defaults to "none" if the caller didn't populate it (defensive).
+    platformRole: payload.platformRole || "none",
     orgId: payload.orgId,
     type: "access",
   };
@@ -247,6 +263,13 @@ export function verifyAccessToken(token: string): AuthenticatedUser | null {
         userId: decoded.sub,
         email: decoded.email,
         role: decoded.role,
+        // TASK-261: fail-closed — legacy tokens issued before this field
+        // existed will have `platformRole === undefined`, which we coerce
+        // to "none". This means existing sessions CANNOT access /api/admin/*
+        // until the user re-authenticates and gets a fresh token with the
+        // platformRole claim. The SaaS operator grants platformRole=admin
+        // via direct DB access; the next login will pick it up.
+        platformRole: decoded.platformRole || "none",
         orgId: decoded.orgId,
       };
     } catch {
@@ -298,6 +321,12 @@ export async function rotateRefreshToken(userId: string): Promise<{ refresh: str
       id: true,
       email: true,
       role: true,
+      // TASK-261: select platformRole so the refreshed access token
+      // carries the current SaaS-operator flag. If the operator
+      // revoked platform admin access (UPDATE User SET platformRole=
+      // 'none'), the very next refresh issues a token without it —
+      // fail-closed, no stale admin access.
+      platformRole: true,
       status: true,
       lockedUntil: true,
       lastActiveOrgId: true,
@@ -330,6 +359,9 @@ export async function rotateRefreshToken(userId: string): Promise<{ refresh: str
     userId: user.id,
     email: user.email,
     role: user.role,
+    // TASK-261: carry platformRole into the refreshed access token.
+    // Coerce to "none" if null (legacy rows pre-migration).
+    platformRole: (user.platformRole as string) || "none",
     orgId: user.lastActiveOrgId ?? undefined,
   });
   return { refresh: token, access };
@@ -596,6 +628,14 @@ export async function authenticateApiKey(rawKey: string): Promise<AuthenticatedU
     userId: key.user.id,
     email: key.user.email,
     role: key.user.role,
+    // TASK-261: API keys inherit the user's platformRole. If the user is
+    // a platform admin, their API key can call /api/admin/* — this is
+    // intentional (the developer platform is the programmatic equivalent
+    // of the cookie session). If the operator revokes platformRole, the
+    // very next API-key auth call reads the new value from the User row
+    // (we `include: { user: true }` above) and the key loses admin access
+    // immediately. Fail-closed.
+    platformRole: (key.user.platformRole as string | undefined) || "none",
     orgId: key.organizationId,
   };
 }

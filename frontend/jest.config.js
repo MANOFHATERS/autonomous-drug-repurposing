@@ -21,7 +21,7 @@ module.exports = {
     "<rootDir>/tests/api/**/*.test.ts",
     "<rootDir>/tests/e2e/**/*.e2e.ts",
   ],
-  setupFiles: ["<rootDir>/tests/api/env.ts"],
+  setupFiles: ["<rootDir>/tests/api/env.ts", "<rootDir>/tests/api/jest-setup.ts"],
   setupFilesAfterEnv: ["<rootDir>/tests/api/setup.ts"],
   moduleNameMapper: {
     "^@/(.*)$": "<rootDir>/src/$1",
