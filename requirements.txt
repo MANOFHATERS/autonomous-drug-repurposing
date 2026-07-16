@@ -22,7 +22,16 @@ numpy>=1.26.3
 # v54 ROOT FIX (ROOT-5): use official `rdkit` package (has Python 3.13
 # wheels) instead of deprecated `rdkit-pypi` (no Python 3.13 wheels).
 # Both provide the same `rdkit` import — code is unchanged.
-rdkit>=2024.3.1; platform_machine=="x86_64"
+#
+# Task 365 ROOT FIX: removed the `platform_machine=="x86_64"` marker.
+# The canonical `rdkit` package (maintained by the RDKit project)
+# ships multi-arch wheels — both x86_64 AND arm64 (Apple Silicon,
+# AWS Graviton). The previous marker prevented installation on arm64,
+# forcing developers on M1/M2 Macs to install rdkit via conda
+# separately. With the marker removed, `pip install -r requirements.txt`
+# works on both architectures. The pipeline degrades gracefully if
+# rdkit is somehow still unavailable (DRUGOS_ALLOW_NO_RDKIT=1).
+rdkit>=2024.3.1
 sqlalchemy>=2.0.25
 psycopg2-binary>=2.9.9
 lxml>=5.1.0
@@ -33,8 +42,17 @@ python-dotenv>=1.0.0
 # apache-airflow installed, every DAG crashes at import time and
 # phase1/tests/test_dag_structure.py used to pytest.importorskip("airflow"),
 # silently SKIPPING all DAG structure validation. The Docker base image
-# (apache/airflow:2.8.1) includes it for prod, but dev/CI envs need it too.
-apache-airflow>=2.8.0
+# (apache/airflow:2.10.5-python3.11) includes it for prod, but dev/CI envs
+# need it too.
+#
+# Task 364 ROOT FIX: pinned apache-airflow==2.10.5 (was >=2.8.0). The
+# Dockerfile.airflow base image is apache/airflow:2.10.5-python3.11 —
+# the dev/CI requirements.txt MUST match the Docker pin exactly, otherwise
+# the dev environment behaves differently from the production container
+# (the exact failure mode the audit flagged as "works in dev, breaks in
+# prod"). 2.10.5 brings CVE-2024-39214 fix + improved LocalExecutor
+# stability under high concurrency.
+apache-airflow==2.10.5
 
 # ─── Phase 2: Knowledge Graph Construction ─────────────────────────────────
 neo4j>=5.0
