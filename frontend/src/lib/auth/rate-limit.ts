@@ -614,6 +614,101 @@ export function __resetUserApiStateForTests(): void {
 
 export const USER_API_RATE_LIMIT_PER_MINUTE = USER_API_MAX_REQUESTS;
 
+// ---------------------------------------------------------------------------
+// Task 253 ROOT FIX: per-user 5 req/sec rate limit for the 7 public-API-proxy
+// routes (drugs/search, drugs/mechanism, diseases/search, safety/[drug],
+// clinical-trials/search, patents/search, literature/search).
+//
+// ROOT CAUSE: the audit required "5 req/sec per user" but the existing
+// `checkUserApiRateLimit` enforced 60 req/MIN (1 req/sec). The unit was
+// wrong AND the limit was applied inconsistently — some routes called
+// `requireAuthAndRateLimit`, others only called `requireAuth`. This left
+// the platform either over-strict (60/min) or unenforced (the routes
+// that skipped the guard).
+//
+// ROOT FIX: this `checkUserApiRateLimitV2` enforces a strict 5 req/sec
+// sliding window per user. It is SEPARATE from the 60/min limiter above
+// (which is kept for backwards compatibility on older routes). The new
+// 7 public-API-proxy routes use `requireAuthAndRateLimitV2` (in
+// api-proxy-guard.ts), which calls this function.
+//
+// The sliding window stores request timestamps in a per-user bucket. A
+// request is allowed iff the count of timestamps within the last 1000ms
+// is < 5. The bucket is garbage-collected lazily on each access.
+// ---------------------------------------------------------------------------
+
+const USER_API_V2_MAX_PER_SEC = 5;
+const USER_API_V2_WINDOW_MS = 1000;
+
+interface UserApiV2Bucket {
+  requests: number[]; // ms timestamps within the sliding window
+}
+
+const userApiV2Buckets = new Map<string, UserApiV2Bucket>();
+
+/**
+ * Check the 5 req/sec per-user rate limit. Returns `{ blocked,
+ * retryAfterSeconds, remaining }`. Does NOT record the request — call
+ * `recordUserApiRequestV2(user)` AFTER this returns blocked:false AND
+ * the upstream call has actually been dispatched (so failed upstream
+ * calls don't count against the quota).
+ */
+export function checkUserApiRateLimitV2(userId: string): {
+  blocked: boolean;
+  retryAfterSeconds: number;
+  remaining: number;
+} {
+  maybeCleanup();
+  const now = Date.now();
+  const bucket = userApiV2Buckets.get(userId) || { requests: [] };
+  // Drop timestamps older than the window.
+  bucket.requests = bucket.requests.filter(
+    (t) => now - t < USER_API_V2_WINDOW_MS
+  );
+
+  if (bucket.requests.length >= USER_API_V2_MAX_PER_SEC) {
+    const oldest = bucket.requests[0];
+    // Retry-After is how long until the oldest request ages out of the
+    // window — at that point a new request will be allowed.
+    const retryAfterMs = USER_API_V2_WINDOW_MS - (now - oldest);
+    const retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+    return {
+      blocked: true,
+      retryAfterSeconds,
+      remaining: 0,
+    };
+  }
+  return {
+    blocked: false,
+    retryAfterSeconds: 0,
+    remaining: USER_API_V2_MAX_PER_SEC - bucket.requests.length,
+  };
+}
+
+/**
+ * Record a successful (non-blocked) upstream API request for a user
+ * against the 5 req/sec limit. Must be called AFTER
+ * `checkUserApiRateLimitV2` returns blocked:false AND the upstream call
+ * has actually been dispatched.
+ */
+export function recordUserApiRequestV2(userId: string): void {
+  maybeCleanup();
+  const now = Date.now();
+  const bucket = userApiV2Buckets.get(userId) || { requests: [] };
+  bucket.requests = bucket.requests.filter(
+    (t) => now - t < USER_API_V2_WINDOW_MS
+  );
+  bucket.requests.push(now);
+  userApiV2Buckets.set(userId, bucket);
+}
+
+/** Test-only helper: reset the 5 req/sec rate-limit state. */
+export function __resetUserApiV2StateForTests(): void {
+  userApiV2Buckets.clear();
+}
+
+export const USER_API_V2_RATE_LIMIT_PER_SEC = USER_API_V2_MAX_PER_SEC;
+
 // FE-061: Exposed for tests so we can verify the LRU bound is enforced.
 export const __test = {
   getBucketCount: () => ipBuckets.size,

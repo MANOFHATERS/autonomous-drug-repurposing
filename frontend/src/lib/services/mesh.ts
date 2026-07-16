@@ -40,6 +40,8 @@
  * "what are ALL the descriptors under D03.438?".
  */
 
+import { monitoredFetch } from "@/lib/external-api-monitor";
+
 const MESH_BASE = "https://id.nlm.nih.gov/mesh/lookup";
 
 export interface MeshDescriptor {
@@ -135,7 +137,8 @@ export async function searchDiseasesByName(
   const q = (query || "").trim();
   if (q.length < 2) return [];
   const url = `${MESH_BASE}/descriptor?label=${encodeURIComponent(q)}&limit=${limit}`;
-  const res = await fetch(url, {
+  // Task 260: monitored for observability.
+  const res = await monitoredFetch("mesh", url, {
     headers: { Accept: "application/json" },
     next: { revalidate: 86400 * 30 }, // MeSH updates ~weekly
   });
@@ -149,7 +152,8 @@ export async function searchDiseasesByName(
     const descriptorUi = uri.split("/").pop() || "";
     if (!descriptorUi) continue;
     // Fetch the name and scope note
-    const nameRes = await fetch(
+    const nameRes = await monitoredFetch(
+      "mesh",
       `${MESH_BASE}/descriptor?resource=${encodeURIComponent(uri)}`,
       {
         headers: { Accept: "application/json" },
@@ -160,7 +164,8 @@ export async function searchDiseasesByName(
     const name = (await nameRes.text()).trim().replace(/^"|"$/g, "");
     let scopeNote: string | undefined;
     try {
-      const snRes = await fetch(
+      const snRes = await monitoredFetch(
+        "mesh",
         `${MESH_BASE}/scopeNote?resource=${encodeURIComponent(uri)}`,
         {
           headers: { Accept: "application/json" },
@@ -171,7 +176,8 @@ export async function searchDiseasesByName(
     } catch {}
     let treeNumber: string[] = [];
     try {
-      const tnRes = await fetch(
+      const tnRes = await monitoredFetch(
+        "mesh",
         `${MESH_BASE}/treeNumber?resource=${encodeURIComponent(uri)}`,
         {
           headers: { Accept: "application/json" },

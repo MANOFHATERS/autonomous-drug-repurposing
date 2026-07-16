@@ -34,6 +34,8 @@
  * callers that explicitly want a small page.
  */
 
+import { monitoredFetch } from "@/lib/external-api-monitor";
+
 const PATENTSVIEW_BASE = "https://search.patentsview.org/api/v1/patent";
 
 /**
@@ -134,7 +136,10 @@ async function fetchPatentsPage(
   size: number,
   offset: number
 ): Promise<{ patents: PatentRecord[]; totalHits: number; ok: boolean; status: number }> {
-  const res = await fetch(PATENTSVIEW_BASE, {
+  // Task 260: monitored for observability — every PatentsView call is
+  // logged with URL, duration, and status so operators can detect slow
+  // or degraded upstream responses (and 401s from an expired API key).
+  const res = await monitoredFetch("patentsview", PATENTSVIEW_BASE, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
