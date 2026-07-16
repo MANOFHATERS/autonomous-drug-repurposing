@@ -925,25 +925,40 @@ class DrugRepurposingGraphTransformer(nn.Module):
         Returns:
             (num_drugs, num_diseases) score matrix with probabilities
             in [0, 1].
-        """
-        self.eval()
-        device = next(self.parameters()).device
 
-        # V90 ROOT FIX (BUG #9, P0): save prior training state and
-        # restore it in a finally block. The previous code called
-        # ``self.eval()`` and NEVER restored training mode. If
-        # ``predict_all_pairs`` was called mid-training (e.g., for
-        # intermediate evaluation, or by a concurrent thread in the
-        # Phase 5 API), the model was silently switched to eval mode
-        # and STAYED there -- subsequent ``train_epoch()`` calls did
-        # call ``self.model.train()``, but ANY external caller (the
-        # bridge's ``generate_rl_input``, the Phase 5 API server)
-        # that called ``predict_all_pairs`` mid-training silently
-        # disabled dropout and BatchNorm updates for the rest of the
-        # process. Combined with ``_SafeBatchNorm1d``'s batch_size=1
-        # fallback (which already runs BN in eval mode), this could
-        # produce silently wrong training behavior.
-        prior_training = self.training
+        P3-014 ROOT FIX (v114 forensic): THREAD-SAFE INFERENCE.
+        The previous implementation toggled ``self.eval()`` /
+        ``self.train(prior_training)``. ``nn.Module.training`` is
+        SHARED MUTABLE STATE across all threads. Under concurrent
+        inference (V1 contract: 100 concurrent requests), the train/
+        eval toggle became a race condition:
+          - Thread A calls ``self.eval()`` (sets training=False)
+          - Thread B calls ``self.eval()`` (no-op)
+          - Thread A finishes, calls ``self.train(prior_training=False)``
+          - If a training thread C concurrently called ``self.train()``
+            between A's eval and A's restore, C's ``train()`` was
+            silently overwritten by A's restore. The training continued
+            with dropout DISABLED and BatchNorm in eval mode --
+            silently corrupting the regularization regime.
+
+        ROOT FIX: do NOT toggle ``self.eval()`` / ``self.train()``
+        inside this method. Instead, use ``torch.set_grad_enabled(False)``
+        which is a PER-THREAD context manager (manipulates a
+        thread-local flag) -- it does NOT require a lock and does NOT
+        mutate shared module state. Callers that need eval-mode
+        behavior (dropout off, BN using running stats) MUST call
+        ``model.eval()`` BEFORE invoking this method (the standard
+        PyTorch inference pattern). The trainer's ``evaluate()``,
+        ``evaluate_link_prediction``, and the Phase 5 API service
+        already set ``model.eval()`` before inference, so this is the
+        natural contract.
+
+        For the rare mid-epoch-inference case (training thread calls
+        predict mid-epoch), the caller MUST use a separate model
+        replica. This is the standard PyTorch guidance for concurrent
+        inference + training.
+        """
+        device = next(self.parameters()).device
 
         # V4 C-F5 fix: respect the user's stored config when no explicit
         # override is passed. The original code silently overrode the
@@ -953,63 +968,53 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # ROOT FIX (C13): pass exclude_edges as parameter, don't mutate self
         effective_exclude = set(exclude_edges) if exclude_edges is not None else self.exclude_edges
 
-        # V90 ROOT FIX (BUG #9, P0): wrap the inference body in
-        # try/finally so the prior training state is ALWAYS restored,
-        # even on exception. Without this, an exception during
-        # inference (e.g., CUDA OOM) would leave the model in eval
-        # mode, silently corrupting subsequent training.
-        try:
-            with torch.no_grad():
-                embeddings = self.encode(
-                    node_features, edge_indices,
-                    exclude_edges_override=effective_exclude,
-                )
+        # P3-014 ROOT FIX (v114): use per-thread torch.set_grad_enabled(False)
+        # instead of mutating self.training. This is thread-safe and does
+        # NOT require a lock. Callers are responsible for calling
+        # model.eval() before this method (standard PyTorch inference
+        # contract).
+        with torch.set_grad_enabled(False):
+            embeddings = self.encode(
+                node_features, edge_indices,
+                exclude_edges_override=effective_exclude,
+            )
 
             drug_emb_all = embeddings["drug"]  # (num_drugs, D)
             disease_emb_all = embeddings["disease"]  # (num_diseases, D)
 
             score_matrix = torch.zeros(num_drugs, num_diseases, device=device)
 
-            with torch.no_grad():
-                # Outer loop: one drug at a time. Inner loop: diseases in
-                # sub-batches. This bounds peak memory.
-                for d_idx in range(num_drugs):
-                    d_emb_row = drug_emb_all[d_idx:d_idx + 1]  # (1, D)
+            # Outer loop: one drug at a time. Inner loop: diseases in
+            # sub-batches. This bounds peak memory.
+            for d_idx in range(num_drugs):
+                d_emb_row = drug_emb_all[d_idx:d_idx + 1]  # (1, D)
 
-                    for ds_start in range(0, num_diseases, batch_size_diseases):
-                        ds_end = min(ds_start + batch_size_diseases, num_diseases)
-                        ds_emb_batch = disease_emb_all[ds_start:ds_end]  # (B_ds, D)
+                for ds_start in range(0, num_diseases, batch_size_diseases):
+                    ds_end = min(ds_start + batch_size_diseases, num_diseases)
+                    ds_emb_batch = disease_emb_all[ds_start:ds_end]  # (B_ds, D)
 
-                        # Broadcast drug embedding to match the disease batch.
-                        # Memory: B_ds * D floats (e.g. 2048 * 128 = 256K floats = 1 MB).
-                        d_emb_expanded = d_emb_row.expand(ds_end - ds_start, -1)  # (B_ds, D)
+                    # Broadcast drug embedding to match the disease batch.
+                    # Memory: B_ds * D floats (e.g. 2048 * 128 = 256K floats = 1 MB).
+                    d_emb_expanded = d_emb_row.expand(ds_end - ds_start, -1)  # (B_ds, D)
 
-                        # V4 B-F5 fix: use link_predictor.predict_probability
-                        # which applies the calibrated temperature. The RL
-                        # ranker's ``gnn_score`` input is now a CALIBRATED
-                        # probability, not a raw sigmoid. This means the
-                        # B10/B19 temperature calibration that the trainer
-                        # runs after main training is now ACTUALLY USED
-                        # downstream -- before this fix, the calibrated
-                        # parameter was dead weight.
-                        #
-                        # ROOT FIX (FORENSIC-AUDIT-I03): pass apply_temperature
-                        # through to predict_probability so callers can choose
-                        # raw sigmoid (False) or calibrated (True). The bridge
-                        # uses False for the RL input CSV to preserve full
-                        # variance.
-                        probs = self.link_predictor.predict_probability(
-                            d_emb_expanded, ds_emb_batch,
-                            apply_temperature=apply_temperature,
-                        )  # (B_ds,)
-                        score_matrix[d_idx, ds_start:ds_end] = probs
+                    # V4 B-F5 fix: use link_predictor.forward (which applies
+                    # calibrated temperature). The RL ranker's ``gnn_score``
+                    # input is now a CALIBRATED probability, not a raw sigmoid.
+                    #
+                    # P3-023 ROOT FIX (v114): call link_predictor.forward
+                    # DIRECTLY instead of predict_probability. The previous
+                    # call to predict_probability acquired an RLock for EVERY
+                    # call and toggled eval/train -- both are shared mutable
+                    # state, racy under concurrent inference. forward() is
+                    # stateless w.r.t. module.training, so it is thread-safe
+                    # by design (the caller has already set eval mode).
+                    probs = self.link_predictor.forward(
+                        d_emb_expanded, ds_emb_batch,
+                        apply_temperature=apply_temperature,
+                    )  # (B_ds, 1)
+                    score_matrix[d_idx, ds_start:ds_end] = probs.squeeze(-1)
 
             return score_matrix
-        finally:
-            # V90 ROOT FIX (BUG #9, P0): restore the prior training state
-            # so callers that invoked predict_all_pairs mid-training
-            # don't have their dropout/BN regime silently changed.
-            self.train(prior_training)
 
     # P3-005 ROOT FIX (v113 forensic): single-pass dual-score inference.
     # The previous bridge code called ``predict_all_pairs`` TWICE -- once
