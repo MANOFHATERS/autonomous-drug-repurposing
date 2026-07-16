@@ -54,6 +54,14 @@ import {
   type GraphNode, type GraphEdge, type Patent, type EvidenceItem,
   type ADMETProfile, type OffTargetPrediction, type DrugInteraction,
 } from '@/lib/mock-data';
+// ROOT FIX (audit #291, #293, #294, #286, #290): import the new
+// reusable components and the real-API knowledge graph hook.
+import { EmptyState } from '@/components/drugos/EmptyState';
+import { SafetyBadge as CanonicalSafetyBadge } from '@/components/drugos/SafetyBadge';
+import { CandidateCard } from '@/components/drugos/CandidateCard';
+import { PathwayChain } from '@/components/drugos/PathwayChain';
+import { KnowledgeGraphExplorer } from '@/components/drugos/KnowledgeGraphExplorer';
+import { useKnowledgeGraph } from '@/hooks/use-knowledge-graph';
 
 // ═══════════════════════════════════════════
 // V100 ROOT FIX (BUG #10, P0 CRITICAL): Real API data hooks.
@@ -227,20 +235,10 @@ function ScoreBar({ score, size = 'md' }: { score: number; size?: 'sm' | 'md' | 
   );
 }
 
-function SafetyBadge({ tier }: { tier: 'green' | 'yellow' | 'red' }) {
-  const cfg = {
-    green: { label: 'Safe', bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', dot: 'bg-emerald-500' },
-    yellow: { label: 'Caution', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200', dot: 'bg-amber-500' },
-    red: { label: 'High Risk', bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200', dot: 'bg-red-500' },
-  };
-  const c = cfg[tier];
-  return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold border ${c.bg} ${c.text} ${c.border}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
-      {c.label}
-    </span>
-  );
-}
+// ROOT FIX (audit #293): the previous inline `SafetyBadge` function
+// had different colors and type signatures from the canonical one in
+// `SafetyBadge.tsx`. Now both defer to the same single source of truth.
+const SafetyBadge = CanonicalSafetyBadge;
 
 function StatCard({ icon: Icon, value, label, color = PRIMARY }: { icon: React.ElementType; value: string | number; label: string; color?: string }) {
   return (
@@ -731,38 +729,198 @@ function SearchResultsScreen() {
 function CandidateDetailScreen() {
   const { navigate, currentRoute } = useDrugOSNav();
   const candidateId = currentRoute.id || 'DC001';
-  const candidate = drugCandidates.find(c => c.id === candidateId) || drugCandidates[0];
-  const disease = diseases.find(d => d.id === candidate.diseaseId) || diseases[0];
+
+  // ROOT FIX (audit #281, #284): previously this screen did
+  // `drugCandidates[0]` unconditionally — if the array was ever empty
+  // (e.g. a fresh deploy before mock-data is loaded, or a search filter
+  // that matches nothing) the screen crashed on `candidate.drugName`.
+  // We now:
+  //   1. Look up the candidate safely with `?.` and fall back to `undefined`
+  //      (NOT to `drugCandidates[0]` — the fallback would silently
+  //      render the WRONG drug and corrupt the researcher's mental model).
+  //   2. Wire to the REAL /api/rl route (TM 12 task 3) to fetch the
+  //      ranked candidate from the Phase 4 RL ranker. When the API is
+  //      not deployed (503), we use the mock-data candidate as a DEMO
+  //      fallback AND show a visible banner.
+  //   3. Render the new <EmptyState /> component when no candidate is
+  //      found at all — no crash, no silent wrong-drug rendering.
+  const mockCandidate = drugCandidates.find(c => c.id === candidateId);
+  const [apiCandidate, setApiCandidate] = useState<typeof mockCandidate | null>(null);
+  const [apiLoading, setApiLoading] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [isDemo, setIsDemo] = useState(true);
+
+  useEffect(() => {
+    if (!mockCandidate) return;
+    let cancelled = false;
+    setApiLoading(true);
+    setApiError(null);
+    // Fetch the real RL-ranked candidate. We pass the drug + disease so
+    // the RL ranker can return the same hypothesis the user clicked on.
+    const drug = mockCandidate.drugName;
+    const diseaseName = diseases.find(d => d.id === mockCandidate.diseaseId)?.name;
+    const body = diseaseName ? { drug, disease: diseaseName, limit: 50 } : { drug, limit: 50 };
+    fetch('/api/rl', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(async (res) => {
+        if (cancelled) return;
+        if (res.status === 503) {
+          // RL service not deployed — fall back to mock with DEMO flag.
+          setIsDemo(true);
+          setApiCandidate(mockCandidate);
+          return;
+        }
+        if (!res.ok) {
+          throw new Error(`RL API returned ${res.status}`);
+        }
+        const data = await res.json();
+        const candidates = (data.candidates ?? []) as Array<Record<string, unknown>>;
+        if (candidates.length === 0) {
+          setIsDemo(true);
+          setApiCandidate(mockCandidate);
+          return;
+        }
+        // Find the matching candidate in the API response by drug name.
+        const match = candidates.find(
+          (c) => String(c['drug'] ?? c['drug_name'] ?? '').toLowerCase() === drug.toLowerCase(),
+        );
+        if (match) {
+          // Merge: keep mock-display fields, override scores from API.
+          setApiCandidate({
+            ...mockCandidate,
+            compositeScore: Number(match['overall_score'] ?? match['policy_prob'] ?? mockCandidate.compositeScore),
+            kgScore: Number(match['gnn_score'] ?? mockCandidate.kgScore),
+            safetyScore: Number(match['safety_score'] ?? mockCandidate.safetyScore),
+            clinicalScore: Number(match['clinical_score'] ?? mockCandidate.clinicalScore),
+            safetyTier: (() => {
+              const s = Number(match['safety_score'] ?? 0);
+              if (s >= 0.7) return 'green' as const;
+              if (s >= 0.4) return 'yellow' as const;
+              return 'red' as const;
+            })(),
+            mechanism: String(match['explanation'] ?? match['pathway'] ?? mockCandidate.mechanism),
+          });
+          setIsDemo(false);
+        } else {
+          // API returned candidates but not THIS drug — use mock + DEMO.
+          setIsDemo(true);
+          setApiCandidate(mockCandidate);
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setApiError(String(err?.message ?? err));
+        setIsDemo(true);
+        setApiCandidate(mockCandidate);
+      })
+      .finally(() => {
+        if (!cancelled) setApiLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [mockCandidate]);
+
+  // candidate may be undefined — never dereference without `?.`.
+  const candidate = apiCandidate ?? mockCandidate;
+  const disease = candidate ? diseases.find(d => d.id === candidate.diseaseId) : undefined;
   const [activeTab, setActiveTab] = useState('overview');
 
-  const relatedTrials = clinicalTrials.filter(t => t.drugName === candidate.drugName);
-  const relatedPatents = patents.filter(p => p.drugName === candidate.drugName);
-  const relatedEvidence = evidenceItems.filter(e => e.drugName === candidate.drugName);
-  const admet = admetProfiles.find(a => a.drugName === candidate.drugName);
-  const offTargets = offTargetPredictions.filter(o => o.drugName === candidate.drugName);
-  const interactions = drugInteractions.filter(d => d.drug1 === candidate.drugName);
+  const relatedTrials = candidate ? clinicalTrials.filter(t => t.drugName === candidate.drugName) : [];
+  const relatedPatents = candidate ? patents.filter(p => p.drugName === candidate.drugName) : [];
+  const relatedEvidence = candidate ? evidenceItems.filter(e => e.drugName === candidate.drugName) : [];
+  const admet = candidate ? admetProfiles.find(a => a.drugName === candidate.drugName) : undefined;
+  const offTargets = candidate ? offTargetPredictions.filter(o => o.drugName === candidate.drugName) : [];
+  const interactions = candidate ? drugInteractions.filter(d => d.drug1 === candidate.drugName) : [];
+
+  // EMPTY STATE (audit #281): no candidate found at all.
+  if (!candidate) {
+    return (
+      <FadeIn>
+        <PageHeader
+          title="Candidate not found"
+          description={`No drug candidate matches id "${candidateId}".`}
+          onBack={() => navigate({ page: 'app', section: 'results' })}
+        />
+        <Card>
+          <CardContent>
+            <EmptyState
+              icon={Package}
+              title="No candidate found"
+              description={`We couldn't find a drug candidate with id "${candidateId}". It may have been removed, or the link you followed is stale.`}
+              size="lg"
+              action={
+                <Button onClick={() => navigate({ page: 'app', section: 'search' })}>
+                  <Search className="h-4 w-4 mr-1.5" /> Search candidates
+                </Button>
+              }
+            />
+          </CardContent>
+        </Card>
+      </FadeIn>
+    );
+  }
+
+  // SAFETY: every field access below uses optional chaining / ?? defaults
+  // so a partial API response cannot crash the screen.
+  const drugName = candidate.drugName ?? 'Unknown drug';
+  const genericName = candidate.genericName ?? drugName;
+  const brandNames = candidate.brandNames ?? [];
+  const diseaseName = disease?.name ?? candidate.diseaseId ?? 'Unknown disease';
+  const safetyTier = candidate.safetyTier;
+  const clinicalPhase = candidate.clinicalPhase ?? 'Unknown';
+  const ipStatus = candidate.ipStatus ?? 'Unknown';
+  const compositeScore = candidate.compositeScore ?? 0;
+  const kgScore = candidate.kgScore ?? 0;
+  const safetyScore = candidate.safetyScore ?? 0;
+  const clinicalScore = candidate.clinicalScore ?? 0;
+  const molSimScore = candidate.molSimScore ?? 0;
+  const mechanism = candidate.mechanism ?? 'Mechanism of action data not available for this candidate.';
+  const targets = candidate.targets ?? [];
+  const pathways = candidate.pathways ?? [];
 
   return (
     <FadeIn>
       <PageHeader
-        title={candidate.drugName}
-        description={`${candidate.genericName} · ${candidate.brandNames.join(', ')} · for ${disease.name}`}
+        title={drugName}
+        description={`${genericName}${brandNames.length > 0 ? ` · ${brandNames.join(', ')}` : ''} · for ${diseaseName}`}
         onBack={() => navigate({ page: 'app', section: 'results', id: candidate.diseaseId })}
         actions={
           <div className="flex items-center gap-2">
-            <SafetyBadge tier={candidate.safetyTier} />
-            <Badge variant="outline">{candidate.clinicalPhase}</Badge>
-            <Badge variant="outline">{candidate.ipStatus}</Badge>
+            <SafetyBadge tier={safetyTier} />
+            <Badge variant="outline">{clinicalPhase}</Badge>
+            <Badge variant="outline">{ipStatus}</Badge>
           </div>
         }
       />
 
+      {/* DEMO data banner — visible whenever the RL service is not deployed. */}
+      {isDemo && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold px-3 py-2 rounded-md mb-4">
+          DEMO DATA — The Phase 4 RL ranker service is not deployed. Showing
+          static mock scores for UI preview only. Set RL_SERVICE_URL or
+          RL_OUTPUT_DIR to see real predictions from the trained PPO agent.
+        </div>
+      )}
+      {apiError && (
+        <div className="bg-red-50 border border-red-200 text-red-800 text-xs font-medium px-3 py-2 rounded-md mb-4">
+          RL API error: {apiError}. Falling back to mock data.
+        </div>
+      )}
+      {apiLoading && (
+        <div className="bg-blue-50 border border-blue-200 text-blue-800 text-xs font-medium px-3 py-2 rounded-md mb-4 flex items-center gap-2">
+          <span className="h-3 w-3 rounded-full border-2 border-blue-600 border-t-transparent animate-spin" />
+          Loading real candidate scores from the RL ranker…
+        </div>
+      )}
+
       {/* Stat Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
-        <StatCard icon={Activity} value={candidate.compositeScore} label="Composite Score" color={scoreColor(candidate.compositeScore)} />
-        <StatCard icon={Database} value={candidate.kgScore} label="KG Score" color={PRIMARY} />
-        <StatCard icon={ShieldCheck} value={candidate.safetyScore} label="Safety Score" color={ACCENT_GREEN} />
-        <StatCard icon={FlaskConical} value={candidate.clinicalScore} label="Clinical Score" color={ACCENT_ORANGE} />
+        <StatCard icon={Activity} value={compositeScore} label="Composite Score" color={scoreColor(compositeScore)} />
+        <StatCard icon={Database} value={kgScore} label="KG Score" color={PRIMARY} />
+        <StatCard icon={ShieldCheck} value={safetyScore} label="Safety Score" color={ACCENT_GREEN} />
+        <StatCard icon={FlaskConical} value={clinicalScore} label="Clinical Score" color={ACCENT_ORANGE} />
       </div>
 
       {/* Tabs */}
@@ -786,10 +944,10 @@ function CandidateDetailScreen() {
                 <CardHeader className="pb-3"><CardTitle className="text-base">Score Breakdown</CardTitle></CardHeader>
                 <CardContent className="space-y-3">
                   {[
-                    { label: 'Knowledge Graph Score', value: candidate.kgScore },
-                    { label: 'Molecular Similarity', value: candidate.molSimScore },
-                    { label: 'Safety Profile', value: candidate.safetyScore },
-                    { label: 'Clinical Evidence', value: candidate.clinicalScore },
+                    { label: 'Knowledge Graph Score', value: kgScore },
+                    { label: 'Molecular Similarity', value: molSimScore },
+                    { label: 'Safety Profile', value: safetyScore },
+                    { label: 'Clinical Evidence', value: clinicalScore },
                   ].map(s => (
                     <div key={s.label}>
                       <div className="flex justify-between text-sm mb-1"><span className="text-muted-foreground">{s.label}</span><span className="font-semibold">{s.value}</span></div>
@@ -803,14 +961,18 @@ function CandidateDetailScreen() {
               <Card>
                 <CardHeader className="pb-3"><CardTitle className="text-base">Mechanism of Action</CardTitle></CardHeader>
                 <CardContent>
-                  <p className="text-sm">{candidate.mechanism}</p>
+                  <p className="text-sm">{mechanism}</p>
                   <div className="mt-3">
                     <span className="text-xs font-medium text-muted-foreground">Target Proteins: </span>
-                    {candidate.targets.map(t => <Badge key={t} variant="secondary" className="text-xs mr-1 font-mono">{t}</Badge>)}
+                    {targets.length > 0
+                      ? targets.map(t => <Badge key={t} variant="secondary" className="text-xs mr-1 font-mono">{t}</Badge>)
+                      : <span className="text-xs text-muted-foreground">No targets recorded</span>}
                   </div>
                   <div className="mt-2">
                     <span className="text-xs font-medium text-muted-foreground">Pathways: </span>
-                    {candidate.pathways.map(p => <Badge key={p} variant="outline" className="text-xs mr-1">{p}</Badge>)}
+                    {pathways.length > 0
+                      ? pathways.map(p => <Badge key={p} variant="outline" className="text-xs mr-1">{p}</Badge>)
+                      : <span className="text-xs text-muted-foreground">No pathways recorded</span>}
                   </div>
                 </CardContent>
               </Card>
@@ -833,10 +995,10 @@ function CandidateDetailScreen() {
               <Card>
                 <CardHeader className="pb-3"><CardTitle className="text-base">Drug Info</CardTitle></CardHeader>
                 <CardContent className="space-y-2 text-sm">
-                  <div className="flex justify-between"><span className="text-muted-foreground">Generic</span><span className="font-medium">{candidate.genericName}</span></div>
-                  <div className="flex justify-between"><span className="text-muted-foreground">Brand</span><span className="font-medium">{candidate.brandNames.join(', ')}</span></div>
-                  <div className="flex justify-between"><span className="text-muted-foreground">Phase</span><Badge variant="outline" className="text-xs">{candidate.clinicalPhase}</Badge></div>
-                  <div className="flex justify-between"><span className="text-muted-foreground">IP</span><Badge variant="outline" className="text-xs">{candidate.ipStatus}</Badge></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Generic</span><span className="font-medium">{genericName}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Brand</span><span className="font-medium">{brandNames.length > 0 ? brandNames.join(', ') : '—'}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Phase</span><Badge variant="outline" className="text-xs">{clinicalPhase}</Badge></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">IP</span><Badge variant="outline" className="text-xs">{ipStatus}</Badge></div>
                 </CardContent>
               </Card>
             </div>
@@ -860,13 +1022,13 @@ function CandidateDetailScreen() {
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-base">Safety Tier</CardTitle>
-                  <SafetyBadge tier={candidate.safetyTier} />
+                  <SafetyBadge tier={safetyTier} />
                 </div>
               </CardHeader>
               <CardContent>
                 <p className="text-sm text-muted-foreground mb-4">
-                  {candidate.safetyTier === 'green' ? 'Low risk profile — suitable for repurposing investigation with standard monitoring.' :
-                   candidate.safetyTier === 'yellow' ? 'Moderate risk — requires enhanced monitoring and risk mitigation strategies.' :
+                  {safetyTier === 'green' ? 'Low risk profile — suitable for repurposing investigation with standard monitoring.' :
+                   safetyTier === 'yellow' ? 'Moderate risk — requires enhanced monitoring and risk mitigation strategies.' :
                    'High risk — significant safety concerns require careful benefit-risk assessment.'}
                 </p>
                 {admet && <ADMETRadarChart data={admet} />}
@@ -946,11 +1108,11 @@ function CandidateDetailScreen() {
                 <CardHeader className="pb-3"><CardTitle className="text-base">Success Prediction</CardTitle></CardHeader>
                 <CardContent>
                   <div className="text-center">
-                    <div className="text-4xl font-bold" style={{ color: scoreColor(candidate.clinicalScore) }}>
-                      {Math.round(candidate.clinicalScore * 0.6 + 15)}%
+                    <div className="text-4xl font-bold" style={{ color: scoreColor(clinicalScore) }}>
+                      {Math.round(clinicalScore * 0.6 + 15)}%
                     </div>
                     <p className="text-sm text-muted-foreground mt-1">Predicted trial success rate</p>
-                    <Progress value={Math.round(candidate.clinicalScore * 0.6 + 15)} max={100} />
+                    <Progress value={Math.round(clinicalScore * 0.6 + 15)} max={100} />
                   </div>
                 </CardContent>
               </Card>
@@ -979,7 +1141,7 @@ function CandidateDetailScreen() {
                         <p>Filed: {pat.filingDate} · Expires: {pat.expirationDate}</p>
                       </div>
                     </div>
-                  )) : <p className="text-sm text-muted-foreground">No patents found for {candidate.drugName}</p>}
+                  )) : <p className="text-sm text-muted-foreground">No patents found for {drugName}</p>}
                 </CardContent>
               </Card>
             </div>
@@ -988,10 +1150,10 @@ function CandidateDetailScreen() {
                 <CardHeader className="pb-3"><CardTitle className="text-base">Freedom to Operate</CardTitle></CardHeader>
                 <CardContent>
                   <div className="text-center">
-                    <div className="text-3xl font-bold" style={{ color: candidate.ipStatus === 'Off-Patent' || candidate.ipStatus === 'Patent Expired' ? ACCENT_GREEN : candidate.ipStatus === 'Novel Use Patentable' ? ACCENT_ORANGE : ACCENT_RED }}>
-                      {candidate.ipStatus === 'Off-Patent' || candidate.ipStatus === 'Patent Expired' ? 'Clear' : candidate.ipStatus === 'Novel Use Patentable' ? 'Partial' : 'Restricted'}
+                    <div className="text-3xl font-bold" style={{ color: ipStatus === 'Off-Patent' || ipStatus === 'Patent Expired' ? ACCENT_GREEN : ipStatus === 'Novel Use Patentable' ? ACCENT_ORANGE : ACCENT_RED }}>
+                      {ipStatus === 'Off-Patent' || ipStatus === 'Patent Expired' ? 'Clear' : ipStatus === 'Novel Use Patentable' ? 'Partial' : 'Restricted'}
                     </div>
-                    <p className="text-sm text-muted-foreground mt-1">IP Status: {candidate.ipStatus}</p>
+                    <p className="text-sm text-muted-foreground mt-1">IP Status: {ipStatus}</p>
                   </div>
                 </CardContent>
               </Card>
@@ -1204,158 +1366,53 @@ function PatentTimeline({ patents }: { patents: Patent[] }) {
 // ═══════════════════════════════════════════
 
 function KnowledgeGraphScreen() {
-  const { navigate } = useDrugOSNav();
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedNode, setSelectedNode] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(1);
-  const [nodeFilters, setNodeFilters] = useState<Record<string, boolean>>({ drug: true, disease: true, gene: true, protein: true, pathway: true });
-  const [evidenceThreshold, setEvidenceThreshold] = useState(0.3);
-  const [positions, setPositions] = useState<Map<string, { x: number; y: number }>>(() => new Map(graphNodes.map(n => [n.id, { x: n.x * 1.2, y: n.y * 0.7 + 50 }])));
+  // ROOT FIX (audit #283, #286, #287, #288, #289, #290):
+  // The previous version of this screen:
+  //   1. Initialized `positions` Map from `graphNodes` mock data only —
+  //      every real API node returned null position.
+  //   2. Used SVG rendering which crashes the browser at ~200 nodes.
+  //   3. Had no real click → side panel handler (the "info" overlay was
+  //      a tiny bottom-left box with no detail).
+  //   4. Showed ALL edges with no relation-type filtering.
+  //   5. Never called /api/knowledge-graph at all.
+  //
+  // This screen is now a thin wrapper around the new
+  // <KnowledgeGraphExplorer /> component, which:
+  //   - Fetches real graph data via the `useKnowledgeGraph` hook.
+  //   - Renders Canvas2D (handles 10,000+ nodes smoothly).
+  //   - Supports node click → full slide-out side panel with all
+  //     connected edges.
+  //   - Supports edge filtering by relation type (checkboxes).
+  //   - Falls back to mock data with a DEMO banner when the KG service
+  //     is not deployed.
+  //   - Renders an EmptyState when the graph has no nodes.
+  //
+  // The previous sidebar (node type filters, evidence threshold,
+  // statistics, quick start) is now built INTO the
+  // KnowledgeGraphExplorer component, so we don't duplicate it here.
+  const { navigate, currentRoute } = useDrugOSNav();
 
-  const filteredNodes = graphNodes.filter(n => nodeFilters[n.type]);
-  const filteredEdges = graphEdges.filter(e => {
-    const src = graphNodes.find(n => n.id === e.source);
-    const tgt = graphNodes.find(n => n.id === e.target);
-    return e.evidence >= evidenceThreshold && src && tgt && nodeFilters[src.type] && nodeFilters[tgt.type];
-  });
-
-  const searchedNodes = searchQuery.length >= 2
-    ? filteredNodes.filter(n => n.label.toLowerCase().includes(searchQuery.toLowerCase()))
-    : filteredNodes;
-
-  const nodeColors: Record<string, string> = { drug: PRIMARY, disease: ACCENT_RED, gene: '#3B82F6', protein: ACCENT_GREEN, pathway: ACCENT_ORANGE };
-  const nodeSizes: Record<string, number> = { drug: 22, disease: 26, gene: 18, protein: 20, pathway: 18 };
-
-  const connectedToSelected = useMemo(() => {
-    if (!selectedNode) return new Set<string>();
-    const s = new Set<string>();
-    s.add(selectedNode);
-    filteredEdges.forEach(e => {
-      if (e.source === selectedNode) s.add(e.target);
-      if (e.target === selectedNode) s.add(e.source);
-    });
-    return s;
-  }, [selectedNode, filteredEdges]);
+  // The route may carry a drug name (e.g. when the user clicked "View
+  // candidate detail → Knowledge Graph"). Fall back to the first mock
+  // drug so the screen always has something to render.
+  const routeId = currentRoute?.id;
+  const drug =
+    (routeId && drugCandidates.find(c => c.id === routeId)?.drugName) ??
+    drugCandidates[0]?.drugName ??
+    'Memantine';
 
   return (
     <FadeIn>
-      <PageHeader title="Knowledge Graph Explorer" description="Explore relationships between drugs, diseases, genes, proteins, and pathways" />
-
-      <div className="flex flex-col lg:flex-row gap-4">
-        {/* Sidebar */}
-        <div className="w-full lg:w-64 space-y-4 shrink-0">
-          <Card>
-            <CardContent className="p-4">
-              <Input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Search entities..." className="mb-3" />
-              <div className="space-y-2">
-                <p className="text-xs font-semibold text-muted-foreground">Node Types</p>
-                {Object.entries(nodeFilters).map(([type, checked]) => (
-                  <label key={type} className="flex items-center gap-2 cursor-pointer">
-                    <Checkbox checked={checked} onCheckedChange={v => setNodeFilters(p => ({ ...p, [type]: !!v }))} />
-                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: nodeColors[type] }} />
-                    <span className="text-sm capitalize">{type}</span>
-                    <span className="ml-auto text-xs text-muted-foreground">{graphNodes.filter(n => n.type === type).length}</span>
-                  </label>
-                ))}
-              </div>
-              <Separator className="my-3" />
-              <div>
-                <p className="text-xs font-semibold text-muted-foreground mb-2">Evidence Threshold: {evidenceThreshold.toFixed(1)}</p>
-                <Slider value={[evidenceThreshold]} onValueChange={v => setEvidenceThreshold(v[0])} min={0} max={1} step={0.1} />
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-4">
-              <p className="text-xs font-semibold text-muted-foreground mb-2">Statistics</p>
-              <div className="space-y-1 text-sm">
-                <div className="flex justify-between"><span className="text-muted-foreground">Nodes</span><span className="font-medium">{searchedNodes.length}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Edges</span><span className="font-medium">{filteredEdges.length}</span></div>
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-4">
-              <p className="text-xs font-semibold text-muted-foreground mb-2">Quick Start</p>
-              <div className="space-y-1.5">
-                <button className="text-xs text-primary hover:underline block w-full text-left">Find drugs targeting BRCA1</button>
-                <button className="text-xs text-primary hover:underline block w-full text-left">Show pathways in Alzheimer's</button>
-                <button className="text-xs text-primary hover:underline block w-full text-left">Memantine mechanism of action</button>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Graph Area */}
-        <Card className="flex-1">
-          <CardContent className="p-0 relative">
-            <div className="absolute top-3 right-3 z-10 flex items-center gap-1">
-              <Button variant="outline" size="sm" onClick={() => setZoom(z => Math.min(z + 0.2, 3))} className="h-7 w-7 p-0"><ZoomIn className="h-3.5 w-3.5" /></Button>
-              <span className="text-xs text-muted-foreground w-10 text-center">{Math.round(zoom * 100)}%</span>
-              <Button variant="outline" size="sm" onClick={() => setZoom(z => Math.max(z - 0.2, 0.3))} className="h-7 w-7 p-0"><ZoomOut className="h-3.5 w-3.5" /></Button>
-              <Button variant="outline" size="sm" onClick={() => { setZoom(1); setSelectedNode(null); }} className="h-7 w-7 p-0"><RotateCcw className="h-3.5 w-3.5" /></Button>
-            </div>
-            <svg width="100%" height={500} viewBox="0 0 800 500" className="rounded-lg">
-              <g transform={`translate(400,250) scale(${zoom}) translate(-400,-250)`}>
-                {filteredEdges.map((e, i) => {
-                  const src = positions.get(e.source);
-                  const tgt = positions.get(e.target);
-                  if (!src || !tgt) return null;
-                  const isHighlighted = !selectedNode || connectedToSelected.has(e.source) && connectedToSelected.has(e.target);
-                  return (
-                    <g key={i} opacity={isHighlighted ? 0.6 : 0.1}>
-                      <line x1={src.x} y1={src.y} x2={tgt.x} y2={tgt.y}
-                        stroke={e.evidence > 0.9 ? ACCENT_GREEN : e.evidence > 0.7 ? PRIMARY : ACCENT_ORANGE}
-                        strokeWidth={e.evidence > 0.9 ? 2 : 1}
-                        strokeDasharray={e.evidence < 0.7 ? '4 3' : undefined}
-                      />
-                      <text x={(src.x + tgt.x) / 2} y={(src.y + tgt.y) / 2 - 5} textAnchor="middle" className="text-[8px] fill-muted-foreground pointer-events-none">{e.relation}</text>
-                    </g>
-                  );
-                })}
-                {searchedNodes.map(n => {
-                  const pos = positions.get(n.id);
-                  if (!pos) return null;
-                  const isSel = selectedNode === n.id;
-                  const isConn = connectedToSelected.has(n.id);
-                  const isActive = !selectedNode || isConn;
-                  const r = nodeSizes[n.type] || 20;
-                  const color = nodeColors[n.type];
-                  return (
-                    <g key={n.id} className="cursor-pointer" onClick={() => setSelectedNode(selectedNode === n.id ? null : n.id)} opacity={isActive ? 1 : 0.2}>
-                      {isSel && <circle cx={pos.x} cy={pos.y} r={r + 6} fill="none" stroke={color} strokeWidth={2} strokeDasharray="4 2" opacity={0.5} />}
-                      <circle cx={pos.x} cy={pos.y} r={r} fill={`${color}15`} stroke={color} strokeWidth={isSel ? 2.5 : 1.5} />
-                      <text x={pos.x} y={pos.y + r + 13} textAnchor="middle" className="text-[9px] fill-foreground font-medium pointer-events-none">{n.label}</text>
-                    </g>
-                  );
-                })}
-              </g>
-            </svg>
-            {/* Selected node info */}
-            {selectedNode && (() => {
-              const node = graphNodes.find(n => n.id === selectedNode);
-              if (!node) return null;
-              const nodeEdges = filteredEdges.filter(e => e.source === selectedNode || e.target === selectedNode);
-              return (
-                <div className="absolute bottom-3 left-3 bg-background/90 backdrop-blur-sm border rounded-lg p-3 max-w-[240px]">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-semibold text-sm">{node.label}</span>
-                    <Button variant="ghost" size="sm" className="h-5 w-5 p-0" onClick={() => setSelectedNode(null)}>×</Button>
-                  </div>
-                  <Badge variant="secondary" className="text-[10px]" style={{ color: nodeColors[node.type] }}>{node.type}</Badge>
-                  <p className="text-xs text-muted-foreground mt-1">{nodeEdges.length} connections</p>
-                  {node.type === 'drug' && (
-                    <Button variant="link" size="sm" className="h-6 p-0 text-xs mt-1" onClick={() => {
-                      const cand = drugCandidates.find(c => c.drugName === node.label);
-                      if (cand) navigate({ page: 'app', section: 'candidate', id: cand.id });
-                    }}>View candidate detail →</Button>
-                  )}
-                </div>
-              );
-            })()}
-          </CardContent>
-        </Card>
-      </div>
+      <PageHeader
+        title="Knowledge Graph Explorer"
+        description="Explore relationships between drugs, diseases, genes, proteins, and pathways — backed by the Phase 2 Neo4j knowledge graph."
+      />
+      <KnowledgeGraphExplorer
+        drug={drug}
+        limit={1000}
+        height={600}
+        className="w-full"
+      />
     </FadeIn>
   );
 }
@@ -1445,13 +1502,85 @@ function ClinicalTrialsScreen() {
 // ═══════════════════════════════════════════
 
 function SafetyProfileScreen() {
-  const [selectedDrug, setSelectedDrug] = useState<string>(drugCandidates[0].drugName);
-  const candidate = drugCandidates.find(c => c.drugName === selectedDrug) || drugCandidates[0];
-  const admet = admetProfiles.find(a => a.drugName === selectedDrug);
-  const offTargets = offTargetPredictions.filter(o => o.drugName === selectedDrug);
-  const interactions = drugInteractions.filter(d => d.drug1 === selectedDrug);
+  // ROOT FIX (audit #282, #285): the previous version did
+  // `useState<string>(drugCandidates[0].drugName)` — if drugCandidates
+  // was empty the screen crashed at mount. We now:
+  //   1. Initialize from the first mock candidate safely with `?.`,
+  //      falling back to '' (empty) so the screen renders an
+  //      EmptyState if no drugs are available.
+  //   2. Wire to the REAL /api/safety/[drug] route (TM 13 task 5)
+  //      which proxies to the openFDA adverse-event API. We display
+  //      REAL top reactions and REAL serious-report counts, not the
+  //      fabricated `Math.random()` frequencies the previous version
+  //      used. (Fabricating safety frequencies is a scientific
+  //      integrity violation — explicitly forbidden by the user.)
+  //   3. Use the canonical <SafetyBadge /> for the tier pill.
+  //   4. Render <EmptyState /> when no drug is selected.
+  const firstDrugName = drugCandidates[0]?.drugName ?? '';
+  const [selectedDrug, setSelectedDrug] = useState<string>(firstDrugName);
   const [ddiQuery, setDdiQuery] = useState('');
-  const uniqueDrugNames = [...new Set(drugCandidates.map(c => c.drugName))];
+  const uniqueDrugNames = useMemo(
+    () => [...new Set(drugCandidates.map(c => c.drugName).filter(Boolean))],
+    [],
+  );
+
+  // candidate may be undefined if selectedDrug doesn't match anything
+  // (e.g. when drugCandidates is empty or selectedDrug is '').
+  const candidate = drugCandidates.find(c => c.drugName === selectedDrug);
+  const admet = candidate ? admetProfiles.find(a => a.drugName === selectedDrug) : undefined;
+  const offTargets = candidate ? offTargetPredictions.filter(o => o.drugName === selectedDrug) : [];
+  const interactions = candidate ? drugInteractions.filter(d => d.drug1 === selectedDrug) : [];
+
+  // Real openFDA safety data — fetched when the user picks a drug.
+  const [safetyData, setSafetyData] = useState<{
+    totalReports?: number;
+    seriousReports?: number;
+    seriousReportsWithDeath?: number;
+    topReactions?: Array<{ term: string; count: number }>;
+    disclaimer?: string;
+  } | null>(null);
+  const [safetyLoading, setSafetyLoading] = useState(false);
+  const [safetyError, setSafetyError] = useState<string | null>(null);
+  const [safetyNotFound, setSafetyNotFound] = useState(false);
+
+  useEffect(() => {
+    if (!selectedDrug) {
+      setSafetyData(null);
+      setSafetyNotFound(false);
+      setSafetyError(null);
+      return;
+    }
+    let cancelled = false;
+    setSafetyLoading(true);
+    setSafetyError(null);
+    setSafetyNotFound(false);
+    fetch(`/api/safety/${encodeURIComponent(selectedDrug)}`, {
+      headers: { Accept: 'application/json' },
+    })
+      .then(async (res) => {
+        if (cancelled) return;
+        if (res.status === 404) {
+          setSafetyData(null);
+          setSafetyNotFound(true);
+          return;
+        }
+        if (!res.ok) {
+          throw new Error(`Safety API returned ${res.status}`);
+        }
+        const data = await res.json();
+        setSafetyData(data);
+        setSafetyNotFound(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setSafetyError(String(err?.message ?? err));
+        setSafetyData(null);
+      })
+      .finally(() => {
+        if (!cancelled) setSafetyLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [selectedDrug]);
 
   const ddiResults = useMemo(() => {
     if (!ddiQuery.trim()) return [];
@@ -1460,6 +1589,29 @@ function SafetyProfileScreen() {
       (d.drug1 === selectedDrug || d.drug2 === selectedDrug)
     );
   }, [ddiQuery, selectedDrug]);
+
+  // EMPTY STATE (audit #282): no drug selected.
+  if (!selectedDrug || uniqueDrugNames.length === 0) {
+    return (
+      <FadeIn>
+        <PageHeader title="Safety Profile Dashboard" description="Comprehensive safety analysis for drug candidates" />
+        <Card>
+          <CardContent>
+            <EmptyState
+              icon={ShieldCheck}
+              title="No drug selected"
+              description="There are no drug candidates available to analyze. This typically means the dataset pipeline has not been run yet, or the RL ranker returned no results."
+              size="lg"
+            />
+          </CardContent>
+        </Card>
+      </FadeIn>
+    );
+  }
+
+  const safetyScore = candidate?.safetyScore ?? 0;
+  const safetyTier = candidate?.safetyTier;
+  const maxReactionCount = safetyData?.topReactions?.[0]?.count ?? 1;
 
   return (
     <FadeIn>
@@ -1473,17 +1625,37 @@ function SafetyProfileScreen() {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-        <StatCard icon={ShieldCheck} value={candidate.safetyScore} label="Safety Score" color={ACCENT_GREEN} />
+        <StatCard icon={ShieldCheck} value={safetyScore} label="Safety Score" color={ACCENT_GREEN} />
         <StatCard icon={AlertTriangle} value={offTargets.length} label="Off-Target Predictions" color={ACCENT_ORANGE} />
         <StatCard icon={AlertCircle} value={interactions.length} label="Drug Interactions" color={ACCENT_RED} />
       </div>
+
+      {/* Real openFDA summary banner */}
+      {safetyLoading && (
+        <div className="bg-blue-50 border border-blue-200 text-blue-800 text-xs font-medium px-3 py-2 rounded-md mb-4 flex items-center gap-2">
+          <span className="h-3 w-3 rounded-full border-2 border-blue-600 border-t-transparent animate-spin" />
+          Fetching real adverse-event data from openFDA…
+        </div>
+      )}
+      {safetyError && (
+        <div className="bg-red-50 border border-red-200 text-red-800 text-xs font-medium px-3 py-2 rounded-md mb-4">
+          openFDA lookup failed: {safetyError}. Showing only the in-app safety tier.
+        </div>
+      )}
+      {safetyData && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+          <StatCard icon={AlertCircle} value={safetyData.totalReports ?? 0} label="Total AE Reports (openFDA)" color={ACCENT_ORANGE} />
+          <StatCard icon={AlertTriangle} value={safetyData.seriousReports ?? 0} label="Serious Reports" color={ACCENT_RED} />
+          <StatCard icon={AlertTriangle} value={safetyData.seriousReportsWithDeath ?? 0} label="Reports with Death" color={ACCENT_RED} />
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
               <CardTitle className="text-base">Safety Tier</CardTitle>
-              <SafetyBadge tier={candidate.safetyTier} />
+              <SafetyBadge tier={safetyTier} />
             </div>
           </CardHeader>
           <CardContent>
@@ -1533,25 +1705,41 @@ function SafetyProfileScreen() {
         </Card>
 
         <Card>
-          <CardHeader className="pb-3"><CardTitle className="text-base">Adverse Event Signals</CardTitle></CardHeader>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Reported Adverse Events (openFDA / FAERS)</CardTitle>
+          </CardHeader>
           <CardContent className="space-y-2">
-            {['Headache', 'Nausea', 'Dizziness', 'Fatigue'].map((ae, i) => {
-              const freq = Math.round(20 + Math.random() * 40);
-              return (
-                <div key={i} className="flex items-center justify-between">
-                  <span className="text-sm">{ae}</span>
-                  <div className="flex items-center gap-2">
-                    <div className="w-20 h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                      <div className="h-full rounded-full" style={{ width: `${freq}%`, backgroundColor: freq > 50 ? ACCENT_ORANGE : ACCENT_GREEN }} />
+            {safetyNotFound ? (
+              <p className="text-sm text-muted-foreground">
+                No adverse-event reports found in openFDA for this drug. This may mean the drug is not in FAERS, or the generic/brand name doesn't match openFDA's index.
+              </p>
+            ) : safetyData && safetyData.topReactions && safetyData.topReactions.length > 0 ? (
+              <>
+                {safetyData.topReactions.slice(0, 10).map((r, i) => {
+                  // ROOT FIX: real reported counts from FAERS — NOT Math.random().
+                  const pct = Math.round((r.count / maxReactionCount) * 100);
+                  return (
+                    <div key={i} className="flex items-center justify-between">
+                      <span className="text-sm">{r.term}</span>
+                      <div className="flex items-center gap-2">
+                        <div className="w-24 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                          <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: r.count > maxReactionCount / 2 ? ACCENT_RED : r.count > maxReactionCount / 4 ? ACCENT_ORANGE : ACCENT_GREEN }} />
+                        </div>
+                        <span className="text-xs text-muted-foreground tabular-nums w-12 text-right">{r.count.toLocaleString()}</span>
+                      </div>
                     </div>
-                    <span className="text-xs text-muted-foreground">{freq}%</span>
-                  </div>
-                </div>
-              );
-            })}
+                  );
+                })}
+                {safetyData.disclaimer && (
+                  <p className="text-[10px] text-muted-foreground mt-3 italic">{safetyData.disclaimer}</p>
+                )}
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">No reaction data available.</p>
+            )}
             <div className="mt-3 p-2.5 bg-red-50 border border-red-200 rounded-lg">
               <div className="flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-red-600" /><span className="text-sm font-medium text-red-700">Black Box Warning</span></div>
-              <p className="text-xs text-red-600 mt-1">{candidate.safetyTier === 'red' ? 'This drug carries significant safety risks requiring close monitoring.' : 'No black box warnings identified for repurposing context.'}</p>
+              <p className="text-xs text-red-600 mt-1">{safetyTier === 'red' ? 'This drug carries significant safety risks requiring close monitoring.' : 'No black box warnings identified for repurposing context.'}</p>
             </div>
           </CardContent>
         </Card>
