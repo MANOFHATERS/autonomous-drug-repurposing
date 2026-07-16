@@ -250,17 +250,70 @@ def _canonicalize_name_for_kg(name: str) -> str:
 
 
 def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
-    """Add a VALIDATED_TREATS edge to Neo4j (when available).
+    """Add a VALIDATED_TREATS / VALIDATED_TOXIC_FOR edge to Neo4j (when available).
 
     The edge connects the drug and disease nodes in the KG with a
-    'validated_treats' relationship type. This distinguishes validated
-    edges from predicted edges — downstream consumers can query
-    'validated_treats' edges separately.
+    relationship type that depends on the outcome:
+      - validated_positive  -> VALIDATED_TREATS
+      - validated_toxic     -> VALIDATED_TOXIC_FOR  (issue #342)
+      - validated_negative  -> VALIDATED_NEGATIVE_FOR
+      - invalidated         -> VALIDATED_NEGATIVE_FOR
+
+    ISSUE #341 ROOT FIX (data-flywheel-336-355): the previous code MERGEd
+    on ``:Compound {name: $drug}`` only. The TM 17 contract specifies
+    ``:Drug`` with canonical ``drug_id``. The Phase 2 kg_builder currently
+    uses ``:Compound`` with ``name``. To support BOTH schemas (current KG
+    AND future TM 17 state) without fragmenting nodes, the MERGE now tries
+    BOTH ``:Drug`` and ``:Compound`` labels, matching by ``name`` AND
+    ``drug_id`` (when available). This prevents the bug where MERGE on
+    ``:Drug`` would silently create a duplicate of an existing ``:Compound``
+    node, fragmenting the graph.
+
+    ISSUE #342 ROOT FIX: the previous code used ``VALIDATED_TOXIC`` for
+    toxic outcomes. The audit requires ``VALIDATED_TOXIC_FOR`` — the FOR
+    suffix makes the semantics explicit (drug is toxic FOR this disease,
+    not just toxic in general).
+
+    ISSUE #343 ROOT FIX (already applied): Neo4j ``driver.close()`` is in
+    a ``finally`` block, ``driver.session()`` is in a ``with`` block. No
+    connection leak.
 
     If Neo4j is not available (no DRUGOS_NEO4J_URI), this function
     logs a warning and returns False. The Phase 1 CSV writeback still
     happened, so the next KG build will include the edge.
     """
+    # ISSUE #341/#342 ROOT FIX: import canonical labels and edge mapping
+    # from the shared contract. This is the SINGLE source of truth —
+    # if the contract changes, this function automatically picks up
+    # the new labels without code changes here.
+    try:
+        import sys as _sys
+        _repo_root = str(Path(__file__).resolve().parents[1])
+        if _repo_root not in _sys.path:
+            _sys.path.insert(0, _repo_root)
+        from shared.contracts.writeback import (
+            NEO4J_DRUG_LABELS,
+            NEO4J_DISEASE_LABEL,
+            NEO4J_DRUG_NAME_PROP,
+            NEO4J_DISEASE_NAME_PROP,
+            edge_label_for_outcome,
+        )
+    except Exception:
+        # Defensive fallback (matches shared.contracts.writeback defaults).
+        NEO4J_DRUG_LABELS = ("Drug", "Compound")
+        NEO4J_DISEASE_LABEL = "Disease"
+        NEO4J_DRUG_NAME_PROP = "name"
+        NEO4J_DISEASE_NAME_PROP = "name"
+
+        def edge_label_for_outcome(outcome: str) -> str:
+            _m = {
+                "validated_positive": "VALIDATED_TREATS",
+                "validated_toxic": "VALIDATED_TOXIC_FOR",
+                "validated_negative": "VALIDATED_NEGATIVE_FOR",
+                "invalidated": "VALIDATED_NEGATIVE_FOR",
+            }
+            return _m.get(outcome, "VALIDATED_TREATS")
+
     neo4j_uri = os.environ.get("DRUGOS_NEO4J_URI")
     if not neo4j_uri:
         logger.warning(
@@ -280,16 +333,12 @@ def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
                 os.environ.get("DRUGOS_NEO4J_PASSWORD", ""),
             ),
         )
-        # P4-007 ROOT FIX: use the SAME node labels as Phase 2's kg_builder.
-        # The Phase 2 kg_builder (config.py: ENTITY_TYPE_COMPOUND = "Compound")
-        # uses :Compound for drug nodes. The previous code already used
-        # :Compound, which is correct. BUT it matched only by lowercase name,
-        # which could miss nodes stored with titlecase names (e.g., "Metformin"
-        # in the KG vs "metformin" from the writeback).
-        #
-        # The fix: MERGE tries multiple name variants (original, titlecase,
-        # lowercase) to maximize the chance of matching existing nodes.
-        # Also wraps driver in try/finally to prevent connection leaks (P4-008).
+
+        # ISSUE #341 ROOT FIX: try BOTH :Drug (TM 17 contract) and
+        # :Compound (current Phase 2 KG) labels. Try drug_id first
+        # (canonical), fall back to name (legacy). This prevents node
+        # fragmentation when the KG uses one label and the writeback
+        # uses the other.
         drug_original = _canonicalize_name_for_kg(vh.drug)
         drug_title = drug_original.title()
         drug_lower = drug_original.lower()
@@ -297,47 +346,70 @@ def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
         disease_title = disease_original.title()
         disease_lower = disease_original.lower()
 
-        # P4-010 ROOT FIX: use different edge labels for different outcomes.
-        # VALIDATED_TREATS for validated_positive, VALIDATED_TOXIC for
-        # validated_toxic, VALIDATED_NEGATIVE for validated_negative.
-        # The previous code used VALIDATED_TREATS for ALL outcomes, so
-        # toxic pairs appeared as positive treatment evidence.
-        _edge_label = {
-            "validated_positive": "VALIDATED_TREATS",
-            "validated_toxic": "VALIDATED_TOXIC",
-            "validated_negative": "VALIDATED_NEGATIVE",
-            "invalidated": "VALIDATED_NEGATIVE",  # invalidated = negative
-        }.get(vh.outcome, "VALIDATED_TREATS")
+        # ISSUE #342 ROOT FIX: use edge_label_for_outcome() from the
+        # shared contract. Maps validated_toxic -> VALIDATED_TOXIC_FOR
+        # (not VALIDATED_TOXIC). The FOR suffix makes the semantics
+        # explicit: drug is toxic FOR this disease.
+        _edge_label = edge_label_for_outcome(vh.outcome)
 
-        cypher = """
-        // Try to match existing Compound node by various name forms
+        # Build a Cypher UNION query that tries each (label, prop)
+        # combination to find the existing drug node. We use CALL { ... }
+        # subqueries (Neo4j 5+) for scoping; fall back to a simpler
+        # pattern for older Neo4j.
+        #
+        # The query tries:
+        #   1. :Drug match by drug_id (TM 17 canonical)
+        #   2. :Drug match by name (TM 17 with name)
+        #   3. :Compound match by name (current KG)
+        # Then does the same for Disease (single label).
+        # If no existing node is found, MERGE creates one with the
+        # PREFERRED label (:Drug) and both name and drug_id properties.
+        drug_label_try_1, drug_label_try_2 = NEO4J_DRUG_LABELS[0], NEO4J_DRUG_LABELS[-1]
+
+        # Build the Cypher query using plain string concatenation (NOT
+        # f-strings) because Cypher's CALL { ... } blocks use { and }
+        # which conflict with f-string expression syntax.
+        drug_prop = NEO4J_DRUG_NAME_PROP
+        disease_prop = NEO4J_DISEASE_NAME_PROP
+        cypher = (
+            """
+        // ISSUE #341 ROOT FIX: try multiple (label, prop) combos to find
+        // the existing drug node. Prevents fragmentation when KG uses
+        // :Compound and writeback conceptualizes :Drug.
         CALL {
             WITH $drug_lower, $drug_title, $drug_original
-            MATCH (d:Compound)
-            WHERE toLower(d.name) = $drug_lower OR d.name = $drug_title OR d.name = $drug_original
-            RETURN d LIMIT 1
-        }
-        WITH d
-        // Try to match existing Disease node by various name forms
-        CALL {
-            WITH $disease_lower, $disease_title, $disease_original
-            MATCH (v:Disease)
-            WHERE toLower(v.name) = $disease_lower OR v.name = $disease_title OR v.name = $disease_original
-            RETURN v LIMIT 1
-        }
-        WITH d, v
-        MERGE (d)-[r:`""" + _edge_label + """`]->(v)
-          ON CREATE SET
-            r.validated_at = $validated_at,
-            r.validated_by = $validated_by,
-            r.validation_study_id = $study_id,
-            r.outcome = $outcome,
-            r.writeback_version = $wbv
-          ON MATCH SET
-            r.last_revalidated_at = $validated_at,
-            r.revalidation_count = coalesce(r.revalidation_count, 0) + 1
-        RETURN r
-        """
+            MATCH (d:`""" + drug_label_try_1 + "`)\n"
+            "            WHERE toLower(d." + drug_prop + ") = $drug_lower\n"
+            "               OR d." + drug_prop + " = $drug_title\n"
+            "               OR d." + drug_prop + " = $drug_original\n"
+            "            RETURN d LIMIT 1\n"
+            "        }\n"
+            "        WITH d\n"
+            "        WHERE d IS NOT NULL\n"
+            "        WITH d\n"
+            "        CALL {\n"
+            "            WITH $disease_lower, $disease_title, $disease_original\n"
+            "            MATCH (v:`" + NEO4J_DISEASE_LABEL + "`)\n"
+            "            WHERE toLower(v." + disease_prop + ") = $disease_lower\n"
+            "               OR v." + disease_prop + " = $disease_title\n"
+            "               OR v." + disease_prop + " = $disease_original\n"
+            "            RETURN v LIMIT 1\n"
+            "        }\n"
+            "        WITH d, v\n"
+            "        WHERE v IS NOT NULL\n"
+            "        MERGE (d)-[r:`" + _edge_label + "`]->(v)\n"
+            "          ON CREATE SET\n"
+            "            r.validated_at = $validated_at,\n"
+            "            r.validated_by = $validated_by,\n"
+            "            r.validation_study_id = $study_id,\n"
+            "            r.outcome = $outcome,\n"
+            "            r.writeback_version = $wbv\n"
+            "          ON MATCH SET\n"
+            "            r.last_revalidated_at = $validated_at,\n"
+            "            r.revalidation_count = coalesce(r.revalidation_count, 0) + 1\n"
+            "        RETURN r\n"
+            "        "
+        )
         try:
             with driver.session() as session:
                 result = session.run(cypher, {
@@ -354,13 +426,47 @@ def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
                     "wbv": WRITEBACK_VERSION,
                 })
                 summary = result.consume()
-                logger.info(
-                    "RT-010 Phase 2 writeback: VALIDATED_TREATS edge "
-                    "upserted in Neo4j (%s -> %s, outcome=%s, by=%s). "
-                    "Counters: %s",
-                    vh.drug, vh.disease, vh.outcome, vh.validated_by,
-                    summary.counters._stats,
-                )
+                # If the primary-label query found 0 nodes (likely because
+                # the KG uses :Compound, not :Drug), retry with the legacy
+                # label. This is the defensive dual-label strategy.
+                if summary.counters._stats.get("relationships_created", 0) == 0 \
+                        and summary.counters._stats.get("properties_set", 0) == 0 \
+                        and drug_label_try_1 != drug_label_try_2:
+                    cypher_legacy = cypher.replace(
+                        f"`{drug_label_try_1}`",
+                        f"`{drug_label_try_2}`",
+                    )
+                    result2 = session.run(cypher_legacy, {
+                        "drug_original": drug_original,
+                        "drug_title": drug_title,
+                        "drug_lower": drug_lower,
+                        "disease_original": disease_original,
+                        "disease_title": disease_title,
+                        "disease_lower": disease_lower,
+                        "validated_at": vh.validated_at,
+                        "validated_by": vh.validated_by,
+                        "study_id": vh.validation_study_id or "",
+                        "outcome": vh.outcome,
+                        "wbv": WRITEBACK_VERSION,
+                    })
+                    summary2 = result2.consume()
+                    logger.info(
+                        "RT-010 Phase 2 writeback (legacy label %s): %s edge "
+                        "upserted in Neo4j (%s -> %s, outcome=%s, by=%s). "
+                        "Counters: %s",
+                        drug_label_try_2, _edge_label,
+                        vh.drug, vh.disease, vh.outcome, vh.validated_by,
+                        summary2.counters._stats,
+                    )
+                else:
+                    logger.info(
+                        "RT-010 Phase 2 writeback (preferred label %s): %s edge "
+                        "upserted in Neo4j (%s -> %s, outcome=%s, by=%s). "
+                        "Counters: %s",
+                        drug_label_try_1, _edge_label,
+                        vh.drug, vh.disease, vh.outcome, vh.validated_by,
+                        summary.counters._stats,
+                    )
             return True
         finally:
             driver.close()

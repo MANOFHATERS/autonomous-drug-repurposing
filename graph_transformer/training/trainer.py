@@ -2304,7 +2304,27 @@ def retrain_on_validated(
                     pos_diseases.append(ds_idx)
 
             if pos_drugs and fine_tune_epochs > 0:
-                # Reconstruct model from saved config
+                # Reconstruct model from saved config.
+                #
+                # ISSUE #338 ROOT FIX (data-flywheel-336-355): the previous
+                # "fix" for #338 (implement actual fine-tuning) introduced
+                # a NEW bug — it called DrugRepurposingGraphTransformer with
+                # the OLD API argument ``node_features_dims=...``. The
+                # current API uses ``feature_dims=...`` and requires
+                # ``edge_types`` and ``node_types``. The TypeError crashed
+                # the fine-tune path, which was caught by the outer
+                # try/except and silently fell back to "known_pairs-only
+                # update" with fine_tune_epochs=0. The data flywheel was
+                # therefore NON-FUNCTIONAL — the model was never actually
+                # fine-tuned on validated pairs. This is exactly the
+                # "fixes that introduced NEW bugs while patching old ones"
+                # pattern the audit warned about.
+                #
+                # ROOT FIX: use the CURRENT API (feature_dims, edge_types,
+                # node_types, min_edge_types). The min_edge_types=1 allows
+                # fine-tuning on a tiny graph (e.g., the staging test's
+                # 4-drug, 4-disease graph with 1 edge type). For the
+                # production graph (18 edge types), this is a no-op.
                 from graph_transformer.models.graph_transformer import (
                     DrugRepurposingGraphTransformer,
                 )
@@ -2313,7 +2333,7 @@ def retrain_on_validated(
                     "node_features_dims", graph_state.get("feature_dims", {})
                 )
                 model = DrugRepurposingGraphTransformer(
-                    node_features_dims=node_features_dims,
+                    feature_dims=node_features_dims,
                     embedding_dim=model_config.get("embedding_dim", 32),
                     num_layers=model_config.get("num_layers", 3),
                     num_heads=model_config.get("num_heads", 2),
@@ -2322,6 +2342,9 @@ def retrain_on_validated(
                     link_predictor_hidden_dims=model_config.get(
                         "link_predictor_hidden_dims", [64, 32]
                     ),
+                    edge_types=list(edge_indices.keys()),
+                    node_types=list(node_features.keys()),
+                    min_edge_types=1,  # allow fine-tune on small subgraphs
                 )
                 model.load_state_dict(
                     bundle.get("model_state_dict", bundle.get("model", {}))
@@ -2350,14 +2373,58 @@ def retrain_on_validated(
                 except Exception as exc:
                     logger.warning("retrain_on_validated: eval-before failed: %s", exc)
 
-                # Fine-tune for a few epochs
+                # ISSUE #338 ROOT FIX (data-flywheel-336-355): construct a
+                # DRUG-DISJOINT val set so the trainer's fit() drug-aware
+                # split enforcement does not raise. The previous code
+                # passed the SAME tensors as both train and val, which
+                # triggered "V30 ROOT FIX (8.5): drug-aware split
+                # violation -- N drug indices appear in BOTH train and val".
+                # The exception was caught by the outer try/except and
+                # silently fell back to "known_pairs-only update" with
+                # fine_tune_epochs=0 — the data flywheel was non-functional.
+                #
+                # ROOT FIX: build the val set from drugs NOT in pos_drugs.
+                # If the graph has at least 1 drug not in the validated
+                # pairs, use it (with a random disease and label 0) as
+                # the val set. This satisfies the drug-disjoint check
+                # (val drugs ∩ train drugs = ∅) and lets fit() proceed.
+                # The val AUC is meaningless for fine-tuning (we're not
+                # using it for early stopping — patience=fine_tune_epochs),
+                # so a degenerate val set is acceptable.
+                train_drugs_set = set(int(x) for x in pos_drugs)
+                all_drug_indices = set(range(len(drug_map)))
+                val_candidate_drugs = sorted(all_drug_indices - train_drugs_set)
+                if val_candidate_drugs:
+                    # Use up to 2 candidate drugs for val (with all diseases).
+                    val_drug_list = val_candidate_drugs[:2]
+                    val_drugs = []
+                    val_diseases = []
+                    val_labels_list = []
+                    for vd in val_drug_list:
+                        for ds_idx in range(len(disease_map)):
+                            val_drugs.append(vd)
+                            val_diseases.append(ds_idx)
+                            val_labels_list.append(0.0)  # negative label
+                    val_drug_idx_t = _torch.tensor(val_drugs, dtype=_torch.long)
+                    val_disease_idx_t = _torch.tensor(val_diseases, dtype=_torch.long)
+                    val_labels_t = _torch.tensor(val_labels_list, dtype=_torch.float)
+                else:
+                    # Edge case: all drugs are in train. Use an EMPTY val
+                    # tensor. The drug-disjoint check (train ∩ val = ∅)
+                    # passes trivially. The val AUC computation will
+                    # return 0.5 (degenerate), which is fine for fine-tune.
+                    val_drug_idx_t = _torch.tensor([], dtype=_torch.long)
+                    val_disease_idx_t = _torch.tensor([], dtype=_torch.long)
+                    val_labels_t = _torch.tensor([], dtype=_torch.float)
+
+                # Fine-tune for a few epochs (drug-disjoint val set).
                 trainer.fit(
                     train_drug_idx=drug_idx_t,
                     train_disease_idx=disease_idx_t,
                     train_labels=labels_t,
-                    val_drug_idx=drug_idx_t,
-                    val_disease_idx=disease_idx_t,
-                    val_labels=labels_t,
+                    val_drug_idx=val_drug_idx_t,
+                    val_disease_idx=val_disease_idx_t,
+                    val_labels=val_labels_t,
                     epochs=fine_tune_epochs,
                     patience=fine_tune_epochs,  # no early stopping during fine-tune
                 )
@@ -2546,16 +2613,68 @@ def load_validated_for_retraining(
             logger.warning("P4-009: failed to read retrain trigger JSON (%s): %s", retrain_trigger_path, exc)
 
     # Write a temporary CSV in the format expected by retrain_on_validated.
-    # The CSV must have columns: drug, disease, validated ("true"/"false")
+    #
+    # ISSUE #337 ROOT FIX (data-flywheel-336-355): the previous code wrote
+    # the temp CSV with column name ``validated`` and values ``"true"`` /
+    # ``"false"``. But ``retrain_on_validated`` reads the ``outcome`` column
+    # (per shared.contracts.writeback.OUTCOME_COL) and branches on the
+    # canonical outcome enum values (``validated_positive`` /
+    # ``validated_toxic``). The temp CSV was therefore INVISIBLE to
+    # ``retrain_on_validated`` — every row was silently skipped because
+    # ``row.get(OUTCOME_COL)`` returned an empty string. The data flywheel
+    # Step 2->3 (retrain trigger -> trainer fine-tune) was broken at this
+    # exact boundary.
+    #
+    # ROOT FIX: write the temp CSV using the CANONICAL schema imported
+    # from shared.contracts.writeback. Both ``drug``, ``disease``, and
+    # ``outcome`` columns use the exact strings the trainer's reader
+    # expects. Positive pairs are tagged ``validated_positive`` (added
+    # to known_pairs as positive labels). Toxic pairs are tagged
+    # ``validated_toxic`` (excluded from positive labels — the trainer
+    # logs them at DEBUG and skips, which is the safe choice; a future
+    # enhancement can add them as label=0 negatives).
+    try:
+        import sys as _sys_mod
+        _repo_root = str(_Path(__file__).resolve().parents[2])
+        if _repo_root not in _sys_mod.path:
+            _sys_mod.path.insert(0, _repo_root)
+        from shared.contracts.writeback import (
+            DRUG_COL as _WB_DRUG_COL,
+            DISEASE_COL as _WB_DISEASE_COL,
+            OUTCOME_COL as _WB_OUTCOME_COL,
+            OUTCOME_VALIDATED_POSITIVE as _WB_OUTCOME_POS,
+            OUTCOME_VALIDATED_TOXIC as _WB_OUTCOME_TOX,
+        )
+    except Exception:
+        # Defensive fallback (same constants, hardcoded) — keeps the
+        # function working even if shared.contracts.writeback is somehow
+        # not importable.
+        _WB_DRUG_COL = "drug"
+        _WB_DISEASE_COL = "disease"
+        _WB_OUTCOME_COL = "outcome"
+        _WB_OUTCOME_POS = "validated_positive"
+        _WB_OUTCOME_TOX = "validated_toxic"
+
     import tempfile as _tempfile
     tmp_csv = _tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, encoding="utf-8")
     try:
-        writer = _csv.DictWriter(tmp_csv, fieldnames=["drug", "disease", "validated"])
+        writer = _csv.DictWriter(
+            tmp_csv,
+            fieldnames=[_WB_DRUG_COL, _WB_DISEASE_COL, _WB_OUTCOME_COL],
+        )
         writer.writeheader()
         for drug, disease in positive_pairs:
-            writer.writerow({"drug": drug, "disease": disease, "validated": "true"})
+            writer.writerow({
+                _WB_DRUG_COL: drug,
+                _WB_DISEASE_COL: disease,
+                _WB_OUTCOME_COL: _WB_OUTCOME_POS,
+            })
         for drug, disease in negative_pairs:
-            writer.writerow({"drug": drug, "disease": disease, "validated": "false"})
+            writer.writerow({
+                _WB_DRUG_COL: drug,
+                _WB_DISEASE_COL: disease,
+                _WB_OUTCOME_COL: _WB_OUTCOME_TOX,
+            })
         tmp_csv.close()
 
         result = retrain_on_validated(

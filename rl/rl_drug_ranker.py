@@ -840,23 +840,35 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
         doesn't exist or has no positive rows (with a CRITICAL log).
     """
     # INT-014 ROOT FIX: import canonical path from shared schema.
+    #
+    # ISSUE #336/#337 ROOT FIX (data-flywheel-336-355): use
+    # ``get_validated_csv_path()`` (which respects the VALIDATED_HYPOTHESES_CSV
+    # env var at CALL TIME) instead of the ``CANONICAL_VALIDATED_CSV`` constant
+    # (which is computed at IMPORT TIME and ignores the env var). The previous
+    # code used the constant, so the staging test's env var override was
+    # IGNORED — the RL ranker loaded the legacy rl/validated_hypotheses.csv
+    # instead of the staging CSV. This broke the flywheel Step 1->4
+    # (validated pairs -> RL ranker loads new bonus).
     try:
         import sys
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if repo_root not in sys.path:
             sys.path.insert(0, repo_root)
         from common.validated_hypotheses_schema import (
-            CANONICAL_VALIDATED_CSV,
+            get_validated_csv_path,
             OUTCOME_COL,
             OUTCOME_VALIDATED_POSITIVE,
             OUTCOME_VALIDATED_TOXIC,
         )
-        canonical_path = CANONICAL_VALIDATED_CSV
+        canonical_path = get_validated_csv_path()  # respects env var at call time
     except Exception:
         # Fallback if schema module not available (should never happen).
         module_dir = os.path.dirname(os.path.abspath(__file__))
-        canonical_path = os.path.join(
-            os.path.dirname(module_dir), "phase1", "processed_data", "validated_hypotheses.csv"
+        canonical_path = os.environ.get(
+            "VALIDATED_HYPOTHESES_CSV",
+            os.path.join(
+                os.path.dirname(module_dir), "phase1", "processed_data", "validated_hypotheses.csv"
+            ),
         )
         OUTCOME_COL = "outcome"
         OUTCOME_VALIDATED_POSITIVE = "validated_positive"
@@ -986,11 +998,11 @@ def _load_validated_toxic_hypotheses() -> List[Tuple[str, str]]:
         if repo_root not in sys.path:
             sys.path.insert(0, repo_root)
         from common.validated_hypotheses_schema import (
-            CANONICAL_VALIDATED_CSV,
+            get_validated_csv_path,
             OUTCOME_COL,
             OUTCOME_VALIDATED_TOXIC,
         )
-        canonical_path = CANONICAL_VALIDATED_CSV
+        canonical_path = get_validated_csv_path()  # respects env var at call time
     except Exception:
         module_dir = os.path.dirname(os.path.abspath(__file__))
         canonical_path = os.path.join(
