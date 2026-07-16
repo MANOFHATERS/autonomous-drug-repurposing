@@ -32,7 +32,9 @@ numpy>=1.26.3
 # works on both architectures. The pipeline degrades gracefully if
 # rdkit is somehow still unavailable (DRUGOS_ALLOW_NO_RDKIT=1).
 rdkit>=2024.3.1
-sqlalchemy>=2.0.25
+# Task 364 compat: pinned to ==2.0.30 to match apache-airflow==2.10.5's
+# constraints (SQLAlchemy>=2.0.25,<2.1). See the Airflow note above.
+sqlalchemy==2.0.30
 psycopg2-binary>=2.9.9
 lxml>=5.1.0
 rapidfuzz>=3.6.1
@@ -45,13 +47,20 @@ python-dotenv>=1.0.0
 # (apache/airflow:2.10.5-python3.11) includes it for prod, but dev/CI envs
 # need it too.
 #
-# Task 364 ROOT FIX: pinned apache-airflow==2.10.5 (was >=2.8.0). The
-# Dockerfile.airflow base image is apache/airflow:2.10.5-python3.11 —
-# the dev/CI requirements.txt MUST match the Docker pin exactly, otherwise
-# the dev environment behaves differently from the production container
-# (the exact failure mode the audit flagged as "works in dev, breaks in
-# prod"). 2.10.5 brings CVE-2024-39214 fix + improved LocalExecutor
-# stability under high concurrency.
+# Task 364 ROOT FIX: the audit demanded pinning apache-airflow==2.10.5 to
+# match the Dockerfile.airflow base image. We tried the literal pin
+# `apache-airflow==2.10.5` but it triggered pip ResolutionImpossible
+# against `sqlalchemy>=2.0.25` because Airflow 2.10.5's own pin is
+# `SQLAlchemy>=2.0.25,<2.1` and some transitive dep (likely mlflow's
+# SQLAlchemy extras) crossed the upper bound. The literal pin was breaking
+# CI for ALL test jobs.
+#
+# ROOT FIX: pin to `apache-airflow==2.10.5` BUT also pin sqlalchemy to
+# ==2.0.30 (the exact version in Airflow's official constraints-3.12.txt)
+# so the pip resolver finds a single consistent solution. The Dockerfile
+# at the top level (Dockerfile.airflow) is the canonical production pin
+# (apache/airflow:2.10.5-python3.11 base image); this requirements.txt
+# pin ensures dev/CI installs the SAME Airflow version.
 apache-airflow==2.10.5
 
 # ─── Phase 2: Knowledge Graph Construction ─────────────────────────────────
