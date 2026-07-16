@@ -1392,6 +1392,58 @@ def _read_csv_robust(path: Path) -> pd.DataFrame:
 # Using the audit's literal column list would BREAK the bridge against the
 # real Phase 1 schema. The list below reflects the ACTUAL Phase 1 contract.
 #
+# =============================================================================
+# TASK 321 ROOT FIX (forensic, root-level, no surface fix):
+# The bridge now imports the canonical Phase 1 schema directly from
+# phase1.contracts.phase1_schema (the SINGLE source of truth). The
+# previous approach tried to load a JSON file (phase1/pipelines/schema/
+# v1.json) that did not exist and fell back to a HARDCODED dict that
+# silently drifted from the actual Phase 1 schema — the fake-fix
+# pattern the user described. This import eliminates the drift by
+# making the bridge's expected columns DERIVED from the same module
+# the Phase 1 pipelines write to.
+# =============================================================================
+try:
+    from phase1.contracts.phase1_schema import (
+        PHASE1_OUTPUT_SCHEMA as _CONTRACT_PHASE1_OUTPUT_SCHEMA,
+        PHASE1_CSV_FILENAMES as _CONTRACT_PHASE1_CSV_FILENAMES,
+    )
+    # Derive the expected-columns dict from the contract's SourceSpec
+    # objects. Each spec.required_columns is a tuple of ColumnSpec; we
+    # extract just the names (the bridge's validator uses name lists).
+    _PHASE1_EXPECTED_COLUMNS_FROM_CONTRACT: Dict[str, List[str]] = {
+        spec.key: [c.name for c in spec.required_columns]
+        for spec in _CONTRACT_PHASE1_OUTPUT_SCHEMA.values()
+    }
+    # Derive ANY_OF groups from the contract. Each spec.any_of_groups is
+    # a tuple of tuples of column names; we convert to list of lists.
+    _PHASE1_ANY_OF_COLUMNS_FROM_CONTRACT: Dict[str, List[List[str]]] = {
+        spec.key: [list(group) for group in spec.any_of_groups]
+        for spec in _CONTRACT_PHASE1_OUTPUT_SCHEMA.values()
+        if spec.any_of_groups
+    }
+    # Derive the source-key -> CSV-filename mapping from the contract.
+    _PHASE1_SOURCE_TO_CSV_FROM_CONTRACT: Dict[str, str] = dict(
+        _CONTRACT_PHASE1_CSV_FILENAMES
+    )
+    _PHASE1_CONTRACT_AVAILABLE: bool = True
+except ImportError as _contract_exc:
+    # Degraded mode: contract module not importable (e.g. Phase 2
+    # standalone deployment without phase1/ on the path). Fall back to
+    # the hardcoded dict below. The contract consistency test will fail
+    # in CI, surfacing the misconfiguration.
+    logger.warning(
+        "phase1.contracts.phase1_schema not importable (%s: %s) — "
+        "falling back to hardcoded _PHASE1_EXPECTED_COLUMNS. This is a "
+        "DEGRADED mode; the contract consistency test "
+        "(shared/tests/test_contract_consistency.py) will fail in CI.",
+        type(_contract_exc).__name__, _contract_exc,
+    )
+    _PHASE1_EXPECTED_COLUMNS_FROM_CONTRACT = {}
+    _PHASE1_ANY_OF_COLUMNS_FROM_CONTRACT = {}
+    _PHASE1_SOURCE_TO_CSV_FROM_CONTRACT = {}
+    _PHASE1_CONTRACT_AVAILABLE: bool = False
+
 # v108 ROOT FIX (issue 64): the column lists are now ALSO loaded from
 # ``phase1/pipelines/schema/v1.json`` (the Phase 1 contract source of
 # truth). The hardcoded dict below remains as a FALLBACK for backward
@@ -1400,6 +1452,11 @@ def _read_csv_robust(path: Path) -> pd.DataFrame:
 # ``_load_phase1_schema_columns()`` (defined below) merges the two
 # sources: schema JSON wins for any CSV it covers; the hardcoded list
 # fills in gaps for sources not yet in the schema JSON.
+#
+# TASK 321 ROOT FIX: the contract-derived values (above) OVERRIDE the
+# hardcoded dict and the JSON-derived values. The contract is the
+# single source of truth; the JSON file and hardcoded dict are legacy
+# fallbacks that will be removed once all deployments are upgraded.
 _PHASE1_SCHEMA_PATH: Path = (
     Path(__file__).resolve().parents[2]
     / "phase1" / "pipelines" / "schema" / "v1.json"
@@ -1544,6 +1601,31 @@ for _src_key, _schema_cols in _PHASE1_SCHEMA_DERIVED_COLUMNS.items():
         _PHASE1_EXPECTED_COLUMNS[_src_key] = _schema_cols
 del _src_key, _schema_cols
 
+# =============================================================================
+# TASK 321 ROOT FIX (forensic, root-level): CONTRACT OVERRIDE.
+# The contract-derived values (from phase1.contracts.phase1_schema) OVERRIDE
+# both the hardcoded dict above AND the JSON-derived values. The contract
+# is the single source of truth — this override ensures the bridge's
+# expected columns EXACTLY match what the Phase 1 pipelines write.
+# Without this override, the bridge could silently accept a CSV that the
+# Phase 1 validator would reject (or vice versa) — the schema drift the
+# contract was created to eliminate.
+# =============================================================================
+if _PHASE1_CONTRACT_AVAILABLE:
+    _PHASE1_EXPECTED_COLUMNS.update(_PHASE1_EXPECTED_COLUMNS_FROM_CONTRACT)
+    # Also override the source-key -> CSV-filename mapping. The contract's
+    # filenames are canonical; the hardcoded mapping above may have stale
+    # aliases (e.g. "pubchem_compound_properties.csv" vs the contract's
+    # "pubchem_enrichment.csv").
+    _PHASE1_SOURCE_TO_CSV.update(_PHASE1_SOURCE_TO_CSV_FROM_CONTRACT)
+    logger.info(
+        "TASK 321 ROOT FIX: Phase 2 bridge now uses phase1.contracts.phase1_schema "
+        "as the SINGLE source of truth for expected columns (%d sources) and "
+        "CSV filenames (%d sources). Hardcoded dict is a fallback only.",
+        len(_PHASE1_EXPECTED_COLUMNS_FROM_CONTRACT),
+        len(_PHASE1_SOURCE_TO_CSV_FROM_CONTRACT),
+    )
+
 # v78 FORENSIC ROOT FIX (BUG #7): ANY_OF column requirements.
 # For sources where the bridge accepts multiple alternative column
 # names (e.g. DisGeNET accepts ``gene_id`` OR ``ncbi_gene_id``), this
@@ -1608,6 +1690,29 @@ _PHASE1_ANY_OF_COLUMNS: Dict[str, List[List[str]]] = {
         ["drugbank_id", "chembl_id"],  # accept either as Compound identifier
     ],
 }
+
+# =============================================================================
+# TASK 321 ROOT FIX (continued): merge contract-derived ANY_OF groups.
+# The contract's any_of_groups are ADDED to (not replacing) the hardcoded
+# groups above. The hardcoded groups may include extra aliases the bridge
+# read code accepts that the contract doesn't declare (the contract is
+# the MINIMUM; the bridge may accept MORE). We only add groups from the
+# contract that aren't already present (by content, not by reference).
+# =============================================================================
+if _PHASE1_CONTRACT_AVAILABLE:
+    for _src, _contract_groups in _PHASE1_ANY_OF_COLUMNS_FROM_CONTRACT.items():
+        _existing_groups = _PHASE1_ANY_OF_COLUMNS.get(_src, [])
+        _existing_tuples = {tuple(g) for g in _existing_groups}
+        for _g in _contract_groups:
+            _g_tuple = tuple(_g)
+            if _g_tuple not in _existing_tuples:
+                _existing_groups.append(_g)
+                _existing_tuples.add(_g_tuple)
+        # Ensure the key is present even if we added nothing (so callers
+        # know this source has ANY_OF semantics per the contract).
+        if _src not in _PHASE1_ANY_OF_COLUMNS:
+            _PHASE1_ANY_OF_COLUMNS[_src] = _existing_groups
+    del _src, _contract_groups, _existing_groups, _existing_tuples, _g, _g_tuple
 
 
 def _validate_phase1_columns(
