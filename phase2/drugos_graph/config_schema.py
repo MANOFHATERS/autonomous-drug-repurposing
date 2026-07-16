@@ -103,7 +103,33 @@ CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
     ("Gene", "associated_with", "Disease"),     # DRKG gene-disease
     ("Gene", "interacts_with", "Gene"),         # PPI (DRKG uses Gene for both ends)
     ("Protein", "interacts_with", "Protein"),   # STRING PPI (UniProt accession IDs)
-    ("Compound", "causes_side_effect", "Side Effect"),  # SIDER legacy
+    # v113 FORENSIC ROOT FIX (P2-049, MEDIUM — KG-Semantics):
+    #   ``RecordingGraphBuilder.load_edges_batch`` checks
+    #   ``edge_key not in CORE_EDGE_TYPES`` and dead-letters any edge
+    #   NOT in the whitelist. The previous whitelist included BOTH:
+    #     ("Compound", "causes_side_effect", "Side Effect")   # SIDER legacy
+    #     ("Compound", "causes_adverse_event", "MedDRA_Term") # SIDER canonical
+    #   The legacy edge bypassed the canonical schema -- a SIDER edge
+    #   emitted with the legacy "Side Effect" label (with a SPACE in
+    #   the label, requiring backtick quoting in Cypher) was accepted
+    #   into the KG, splitting adverse-event counts per drug between
+    #   two label namespaces. The RL safety ranker queries
+    #   ``(:Compound)-[:causes_adverse_event]->(:MedDRA_Term)`` and
+    #   would MISS adverse events recorded under the legacy label,
+    #   under-counting adverse events and ranking dangerous drugs as
+    #   'green' (safe).
+    #
+    #   ROOT FIX: the legacy edge type is REMOVED from the whitelist
+    #   (the tuple is commented out below -- DO NOT re-enable it). Any
+    #   new edge emission MUST use the canonical form
+    #   ``("Compound", "causes_adverse_event", "MedDRA_Term")``. The
+    #   ``RecordingGraphBuilder`` will dead-letter any edge emitted
+    #   with the legacy tuple, forcing callers to migrate. Existing
+    #   KGs with legacy ``:Side Effect`` nodes should run the one-time
+    #   Cypher migration in
+    #   ``scripts/migrate_sidetoeffect_to_meddraterm.py`` (already
+    #   exists in the repo) to convert legacy edges to canonical form.
+    # ("Compound", "causes_side_effect", "Side Effect"),  # SIDER legacy -- REMOVED v113 P2-049
     ("Gene", "expressed_in", "Anatomy"),
     ("Gene", "participates_in", "Pathway"),
     ("Protein", "participates_in", "Pathway"),  # Reactome uses protein participants
@@ -116,7 +142,7 @@ CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
     # completed but FAILED their primary endpoint.
     ("Compound", "failed_for", "Disease"),
     ("Protein", "associated_with", "Disease"),
-    ("Compound", "causes_adverse_event", "MedDRA_Term"),
+    ("Compound", "causes_adverse_event", "MedDRA_Term"),  # SIDER canonical (see v113 P2-049 above)
     ("Protein", "expressed_in", "Anatomy"),
     ("Pathway", "associated_with", "Disease"),
     # ── DrugBank v2.0 audit-fix edge types ──

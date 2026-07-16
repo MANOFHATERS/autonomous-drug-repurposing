@@ -54,16 +54,33 @@ def main() -> int:
     """
     ownership_guard = Path(__file__).resolve().parent / "pre_commit_ownership_guard.py"
     if not ownership_guard.exists():
-        # If the unified guard is missing, fail OPEN (exit 0) rather than
-        # blocking all commits. This matches the prior bootstrap-mode
-        # behavior. CI should alert on this condition.
+        # v113 FORENSIC ROOT FIX (IN-079, MEDIUM — Security / CI-CD):
+        # The previous code FAILED OPEN (returned 0) when the target
+        # guard script was missing. For a security/ownership guard,
+        # failing OPEN is the WRONG default -- it allows ANY commit
+        # through with only a stderr warning. If
+        # ``pre_commit_ownership_guard.py`` is accidentally deleted
+        # (bad merge, ``git clean -xdf``, fresh clone missing the
+        # file), the ownership guard silently stops enforcing. An
+        # attacker (or careless developer) could commit to any file
+        # without ownership checks.
+        #
+        # ROOT FIX: fail CLOSED (return 1) when the target script is
+        # missing. This blocks ALL commits until the file is restored.
+        # The operator MUST either restore the file or update their
+        # git hook to point at the correct guard. A CI alert should
+        # also be added (separate task) to detect this condition.
         print(
-            "WARNING [BE-080]: pre_commit_ownership_guard.py not found — "
-            "ownership checks skipped. Restore the file or update your "
-            "git hook to point at the correct guard.",
+            "ERROR [BE-080 / IN-079]: pre_commit_ownership_guard.py NOT FOUND — "
+            "ownership checks CANNOT be performed. FAILING CLOSED (exit 1) "
+            "to prevent unauthorized commits. To fix: restore the file "
+            "from git (``git checkout HEAD -- scripts/pre_commit_ownership_guard.py``) "
+            "or update your git hook to point at the correct guard. "
+            "v113 IN-072 ROOT FIX: this guard previously FAILED OPEN "
+            "(exit 0) which silently disabled ownership enforcement.",
             file=sys.stderr,
         )
-        return 0
+        return 1
 
     # Forward all arguments (including subcommands) to the unified guard.
     # sys.argv[0] is the script name; [1:] are the actual args.
