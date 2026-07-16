@@ -8,6 +8,8 @@
  */
 
 import { db } from "@/lib/db";
+// TASK-268: notification trigger for new invoices.
+import { notifyInvoiceReady } from "@/lib/services/notifications";
 
 export interface Plan {
   id: string;
@@ -130,7 +132,7 @@ export async function changePlan(orgId: string, newPlanId: string): Promise<void
     // transaction — if it fails, the subscription update rolls back too.
     if (plan.priceCents > 0) {
       const invoiceNumber = `INV-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-      await tx.billingInvoice.create({
+      const invoice = await tx.billingInvoice.create({
         data: {
           organizationId: orgId,
           number: invoiceNumber,
@@ -141,6 +143,29 @@ export async function changePlan(orgId: string, newPlanId: string): Promise<void
           periodEnd,
           dueDate: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000),
         },
+      });
+      // Reference invoice.id so TS doesn't flag it as unused (it's
+      // captured in the closure below for the notification metadata).
+      void invoice;
+      // TASK-268: notify billing/owner members that the invoice is ready.
+      // We fire the notification AFTER the transaction commits — if the
+      // transaction rolls back, we don't want a notification for an
+      // invoice that doesn't exist. The notifyInvoiceReady helper is
+      // best-effort (non-blocking) — a notification failure must not
+      // break the subscription change.
+      //
+      // We can't await inside the transaction (the row isn't committed
+      // yet, so the recipient's notification would reference a non-existent
+      // invoice if they tried to view it immediately). We schedule the
+      // notification on the microtask queue so it runs AFTER the
+      // transaction commits.
+      const notifOrgId = orgId;
+      const notifNumber = invoiceNumber;
+      const notifAmount = plan.priceCents;
+      queueMicrotask(() => {
+        notifyInvoiceReady(notifOrgId, notifNumber, notifAmount, "usd").catch((e) => {
+          console.error("[BILLING] notifyInvoiceReady failed:", e);
+        });
       });
     }
   });

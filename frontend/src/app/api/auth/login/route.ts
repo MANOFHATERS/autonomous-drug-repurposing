@@ -102,6 +102,10 @@ export async function POST(req: NextRequest) {
       email: true,
       passwordHash: true,
       role: true,
+      // TASK-261: select platformRole so we can stamp it into the
+      // access token immediately at login (the rotateRefreshToken
+      // path will pick it up on subsequent refreshes).
+      platformRole: true,
       status: true,
       emailVerified: true,
       name: true,
@@ -280,7 +284,7 @@ export async function POST(req: NextRequest) {
       maxAge: 5 * 60, // 5 minutes — matches MFA_CHALLENGE_TTL_SECONDS
     });
     await writeAuditLog({
-      user: { userId: user.id, email: user.email, role: user.role },
+      user: { userId: user.id, email: user.email, role: user.role, platformRole: (user.platformRole as string | undefined) || "none" },
       action: "login_mfa_challenge_issued",
       resource: `user:${user.id}`,
       critical: true,
@@ -325,6 +329,11 @@ export async function POST(req: NextRequest) {
     userId: user.id,
     email: user.email,
     role: user.role,
+    // TASK-261: stamp the user's current platformRole into the access
+    // token. Coerce to "none" if null (legacy rows pre-migration —
+    // fail-closed, the user has no platform-admin access until the
+    // operator grants it via direct DB access).
+    platformRole: (user.platformRole as string | undefined) || "none",
     orgId: membership?.organizationId,
   });
   await setAuthCookies(access, tokens.refresh);

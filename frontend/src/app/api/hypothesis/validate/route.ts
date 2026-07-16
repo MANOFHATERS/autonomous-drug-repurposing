@@ -25,6 +25,10 @@ import {
   type RlValidateResponse,
   validateMlResponse,
 } from "@/lib/ml-contracts";
+// TASK-268: notification trigger for hypothesis validation completion.
+// Fires AFTER the writeback succeeds — notifies the submitter + the
+// org's PIs so they can review the validation result.
+import { notifyHypothesisValidationComplete } from "@/lib/services/notifications";
 
 const SERVICE_NAME = "phase4_rl_validate";
 
@@ -210,6 +214,23 @@ export async function POST(req: NextRequest) {
       phase2Neo4jWritten: validated.writeback?.phase2_neo4j_written,
     },
   });
+
+  // TASK-268: fire the notification trigger. NON-BLOCKING — the
+  // writeback already succeeded; a notification failure must not roll
+  // it back. The helper notifies (a) the submitter and (b) the org's
+  // PIs (principal investigators) who need to review the validation.
+  if (auth.user.orgId) {
+    await notifyHypothesisValidationComplete(
+      auth.user.userId,
+      auth.user.orgId,
+      drug,
+      disease,
+      outcome,
+    ).catch((e) => {
+      // Non-critical — the validation already wrote back to all 3 phases.
+      console.error("[HYPOTHESIS-VALIDATE] notification failed:", e);
+    });
+  }
 
   return NextResponse.json({
     ok: true,
