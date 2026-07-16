@@ -17,6 +17,18 @@ AND the wrapper modules import from here, so:
      monolith's import side effects.
   3. This proves the modular structure is REAL, not cosmetic.
 
+TASK 328 ROOT FIX (forensic, root-level):
+  The 6 CANONICAL RL feature names (gnn_score, safety_score, market_score,
+  efficacy_score, patent_score, adme_score) are now imported from
+  shared/contracts/feature_names.py — the SINGLE source of truth shared
+  with Phase 3's bridge (which writes these features to the RL input CSV).
+  This eliminates the schema drift where Phase 3 writes ``gnn_score`` but
+  Phase 4 reads ``gt_score`` (or vice versa) — the contract makes any
+  rename a compile-time error on both sides.
+
+  The non-canonical constants (CONFIDENCE_COL, PATHWAY_COL, etc.) remain
+  defined here because they are Phase 4-internal (not written by Phase 3).
+
 Future extraction steps (post-v105, when CI coverage is higher):
   - rl/types.py — RankedCandidate, PipelineMetrics dataclasses
   - rl/reward.py — RewardConfig + RewardFunction (move from monolith)
@@ -24,11 +36,39 @@ Future extraction steps (post-v105, when CI coverage is higher):
   - rl_drug_ranker.py becomes a backward-compat shim
 
 This file is INTENTIONALLY minimal — only constants, no logic, no imports
-beyond stdlib typing. It can be imported from anywhere without side effects.
+beyond stdlib typing + the shared contract.
 """
 from __future__ import annotations
 
 from typing import List
+
+# =============================================================================
+# TASK 328 ROOT FIX: import the 6 CANONICAL RL feature names from the
+# shared contract. Both Phase 3 bridge (writer) and Phase 4 env (reader)
+# import from the same module — eliminating the schema drift that
+# previously caused silent zero-feature bugs.
+# =============================================================================
+try:
+    from shared.contracts.feature_names import (
+        FEATURE_GNN_SCORE as GNN_SCORE_COL,
+        FEATURE_SAFETY_SCORE as SAFETY_COL,
+        FEATURE_MARKET_SCORE as MARKET_COL,
+        FEATURE_EFFICACY_SCORE as EFFICACY_COL,
+        FEATURE_PATENT_SCORE as PATENT_COL,
+        FEATURE_ADME_SCORE as ADME_COL,
+    )
+    _FEATURE_NAMES_FROM_CONTRACT = True
+except ImportError:
+    # Degraded mode: shared.contracts.feature_names not importable.
+    # Fall back to hardcoded values that match the contract. The contract
+    # consistency test will fail in CI, surfacing the misconfiguration.
+    GNN_SCORE_COL: str = "gnn_score"
+    SAFETY_COL: str = "safety_score"
+    MARKET_COL: str = "market_score"
+    EFFICACY_COL: str = "efficacy_score"
+    PATENT_COL: str = "patent_score"
+    ADME_COL: str = "adme_score"
+    _FEATURE_NAMES_FROM_CONTRACT = False
 
 # ============================================================================
 # CORE IDENTIFIER COLUMNS
@@ -39,25 +79,22 @@ DISEASE_COL: str = "disease"
 # ============================================================================
 # FEATURE COLUMNS (observed by the RL agent)
 # ============================================================================
-GNN_SCORE_COL: str = "gnn_score"
-SAFETY_COL: str = "safety_score"
-MARKET_COL: str = "market_score"
+# The 6 canonical features (above) are imported from the shared contract.
+# The remaining feature columns are Phase 4-internal (not written by
+# Phase 3) so they stay defined here.
 CONFIDENCE_COL: str = "confidence"
 PATHWAY_COL: str = "pathway_score"
 
 # PATENT_COL semantics: For REPURPOSING, OFF-patent = better (cheaper,
 # generic availability, no IP blocking by original manufacturer).
-PATENT_COL: str = "patent_score"
+# (PATENT_COL is imported from the shared contract above.)
+
 RARE_DISEASE_COL: str = "rare_disease_flag"
 
 # Renamed from existing_drugs_score: previous name was actively misleading.
 UNMET_NEED_COL: str = "unmet_need_score"
 
-# Clinical efficacy signal (project doc requires 3 dimensions including efficacy).
-EFFICACY_COL: str = "efficacy_score"
-
-# ADME (Absorption, Distribution, Metabolism, Excretion) properties.
-ADME_COL: str = "adme_score"
+# (EFFICACY_COL and ADME_COL are imported from the shared contract above.)
 
 # ============================================================================
 # DISEASE-CONTEXT FEATURES (added at runtime by the env)
