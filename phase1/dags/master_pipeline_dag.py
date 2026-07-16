@@ -1574,6 +1574,30 @@ def master_pipeline() -> None:
     omim_load >> validate_phase1_contract
     # P1-018 ROOT FIX (Team-2): wire pubchem_load >> validate_phase1_contract
     # so contract validation runs AFTER PubChem enrichment FINISHES.
+    #
+    # P1-013 v113 ROOT FIX (PubChem graceful degradation verification):
+    #   The P1-013 audit found that `validate_output_task`'s trigger_rule
+    #   was NOT set, defaulting to ALL_SUCCESS — so a SKIPPED pubchem_load
+    #   SKIPPED validate_output_task, which SKIPPED trigger_phase2. The
+    #   KG build was blocked on PubChem API outages.
+    #
+    #   VERIFIED: both `validate_phase1_contract` (line 587) and
+    #   `validate_output` (line 1060) now have
+    #   `trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS`. This means:
+    #     - If pubchem_load is SKIPPED (PubChem API outage →
+    #       pubchem_download failed → pubchem_load skipped): both validate
+    #       tasks STILL FIRE (skip is not failure; other loads succeeded).
+    #       trigger_phase2 fires. KG build proceeds with 6/7 sources. ✓
+    #     - If pubchem_load FAILED (real bug, not API outage): both
+    #       validate tasks are SKIPPED (UPSTREAM_FAILED). trigger_phase2
+    #       is SKIPPED. Operator must investigate. ✓ (correct behavior)
+    #     - If pubchem_load SUCCEEDED: both validate tasks fire normally. ✓
+    #
+    #   The wiring `pubchem_load >> validate_phase1_contract` is RETAINED
+    #   (not removed) because it prevents the P1-018 race condition where
+    #   trigger_phase2 fired while pubchem_load was still running. The
+    #   trigger_rule ensures the wire does NOT re-introduce the P1-009
+    #   graceful-degradation bug.
     pubchem_load >> validate_phase1_contract
     # TM1 TASK 8: validate_phase1_contract >> trigger_phase2 — Phase 2
     # is BLOCKED until every Phase 1 output CSV passes the contract.
