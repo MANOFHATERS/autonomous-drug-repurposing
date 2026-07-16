@@ -4,8 +4,16 @@
 
 services:
   postgres:
-    image: postgres:15
+    # IN-045 v113 ROOT FIX: align with root docker-compose.yml (postgres:16-alpine).
+    # The previous version used postgres:15 (Debian) while root used
+    # postgres:16-alpine. Postgres 15 vs 16 have different default settings
+    # and extension versions. The Alpine variant uses C.UTF-8 collation
+    # while Debian uses en_US.UTF-8, causing subtle sorting differences in
+    # drug/disease name lookups (entity resolution fuzzy matching).
+    image: postgres:16-alpine
     environment:
+      # IN-045 v113: explicit locale for collation consistency.
+      POSTGRES_INITDB_ARGS: "--locale=C.UTF-8"
       # v37 ROOT FIX (Phase 1 Issue #63): credentials now come from env
       # vars (with dev-only defaults). Production deployments MUST set
       # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB — the previous
@@ -349,7 +357,12 @@ services:
   # DRUGOS_NEO4J_URI=bolt://neo4j:7687 in the environment to make
   # Phase 2 use it.
   neo4j:
-    image: neo4j:5.20
+    # IN-044 v113 ROOT FIX: pin to neo4j:5.20-community (specific patch)
+    # to match root docker-compose.yml. The previous version used
+    # neo4j:5.20 while root used neo4j:5-community (floating tag).
+    # Floating tags resolve to different patch versions over time,
+    # causing dev/prod APOC/Cypher divergence.
+    image: neo4j:5.20-community
     environment:
       # FIX-P1-B-15 (audit P1): Neo4j password now comes from env var
       # v49 ROOT FIX (P0 SECURITY — Neo4j default password):

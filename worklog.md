@@ -423,3 +423,22 @@ Stage Summary:
 - P1-010 HIGH ROOT FIX complete
 - Files touched: phase1/docker/airflow-init.sh (new), phase1/docker-compose.yml
 - Impact: operators can now use passwords with literal dollar signs ($), backticks, or other shell-meta characters without truncation. The entrypoint is maintainable (single-quoted variables, no mixed escaping conventions).
+
+---
+Task ID: TM3-MEDIUM-BATCH-1
+Agent: main (Teammate 3 swim lane)
+Task: Fix MEDIUM issues IN-044, IN-045, P1-006, P1-017, P1-018, P1-029
+
+Work Log:
+- IN-044: aligned Neo4j version — phase1 uses neo4j:5.20-community (was 5.20), root uses neo4j:5.20-community (was 5-community floating tag); added NEO4J_PLUGINS=["apoc"] + NEO4J_dbms_security_procedures_unrestricted=apoc.* to root compose
+- IN-045: aligned Postgres version — phase1 uses postgres:16-alpine (was 15); added POSTGRES_INITDB_ARGS="--locale=C.UTF-8" for collation consistency
+- P1-006: removed dead-code block in service.py _load_dataset_stats (the `if source_name in ("chembl","drugbank","pubchem"):` block computed total_drugs 3 ways then was unconditionally overwritten); replaced with fallback chain (drugbank -> chembl -> drugs.csv) so total_drugs is non-zero when DrugBank is unavailable
+- P1-017: replaced allow_origins=["*"] in service.py CORS with env-var-driven list (PHASE1_CORS_ORIGINS, default http://localhost:3000)
+- P1-018: replaced newline-counting in _count_csv_rows with csv.reader (correctly handles multi-line quoted fields like DrugBank mechanism_of_action)
+- P1-029: total_proteins now falls back to total_interactions (conservative lower bound) when UniProt is unavailable but STRING has data
+- py_compile phase1/service.py: OK
+- Verified both compose files parse and versions are aligned
+
+Stage Summary:
+- 6 MEDIUM issues fixed in batch
+- Files touched: docker-compose.yml, phase1/docker-compose.yml, phase1/service.py

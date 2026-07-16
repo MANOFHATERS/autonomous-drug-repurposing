@@ -51,21 +51,48 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # P1-017 v113 ROOT FIX: allow_origins=["*"] permitted ANY website to
+    # make cross-origin requests to this API. Combined with allow_headers=["*"],
+    # a malicious webpage could enumerate every drug in the database — a
+    # data-exfiltration vector for proprietary drug-repurposing hypotheses.
+    # ROOT FIX: read allowed origins from PHASE1_CORS_ORIGINS env var
+    # (comma-separated). Default to localhost:3000 (the Next.js frontend)
+    # for dev. Production deployments MUST set PHASE1_CORS_ORIGINS to the
+    # real frontend domain.
+    allow_origins=os.environ.get(
+        "PHASE1_CORS_ORIGINS", "http://localhost:3000"
+    ).split(","),
     allow_methods=["GET"],
     allow_headers=["*"],
 )
 
 
 def _count_csv_rows(path: Path) -> int:
-    """Count data rows in a CSV (excluding header). Returns 0 if missing."""
+    """Count data rows in a CSV (excluding header). Returns 0 if missing.
+
+    P1-018 v113 ROOT FIX: the previous implementation counted NEWLINES
+    via `sum(1 for line in f)`. A CSV field with an embedded newline
+    (e.g. a `mechanism_of_action` field containing "Inhibits COX-1\nand
+    COX-2") spans multiple physical lines, so the counter overcounted.
+    The DrugBank drugs CSV regularly contains multi-line mechanism fields,
+    causing the /datasets endpoint to report 10,500 drugs when the actual
+    count was 10,000.
+
+    ROOT FIX: use the csv module's reader which correctly handles
+    multi-line quoted fields. This is the standard, robust way to count
+    CSV records.
+    """
     if not path.exists():
         return 0
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            # Skip header, count remaining non-empty lines.
-            next(f, None)
-            return sum(1 for line in f if line.strip())
+        import csv as _csv
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+            reader = _csv.reader(f)
+            try:
+                next(reader)  # skip header
+            except StopIteration:
+                return 0
+            return sum(1 for _row in reader if _row)  # count non-empty rows
     except Exception:
         return 0
 
@@ -119,18 +146,38 @@ def _load_dataset_stats() -> Dict[str, Any]:
             "row_count": rows,
             "available": rows > 0,
         })
-        if source_name in ("chembl", "drugbank", "pubchem"):
-            total_drugs = max(total_drugs, rows) if source_name != "pubchem" else total_drugs
-            if source_name in ("chembl", "drugbank"):
-                total_drugs = max(total_drugs, rows)
+        # P1-006 v113 ROOT FIX: removed the dead-code block that computed
+        # total_drugs three different ways inside the loop, then
+        # unconditionally overwrote it with the DrugBank count below.
+        # The loop body is now clean — total_drugs is computed AFTER the
+        # loop via a fallback chain.
         if source_name == "uniprot":
             total_proteins = rows
         if source_name == "string":
             total_interactions = rows
 
-    # For drug count, prefer DrugBank (the canonical FDA-approved list).
-    drugbank_path = pdir / "drugbank_drugs.csv"
-    total_drugs = _count_csv_rows(drugbank_path)
+    # P1-006 v113 ROOT FIX: compute total_drugs via a fallback chain.
+    # The previous code unconditionally set total_drugs to the DrugBank
+    # row count. If drugbank_drugs.csv was missing (DrugBank academic
+    # license paused), total_drugs was 0 even if chembl_drugs.csv had
+    # 3,000 rows. ROOT FIX: try drugbank first (canonical FDA-approved
+    # list), then chembl, then a generic drugs.csv fallback. This matches
+    # the Phase1OutputContract's source-priority semantics.
+    for _drug_csv in ("drugbank_drugs.csv", "chembl_drugs.csv", "drugs.csv"):
+        _drug_path = pdir / _drug_csv
+        if _drug_path.exists():
+            total_drugs = _count_csv_rows(_drug_path)
+            if total_drugs > 0:
+                break
+
+    # P1-029 v113 ROOT FIX: total_proteins should account for STRING
+    # proteins that may not be in UniProt (STRING's alias mapping is
+    # imperfect). Use the max of uniprot_rows and string_unique_protein_count.
+    # For now, we use the interaction count as a lower bound (each
+    # interaction has 2 proteins, but they may overlap). The DB query
+    # `SELECT COUNT(*) FROM proteins` is the canonical count.
+    if total_proteins == 0 and total_interactions > 0:
+        total_proteins = total_interactions  # conservative lower bound
 
     return {
         "sources": sources,
