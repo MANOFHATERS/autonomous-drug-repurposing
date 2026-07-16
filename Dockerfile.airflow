@@ -57,7 +57,22 @@ ENV AIRFLOW__CORE__EXECUTOR=LocalExecutor \
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True \
     PYTHONPATH=/opt/airflow:/opt/phase1:${PYTHONPATH}
 
+# IN-077 ROOT FIX: Fernet key validation entrypoint.
+# The docker-compose.yml passes
+# ``AIRFLOW__CORE__FERNET_KEY: "dev_fernet_key_replace_in_production"``
+# which is NOT a valid Fernet key. Airflow would crash at startup with
+# ``cryptography.fernet.InvalidToken`` (good — visible failure) OR
+# silently fall back to plaintext Connection storage (bad — invisible
+# failure). This entrypoint script validates the Fernet key BEFORE
+# starting the scheduler and fails fast with a clear error message
+# including the command to generate a valid key.
+COPY --chown=airflow:airflow Dockerfile.airflow.entrypoint.sh /opt/airflow/airflow-entrypoint.sh
+RUN chmod +x /opt/airflow/airflow-entrypoint.sh
+
 # Default command — the docker-compose service overrides this to run
 # `airflow scheduler` (the webserver is optional for V1 since the
 # platform's UI is the Next.js frontend, not Airflow's own UI).
+# IN-077: the entrypoint validates the Fernet key BEFORE exec'ing the
+# command, so an invalid key fails fast with a clear error.
+ENTRYPOINT ["/opt/airflow/airflow-entrypoint.sh"]
 CMD ["airflow", "scheduler"]

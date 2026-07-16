@@ -425,6 +425,53 @@ def _explore_subgraph_neo4j(
 ) -> Optional[Dict[str, Any]]:
     """Try Neo4j first for subgraph exploration."""
 
+    # v113 FORENSIC ROOT FIX (P2-044 + P2-045, MEDIUM):
+    #   P2-044: the previous code used ``d_node.id`` (Neo4j INTERNAL ID)
+    #   as the response ``id``. Neo4j internal IDs are NOT stable across
+    #   database restarts -- a node that was internal-id 42 before a
+    #   restart may be internal-id 17 after. The frontend cached these
+    #   IDs and broke on the next KG rebuild.
+    #
+    #   P2-045: the previous code used ``r1.start_node.id`` and
+    #   ``r1.end_node.id`` for edge source/target. For UNDIRECTED
+    #   ``MATCH (d)-[r1]-(n1)`` patterns, ``start_node`` and
+    #   ``end_node`` are ARBITRARY (not the actual src/dst of the
+    #   traversal) -- the edge's source/target in the response could
+    #   be SWAPPED on consecutive runs of the same query, breaking
+    #   the visual graph rendering.
+    #
+    #   ROOT FIX: use the BUSINESS ``id`` property from node properties
+    #   (``dict(node).get("id")``), falling back to the Neo4j internal
+    #   ID only when the business ``id`` property is missing (e.g., for
+    #   legacy nodes created before the ``id`` property was mandatory).
+    #   For edges, use the business IDs of the nodes we ALREADY have
+    #   from the query (``d``, ``n1``, ``n2``) -- do NOT use
+    #   ``r.start_node.id`` / ``r.end_node.id`` which are arbitrary for
+    #   undirected patterns. The edge source is always the node CLOSER
+    #   to the query root (``d`` for r1, ``n1`` for r2), and the target
+    #   is the node FARTHER from the root (``n1`` for r1, ``n2`` for r2).
+    #   This produces STABLE, DETERMINISTIC edge source/target pairs.
+    def _business_id(node) -> Any:
+        """Return the business ``id`` property, falling back to Neo4j internal id."""
+        if node is None:
+            return None
+        props = dict(node)
+        bid = props.get("id")
+        if bid is not None and bid != "":
+            return bid
+        # Legacy nodes without a business ``id`` property -- fall back
+        # to the Neo4j internal id (stringified so it's JSON-serializable
+        # and visually distinct from business IDs).
+        return f"__neo4j_internal:{node.id}"
+
+    def _node_record(node) -> Dict[str, Any]:
+        return {
+            "id": _business_id(node),
+            "label": list(node.labels)[0] if node.labels else "Unknown",
+            "labels": list(node.labels),
+            "properties": dict(node),
+        }
+
     def _query(driver):
         nodes: List[Dict[str, Any]] = []
         edges: List[Dict[str, Any]] = []
@@ -474,40 +521,31 @@ def _explore_subgraph_neo4j(
                 result = session.run(q, drug=drug, limit=limit)
                 for record in result:
                     d_node = record["d"]
-                    nodes.append({
-                        "id": d_node.id,
-                        "label": list(d_node.labels)[0] if d_node.labels else "Unknown",
-                        "labels": list(d_node.labels),
-                        "properties": dict(d_node),
-                    })
+                    nodes.append(_node_record(d_node))
                     n1 = record["n1"]
                     if n1 is not None:
-                        nodes.append({
-                            "id": n1.id,
-                            "label": list(n1.labels)[0] if n1.labels else "Unknown",
-                            "labels": list(n1.labels),
-                            "properties": dict(n1),
-                        })
+                        nodes.append(_node_record(n1))
                         r1 = record["r1"]
                         if r1 is not None:
+                            # v113 P2-044/045 ROOT FIX: use business IDs
+                            # of the nodes we already have (d, n1), NOT
+                            # r1.start_node.id / r1.end_node.id (which
+                            # are arbitrary for undirected MATCH).
                             edges.append({
-                                "source": r1.start_node.id,
-                                "target": r1.end_node.id,
+                                "source": _business_id(d_node),
+                                "target": _business_id(n1),
                                 "type": r1.type,
                             })
                     n2 = record["n2"]
                     if n2 is not None:
-                        nodes.append({
-                            "id": n2.id,
-                            "label": list(n2.labels)[0] if n2.labels else "Unknown",
-                            "labels": list(n2.labels),
-                            "properties": dict(n2),
-                        })
+                        nodes.append(_node_record(n2))
                         r2 = record["r2"]
                         if r2 is not None:
+                            # v113 P2-044/045 ROOT FIX: use business IDs
+                            # of n1 and n2 (NOT r2.start_node/end_node).
                             edges.append({
-                                "source": r2.start_node.id,
-                                "target": r2.end_node.id,
+                                "source": _business_id(n1) if n1 is not None else _business_id(d_node),
+                                "target": _business_id(n2),
                                 "type": r2.type,
                             })
             elif disease:
@@ -536,40 +574,27 @@ def _explore_subgraph_neo4j(
                 result = session.run(q, disease=disease, limit=limit)
                 for record in result:
                     d_node = record["d"]
-                    nodes.append({
-                        "id": d_node.id,
-                        "label": list(d_node.labels)[0] if d_node.labels else "Unknown",
-                        "labels": list(d_node.labels),
-                        "properties": dict(d_node),
-                    })
+                    nodes.append(_node_record(d_node))
                     n1 = record["n1"]
                     if n1 is not None:
-                        nodes.append({
-                            "id": n1.id,
-                            "label": list(n1.labels)[0] if n1.labels else "Unknown",
-                            "labels": list(n1.labels),
-                            "properties": dict(n1),
-                        })
+                        nodes.append(_node_record(n1))
                         r1 = record["r1"]
                         if r1 is not None:
+                            # v113 P2-044/045 ROOT FIX: use business IDs.
                             edges.append({
-                                "source": r1.start_node.id,
-                                "target": r1.end_node.id,
+                                "source": _business_id(d_node),
+                                "target": _business_id(n1),
                                 "type": r1.type,
                             })
                     n2 = record["n2"]
                     if n2 is not None:
-                        nodes.append({
-                            "id": n2.id,
-                            "label": list(n2.labels)[0] if n2.labels else "Unknown",
-                            "labels": list(n2.labels),
-                            "properties": dict(n2),
-                        })
+                        nodes.append(_node_record(n2))
                         r2 = record["r2"]
                         if r2 is not None:
+                            # v113 P2-044/045 ROOT FIX: use business IDs.
                             edges.append({
-                                "source": r2.start_node.id,
-                                "target": r2.end_node.id,
+                                "source": _business_id(n1) if n1 is not None else _business_id(d_node),
+                                "target": _business_id(n2),
                                 "type": r2.type,
                             })
             else:

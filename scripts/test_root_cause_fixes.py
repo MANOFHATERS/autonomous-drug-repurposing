@@ -342,54 +342,86 @@ def test_X07_safebatchnorm_warns_loudly():
 # X-08: _load_known_positives merges validated_hypotheses.csv
 # ===========================================================================
 def test_X08_known_positives_merges_validated_hypotheses():
-    """Verify validated_hypotheses.csv is merged into KNOWN_POSITIVES."""
-    # Create a temporary validated_hypotheses.csv next to the rl package
-    rl_dir = os.path.join(_CODEBASE, "rl")
-    test_csv = os.path.join(rl_dir, "validated_hypotheses.csv")
+    """Verify validated_hypotheses.csv is merged into KNOWN_POSITIVES.
 
-    # Read the original content (if any) to restore later
-    original_content = None
-    if os.path.exists(test_csv):
-        with open(test_csv) as f:
-            original_content = f.read()
+    v113 IN-060 ROOT FIX (MEDIUM — Corrupted):
+        The previous test wrote ``sildenafil -> pulmonary arterial
+        hypertension`` to the PRODUCTION file ``rl/validated_hypotheses.csv``
+        and tried to restore it in a ``finally`` block. If the test
+        process was killed (Ctrl-C, OOM, CI timeout) between the
+        ``to_csv`` and the ``finally``, the production file was left
+        with the test data -- ``sildenafil`` became a "known positive"
+        in production, biasing the RL ranker. The restore logic also
+        had a race condition: if two tests ran in parallel
+        (pytest-xdist), both wrote to the same file.
 
+        ROOT FIX: use ``tempfile.TemporaryDirectory()`` and the
+        ``VALIDATED_HYPOTHESES_CSV`` env var (respected by
+        ``_load_validated_hypotheses``) to point the ranker at a TEMP
+        file that lives ONLY for the duration of the test. The
+        production ``rl/validated_hypotheses.csv`` is NEVER touched.
+        The env var is cleaned up in a ``finally`` block. If the test
+        process is killed, the OS reclaims the temp directory; the
+        production file is untouched.
+    """
+    import tempfile
+    old_env = os.environ.get("VALIDATED_HYPOTHESES_CSV")
     try:
-        # Write a test validated hypothesis that's NOT in the default KPs
-        test_df = pd.DataFrame({
-            "drug": ["sildenafil"],
-            "disease": ["pulmonary arterial hypertension"],
-        })
-        test_df.to_csv(test_csv, index=False)
+        with tempfile.TemporaryDirectory(prefix="x08_test_") as tmpdir:
+            # Write the test CSV to the TEMP directory, not production.
+            test_csv = os.path.join(tmpdir, "validated_hypotheses.csv")
+            test_df = pd.DataFrame({
+                "drug": ["sildenafil"],
+                "disease": ["pulmonary arterial hypertension"],
+                # v113 IN-060: include the ``outcome`` column required by
+                # the INT-020 root fix (only ``validated_positive`` rows
+                # are loaded as bonus pairs).
+                "outcome": ["validated_positive"],
+            })
+            test_df.to_csv(test_csv, index=False)
 
-        # Force reload of the rl module to re-trigger _load_known_positives
-        import importlib
-        import rl.rl_drug_ranker
-        importlib.reload(rl.rl_drug_ranker)
-        # Re-import the package to refresh KNOWN_POSITIVES
-        import rl
-        importlib.reload(rl)
+            # Point the ranker at the TEMP file via the env var. The
+            # ``_load_validated_hypotheses`` function reads
+            # ``VALIDATED_HYPOTHESES_CSV`` at CALL TIME (per the
+            # ISSUE #336/#337 root fix), so setting it here before the
+            # reload is sufficient.
+            os.environ["VALIDATED_HYPOTHESES_CSV"] = test_csv
 
-        kps = rl.KNOWN_POSITIVES
-        kp_set = {(d.lower(), v.lower()) for d, v in kps}
-        assert ("sildenafil", "pulmonary arterial hypertension") in kp_set, (
-            f"X-08 FAIL: validated hypothesis 'sildenafil -> pulmonary arterial hypertension' "
-            f"was NOT merged into KNOWN_POSITIVES. KPs: {kps}"
-        )
-        print(f"  X-08 PASS: validated_hypotheses.csv merged into KNOWN_POSITIVES. "
-              f"Total KPs: {len(kps)} (was 5, now includes sildenafil)")
+            # Force reload of the rl module to re-trigger _load_known_positives
+            import importlib
+            import rl.rl_drug_ranker
+            importlib.reload(rl.rl_drug_ranker)
+            # Re-import the package to refresh KNOWN_POSITIVES
+            import rl
+            importlib.reload(rl)
+
+            kps = rl.KNOWN_POSITIVES
+            kp_set = {(d.lower(), v.lower()) for d, v in kps}
+            assert ("sildenafil", "pulmonary arterial hypertension") in kp_set, (
+                f"X-08 FAIL: validated hypothesis 'sildenafil -> pulmonary arterial hypertension' "
+                f"was NOT merged into KNOWN_POSITIVES. KPs: {kps}"
+            )
+            print(f"  X-08 PASS: validated_hypotheses.csv merged into KNOWN_POSITIVES. "
+                  f"Total KPs: {len(kps)} (was 5, now includes sildenafil)")
+
+            # v113 IN-060: assert the production file was NOT touched.
+            # Read its content (if it exists) and verify no ``sildenafil``.
+            prod_csv = os.path.join(_CODEBASE, "rl", "validated_hypotheses.csv")
+            if os.path.exists(prod_csv):
+                with open(prod_csv) as f:
+                    prod_content = f.read()
+                assert "sildenafil" not in prod_content.lower(), (
+                    f"X-08 FAIL (IN-060): production rl/validated_hypotheses.csv "
+                    f"was MUTATED by the test! Content: {prod_content!r}"
+                )
+                print(f"  X-08 PASS (IN-060): production rl/validated_hypotheses.csv "
+                      f"was NOT mutated by the test.")
     finally:
-        # Restore original content
-        if original_content is not None:
-            with open(test_csv, 'w') as f:
-                f.write(original_content)
+        # Restore the original env var (or unset it).
+        if old_env is None:
+            os.environ.pop("VALIDATED_HYPOTHESES_CSV", None)
         else:
-            # Remove the test file (it didn't exist before)
-            if os.path.exists(test_csv):
-                # Only remove if it's our test file (not the original)
-                with open(test_csv) as f:
-                    content = f.read()
-                if "sildenafil" in content:
-                    os.remove(test_csv)
+            os.environ["VALIDATED_HYPOTHESES_CSV"] = old_env
 
 
 # ===========================================================================

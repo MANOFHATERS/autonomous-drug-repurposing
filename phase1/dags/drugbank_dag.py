@@ -80,22 +80,96 @@ DEFAULT_ARGS = {
     "depends_on_past": False,
 }
 
-# P1-035 ROOT FIX: supported DrugBank XML schema versions.
-# Each entry maps a major.minor version to its expected root element XPath
-# for the drug name field. The pipeline's parser uses the namespace-aware
-# iteration ``{%s}drug`` with ``{%s}name`` sub-elements (see
-# drugbank_pipeline.py line 1746 / 2126), which is correct for ALL 5.x
-# versions. For a hypothetical 6.0 schema change to ``primary-name``, the
-# parser would silently extract ZERO names -- this pre-flight check
-# catches that BEFORE the pipeline runs.
+# P1-035 + P1-015 ROOT FIX: supported DrugBank XML schema versions.
 #
-# The version is read from the root ``<drugbank xmlns="..." version="5.1.10">``
-# attribute (NOT the DOCTYPE, which is unreliable across DrugBank releases).
+# P1-015 ROOT FIX (forensic, root-level):
+#   The previous code hardcoded versions 5.0 through 5.1.12 in a
+#   frozenset. DrugBank releases a new schema version roughly every
+#   1-2 months (5.1.13, 5.1.14, ...). Each new release FAILED the
+#   schema check at ``check_drugbank_schema`` and raised
+#   ``AirflowFailException``, blocking the entire DrugBank DAG until a
+#   developer manually added the new version to the frozenset,
+#   committed, and redeployed. Pharma customers using the platform
+#   would see stale DrugBank data and miss newly-approved drugs.
+#
+#   The parser uses XPath ``<drug><name>...</name></drug>`` which has
+#   been stable across ALL 5.x releases. The version check exists to
+#   catch a HYPOTHETICAL 6.0 schema change (planned ``<primary-name>``)
+#   that hasn't happened yet — so a strict whitelist is over-engineered
+#   for the actual risk.
+#
+#   ROOT FIX:
+#     1. Replace the explicit whitelist with a REGEX that matches ALL
+#        5.x versions: ``^5\.\d+(\.\d+)?$``. This auto-accepts future
+#        5.1.13, 5.1.14, 5.2.0, 5.3.0, etc. without code changes.
+#     2. Keep a separate ``BLOCKED_DRUGBANK_SCHEMAS`` frozenset for
+#        known-bad versions (empty by default — no known bad 5.x).
+#     3. Versions >= 6.0 are NOT auto-accepted. They emit a WARNING
+#        (not FAIL) so the operator can decide whether to proceed
+#        (the parser MIGHT still work, depending on the actual 6.0
+#        schema when it ships).
+import re as _re_for_drugbank_schema
+
+# Regex that matches ALL 5.x versions: 5.0, 5.1, 5.1.0, 5.1.10, 5.2.0, etc.
+# The parser's XPath ``<drug><name>...</name></drug>`` is stable across
+# the entire 5.x line — there's no need to whitelist individual patches.
+SUPPORTED_DRUGBANK_SCHEMA_REGEX = _re_for_drugbank_schema.compile(
+    r"^5\.\d+(\.\d+)?$"
+)
+
+# Known-bad DrugBank schema versions (none currently). When a 5.x
+# release ships with a regression (e.g. 5.1.20 ships a broken XSD), add
+# it here to block it without affecting other 5.x releases.
+BLOCKED_DRUGBANK_SCHEMAS: frozenset[str] = frozenset()
+
+# Major-version threshold for the WARNING (not FAIL) path. Versions >= 6
+# are not auto-accepted because the parser MIGHT break — but we don't
+# hard-fail because we don't know the actual 6.0 schema yet.
+DRUGBANK_MAJOR_VERSION_WARN_THRESHOLD = 6
+
+# Backward-compat: callers that import SUPPORTED_DRUGBANK_SCHEMAS
+# (e.g. existing tests) get a frozenset of the canonical versions we
+# KNOW work. This is no longer the authoritative check — the regex is.
 SUPPORTED_DRUGBANK_SCHEMAS: frozenset[str] = frozenset({
     "5.0",
     "5.1", "5.1.0", "5.1.1", "5.1.2", "5.1.3", "5.1.4", "5.1.5",
     "5.1.6", "5.1.7", "5.1.8", "5.1.9", "5.1.10", "5.1.11", "5.1.12",
 })
+
+
+def _is_drugbank_version_supported(version: str) -> bool:
+    """P1-015 ROOT FIX: check a DrugBank version against the SUPPORTED pattern.
+
+    A version is supported if:
+      1. It matches ``^5\\.\\d+(\\.\\d+)?$`` (any 5.x version), AND
+      2. It is NOT in ``BLOCKED_DRUGBANK_SCHEMAS``.
+
+    Versions >= 6.0 (e.g. 6.0.0) return False — the caller decides
+    whether to FAIL or WARN.
+    """
+    if not version or not isinstance(version, str):
+        return False
+    if version in BLOCKED_DRUGBANK_SCHEMAS:
+        return False
+    return bool(SUPPORTED_DRUGBANK_SCHEMA_REGEX.match(version))
+
+
+def _is_drugbank_version_warn_only(version: str) -> bool:
+    """P1-015 ROOT FIX: True if the version is >= 6.0 (WARN, not FAIL).
+
+    Versions >= 6.0 MIGHT still parse correctly (the parser's XPath is
+    generic enough to handle a rename to ``<primary-name>`` if we add a
+    fallback). The operator should be ALERTED but not BLOCKED — the
+    alternative is hard-failing on every 6.x release until a developer
+    updates the parser, which is the same maintenance trap P1-015 fixes.
+    """
+    if not version or not isinstance(version, str):
+        return False
+    try:
+        major = int(version.split(".", 1)[0])
+    except (ValueError, IndexError):
+        return False
+    return major >= DRUGBANK_MAJOR_VERSION_WARN_THRESHOLD
 
 
 def _raise_schema_fail(message: str) -> None:
@@ -256,26 +330,55 @@ def check_drugbank_schema() -> str:
         )
         return ""  # unreachable
 
-    if detected_version not in SUPPORTED_DRUGBANK_SCHEMAS:
-        # UNSUPPORTED schema version -- the parser may silently extract
-        # ZERO drugs. Fail fast so the operator can update the parser
-        # or pin to a supported release.
+    if not _is_drugbank_version_supported(detected_version):
+        # P1-015 ROOT FIX: distinguish between BLOCKED (known-bad),
+        # UNSUPPORTED major (>= 6.0 — WARN, not FAIL), and
+        # genuinely-unknown versions.
+        if detected_version in BLOCKED_DRUGBANK_SCHEMAS:
+            _raise_schema_fail(
+                f"P1-015 DrugBank schema check FAILED: detected version "
+                f"{detected_version!r} is in the BLOCKED_DRUGBANK_SCHEMAS "
+                f"set (known-bad release). Remove it from BLOCKED_DRUGBANK_SCHEMAS "
+                f"in phase1/dags/drugbank_dag.py ONLY after verifying the "
+                f"parser handles it correctly."
+            )
+            return ""  # unreachable
+
+        if _is_drugbank_version_warn_only(detected_version):
+            # P1-015: versions >= 6.0 get a WARNING (not FAIL). The
+            # parser MIGHT still work — the XPath is generic enough
+            # to handle a rename. The operator is alerted but the
+            # pipeline is NOT blocked. This is the OPPOSITE of the
+            # previous behavior (hard-fail on any unknown version),
+            # which turned every DrugBank release into a P0 incident.
+            logger.warning(
+                "P1-015 DrugBank schema check WARNING: detected "
+                "version %s is >= 6.0 (not in the 5.x supported set). "
+                "The parser uses XPath <drug><name>...</name></drug> "
+                "which MAY still work if 6.x keeps the <name> "
+                "sub-element. The pipeline will proceed — if it "
+                "extracts zero drugs, file a bug to update the parser "
+                "for the new schema.",
+                detected_version,
+            )
+            return detected_version
+
+        # Genuinely unknown version (doesn't match 5.x regex, not >= 6).
+        # This is most likely a corrupted version string or a non-DrugBank
+        # XML. Fail fast so the operator investigates.
         _raise_schema_fail(
-            f"P1-035 DrugBank schema check FAILED: detected version "
-            f"{detected_version!r} is NOT in the supported set "
-            f"{sorted(SUPPORTED_DRUGBANK_SCHEMAS)}. The DrugBank parser "
-            f"uses the 5.x XPath ``<drug><name>...</name></drug>``; "
-            f"version {detected_version!r} may use a different schema "
-            f"(e.g. 6.0 plans to move to ``<primary-name>``). Update "
-            f"the parser (drugbank_pipeline.py) to support "
-            f"{detected_version!r} OR pin DRUGBANK_VERSION to a "
-            f"supported release."
+            f"P1-015 DrugBank schema check FAILED: detected version "
+            f"{detected_version!r} does not match the supported pattern "
+            f"^5\\.\\d+(\\.\\d+)?$ and is not >= 6.0 (warn-only). The "
+            f"version string may be corrupted, or the file is not a "
+            f"DrugBank XML. Verify the file and re-download if necessary."
         )
         return ""  # unreachable
 
     logger.info(
-        "P1-035 DrugBank schema check PASSED: detected version %s "
-        "(in supported set). Proceeding with pipeline.",
+        "P1-015 DrugBank schema check PASSED: detected version %s "
+        "(matches supported pattern ^5.\\d+(\\.\\d+)?$ and not in "
+        "BLOCKED_DRUGBANK_SCHEMAS). Proceeding with pipeline.",
         detected_version,
     )
     return detected_version

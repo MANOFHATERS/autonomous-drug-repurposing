@@ -1,77 +1,128 @@
-"""Canonical Phase 4 output schema — the SINGLE source of truth.
+"""Canonical Phase 4 output schema — DELEGATES to shared.contracts.writeback.
 
-TASK 325 ROOT FIX (forensic, root-level):
-  Phase 4's final output is a ``validated_hypotheses.csv`` file. This file
-  is the WRITEBACK artifact that closes the data flywheel (DOCX §10):
-  validated drug-disease predictions are fed back to the Phase 3 trainer
-  as new labeled data points, the model retrains, predictions improve,
-  more pharma partners validate, repeat.
+SH-002 + SH-003 ROOT FIX (forensic, root-level):
+  Previously this module REDEFINED the outcome enum and CSV column names,
+  causing CONTRACT DRIFT against ``shared/contracts/writeback.py``:
 
-  Previously the CSV schema was defined INLINE in
-  ``rl/rl_drug_ranker.py``'s ``OUTPUT_SCHEMA`` dict — Phase 3's trainer
-  had to reverse-engineer the schema from the writer's source code. When
-  Phase 4 renamed a column (e.g. ``validated`` -> ``outcome``), Phase 3
-  silently broke until someone noticed missing training rows.
+    - SH-002: this module declared 3 outcomes (validated_positive,
+      validated_toxic, validated_inconclusive) while the shared contract
+      declared 4 (validated_positive, validated_toxic,
+      validated_negative, invalidated). The 3-value set could never
+      represent `validated_negative` or `invalidated` — Phase 3's
+      trainer would silently drop those rows during retraining,
+      corrupting the data flywheel.
 
-  This module extracts the CSV schema into a CONTRACT that both sides
-  import. Any change to the schema is a compile-time error on both
-  sides — the contract consistency test (Task 330) verifies the writer's
-  OUTPUT_SCHEMA matches this contract.
+    - SH-003: this module declared CSV columns (drug_id, disease_id,
+      drug_name, disease_name, score, ...) that did NOT match the
+      shared contract's columns (drug, disease, outcome, validated_by,
+      validation_study_id, validated_at, notes, original_gt_score,
+      original_rl_rank, writeback_version). The Phase 4 writer
+      (phase4/writeback.py) writes the SHARED schema to disk, so any
+      reader using this module's ColumnSpec list would fail to find
+      the required columns and reject every row.
 
-CSV schema (validated_hypotheses.csv)
--------------------------------------
-Columns (in canonical order):
+  ROOT FIX: this module now DELEGATES the canonical outcome enum and
+  CSV column list to ``shared.contracts.writeback`` (the AUTHORITATIVE
+  source per its docstring and per actual usage by both the writer
+  ``phase4/writeback.py`` and the reader
+  ``graph_transformer/training/trainer.py``). The ``ColumnSpec`` dataclass
+  and validators are KEPT (they're useful for runtime row validation),
+  but they're rebuilt from the SHARED column list so they can never drift
+  again.
 
-    drug_id           str   REQUIRED  Phase 1 canonical drug ID (InChIKey or DBxxxxx)
-    disease_id        str   REQUIRED  Phase 1 canonical disease ID (DOID/MESH/CUI)
-    drug_name         str   REQUIRED  Human-readable drug name (for display)
-    disease_name      str   REQUIRED  Human-readable disease name (for display)
-    score             float REQUIRED  RL composite score [0, 1]
-    outcome           str   REQUIRED  One of: validated_positive | validated_toxic | validated_inconclusive
-    validated_by      str   REQUIRED  Validator ID (e.g. "wet_lab:partner_A", "literature:pubmed")
-    validated_at      str   REQUIRED  ISO 8601 timestamp of validation
-    notes             str   OPTIONAL  Free-text notes from the validator
-
-The ``outcome`` column drives the Phase 3 retraining label:
-  - validated_positive     -> positive label (drug DOES treat disease)
-  - validated_toxic        -> negative label with safety weight (drug is harmful)
-  - validated_inconclusive -> excluded from retraining (no signal)
+  Backward-compat aliases are preserved so existing imports
+  (``OUTCOME_POSITIVE``, ``OUTCOME_VALUES``, ``ColumnSpec``) keep working.
+  The misleading ``OUTCOME_INCONCLUSIVE`` constant is REMOVED — it never
+  existed in the canonical contract and was the root cause of the drift.
 """
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# -----------------------------------------------------------------------------
+# Make shared.contracts.writeback importable when rl/contracts is imported
+# standalone (e.g., by tests that manipulate sys.path). Defensive — if
+# shared/ is already importable (normal case), the insert is a no-op.
+# -----------------------------------------------------------------------------
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
-# =============================================================================
-# Canonical filename
-# =============================================================================
-VALIDATED_HYPOTHESES_FILENAME: str = "validated_hypotheses.csv"
-
-# =============================================================================
-# Outcome enum — the EXACT set of allowed values for the ``outcome`` column
-# =============================================================================
-# These values are referenced by Phase 3's trainer to decide how to use
-# each row in retraining. Renaming any of them silently breaks retraining.
-OUTCOME_POSITIVE: str = "validated_positive"
-OUTCOME_TOXIC: str = "validated_toxic"
-OUTCOME_INCONCLUSIVE: str = "validated_inconclusive"
-
-OUTCOME_VALUES: Tuple[str, ...] = (
-    OUTCOME_POSITIVE,
-    OUTCOME_TOXIC,
-    OUTCOME_INCONCLUSIVE,
+# -----------------------------------------------------------------------------
+# CANONICAL IMPORTS — single source of truth.
+# -----------------------------------------------------------------------------
+# SH-002/SH-003 ROOT FIX: import outcomes and column names from the
+# shared contract. ANY change to the outcome enum or column list MUST
+# be made in shared/contracts/writeback.py — this module mirrors it.
+from shared.contracts.writeback import (  # noqa: E402
+    CANONICAL_VALIDATED_CSV,
+    LEGACY_RL_VALIDATED_CSV,
+    DRUG_COL,
+    DISEASE_COL,
+    OUTCOME_COL,
+    TIMESTAMP_COL,
+    VALIDATED_BY_COL,
+    VALIDATION_STUDY_ID_COL,
+    NOTES_COL,
+    ORIGINAL_GT_SCORE_COL,
+    ORIGINAL_RL_RANK_COL,
+    WRITEBACK_VERSION_COL,
+    WRITEBACK_CSV_COLUMNS,
+    REQUIRED_COLUMNS,
+    OUTCOME_VALIDATED_POSITIVE,
+    OUTCOME_VALIDATED_TOXIC,
+    OUTCOME_VALIDATED_NEGATIVE,
+    OUTCOME_INVALIDATED,
+    VALID_OUTCOMES,
+    POSITIVE_OUTCOMES,
+    TOXIC_OUTCOMES,
+    NEGATIVE_OUTCOMES,
+    BONUS_OUTCOMES,
+    PENALTY_OUTCOMES,
+    WRITEBACK_VERSION,
+    get_validated_csv_path,
+    ensure_csv_dir,
+    get_writer_path,
+    get_reader_path,
 )
+
+
+# =============================================================================
+# Canonical filename (re-exported for back-compat)
+# =============================================================================
+VALIDATED_HYPOTHESES_FILENAME: str = os.path.basename(CANONICAL_VALIDATED_CSV)
+
+
+# =============================================================================
+# Outcome enum — DELEGATES to shared contract (SH-002 ROOT FIX)
+# =============================================================================
+# Backward-compat aliases. These point to the SAME string objects as the
+# shared contract — there is no possibility of drift.
+OUTCOME_POSITIVE: str = OUTCOME_VALIDATED_POSITIVE
+OUTCOME_TOXIC: str = OUTCOME_VALIDATED_TOXIC
+OUTCOME_NEGATIVE: str = OUTCOME_VALIDATED_NEGATIVE      # NEW (was missing)
+OUTCOME_INVALIDATED: str = OUTCOME_INVALIDATED           # NEW (was missing)
+
+# SH-002 ROOT FIX: was previously a 3-tuple missing
+# `validated_negative` and `invalidated`. Now mirrors the shared
+# contract's 4-value set EXACTLY.
+OUTCOME_VALUES: Tuple[str, ...] = tuple(VALID_OUTCOMES)
 
 # Outcome -> human-readable label (for display in the frontend).
 OUTCOME_TO_LABEL: Dict[str, str] = {
-    OUTCOME_POSITIVE: "Validated Positive",
-    OUTCOME_TOXIC: "Validated Toxic",
-    OUTCOME_INCONCLUSIVE: "Validated Inconclusive",
+    OUTCOME_VALIDATED_POSITIVE: "Validated Positive",
+    OUTCOME_VALIDATED_TOXIC: "Validated Toxic",
+    OUTCOME_VALIDATED_NEGATIVE: "Validated Negative",
+    OUTCOME_INVALIDATED: "Invalidated",
 }
 
 # Reverse lookup.
 LABEL_TO_OUTCOME: Dict[str, str] = {v: k for k, v in OUTCOME_TO_LABEL.items()}
+
 
 # =============================================================================
 # Validated-by enum — the allowed values for the ``validated_by`` column
@@ -116,42 +167,100 @@ class ColumnSpec:
 
 
 # =============================================================================
-# REQUIRED columns — must be present and non-null in every row
+# REQUIRED columns — DERIVED from shared contract (SH-003 ROOT FIX)
 # =============================================================================
-VALIDATED_HYPOTHESES_REQUIRED_COLUMNS: Tuple[ColumnSpec, ...] = (
-    ColumnSpec("drug_id", "string", nullable=False,
-               description="Phase 1 canonical drug ID (InChIKey or DBxxxxx)."),
-    ColumnSpec("disease_id", "string", nullable=False,
-               description="Phase 1 canonical disease ID (DOID/MESH/CUI)."),
-    ColumnSpec("drug_name", "string", nullable=False,
-               description="Human-readable drug name (for display)."),
-    ColumnSpec("disease_name", "string", nullable=False,
-               description="Human-readable disease name (for display)."),
-    ColumnSpec("score", "float64", nullable=False,
-               description="RL composite score [0, 1]. Higher = better candidate."),
-    ColumnSpec("outcome", "string", nullable=False,
-               description="One of: validated_positive | validated_toxic | validated_inconclusive."),
-    ColumnSpec("validated_by", "string", nullable=False,
-               description="Validator ID prefix (wet_lab | clinical_study | literature | expert_review | automated)."),
-    ColumnSpec("validated_at", "string", nullable=False,
-               description="ISO 8601 timestamp of validation (UTC)."),
+# SH-003 ROOT FIX: the previous hardcoded list (drug_id, disease_id,
+# drug_name, disease_name, score, outcome, validated_by, validated_at)
+# DID NOT match the shared contract's column names (drug, disease,
+# outcome, validated_by, validation_study_id, validated_at, notes,
+# original_gt_score, original_rl_rank, writeback_version). The Phase 4
+# writer writes the SHARED schema, so any reader using the old list
+# would fail to find required columns.
+#
+# We now BUILD the ColumnSpec list from the shared contract's
+# WRITEBACK_CSV_COLUMNS so they can never drift. The dtype map is
+# sourced from shared.contracts.writeback.WRITEBACK_DTYPES.
+_SHARED_DTYPES: Dict[str, str] = {
+    DRUG_COL: "string",
+    DISEASE_COL: "string",
+    OUTCOME_COL: "string",
+    VALIDATED_BY_COL: "string",
+    VALIDATION_STUDY_ID_COL: "string",
+    TIMESTAMP_COL: "string",
+    NOTES_COL: "string",
+    ORIGINAL_GT_SCORE_COL: "float64",
+    ORIGINAL_RL_RANK_COL: "int64",
+    WRITEBACK_VERSION_COL: "string",
+}
+
+_SHARED_NULLABLE: Dict[str, bool] = {
+    DRUG_COL: False,
+    DISEASE_COL: False,
+    OUTCOME_COL: False,
+    VALIDATED_BY_COL: False,
+    VALIDATION_STUDY_ID_COL: True,
+    TIMESTAMP_COL: False,
+    NOTES_COL: True,
+    ORIGINAL_GT_SCORE_COL: True,
+    ORIGINAL_RL_RANK_COL: True,
+    WRITEBACK_VERSION_COL: False,
+}
+
+_SHARED_DESCRIPTIONS: Dict[str, str] = {
+    DRUG_COL: "Drug identifier (canonical name from Phase 1).",
+    DISEASE_COL: "Disease identifier (canonical name from Phase 1).",
+    OUTCOME_COL: (
+        "One of: validated_positive | validated_toxic | "
+        "validated_negative | invalidated."
+    ),
+    VALIDATED_BY_COL: (
+        "Validator ID prefix (wet_lab | clinical_study | literature | "
+        "expert_review | automated)."
+    ),
+    VALIDATION_STUDY_ID_COL: "Optional study identifier (e.g. NCT number).",
+    TIMESTAMP_COL: "ISO 8601 timestamp of validation (UTC).",
+    NOTES_COL: "Free-text notes from the validator.",
+    ORIGINAL_GT_SCORE_COL: "Original Graph Transformer score [0, 1].",
+    ORIGINAL_RL_RANK_COL: "Original RL rank (1-indexed).",
+    WRITEBACK_VERSION_COL: "Writeback schema version (semver).",
+}
+
+
+def _build_column_specs() -> Tuple[ColumnSpec, ...]:
+    """Build ColumnSpec list from the shared contract's column list.
+
+    This GUARANTEES that this module's ColumnSpec list matches the
+    shared contract's WRITEBACK_CSV_COLUMNS — they're built from the
+    SAME source list.
+    """
+    specs: List[ColumnSpec] = []
+    for col_name in WRITEBACK_CSV_COLUMNS:
+        specs.append(
+            ColumnSpec(
+                name=col_name,
+                dtype=_SHARED_DTYPES.get(col_name, "string"),
+                nullable=_SHARED_NULLABLE.get(col_name, True),
+                description=_SHARED_DESCRIPTIONS.get(col_name, ""),
+            )
+        )
+    return tuple(specs)
+
+
+# Required columns (non-nullable per shared contract).
+VALIDATED_HYPOTHESES_REQUIRED_COLUMNS: Tuple[ColumnSpec, ...] = tuple(
+    spec for spec in _build_column_specs() if not spec.nullable
 )
 
-# =============================================================================
-# OPTIONAL columns — may be present, may be null
-# =============================================================================
-VALIDATED_HYPOTHESES_OPTIONAL_COLUMNS: Tuple[ColumnSpec, ...] = (
-    ColumnSpec("notes", "string", nullable=True,
-               description="Free-text notes from the validator."),
+# Optional columns (nullable per shared contract).
+VALIDATED_HYPOTHESES_OPTIONAL_COLUMNS: Tuple[ColumnSpec, ...] = tuple(
+    spec for spec in _build_column_specs() if spec.nullable
 )
 
-# All columns in canonical order.
-VALIDATED_HYPOTHESES_COLUMNS: Tuple[ColumnSpec, ...] = (
-    *VALIDATED_HYPOTHESES_REQUIRED_COLUMNS,
-    *VALIDATED_HYPOTHESES_OPTIONAL_COLUMNS,
-)
+# All columns in canonical order (mirrors shared.WRITEBACK_CSV_COLUMNS).
+VALIDATED_HYPOTHESES_COLUMNS: Tuple[ColumnSpec, ...] = _build_column_specs()
 
 # Flat list of column names (for pandas usecols / dtype construction).
+# SH-003 ROOT FIX: this now EXACTLY matches shared.WRITEBACK_CSV_COLUMNS.
 VALIDATED_HYPOTHESES_COLUMN_NAMES: Tuple[str, ...] = tuple(
     c.name for c in VALIDATED_HYPOTHESES_COLUMNS
 )
@@ -168,7 +277,11 @@ VALIDATED_HYPOTHESES_DTYPES: Dict[str, str] = {
 
 
 def is_valid_outcome(value: str) -> bool:
-    """Return True if ``value`` is a valid outcome enum value."""
+    """Return True if ``value`` is a valid outcome enum value.
+
+    SH-002 ROOT FIX: now checks against the 4-value shared contract
+    (was previously 3 values, missing validated_negative + invalidated).
+    """
     return value in OUTCOME_VALUES
 
 
@@ -202,7 +315,7 @@ def validate_validated_hypotheses_row(row: Dict[str, Any]) -> List[str]:
             errors.append(f"Required column {col.name!r} is empty.")
 
     # Check 2: outcome is a valid enum value.
-    outcome = row.get("outcome")
+    outcome = row.get(OUTCOME_COL)
     if outcome is not None and not is_valid_outcome(outcome):
         errors.append(
             f"outcome {outcome!r} is not valid. "
@@ -210,29 +323,30 @@ def validate_validated_hypotheses_row(row: Dict[str, Any]) -> List[str]:
         )
 
     # Check 3: validated_by is a valid prefix.
-    vb = row.get("validated_by")
+    vb = row.get(VALIDATED_BY_COL)
     if vb is not None and not is_validated_by(vb):
         errors.append(
             f"validated_by {vb!r} is not valid. "
             f"Prefix must be one of: {list(VALIDATED_BY_VALUES)}."
         )
 
-    # Check 4: score is in [0, 1].
-    score = row.get("score")
-    if score is not None:
+    # Check 4: original_gt_score is in [0, 1] (if present).
+    score = row.get(ORIGINAL_GT_SCORE_COL)
+    if score is not None and score != "":
         try:
             score_f = float(score)
             if score_f < 0.0 or score_f > 1.0:
-                errors.append(f"score {score_f} is out of range [0, 1].")
+                errors.append(
+                    f"original_gt_score {score_f} is out of range [0, 1]."
+                )
         except (TypeError, ValueError):
-            errors.append(f"score {score!r} is not a valid float.")
+            errors.append(f"original_gt_score {score!r} is not a valid float.")
 
     # Check 5: validated_at is ISO 8601 parseable.
-    validated_at = row.get("validated_at")
+    validated_at = row.get(TIMESTAMP_COL)
     if validated_at is not None:
         try:
             from datetime import datetime
-            # Try common ISO 8601 formats.
             datetime.fromisoformat(str(validated_at).replace("Z", "+00:00"))
         except (ValueError, TypeError):
             errors.append(
@@ -271,8 +385,11 @@ def validate_validated_hypotheses_dataframe(df: Any) -> List[str]:
             )
 
     # Check 3: outcome column only contains valid enum values.
-    if "outcome" in actual_cols:
-        invalid = df.loc[df["outcome"].notna() & ~df["outcome"].isin(OUTCOME_VALUES), "outcome"]
+    if OUTCOME_COL in actual_cols:
+        invalid = df.loc[
+            df[OUTCOME_COL].notna() & ~df[OUTCOME_COL].isin(OUTCOME_VALUES),
+            OUTCOME_COL,
+        ]
         if len(invalid) > 0:
             unique_invalid = invalid.unique().tolist()
             errors.append(
@@ -281,32 +398,94 @@ def validate_validated_hypotheses_dataframe(df: Any) -> List[str]:
             )
 
     # Check 4: validated_by column only contains valid prefixes.
-    if "validated_by" in actual_cols:
-        invalid_mask = df["validated_by"].notna() & ~df["validated_by"].apply(
+    if VALIDATED_BY_COL in actual_cols:
+        invalid_mask = df[VALIDATED_BY_COL].notna() & ~df[VALIDATED_BY_COL].apply(
             lambda x: is_validated_by(x) if isinstance(x, str) else False
         )
         invalid_count = int(invalid_mask.sum())
         if invalid_count > 0:
-            unique_invalid = df.loc[invalid_mask, "validated_by"].unique().tolist()
+            unique_invalid = df.loc[invalid_mask, VALIDATED_BY_COL].unique().tolist()
             errors.append(
                 f"validated_by column contains {invalid_count} rows with invalid "
                 f"prefixes: {unique_invalid}. Prefix must be one of: "
                 f"{list(VALIDATED_BY_VALUES)}."
             )
 
-    # Check 5: score column in [0, 1].
-    if "score" in actual_cols:
-        scores = df["score"].dropna()
+    # Check 5: original_gt_score column in [0, 1] (if present).
+    if ORIGINAL_GT_SCORE_COL in actual_cols:
+        scores = df[ORIGINAL_GT_SCORE_COL].dropna()
         if len(scores) > 0:
             try:
                 scores_f = scores.astype(float)
                 bad = scores_f[(scores_f < 0.0) | (scores_f > 1.0)]
                 if len(bad) > 0:
                     errors.append(
-                        f"score column contains {len(bad)} rows outside [0, 1]. "
+                        f"original_gt_score column contains {len(bad)} rows outside [0, 1]. "
                         f"Min={scores_f.min()}, Max={scores_f.max()}."
                     )
             except (TypeError, ValueError):
-                errors.append("score column contains non-numeric values.")
+                errors.append("original_gt_score column contains non-numeric values.")
 
     return errors
+
+
+# =============================================================================
+# __all__ — explicit export list
+# =============================================================================
+__all__ = [
+    # Filename
+    "VALIDATED_HYPOTHESES_FILENAME",
+    # Outcomes (delegated to shared)
+    "OUTCOME_POSITIVE",
+    "OUTCOME_TOXIC",
+    "OUTCOME_NEGATIVE",
+    "OUTCOME_INVALIDATED",
+    "OUTCOME_VALUES",
+    "OUTCOME_TO_LABEL",
+    "LABEL_TO_OUTCOME",
+    # Validated-by
+    "VALIDATED_BY_VALUES",
+    # Columns
+    "ColumnSpec",
+    "VALIDATED_HYPOTHESES_REQUIRED_COLUMNS",
+    "VALIDATED_HYPOTHESES_OPTIONAL_COLUMNS",
+    "VALIDATED_HYPOTHESES_COLUMNS",
+    "VALIDATED_HYPOTHESES_COLUMN_NAMES",
+    "VALIDATED_HYPOTHESES_DTYPES",
+    # Validators
+    "is_valid_outcome",
+    "is_validated_by",
+    "validate_validated_hypotheses_row",
+    "validate_validated_hypotheses_dataframe",
+    # Re-exports from shared (for back-compat with code that imported
+    # these from rl.contracts.phase4_schema)
+    "CANONICAL_VALIDATED_CSV",
+    "LEGACY_RL_VALIDATED_CSV",
+    "DRUG_COL",
+    "DISEASE_COL",
+    "OUTCOME_COL",
+    "TIMESTAMP_COL",
+    "VALIDATED_BY_COL",
+    "VALIDATION_STUDY_ID_COL",
+    "NOTES_COL",
+    "ORIGINAL_GT_SCORE_COL",
+    "ORIGINAL_RL_RANK_COL",
+    "WRITEBACK_VERSION_COL",
+    "WRITEBACK_CSV_COLUMNS",
+    "REQUIRED_COLUMNS",
+    "OUTCOME_VALIDATED_POSITIVE",
+    "OUTCOME_VALIDATED_TOXIC",
+    "OUTCOME_VALIDATED_NEGATIVE",
+    "OUTCOME_INVALIDATED",
+    "VALID_OUTCOMES",
+    "POSITIVE_OUTCOMES",
+    "TOXIC_OUTCOMES",
+    "NEGATIVE_OUTCOMES",
+    "BONUS_OUTCOMES",
+    "PENALTY_OUTCOMES",
+    "WRITEBACK_VERSION",
+    "get_validated_csv_path",
+    "ensure_csv_dir",
+    "get_writer_path",
+    "get_reader_path",
+]
