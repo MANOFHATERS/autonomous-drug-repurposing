@@ -941,10 +941,14 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
         "DrugBank: FULL mode -- academic downloads paused since May 2026. "
         "v107 P1-005: NOT synthesizing fake DrugBank data (would create "
         "phantom drugbank_ids that 404 against the real DrugBank API). "
-        "Emitting ZERO DrugBank rows. The KG will be built from ChEMBL "
-        "FDA-approved drugs (chembl_drugs.csv) + RxNorm indications only. "
-        "When DrugBank academic access resumes, re-enable the real "
-        "drugbank_open_data downloader."
+        "v113 P1-024 ROOT FIX: this used to silently emit ZERO DrugBank "
+        "rows and return success -- the operator saw a green DAG run with "
+        "no DrugBank data and no clear error. The KG lost the withdrawn-"
+        "drug safety signal entirely. Now we RAISE RuntimeError unless "
+        "DRUGOS_ALLOW_NO_DRUGBANK=1 is set, so the operator must "
+        "explicitly opt into ChEMBL-only degraded mode. The empty CSVs "
+        "are still written (with a data_status marker file) so downstream "
+        "contract checks pass."
     )
 
     def _synthesize_drugbank_id(inchikey: str) -> str:  # noqa: ARG001
@@ -981,10 +985,34 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
     ])
     drugs_df.to_csv(drugs_path, index=False)
     indications_df.to_csv(indications_path, index=False)
+    # v113 P1-024 ROOT FIX: write a data_status marker file so the
+    # dashboard / ops team can surface "DrugBank missing" as a
+    # first-class data-quality signal. The marker is read by the
+    # bridge's manifest emission (see ``phase1_bridge._emit_manifest``)
+    # and surfaced in the run summary.
+    data_status_path = raw_dir / "drugbank_data_status.json"
+    import json as _json
+    data_status_path.write_text(_json.dumps({
+        "source": "drugbank",
+        "status": "drugbank_missing",
+        "mode": "full",
+        "reason": (
+            "DrugBank academic downloads paused since May 2026. "
+            "v113 P1-024: FULL mode emits empty CSVs and raises "
+            "RuntimeError unless DRUGOS_ALLOW_NO_DRUGBANK=1 is set. "
+            "The KG will be built from ChEMBL FDA-approved drugs; "
+            "withdrawn-drug safety signal is ABSENT until real "
+            "DrugBank data is provided."
+        ),
+        "rows_drugs": 0,
+        "rows_indications": 0,
+        "allow_no_drugbank_env": os.environ.get("DRUGOS_ALLOW_NO_DRUGBANK", "0"),
+    }, indent=2))
     logger.info(
         "DrugBank: wrote EMPTY drugbank_open_drugs.csv and "
-        "drugbank_open_indications.csv (0 rows each). KG will use "
-        "ChEMBL FDA-approved drugs as the Compound source."
+        "drugbank_open_indications.csv (0 rows each) + data_status "
+        "marker. KG will use ChEMBL FDA-approved drugs as the "
+        "Compound source."
     )
 
     # v107 P1-005: the RxNorm enrichment loop below is now DEAD CODE
@@ -994,6 +1022,41 @@ def download_drugbank_open_data(raw_dir: Path) -> dict[str, Path]:
 
     result["drugs"] = drugs_path
     result["indications"] = indications_path
+    result["data_status"] = data_status_path
+
+    # v113 P1-024 ROOT FIX: RAISE RuntimeError unless the operator has
+    # explicitly opted into ChEMBL-only degraded mode. The previous
+    # code silently returned success with zero DrugBank rows -- the
+    # operator saw a green DAG run with no DrugBank data and no clear
+    # error, and the RL ranker's withdrawn-drug safety filter saw NULL
+    # for every drug (a withdrawn drug like thalidomide could be
+    # recommended as a repurposing candidate). This is a patient-safety
+    # bug. Now the operator MUST set DRUGOS_ALLOW_NO_DRUGBANK=1 to
+    # acknowledge the degraded mode; otherwise the pipeline fails
+    # loudly and the operator can either provide real DrugBank XML or
+    # explicitly accept the ChEMBL-only degradation.
+    _allow_no_drugbank = os.environ.get("DRUGOS_ALLOW_NO_DRUGBANK", "0")
+    if _allow_no_drugbank not in ("1", "true", "True", "TRUE", "yes", "YES"):
+        raise RuntimeError(
+            "v113 P1-024 ROOT FIX: DrugBank FULL mode produced ZERO rows "
+            "(academic downloads paused since May 2026). The previous "
+            "code silently returned success -- this hid a patient-safety "
+            "bug where the RL ranker's withdrawn-drug safety filter saw "
+            "NULL for every drug (withdrawn drugs like thalidomide could "
+            "be recommended as repurposing candidates). To acknowledge "
+            "ChEMBL-only degraded mode and proceed, set the environment "
+            "variable DRUGOS_ALLOW_NO_DRUGBANK=1. To fix properly, "
+            "provide real DrugBank XML via DRUGBANK_XML_PATH. The empty "
+            "DrugBank CSVs and a data_status marker have been written "
+            f"to {raw_dir} so downstream contract checks still pass."
+        )
+    logger.warning(
+        "v113 P1-024: DRUGOS_ALLOW_NO_DRUGBANK=%r is set -- proceeding "
+        "in ChEMBL-only degraded mode. The KG will NOT have DrugBank "
+        "withdrawn-drug safety signals. This is acceptable for dev/demo "
+        "ONLY -- production deployments MUST provide real DrugBank XML.",
+        _allow_no_drugbank,
+    )
     return result
 
 

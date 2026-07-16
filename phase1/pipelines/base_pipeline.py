@@ -811,6 +811,33 @@ class BasePipeline(ABC):
         if seed is not None:
             self.seed = int(seed)
 
+        # v113 FORENSIC ROOT FIX (P1-025, IDEM-7.4):
+        # Per-instance RNG instead of mutating the GLOBAL ``random`` /
+        # ``numpy.random`` state. The previous code called
+        # ``random.seed(self.seed)`` and ``np.random.seed(self.seed)``
+        # inside ``run()`` -- this mutated the GLOBAL RNG. If two
+        # pipeline instances ran concurrently in the same process
+        # (e.g., ChEMBL and DrugBank in the master DAG's parallel
+        # tasks), the second instance's seed overwrote the first's --
+        # the first pipeline's subsequent ``random.uniform()`` calls
+        # used the SECOND pipeline's seed, breaking reproducibility.
+        # The comment at ``pipelines/__init__.py:469`` claimed this
+        # provided "IDEM-4" (idempotency), but it actually DESTROYED
+        # idempotency for concurrent pipelines.
+        #
+        # ROOT FIX: instantiate a local ``random.Random(self.seed)``
+        # and (when numpy is available) a local
+        # ``np.random.default_rng(self.seed)``. Both are stored on
+        # ``self`` and used by all retry-backoff / jitter code in this
+        # module (see ``run()`` and the two ``random.uniform`` call
+        # sites in ``_download_with_retries``). The GLOBAL RNG is no
+        # longer touched.
+        self._rng: random.Random = random.Random(self.seed)
+        if _HAS_NUMPY:
+            self._np_rng = np.random.default_rng(self.seed)
+        else:  # pragma: no cover -- numpy is a hard dep in production
+            self._np_rng = None
+
         # v49 ROOT FIX: read DRUGOS_DOWNLOAD_MODE from env (default sample).
         _mode = os.environ.get("DRUGOS_DOWNLOAD_MODE", self.DEFAULT_DOWNLOAD_MODE).lower().strip()
         if _mode not in self.VALID_DOWNLOAD_MODES:
@@ -1184,10 +1211,18 @@ class BasePipeline(ABC):
                 f"{', '.join(failed)}"
             )
 
-        # Seed management for reproducibility (IDEM-7.4)
-        random.seed(self.seed)
-        if _HAS_NUMPY:
-            np.random.seed(self.seed)
+        # v113 FORENSIC ROOT FIX (P1-025, IDEM-7.4):
+        # Per-instance RNG was already initialised in ``__init__`` as
+        # ``self._rng`` (random.Random) and ``self._np_rng``
+        # (numpy Generator). The previous code here called
+        # ``random.seed(self.seed)`` and ``np.random.seed(self.seed)``
+        # on the GLOBAL RNG -- this mutated the global state for every
+        # other module in the process (Airflow scheduler, ChEMBL HTTP
+        # client, deduplicator). With concurrent pipelines, the second
+        # pipeline's seed overwrote the first's, destroying both
+        # reproducibility AND idempotency. The global seeding is now
+        # REMOVED; all jitter in this module uses ``self._rng`` (see
+        # ``_download_with_retries``).
 
         records_downloaded: int = 0
         records_cleaned: int = 0
@@ -4290,7 +4325,7 @@ class BasePipeline(ABC):
                 # (``backoff_base * (2 ** attempt) + jitter``) but the
                 # actual _http_client.py code uses the same formula as
                 # here. The docstrings are now aligned.
-                backoff = (2 ** (attempt - 1)) + random.uniform(0, 1)
+                backoff = (2 ** (attempt - 1)) + self._rng.uniform(0, 1)
                 logger.warning(
                     "[%s] Download failed (attempt %d/%d), retrying in %.1fs: %s",
                     self.source_name,
@@ -4312,7 +4347,7 @@ class BasePipeline(ABC):
                         raise DownloadError(
                             f"HTTP {status_code} after {max_retries} attempts"
                         ) from exc
-                    backoff = (2 ** (attempt - 1)) + random.uniform(0, 1)
+                    backoff = (2 ** (attempt - 1)) + self._rng.uniform(0, 1)
                     logger.warning(
                         "[%s] HTTP %d (attempt %d/%d), retrying in %.1fs",
                         self.source_name,

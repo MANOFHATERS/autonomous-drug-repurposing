@@ -336,8 +336,39 @@ def _log_bridge_fallback(
     file lock (``_acquire_audit_lock``) so concurrent pipeline runs
     cannot interleave their JSONL writes. This satisfies the FDA 21
     CFR Part 11 tamper-evident audit-trail requirement.
+
+    v113 P2-043 ROOT FIX (LOW — Corrupted): the audit log previously
+    accepted ANY string for ``layer`` and ``reason``, which let a
+    concurrent test pollute the log with nonsensical entries like
+    ``"layer": "thread_3", "reason": "write_16"`` (909 such entries
+    were found in production). ROOT FIX: validate ``layer`` and
+    ``reason`` against known-good patterns and REJECT entries that
+    match obvious test-pollution patterns (``thread_N``, ``write_N``).
+    This keeps the audit log scientifically meaningful for downstream
+    FDA 21 CFR Part 11 audit-trail review.
     """
     try:
+        # v113 P2-043 ROOT FIX: reject obvious test-pollution patterns.
+        # Valid ``layer`` values are stable identifiers like
+        # ``phase1_db_available``, ``bridge_load``, ``csv_fallback``,
+        # etc. -- NOT ``thread_0``, ``thread_1``, etc. (those are
+        # concurrent-test artifacts). Valid ``reason`` values are
+        # human-readable explanations like ``db_unavailable:unknown``,
+        # ``empty_dataframe``, etc. -- NOT ``write_0``, ``write_1``,
+        # etc. (those are test-loop counters).
+        import re as _re
+        _TEST_POLLUTION_LAYER_RE = _re.compile(r"^thread_\d+$")
+        _TEST_POLLUTION_REASON_RE = _re.compile(r"^write_\d+$")
+        if _TEST_POLLUTION_LAYER_RE.match(str(layer)) or _TEST_POLLUTION_REASON_RE.match(str(reason)):
+            logger.warning(
+                "v113 P2-043: rejecting bridge_fallbacks audit entry with "
+                "test-pollution pattern (layer=%r, reason=%r). The audit "
+                "log is FDA 21 CFR Part 11 tamper-evident -- synthetic "
+                "test entries are FORBIDDEN. Investigate the caller.",
+                layer, reason,
+            )
+            return  # do NOT write the entry
+
         from datetime import datetime, timezone
         _audit_dir = (
             Path(__file__).resolve().parents[1]
@@ -501,13 +532,40 @@ def _compute_normalized_score(
             pass
 
     # 5. DrugBank indication_type — qualitative approval signal.
+    # v113 FORENSIC ROOT FIX (P2-050, scientific correctness):
+    #   The previous code mapped "approved" -> 1.0,
+    #   "investigational"/"phase" -> 0.5, ELSE -> 0.3. The "else"
+    #   branch caught "withdrawn", "over_the_counter", "experimental",
+    #   "illicit", etc. — giving a WITHDRAWN drug's ``treats`` edge a
+    #   confidence of 0.3. This is a patient-safety bug: a withdrawn
+    #   drug (e.g., thalidomide, rofecoxib, cisapride) was pulled from
+    #   the market for safety reasons -- its ``treats`` edge should
+    #   have ZERO confidence (the drug is NOT a viable repurposing
+    #   candidate without an explicit safety override). The RL ranker
+    #   reads ``normalized_score`` and a non-zero score biases it
+    #   toward recommending withdrawn drugs.
+    #
+    #   ROOT FIX: explicit per-status mapping. "withdrawn" -> 0.0
+    #   (the drug is NOT a viable candidate). "approved" -> 1.0.
+    #   "investigational"/"phase" -> 0.5. "experimental"/"illicit"
+    #   -> 0.1 (weak signal -- NOT a viable clinical candidate but
+    #   not a hard zero like withdrawn). Other (e.g., "over_the_counter")
+    #   -> 0.3 (real clinical signal, kept for backward compat).
     if indication_type:
         it = str(indication_type).strip().lower()
+        # WITHDRAWN must be checked FIRST -- "approved_and_withdrawn"
+        # (rare but possible in DrugBank exports) should map to 0.0,
+        # not 1.0, because the withdrawal is the more recent safety
+        # signal and overrides the prior approval.
+        if "withdrawn" in it:
+            return 0.0
         if "approved" in it or it == "approved":
             return 1.0
         if "investigational" in it or "phase" in it:
             return 0.5
-        # "withdrawn" / "over_the_counter" / etc. — still a real clinical signal.
+        if "experimental" in it or "illicit" in it:
+            return 0.1
+        # "over_the_counter" / other -- still a real clinical signal.
         if it:
             return 0.3
 
@@ -3772,6 +3830,35 @@ def read_phase1_outputs(
         "omim_susceptibility": [
             base / "omim_gene_disease_susceptibility.csv",
         ],
+        # ─── v113 ROOT FIX (P2-047, HIGH): SIDER integration in the bridge ──
+        # The audit found that ``sider_loader`` parses SIDER adverse-event
+        # data, but the bridge's ``paths`` dict had NO SIDER entry -- so
+        # SIDER data was NEVER consumed by the Phase 1 → Phase 2 bridge.
+        # The KG's Compound→causes_adverse_event→MedDRA_Term edges were
+        # emitted ONLY by ``run_pipeline.step6_ingest_sider`` (a Phase-2
+        # code path), which meant the bridge's "single authoritative
+        # wire" promise was broken for adverse-event data. The RL ranker
+        # reads causes_adverse_event edges for its safety-signal
+        # dimension; if the bridge doesn't emit them, the safety ranker
+        # has no signal when running in bridge-only mode.
+        #
+        # ROOT FIX: add SIDER entries to the paths dict. We accept TWO
+        # candidate CSV filenames:
+        #   • ``sider_adverse_events.csv``  -- canonical name (v113)
+        #   • ``sider_meddra_all_se.csv``   -- matches the raw filename
+        # If neither file exists (the current state, since SIDER is a
+        # Phase-2-only source and Phase 1 doesn't produce it), the
+        # bridge logs a warning and produces an empty DataFrame -- same
+        # graceful-degradation behavior as the other missing sources.
+        # An operator who wants SIDER data in the bridge can write a
+        # CSV at either path (e.g., by running
+        # ``python -c "from drugos_graph.sider_loader import
+        # parse_sider_side_effects; parse_sider_side_effects().to_csv(
+        # 'phase1/processed_data/sider_adverse_events.csv')"``).
+        "sider_adverse_events": [
+            base / "sider_adverse_events.csv",
+            base / "sider_meddra_all_se.csv",
+        ],
     }
     out: Dict[str, pd.DataFrame] = {}
     for key, p in paths.items():
@@ -4689,7 +4776,17 @@ def _load_clinical_outcomes(
     Each unique ``(disease_id, indication_type)`` tuple becomes a
     ClinicalOutcome node with properties:
 
-        id                  = "CO:{drugbank_id}:{disease_key}:{indication_type}"
+        id                  = "CO:{disease_key}:{indication_type}"
+                              (v113 P2-046/048 ROOT FIX: dropped the
+                              first-seen drugbank_id from the ID -- the
+                              CO node is shared across ALL drugs for the
+                              same (disease, type) pair, so the ID
+                              should not depend on which drug was seen
+                              first. This makes the ID deterministic
+                              across runs and unique per (disease, type)
+                              pair. The ``first_seen_drug_id`` and
+                              ``source_drug_ids`` fields still record
+                              which drug(s) contributed.)
         name                = "{disease_name} ({indication_type})"
         disease_id          = original OMIM ID (or "" if absent)
         disease_name        = human-readable disease name
@@ -4784,12 +4881,49 @@ def _load_clinical_outcomes(
         if dedup_key in seen_node_keys:
             co_id = seen_node_keys[dedup_key]
         else:
-            # Construct a stable, ID_PATTERNS-compliant ClinicalOutcome ID.
-            # Format: "CO:{drugbank_id}:{disease_key}:{indication_type}".
-            # Use the FIRST drug's dbid so the ID is deterministic per
-            # (disease, type) pair. (Subsequent drugs pointing to the same
-            # node reuse this ID via seen_node_keys.)
-            co_id = f"CO:{dbid}:{disease_key}:{itype}"
+            # v113 FORENSIC ROOT FIX (P2-046 + P2-048, MEDIUM):
+            #   The previous ID format was ``CO:{dbid}:{disease_key}:{itype}``
+            #   where ``dbid`` was the FIRST drug's drugbank_id. This had
+            #   TWO scientific-correctness bugs:
+            #
+            #   P2-046: the ID depended on row order -- if the indications
+            #   CSV was sorted differently, a DIFFERENT drug's dbid would
+            #   be "first", producing a DIFFERENT CO ID for the SAME
+            #   (disease, type) pair. The KG would then have duplicate
+            #   ClinicalOutcome nodes for the same disease+type, split
+            #   across runs, breaking longitudinal analysis.
+            #
+            #   P2-048: ``kg_builder.create_constraints`` creates a
+            #   uniqueness constraint on ``n.id`` for ClinicalOutcome.
+            #   With the old format, the SAME (disease, type) pair could
+            #   collide across different drug-disease-type combinations
+            #   (e.g., "CO:DB00001:mesh:D001:approved" for drug DB00001
+            #   vs "CO:DB00002:mesh:D001:approved" for drug DB00002 --
+            #   these are DIFFERENT IDs but represent the SAME clinical
+            #   outcome). The uniqueness constraint would NOT catch this
+            #   -- it only catches EXACT id collisions.
+            #
+            #   ROOT FIX: drop ``dbid`` from the CO ID entirely. The CO
+            #   node is shared across ALL drugs for the same (disease,
+            #   type) pair -- the ID should reflect ONLY the (disease,
+            #   type) pair, not the first-seen drug. New format:
+            #       CO:{disease_key}:{itype}
+            #   This is deterministic across runs (independent of row
+            #   order) and unique per (disease, type) pair. The
+            #   ``first_seen_drug_id`` and ``source_drug_ids`` fields on
+            #   the node still record which drug(s) contributed.
+            #
+            #   BACKWARD COMPAT: existing KGs with the old ``CO:{dbid}:...``
+            #   IDs are NOT migrated -- they will appear as separate nodes
+            #   from the new ``CO:{disease_key}:{itype}`` nodes. Operators
+            #   should run a one-time Cypher migration to merge them:
+            #     MATCH (n:ClinicalOutcome) WHERE n.id STARTS WITH "CO:"
+            #     WITH n, split(n.id, ":") AS parts
+            #     WHERE size(parts) = 4  // old format CO:dbid:disease:type
+            #     MERGE (m:ClinicalOutcome {id: "CO:" + parts[2] + ":" + parts[3]})
+            #     SET m += properties(n)
+            #     DETACH DELETE n
+            co_id = f"CO:{disease_key}:{itype}"
             seen_node_keys[dedup_key] = co_id
             node_name = f"{dname or did} ({itype})"
             # P2-001 FORENSIC ROOT FIX (Team 4 — namespace collision):
