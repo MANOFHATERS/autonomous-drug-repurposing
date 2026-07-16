@@ -1104,7 +1104,27 @@ class DrugRepurposingGraphTransformer(nn.Module):
                     raw_matrix[d_idx, ds_start:ds_end] = torch.sigmoid(logits)
                     # Calibrated: sigmoid(logits / T). The temperature T
                     # is stored on the link predictor after fit_temperature.
-                    T = float(getattr(self.link_predictor, "temperature", 1.0))
+                    # P3-005 v113/v114: temperature is an nn.Parameter of
+                    # shape (2,) (per-class, v114 P3-016 fix). At inference
+                    # time the true label is unknown, so we use the MEAN
+                    # of the two per-class temperatures (the same
+                    # approximation the link predictor's forward() uses
+                    # when labels=None). The clamp to [0.5, 2.0] matches
+                    # the link predictor's TEMPERATURE_CLAMP_MIN/MAX.
+                    T_param = getattr(self.link_predictor, "temperature", None)
+                    if T_param is None:
+                        T = 1.0
+                    else:
+                        try:
+                            # v114: temperature is shape (2,) per-class.
+                            # Use the mean (inference-time approximation).
+                            t_clamped = T_param.clamp(min=0.5, max=2.0)
+                            T = float(t_clamped.mean().item())
+                        except (ValueError, TypeError, RuntimeError):
+                            try:
+                                T = float(T_param.item())
+                            except (ValueError, RuntimeError):
+                                T = 1.0
                     if T <= 0 or not math.isfinite(T):
                         T = 1.0  # degenerate -- treat as identity
                     calibrated_matrix[d_idx, ds_start:ds_end] = torch.sigmoid(logits / T)
