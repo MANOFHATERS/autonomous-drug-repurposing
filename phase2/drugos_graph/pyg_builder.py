@@ -3883,7 +3883,25 @@ def build_pyg_hetero_data(
                 "build_pyg_hetero_data: node missing 'label', skipping"
             )
             continue
-        gt_label = _PHASE2_TO_GT_NODE_TYPE.get(p2_label, p2_label.lower())
+        # SH-011 ROOT FIX (Teammate 4): the canonical PHASE2_TO_PHASE3_NODE
+        # mapping is now Dict[str, Optional[str]] — Gene and MedDRA_Term
+        # map to None (they are Phase 2 intermediates dropped in the
+        # projection to Phase 3). The previous code used ``.get(p2_label,
+        # p2_label.lower())`` which returned the DEFAULT ("gene") for
+        # missing keys, but with the new mapping it returns None for
+        # intermediates (because the key EXISTS with value None). We must
+        # explicitly skip None — silently coercing Gene to "gene" would
+        # create a spurious node type in the Phase 3 HeteroData that the
+        # Graph Transformer is not trained to reason about.
+        gt_label = _PHASE2_TO_GT_NODE_TYPE.get(p2_label)
+        if gt_label is None:
+            # Phase 2 intermediate (Gene, MedDRA_Term) — dropped in Phase 3.
+            # This is the SCIENTIFICALLY CORRECT behavior per
+            # phase2/contracts/phase2_schema.py: Gene is used to derive
+            # pathway->disease edges; MedDRA_Term is folded into
+            # ClinicalOutcome. Neither appears as a top-level node type
+            # in the Phase 3 HeteroData.
+            continue
         if gt_label not in entity_maps:
             entity_maps[gt_label] = {}
             _phase2_nodes_by_type[gt_label] = []
@@ -3921,8 +3939,18 @@ def build_pyg_hetero_data(
         if not (p2_src and p2_dst and relation):
             continue
 
-        gt_src = _PHASE2_TO_GT_NODE_TYPE.get(p2_src, p2_src.lower())
-        gt_dst = _PHASE2_TO_GT_NODE_TYPE.get(p2_dst, p2_dst.lower())
+        # SH-011 ROOT FIX (Teammate 4): same fix as the node loop above.
+        # If either endpoint maps to None (intermediate node type), skip
+        # the edge — it cannot exist in the Phase 3 HeteroData because
+        # one of its endpoint node types is dropped.
+        gt_src = _PHASE2_TO_GT_NODE_TYPE.get(p2_src)
+        gt_dst = _PHASE2_TO_GT_NODE_TYPE.get(p2_dst)
+        if gt_src is None or gt_dst is None:
+            # Edge touches a Phase 2 intermediate (Gene/MedDRA_Term) —
+            # dropped in Phase 3. This is correct: e.g. (Gene, associated_with,
+            # Disease) is used to DERIVE (Pathway, disrupted_in, Disease)
+            # in the adapter — the original Gene edge is not in Phase 3.
+            continue
         edge_key = (gt_src, relation, gt_dst)
 
         src_id = str(edge.get("source_id", ""))
@@ -3954,7 +3982,31 @@ def build_pyg_hetero_data(
     disease_idx_to_id = {v: k for k, v in disease_id_map.items()}
 
     for edge_key in edge_maps:
-        if edge_key[1] == "treats" and edge_key[0] in ("drug", "compound") \
+        # P2-060 ROOT FIX (Teammate 4, forensic, root-level): the previous
+        # code checked ONLY ``edge_key[1] == "treats"``. But there are
+        # THREE edge types that represent drug-disease therapeutic
+        # relationships in the Phase 3 canonical schema (see
+        # phase2/contracts/phase2_schema.py:EDGE_TYPES):
+        #   - ("drug", "treats", "disease") — approved/used to treat
+        #   - ("drug", "tested_for", "disease") — in clinical trials
+        #   - ("drug", "validated_treats", "disease") — post-trial validated
+        #
+        # The previous code missed the latter two, so the known_pairs
+        # list was incomplete. The GNN's link predictor was trained
+        # against an incomplete positive set, biasing it toward "treats"
+        # edges and against "tested_for" / "validated_treats" edges.
+        # For drug REPURPOSING, the "tested_for" edges are ESSENTIAL —
+        # they represent the very hypotheses the platform is trying to
+        # validate. Missing them in known_pairs meant the model could
+        # not learn from prior clinical trial data.
+        #
+        # ROOT FIX: include ALL three therapeutic edge types. The
+        # ``validated_treats`` edge type is not yet in the canonical
+        # EDGE_TYPES tuple (it's a future addition per the project
+        # roadmap), but we accept it here for forward compatibility —
+        # if/when it's added, this code will already handle it.
+        if edge_key[1] in ("treats", "tested_for", "validated_treats") \
+                and edge_key[0] in ("drug", "compound") \
                 and edge_key[2] in ("disease",):
             src_indices, dst_indices = edge_maps[edge_key]
             for si, di in zip(src_indices, dst_indices):

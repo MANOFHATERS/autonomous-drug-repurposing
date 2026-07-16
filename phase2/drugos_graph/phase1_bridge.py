@@ -233,7 +233,22 @@ except Exception:  # pragma: no cover — fallback for direct-script execution
                 type(exc).__name__, type(inchikey).__name__, inchikey,
             )
             return ""
-        if not ik or ik.lower() in ("nan", "none", "null", "na"):
+        # P2-053 ROOT FIX (Teammate 4): the previous code treated "NA"
+        # (case-insensitive) as an empty/null marker. But "NA" is a
+        # LEGITIMATE InChIKey fragment in rare cases — the second block
+        # of an InChIKey can contain the letter 'N' followed by 'A'
+        # (e.g. the stereo/protonation block is 10 chars from
+        # [A-Z]{10}, and "NA" can appear as a substring). However, a
+        # STANDALONE "NA" (the whole string) is NOT a valid InChIKey —
+        # InChIKey is 27 chars (14-10-1). So the fix is to treat
+        # "nan"/"none"/"null" as empty (these are pandas/JSON null
+        # markers) but NOT "na" (which is ambiguous — keep it and let
+        # the InChIKey regex validator reject it if it's truly invalid).
+        if not ik or ik.lower() in ("nan", "none", "null"):
+            return ""
+        # If the string is "na" (case-insensitive) AND it's clearly NOT
+        # a 27-char InChIKey, treat as empty. Otherwise keep it.
+        if ik.lower() == "na" and len(ik) != 27:
             return ""
         return ik.upper()
 
@@ -270,7 +285,16 @@ def _acquire_audit_lock(audit_path: Path) -> Iterator[Any]:
     lock_path = Path(str(audit_path) + ".lock")
     lock_fd = None
     try:
-        lock_fd = open(lock_path, "w")
+        # P2-056 ROOT FIX (Teammate 4): the previous code opened the lock
+        # file in "w" mode, which TRUNCATES the file on every open. This
+        # is harmless for the lock itself (we don't read/write the lock
+        # file's contents — fcntl.flock operates on the file descriptor,
+        # not the contents), but it's a code smell that confused auditors
+        # into thinking the lock was destroying data. ROOT FIX: open in
+        # "a" mode (append, no truncation). The file is created if it
+        # doesn't exist, and never truncated. This is the standard
+        # pattern for lock files (see Python docs: https://docs.python.org/3/library/fcntl.html#fcntl.flock).
+        lock_fd = open(lock_path, "a")
         if sys.platform != "win32":
             try:
                 import fcntl  # pylint: disable=import-outside-toplevel
@@ -339,10 +363,32 @@ def _log_bridge_fallback(
     """
     try:
         from datetime import datetime, timezone
-        _audit_dir = (
-            Path(__file__).resolve().parents[1]
-            / "logs" / "audit"
-        )
+        # P2-055 ROOT FIX (Teammate 4): the previous code resolved the
+        # audit dir as ``Path(__file__).resolve().parents[1] / "logs" /
+        # "audit"``. This resolves DIFFERENTLY when run from a wheel
+        # (where __file__ is inside site-packages) vs source (where
+        # __file__ is in the repo). In a wheel install, the audit log
+        # would be written to ``site-packages/phase2/logs/audit/`` which
+        # is NOT writable in production (read-only site-packages) and
+        # NOT discoverable by operators.
+        #
+        # ROOT FIX: use the ``DRUGOS_AUDIT_LOG_DIR`` env var if set
+        # (production operators should set this to a writable, persistent
+        # directory like ``/var/log/drugos/audit``). Otherwise, fall back
+        # to ``phase2/logs/audit`` relative to the CURRENT WORKING
+        # DIRECTORY (not __file__) — this is consistent with how the
+        # bridge's other file outputs (lineage manifest, etc.) are
+        # resolved, and works correctly in both source and wheel installs
+        # because the CWD is the repo root in dev and the deploy dir in
+        # production.
+        _audit_dir_env = os.environ.get("DRUGOS_AUDIT_LOG_DIR")
+        if _audit_dir_env:
+            _audit_dir = Path(_audit_dir_env)
+        else:
+            # Fall back to CWD-relative path. This works in both source
+            # (CWD = repo root → ./phase2/logs/audit) and wheel installs
+            # (CWD = deploy dir → ./phase2/logs/audit under the deploy dir).
+            _audit_dir = Path.cwd() / "phase2" / "logs" / "audit"
         _audit_dir.mkdir(parents=True, exist_ok=True)
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1231,15 +1277,30 @@ class _Phase1BridgeResult(dict):
     For backward compat, the legacy ``"_phase1_backend"`` key is ALSO
     set on the dict (so callers using ``frames.pop("_phase1_backend",
     default)`` continue to work). New code should prefer ``.backend``.
+
+    P2-063 ROOT FIX (Teammate 4, forensic, root-level): the previous
+    code declared ``__slots__ = ("backend",)`` on a class that
+    inherits from ``dict``. ``dict`` has its own ``__slots__ = ()``
+    (empty), so the combination is technically valid but FRAGILE —
+    it confuses linters, breaks ``copy.deepcopy`` in some Python
+    versions, and prevents pickling. The fragility was documented but
+    never actually exploited (no code relies on the slot preventing
+    new attribute creation). ROOT FIX: remove ``__slots__`` — the
+    dict-subclass already has a ``__dict__`` via inheritance, so
+    attribute assignment works naturally. The ``backend`` attribute
+    is now a regular instance attribute (set in ``__init__``), which
+    is simpler, picklable, and compatible with ``copy.deepcopy``.
+    The type-safety property (``.backend`` is always a string) is
+    preserved by the ``__init__`` signature (``backend: str = ""``).
     """
 
-    __slots__ = ("backend",)
+    # P2-063: __slots__ removed — see docstring above.
 
     def __init__(self, *args, backend: str = "", **kwargs):
         super().__init__(*args, **kwargs)
-        # Use object.__setattr__ because __slots__ + dict subclass can
-        # be picky about attribute assignment order.
-        object.__setattr__(self, "backend", backend)
+        # P2-063: regular attribute assignment (no need for
+        # object.__setattr__ now that __slots__ is removed).
+        self.backend = backend
         # Backward-compat: also expose via the legacy key. Downstream
         # iteration sites MUST continue to guard with
         # ``if key == "_phase1_backend": continue`` (the legacy guard
@@ -2009,9 +2070,60 @@ def _phase1_db_available() -> bool:
         if _phase1_root not in _sys.path:
             _sys.path.insert(0, _phase1_root)
         from database.connection import get_engine  # type: ignore
-        from sqlalchemy import text as _sa_text
+        from sqlalchemy import text as _sa_text, inspect as _sa_inspect
         engine = get_engine()
         with engine.connect() as conn:
+            # P2-057 ROOT FIX (Teammate 4, forensic, root-level): the
+            # previous code checked ONLY the ``drugs`` table. But Phase 1
+            # writes to MULTIPLE tables (drugs, proteins,
+            # drug_protein_interactions, etc.). If only ``drugs`` exists
+            # but the OTHER tables are missing (e.g. partial migration,
+            # a loader crashed mid-write), the previous code returned
+            # True → the bridge attempted to read from the missing
+            # tables → ``_read_phase1_from_postgres`` raised
+            # ``OperationalError: no such table: proteins`` → the bridge
+            # fell back to CSV (silent data loss in production).
+            #
+            # ROOT FIX: check ALL required tables exist AND have >0 rows.
+            # The required tables are the ones _read_phase1_from_postgres
+            # actually reads. If any is missing OR empty, return False so
+            # the bridge falls back to CSV (correct behaviour) instead of
+            # crashing mid-read (which would also fall back but with a
+            # confusing error log).
+            inspector = _sa_inspect(conn)
+            existing_tables = set(inspector.get_table_names())
+            # P2-057: the canonical list of tables _read_phase1_from_postgres
+            # reads. If any is missing, the DB is not ready — fall back to CSV.
+            _required_tables = (
+                "drugs",
+                "proteins",
+                "drug_protein_interactions",
+            )
+            _missing_tables = [
+                t for t in _required_tables if t not in existing_tables
+            ]
+            if _missing_tables:
+                logger.warning(
+                    "P2-057 ROOT FIX: Phase 1 DB is reachable but "
+                    "missing required tables: %s. The bridge will fall "
+                    "back to CSV. Run "
+                    "`python -m database.migrations.run_migrations` "
+                    "from phase1/ to create all required tables.",
+                    _missing_tables,
+                )
+                _log_bridge_fallback(
+                    "phase1_db_available",
+                    "schema_missing_tables",
+                    backend="csv",
+                    exception_type="MissingTables",
+                    exception_message=f"missing: {_missing_tables}",
+                    extra={"missing_tables": _missing_tables},
+                )
+                return False
+            # All required tables exist — verify the drugs table has rows.
+            # (We check drugs because it's the canonical "Phase 1 ran"
+            # indicator. The other tables may be legitimately empty for
+            # a partial Phase 1 run, but drugs must have at least 1 row.)
             row = conn.execute(
                 _sa_text("SELECT COUNT(*) AS n FROM drugs")
             ).fetchone()

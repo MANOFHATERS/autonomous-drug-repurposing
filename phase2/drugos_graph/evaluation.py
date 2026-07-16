@@ -477,17 +477,58 @@ def _sanitize_scores(
         nan_mask = np.isnan(scores)
         n_nan = int(np.sum(nan_mask))
         if n_nan > 0:
+            # P2-064 ROOT FIX (Teammate 4, forensic, root-level): the
+            # previous code logged at WARNING level with only n_dropped
+            # and total. The audit found this was "silently" dropping
+            # NaN scores because:
+            #   1. WARNING level is often filtered in production logs.
+            #   2. The PERCENTAGE dropped was not logged (5% drop is
+            #      acceptable; 50% drop is a data quality emergency).
+            #   3. The caller had no way to know how many were dropped
+            #      (the count was logged but not returned).
+            #
+            # ROOT FIX:
+            #   - Log at ERROR level if >5% of scores are NaN (data
+            #     quality emergency — the AUC is likely meaningless).
+            #   - Log at WARNING level if 1-5% are NaN (investigate).
+            #   - Log at INFO level if <1% are NaN (acceptable).
+            #   - Include the PERCENTAGE in the log message.
+            #   - Include the SHAPE of the original array so operators
+            #     can correlate with the source data.
+            _pct = (n_nan / len(scores)) * 100 if len(scores) > 0 else 0.0
+            _log_level = (
+                logging.ERROR if _pct > 5.0
+                else logging.WARNING if _pct >= 1.0
+                else logging.INFO
+            )
             _log_structured(
-                logging.WARNING,
+                _log_level,
                 "nan_scores_dropped",
                 n_dropped=n_nan,
                 total=len(scores),
+                pct_dropped=round(_pct, 4),
+                array_shape=list(scores.shape),
+                message=(
+                    f"Dropped {n_nan}/{len(scores)} ({_pct:.2f}%) NaN "
+                    f"scores from array of shape {scores.shape}. "
+                    + (
+                        "DATA QUALITY EMERGENCY: >5% of scores are NaN — "
+                        "the AUC is likely meaningless. Investigate the "
+                        "model's forward pass for NaN propagation."
+                        if _pct > 5.0
+                        else "Investigate the source of NaN scores."
+                        if _pct >= 1.0
+                        else "Acceptable NaN rate."
+                    )
+                ),
             )
             EVALUATION_TRANSFORMATIONS_LOG.append(
                 {
                     "action": "drop_nan",
                     "n_dropped": n_nan,
                     "total_before": len(scores),
+                    "pct_dropped": round(_pct, 4),
+                    "log_level": logging.getLevelName(_log_level),
                 }
             )
             scores = scores[~nan_mask]
