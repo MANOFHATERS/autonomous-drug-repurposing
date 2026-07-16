@@ -18,15 +18,26 @@ import { validateBody, PredictBody } from "@/lib/zod-schemas";
  * to the frontend. A researcher can now ask "what is the GT score for
  * drug X -> disease Y?" and get a real answer in seconds.
  *
- * The route shells out to `scripts/gt_inference.py` (shipped with the
- * repo) which loads the trained checkpoint and runs the actual model.
+ * Issue 221 ROOT FIX: the previous version of this route called
+ * `predictPairs()` from gt-inference.ts which had a SUBPROCESS fallback
+ * that spawned `frontend/scripts/gt_inference.py` — a path that DOES
+ * NOT EXIST (the script lives at `<repo>/scripts/gt_inference.py`, but
+ * the path resolver used `process.cwd()` which is `frontend/` in dev).
+ * Every request that didn't hit the HTTP path returned `source: "none"`
+ * with a "GT inference helper not found" note.
+ *
+ * The new gt-inference.ts (Issue 230) is HTTP-ONLY: it proxies to
+ * `GT_SERVICE_URL/predict` via the shared mlFetch HTTP client. There
+ * is no subprocess path, no checkpoint search, no fs.watch. If
+ * GT_SERVICE_URL is not set, the route returns `source: "none"` with
+ * a clear message telling the operator to set the env var.
+ *
  * We NEVER fabricate scores — if no checkpoint exists, we return an
  * empty list with `source: "none"` and a clear note.
  *
  * Phase 6 V1 launch criterion: "API handles 100 concurrent requests
- * without timeout" (project docx Section 8). The Python helper runs in
- * a subprocess per request; for high-concurrency deployments, set
- * GT_SERVICE_URL to proxy to a long-running FastAPI service instead.
+ * without timeout" (project docx Section 8). The HTTP service path
+ * (FastAPI + uvicorn) handles 100+ concurrent requests via asyncio.
  */
 export async function POST(req: NextRequest) {
   const auth = await requireAuth();

@@ -479,6 +479,153 @@ def rank_post(req: RankRequest) -> Dict[str, Any]:
     return _rank_impl(req.drug, req.disease, req.limit)
 
 
+# ============================================================================
+# Issue 227 ROOT FIX: /validate endpoint for data flywheel writeback
+# ============================================================================
+#
+# The frontend's /api/hypothesis/validate route previously spawned a
+# subprocess to call scripts/hypothesis_writeback.py — a path that did
+# not resolve correctly when Next.js ran from frontend/. This endpoint
+# replaces the subprocess path with an HTTP proxy.
+#
+# The endpoint calls phase4.writeback.write_validated_hypothesis() which
+# writes the validated hypothesis to all 3 phases:
+#   - Phase 1: appends to phase1/processed_data/validated_hypotheses.csv
+#   - Phase 2: adds a VALIDATED_TREATS edge to Neo4j (when available)
+#   - Phase 3: appends to graph_transformer/retrain_triggered.json
+#
+# The writeback is APPEND-ONLY and timestamped (21 CFR Part 11 compliance).
+# This endpoint does NOT retry on failure — writeback is not idempotent
+# (appending to a CSV twice would create duplicate records).
+
+
+class ValidateRequest(BaseModel):
+    """Request body for /validate (Issue 227).
+
+    Matches the ValidatedHypothesis dataclass in phase4/writeback.py.
+    The frontend's RlValidateRequestSchema (ml-contracts.ts) is the
+    TypeScript mirror of this Pydantic model — the two MUST stay in sync.
+    """
+    drug: str
+    disease: str
+    outcome: str  # validated_positive | validated_negative | validated_toxic | invalidated
+    validated_by: str
+    validation_study_id: Optional[str] = None
+    notes: Optional[str] = None
+    original_gt_score: Optional[float] = None
+    original_rl_rank: Optional[int] = None
+
+
+@app.post("/validate")
+def validate(req: ValidateRequest) -> Dict[str, Any]:
+    """Write a validated hypothesis back to all 3 phases (data flywheel).
+
+    Issue 227 ROOT FIX: this endpoint replaces the subprocess shell-out
+    from the frontend's /api/hypothesis/validate route. The frontend now
+    proxies to RL_SERVICE_URL/validate via HTTP.
+
+    The endpoint calls phase4.writeback.write_validated_hypothesis()
+    which:
+      1. Appends to phase1/processed_data/validated_hypotheses.csv
+         (becomes a new labeled data point for future KG builds).
+      2. Adds a VALIDATED_TREATS edge to Neo4j (when available) with
+         validated_at timestamp + validated_by partner identifier.
+      3. Appends to graph_transformer/retrain_triggered.json so the
+         next GT training run includes this pair in known_pairs.
+
+    Returns the writeback result containing:
+      - phase1_csv_path: path to the appended CSV
+      - phase2_neo4j_written: whether the Neo4j edge was added
+      - phase3_trigger_path: path to the retrain trigger JSON
+      - validated_hypothesis: the ValidatedHypothesis record
+      - writeback_version: the writeback module version
+
+    Errors:
+      - 400: invalid outcome enum value
+      - 500: writeback failed (CSV append error, Neo4j connection error, etc.)
+    """
+    # Validate the outcome enum (Pydantic accepts any string for `outcome`
+    # because we typed it as `str` for forward-compat with new outcomes).
+    valid_outcomes = {
+        "validated_positive",
+        "validated_negative",
+        "validated_toxic",
+        "invalidated",
+    }
+    if req.outcome not in valid_outcomes:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"outcome must be one of: {', '.join(sorted(valid_outcomes))}. "
+                f"Got: {req.outcome!r}"
+            ),
+        )
+
+    try:
+        # Import here (not at module top) so the service can start even
+        # if phase4.writeback has a missing optional dependency (e.g.,
+        # neo4j driver not installed). The /rank endpoint does not need
+        # writeback, so it should not be blocked by a writeback import
+        # failure.
+        from phase4.writeback import (
+            write_validated_hypothesis,
+            ValidationOutcome,
+            WRITEBACK_VERSION,
+        )
+
+        # Cast the string outcome to the Literal type. The set membership
+        # check above guarantees the value is one of the 4 valid strings.
+        outcome_typed = req.outcome  # type: ignore[assignment]
+
+        result = write_validated_hypothesis(
+            drug=req.drug,
+            disease=req.disease,
+            outcome=outcome_typed,  # type: ignore[arg-type]
+            validated_by=req.validated_by,
+            validation_study_id=req.validation_study_id,
+            notes=req.notes,
+            original_gt_score=req.original_gt_score,
+            original_rl_rank=req.original_rl_rank,
+        )
+
+        # write_validated_hypothesis returns a Dict[str, Any] with keys:
+        # phase1_csv_path, phase2_neo4j_written, phase3_trigger_path,
+        # validated_hypothesis, writeback_version. We forward it directly.
+        result_dict: Dict[str, Any] = dict(result) if isinstance(result, dict) else {}
+
+        return {
+            "ok": True,
+            "writeback": {
+                "phase1_csv_path": str(result_dict.get("phase1_csv_path", "")),
+                "phase2_neo4j_written": bool(result_dict.get("phase2_neo4j_written", False)),
+                "phase3_trigger_path": str(result_dict.get("phase3_trigger_path", "")),
+                "validated_hypothesis": result_dict.get("validated_hypothesis", {}),
+                "writeback_version": result_dict.get("writeback_version", WRITEBACK_VERSION),
+            },
+            "message": (
+                "Hypothesis validation written back to Phase 1 (CSV), "
+                "Phase 2 (Neo4j edge), and Phase 3 (retrain trigger)."
+            ),
+        }
+    except HTTPException:
+        # Re-raise HTTPExceptions (e.g., the 400 above) without wrapping.
+        raise
+    except Exception as exc:
+        logger.error(
+            "Issue 227 /validate writeback failed for drug=%s disease=%s: %s",
+            req.drug, req.disease, exc, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Hypothesis writeback failed: {exc}. The writeback is "
+                f"append-only — re-submitting will NOT create duplicate "
+                f"records if Phase 1 succeeded but Phase 2/3 failed. "
+                f"Check the service logs for which phase(s) completed."
+            ),
+        )
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("RL_SERVICE_PORT", "8004"))

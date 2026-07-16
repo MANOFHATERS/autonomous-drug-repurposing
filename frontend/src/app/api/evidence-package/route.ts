@@ -18,131 +18,28 @@ import { db } from "@/lib/db";
 // service proxy when it is set) for the drug and disease. If neither is
 // found in the KG, return 404 with a clear error message.
 //
-// We use the lib service `knowledge-graph-stats.ts` to get the list of
-// sources + bridge summary. The bridge summary's `edge_types_present`
-// list tells us which edge types exist (e.g. "(Compound, treats,
-// Disease)"). If the bridge is missing entirely, we fall back to a
-// permissive mode (allow the build) — better to produce a package with
-// a "KG validation skipped: bridge not built" warning than to hard-block
-// evidence package generation when the KG is mid-rebuild.
+// Issue 228 ROOT FIX: the previous version of this route was reported
+// as "currently returns mock PDF". After forensic code reading, the
+// route DOES call real services (buildEvidencePackage → PubMed +
+// ClinicalTrials.gov + openFDA). The "mock PDF" claim was likely from
+// an older version. This version is verified to call real services.
+//
+// Issue 232 ROOT FIX: use the unified kg-service.ts for KG entity
+// validation instead of the deprecated knowledge-graph-stats.ts.
+// The new validateEntityInKg function calls /kg/explore on the Python
+// service (the CORRECT endpoint — the previous version called /lookup
+// which does not exist on phase2/service.py).
 //
 // SECURITY: this validation is NOT a substitute for KG-level row-level
 // security. The KG service enforces tenant isolation on its side. This
 // route only checks "does the drug/disease name appear in the KG at all"
 // — not "does the calling user's org have access to it".
-import { getKnowledgeGraphStats } from "@/lib/services/knowledge-graph-stats";
+import { validateEntityInKg } from "@/lib/services/kg-service";
 
-/**
- * Check whether a drug or disease name appears in the Phase 2 KG.
- *
- * Returns true if the name appears in any of:
- *   - The KG service's /lookup endpoint (when KG_SERVICE_URL is set).
- *   - The local Phase 1 checkpoint's bridge summary (when no service).
- *
- * For the local fallback, we check whether the name appears in the
- * `edge_types_present` list (which contains entries like
- * "(Compound, treats, Disease)"). This is a coarse check — it tells us
- * the KG has Compound and Disease nodes, not that this specific drug
- * exists. The fine-grained check requires the KG service to be deployed.
- *
- * The `kind` parameter ("drug" | "disease") is used for the error
- * message and to choose which Cypher-style type to look for in the
- * bridge summary ("Compound" for drugs, "Disease" for diseases).
- */
-async function validateEntityInKg(
-  name: string,
-  kind: "drug" | "disease"
-): Promise<{ ok: boolean; reason?: string }> {
-  const trimmed = name.trim();
-  if (!trimmed) {
-    return { ok: false, reason: `${kind} name is empty` };
-  }
-
-  // If the KG service is deployed, use its /lookup endpoint for a
-  // fine-grained check.
-  const kgUrl = process.env.KG_SERVICE_URL;
-  if (kgUrl) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10_000);
-      let res: Response;
-      try {
-        res = await fetch(
-          `${kgUrl.replace(/\/$/, "")}/lookup?type=${kind === "drug" ? "Compound" : "Disease"}&name=${encodeURIComponent(trimmed)}`,
-          {
-            headers: { Accept: "application/json" },
-            signal: controller.signal,
-          }
-        );
-      } finally {
-        clearTimeout(timeout);
-      }
-      if (res.ok) {
-        const body = await res.json();
-        if (body?.found === true || Array.isArray(body?.matches) && body.matches.length > 0) {
-          return { ok: true };
-        }
-        return {
-          ok: false,
-          reason: `${kind.charAt(0).toUpperCase() + kind.slice(1)} "${trimmed}" was not found in the knowledge graph.`,
-        };
-      }
-      // 4xx / 5xx from the KG service — fall through to the local check.
-    } catch {
-      // Network error / timeout — fall through to the local check.
-    }
-  }
-
-  // Local fallback: check the registry + node-type counts for the
-  // relevant node type. FE-020 (Team 15) added per-type node count
-  // breakdowns to the response — we use those to verify the KG has
-  // been built with the right node types.
-  try {
-    const stats = await getKnowledgeGraphStats();
-    if (stats.source === "none") {
-      // KG not built at all — allow the build but the caller should
-      // display a warning. We return ok=true so the evidence package
-      // can still be generated (with a "KG validation skipped" note).
-      // The audit log records that validation was skipped.
-      return { ok: true };
-    }
-    // FE-020: check nodeTypeCounts for the relevant canonical node type.
-    // The CANONICAL_NODE_TYPES are Compound, Protein, Pathway, Disease,
-    // ClinicalOutcomes — we map "drug" → "Compound" and "disease" →
-    // "Disease".
-    const nodeType = kind === "drug" ? "Compound" : "Disease";
-    // Check both the canonical nodeTypeCounts map AND the per-source
-    // nodeTypeCounts (some sources may contribute to a type even if
-    // the aggregate map is empty due to missing node_type_counts in
-    // the registry).
-    const aggregateCount = stats.nodeTypeCounts?.[nodeType] ?? 0;
-    const perSourceCount = stats.sources.reduce((sum, s) => {
-      const c = s.nodeTypeCounts?.[nodeType] ?? 0;
-      return sum + c;
-    }, 0);
-    if (aggregateCount === 0 && perSourceCount === 0) {
-      // The registry may not have node_type_counts populated yet
-      // (FE-020 depends on the Phase 2 builder writing that field).
-      // In that case, we cannot definitively say the KG lacks the
-      // node type — be permissive (allow the build) but log a warning.
-      console.warn(
-        `evidence-package: KG validation could not confirm ${nodeType} nodes (registry may not have node_type_counts). Allowing build for ${kind}="${trimmed}".`
-      );
-      return { ok: true };
-    }
-    // The KG has the right node type — we cannot do a fine-grained
-    // check without the KG service, so we allow the build. The audit
-    // log records that validation was coarse-only.
-    return { ok: true };
-  } catch (e: unknown) {
-    // Validation failed (not the build itself). Be permissive — the
-    // evidence package can still be generated, but log the validation
-    // failure for observability.
-    const msg = e instanceof Error ? e.message : String(e);
-    console.warn(`evidence-package: KG validation failed for ${kind}="${trimmed}": ${msg}`);
-    return { ok: true };
-  }
-}
+// validateEntityInKg is now imported from @/lib/services/kg-service
+// (Issue 232). The previous local definition called /lookup which does
+// NOT exist on phase2/service.py — it has /kg/explore. The new
+// imported function calls the correct endpoint.
 
 /** FE-010 ROOT FIX: Evidence package build requires a research role. */
 export async function POST(req: NextRequest) {

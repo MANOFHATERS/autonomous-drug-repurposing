@@ -16,9 +16,12 @@ import { topKNovel } from "@/lib/services/gt-inference";
  * Section 8: "We take the model's top 50 novel predictions and run an
  * automated PubMed literature search").
  *
- * The route shells out to `scripts/gt_inference.py` which loads the
- * trained checkpoint. We NEVER fabricate predictions — if no checkpoint
- * exists, we return an empty list with `source: "none"` and a clear note.
+ * Issue 222 ROOT FIX: same as Issue 221 — the previous version had a
+ * subprocess fallback that spawned a non-existent script. The new
+ * gt-inference.ts (Issue 230) is HTTP-ONLY: it proxies to
+ * `GT_SERVICE_URL/top-k?k=<n>` via the shared mlFetch HTTP client.
+ * We NEVER fabricate predictions — if no checkpoint exists, we return
+ * an empty list with `source: "none"` and a clear note.
  */
 export async function GET(req: NextRequest) {
   const auth = await requireAuth();
