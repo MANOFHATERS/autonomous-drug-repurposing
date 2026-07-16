@@ -245,3 +245,29 @@ Stage Summary:
 - P1-005 ROOT FIX complete and verified at runtime
 - Files touched (all in TM3 swim lane): phase1/entity_resolution/base.py, phase1/entity_resolution/resolver_utils.py, phase1/entity_resolution/drug_resolver.py
 - Scientific impact: Phase 2 KG builder can now correctly distinguish UniProt-exact (sequence identity) from InChIKey-exact (structural identity); Phase 4 RL ranker no longer over-weights structural identity; patient-safety filters that distinguish structural vs sequence identity now fire correctly
+
+---
+Task ID: TM3-SH-009
+Agent: main (Teammate 3 swim lane)
+Task: Fix SH-009 (CRITICAL) — DATASET_SERVICE_URL points to wrong host:port
+
+Work Log:
+- Read docker-compose.yml (root) lines 113-140 (phase1-airflow) and 262 (DATASET_SERVICE_URL)
+- Read phase1/service.py lines 1-359 (real code) — confirmed service.py exists, listens on port 8001 by default, exposes /health, /datasets, /stats, /datasets/{drug}/mechanism
+- Confirmed phase1-airflow only exposes 8080 (Airflow webserver), never runs service.py
+- Confirmed DATASET_SERVICE_URL=http://phase1-airflow:8000 pointed at a non-existent port
+- Added new phase1-service container to root docker-compose.yml:
+  * Builds from Dockerfile.airflow (same image as phase1-airflow — already has phase1/ + fastapi + uvicorn)
+  * Runs `uvicorn phase1.service:app` on port 8000
+  * Mounts ./phase1 and phase1-data volume (read-only for data)
+  * Healthcheck hits /health on port 8000
+  * Profiles: full-stack, etl, dataset
+- Updated DATASET_SERVICE_URL: http://phase1-airflow:8000 -> http://phase1-service:8000
+- Added phase1-service to frontend depends_on (condition: service_healthy)
+- Verified YAML parses correctly with pyyaml
+- Verified phase1-service container exists, DATASET_SERVICE_URL updated, frontend depends on phase1-service
+
+Stage Summary:
+- SH-009 CRITICAL ROOT FIX complete
+- Files touched: docker-compose.yml (root)
+- Impact: frontend /api/dataset requests now proxy to a real service that runs phase1/service.py; /datasets, /stats, /datasets/{drug}/mechanism endpoints are reachable; the dashboard will show real Phase 1 CSV row counts instead of silently falling back to stale local data

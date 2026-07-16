@@ -140,6 +140,52 @@ services:
     profiles: [full-stack, etl]
 
   # ─────────────────────────────────────────────────────────────────────
+  # Phase 1 — Dataset Service (SH-009 v113 ROOT FIX)
+  # ─────────────────────────────────────────────────────────────────────
+  # The previous docker-compose.yml set DATASET_SERVICE_URL=http://phase1-airflow:8000
+  # but phase1-airflow only exposes 8080 (Airflow webserver REST API) and
+  # never runs phase1/service.py. Port 8000 did not exist anywhere in the
+  # stack, so every frontend /api/dataset request proxied to a dead endpoint
+  # and silently fell back to stale local data.
+  #
+  # ROOT FIX: add a dedicated phase1-service container that runs
+  # `uvicorn phase1.service:app` on port 8000. This is the service the
+  # frontend's DATASET_SERVICE_URL env var has always pointed at. It
+  # exposes /health, /datasets, /stats, /datasets/{drug}/mechanism — the
+  # exact routes the frontend's src/lib/services/dataset-stats.ts proxies
+  # to. The image is the same Airflow image (it already has phase1/ +
+  # fastapi + uvicorn installed via phase1/requirements.txt).
+  phase1-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: drugos-phase1-service
+    environment:
+      PHASE1_SERVICE_PORT: "8000"
+      PHASE1_SERVICE_HOST: "0.0.0.0"
+      PHASE1_PROCESSED_DIR: /opt/phase1/processed_data
+      PYTHONPATH: /opt/phase1:/opt/repo
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./phase1:/opt/phase1
+      - ./:/opt/repo:ro
+      - phase1-data:/opt/phase1/processed_data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    command: >
+      bash -lc "cd /opt/phase1 && python -c 'from service import app; import uvicorn; uvicorn.run(app, host=\"0.0.0.0\", port=8000)'"
+    restart: unless-stopped
+    profiles: [full-stack, etl, dataset]
+
+  # ─────────────────────────────────────────────────────────────────────
   # Phase 2 — Knowledge Graph builder + service
   # ─────────────────────────────────────────────────────────────────────
 
@@ -259,7 +305,7 @@ services:
       DRUGOS_NEO4J_URI: bolt://neo4j:7687
       DRUGOS_NEO4J_USER: neo4j
       DRUGOS_NEO4J_PASSWORD: drugos_dev_password
-      DATASET_SERVICE_URL: http://phase1-airflow:8000
+      DATASET_SERVICE_URL: http://phase1-service:8000
       KG_SERVICE_URL: http://phase2-kg-builder:8001
       GT_SERVICE_URL: http://phase3-trainer:8002
       RL_SERVICE_URL: http://phase4-rl:8003
@@ -270,6 +316,8 @@ services:
       - "3000:3000"
     depends_on:
       postgres:
+        condition: service_healthy
+      phase1-service:
         condition: service_healthy
       phase4-rl:
         condition: service_healthy
