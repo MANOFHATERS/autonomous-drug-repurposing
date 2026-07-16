@@ -340,11 +340,18 @@ export async function GET(req: NextRequest) {
   const pageSizeRaw = Math.min(Math.max(1, Number(sp.get('pageSize') ?? sp.get('limit') ?? 50) || 50), 200);
   const pageRaw = Math.max(0, Math.floor(Number(sp.get('page') ?? 0) || 0));
   const offset = pageRaw * pageSizeRaw;
+  // Issue 237 ROOT FIX: GET handler was NOT passing drug/disease query
+  // params to getRankedHypotheses — a researcher searching for
+  // ?drug=Aspirin got ALL candidates instead of Aspirin-filtered ones.
+  const drugParam = (sp.get('drug') || '').trim() || undefined;
+  const diseaseParam = (sp.get('disease') || '').trim() || undefined;
 
   const availability = checkRlAvailability();
 
   try {
     const result = await getRankedHypotheses({
+      drug: drugParam,
+      disease: diseaseParam,
       sort,
       sortDir,
       offset,
@@ -599,8 +606,15 @@ async function persistRlCandidates(
           reward: c.reward ?? null,
           gnnScore: c.gnnScore ?? null,
           literatureSupport:
-            c.literatureSupportBool ??
-            (c.literatureSupport !== undefined ? c.literatureSupport > 0 : null),
+            // Issue 231 ROOT FIX: the new RankedHypothesis contract uses
+            // `literatureSupport` as a number (nullable). The old
+            // `literatureSupportBool` field no longer exists — it was
+            // part of the divergent inline parser that was removed in
+            // the FE-019 fix. Convert the numeric score to a boolean
+            // for the DB column (>0 = some literature support).
+            c.literatureSupport != null
+              ? c.literatureSupport > 0
+              : null,
           rlModelVersion: "rl_drug_ranker.py-v101",
           rlUpdatedAt: new Date(),
           rlPredicted: true,

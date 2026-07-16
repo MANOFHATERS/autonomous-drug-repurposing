@@ -7,64 +7,32 @@ import {
 } from "@/lib/api-helpers";
 // BE-029 ROOT FIX (Team Member 12): Zod-validated request body for POST.
 import { validateBody, KnowledgeGraphBody } from "@/lib/zod-schemas";
-// FE-002 ROOT FIX (Team Member 13): wire the lib service as a fallback.
-//
-// Previously: the route checked `process.env.KG_SERVICE_URL` via
-// `checkKnowledgeGraphAvailability()` from ml-stubs and returned 503 when
-// the env var was unset. The lib service `knowledge-graph-stats.ts`
-// (which reads the real Phase 2 registry at `../phase2/data/registry.json`)
-// was DEAD CODE — the route never imported or called it.
-//
-// ROOT FIX: GET without a `cypher` param now calls
-// `getKnowledgeGraphStats()` from `knowledge-graph-stats.ts`. That lib
-// service is the single source of truth:
-//   1. If `KG_SERVICE_URL` is set, it proxies to the standalone Neo4j
-//      service (production path).
-//   2. Otherwise, it reads the local Phase 2 registry JSON (dev /
-//      single-box path). The registry exists with real source stats
-//      (SIDER rows, STRING edges, etc.) after the Phase 2 builder runs.
-//   3. If neither is available, it returns `source: "none"` with empty
-//      lists — NEVER fabricated graph statistics.
-//
-// The dashboard's KG explorer page therefore works in default deployments
-// (no env vars set) as long as the Phase 2 builder has written its
-// registry to disk. The 503-only behavior was a credibility killer.
-//
-// FE-020 (Team Member 15) enhanced the lib service to break down node
-// counts by canonical type (Compound, Protein, Pathway, Disease,
-// ClinicalOutcomes) — excluding non-canonical types like AdverseEvent
-// from `nodeCount`. This route forwards those fields to the dashboard
-// unchanged.
-//
 // FE-008 ROOT FIX: shared validator extracted so unit tests can exercise it
 // without spinning up the route handler.
 import { validateReadOnlyCypher } from "./cypher-validator";
-// RT-007 ROOT FIX (Team Member 17) + FE-008 ROOT FIX (Team Member 13):
-// import the local lib service so the GET endpoint can return real KG
-// stats even when KG_SERVICE_URL is unset. The local lib reads from the
-// Phase 2 registry JSON on disk — sufficient for single-instance deploys
-// and dev/CI. The proxy is still used in multi-node production deployments
-// where KG_SERVICE_URL is set.
-import { getKnowledgeGraphStats } from "@/lib/services/knowledge-graph-stats";
+// Issue 232 ROOT FIX: use the unified kg-service.ts (HTTP-only, no local
+// registry fallback). URLs are aligned with the Python phase2/service.py:
+//   - GET  /kg/stats    → KG statistics
+//   - GET  /kg/explore  → Subgraph exploration
+//   - POST /query       → Structured query
+//   - POST /cypher      → Raw Cypher passthrough (role-gated)
+// The previous version called /stats (WRONG — Python exposes /kg/stats)
+// and /lookup (WRONG — Python has no /lookup, it has /kg/explore).
+import {
+  getKnowledgeGraphStats,
+  queryKnowledgeGraph,
+  executeCypher,
+} from "@/lib/services/kg-service";
 
 /**
  * GET /api/knowledge-graph?cypher=<Cypher query>&limit=<n>
  *      /api/knowledge-graph?drug=<drug>&disease=<disease>&limit=<n>   (structured query)
  *      /api/knowledge-graph                                              (stats — no params)
  *
- * RT-007 + FE-008 ROOT FIX behavior matrix:
- *   - No `cypher`, no `drug`, no `disease`:
- *       Return KG stats (node/edge counts, source list). This is the
- *       dashboard landing path. Uses getKnowledgeGraphStats() — the lib
- *       service that reads the real Phase 2 registry (RT-007 fix: was
- *       previously 503 by default when KG_SERVICE_URL was unset).
- *   - `drug` and/or `disease`:
- *       Structured query. Forwarded to the KG service (if configured) as
- *       a POST /query with a parameterized body. We do NOT let callers
- *       inject raw Cypher via GET.
- *   - `cypher`:
- *       NOT accepted via GET — would be a Cypher-injection vector.
- *       Callers must use POST with the role-gated, whitelisted validator.
+ * Issue 225 ROOT FIX: URLs are now aligned with the Python phase2/service.py:
+ *   - Stats path: calls getKnowledgeGraphStats() → GET /kg/stats
+ *   - Structured query path: calls queryKnowledgeGraph() → POST /query
+ *   - Cypher path: rejected via GET (use POST with role-gated validator)
  *
  * SECURITY: Cypher queries can be parameterized — we forward the `params`
  * object so the KG service can use parameterized queries. Raw string
@@ -79,9 +47,8 @@ export async function GET(req: NextRequest) {
   const limit = parseInt(req.nextUrl.searchParams.get("limit") || "100", 10);
   const drug = req.nextUrl.searchParams.get("drug");
   const disease = req.nextUrl.searchParams.get("disease");
-  // RT-007 + FE-002: stats path — no structured query params and no cypher.
-  // Return real KG stats from the lib service (registry / proxy).
-  // This is the path the dashboard's KG explorer landing takes.
+
+  // Stats path — no structured query params and no cypher.
   if (!cypher && !drug && !disease) {
     try {
       const stats = await getKnowledgeGraphStats();
@@ -97,9 +64,7 @@ export async function GET(req: NextRequest) {
         },
       });
       // If the lib returned `source: "none"`, return 503 so the dashboard
-      // shows a clear "KG not built yet" state. But we NO LONGER return
-      // 503 just because the env var is unset — the local registry is a
-      // first-class data source.
+      // shows a clear "KG not built yet" state.
       if (stats.source === "none") {
         return NextResponse.json(
           {
@@ -110,16 +75,14 @@ export async function GET(req: NextRequest) {
               "proteins, pathways, diseases, outcomes). Owned by Phase 2 " +
               "of the build plan.",
             reason:
-              "Neither KG_SERVICE_URL is set nor a local Phase 2 registry " +
-              "was found. Run the Phase 2 KG builder to produce real " +
-              "graph statistics, or set KG_SERVICE_URL to proxy to the " +
-              "Neo4j service.",
+              "KG_SERVICE_URL is not set. The Phase 2 KG service " +
+              "(phase2/service.py) must be running and reachable. Start " +
+              "it with `python phase2/service.py` and set " +
+              "KG_SERVICE_URL=http://localhost:8002 in frontend/.env.local.",
             stats,
             documentation:
               "See Phase 2 of the build plan (Neo4j Knowledge Graph " +
-              "Construction). Set KG_SERVICE_URL to enable the proxy, or " +
-              "ensure the Phase 2 builder has written its registry to " +
-              "phase2/data/registry.json.",
+              "Construction). Set KG_SERVICE_URL to enable the proxy.",
           },
           { status: 503 }
         );
@@ -132,8 +95,6 @@ export async function GET(req: NextRequest) {
   }
 
   // Reject raw Cypher via GET — would be a Cypher-injection vector.
-  // Callers must use POST /api/knowledge-graph with the role-gated
-  // validator (FE-008).
   if (cypher) {
     return NextResponse.json(
       {
@@ -148,64 +109,35 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // Structured query path — proxy to the KG service. If the service is
-  // not configured, return 503 (we cannot answer structured queries from
-  // the registry alone — the registry is source-level stats, not a graph
-  // query engine).
-  const kgUrl = process.env.KG_SERVICE_URL;
-  if (!kgUrl) {
-    return NextResponse.json(
-      {
-        error: "service_not_deployed",
-        service: "Knowledge Graph Service",
-        reason:
-          "Structured queries (drug/disease) require the standalone Neo4j " +
-          "service. Set KG_SERVICE_URL to enable the proxy. For KG " +
-          "statistics (source list, node/edge counts), call GET without " +
-          "query params.",
-        documentation:
-          "See Phase 2 of the build plan (Neo4j Knowledge Graph " +
-          "Construction).",
-      },
-      { status: 503 }
-    );
-  }
-
+  // Structured query path — proxy to the KG service via kg-service.ts.
+  // The lib returns {nodes, edges} or throws on service error.
   try {
-    // Build a structured query for the KG service. We do NOT let the
-    // caller send arbitrary Cypher via GET (that would be a Cypher-
-    // injection vector). Instead, GET takes drug/disease/limit params
-    // and the KG service translates them to a safe parameterized query.
-    const upstreamBody: Record<string, unknown> = { limit };
-    if (drug) upstreamBody.drug = drug;
-    if (disease) upstreamBody.disease = disease;
-
-    const upstream = await fetch(`${kgUrl.replace(/\/$/, "")}/query`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(upstreamBody),
+    const data = await queryKnowledgeGraph({
+      drug: drug || undefined,
+      disease: disease || undefined,
+      limit,
     });
-    if (!upstream.ok) {
-      const text = await upstream.text();
-      return NextResponse.json(
-        {
-          error: "kg_service_error",
-          message: `KG service returned ${upstream.status}: ${text.slice(0, 500)}`,
-        },
-        { status: 502 }
-      );
-    }
-    const data = await upstream.json();
     await writeAuditLog({
       user: auth.user,
       action: "kg_query",
       resource: `kg:${drug || "*"}:${disease || "*"}`,
-      metadata: { nodeCount: data.nodes?.length || 0, edgeCount: data.edges?.length || 0 },
+      metadata: {
+        nodeCount: data.nodes?.length || 0,
+        edgeCount: data.edges?.length || 0,
+      },
     });
     return NextResponse.json(data);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    return internalError(`KG service proxy failed: ${msg}`);
+    // If KG_SERVICE_URL is not set, the lib returns empty arrays (not
+    // a throw). A throw means the service was configured but failed.
+    return NextResponse.json(
+      {
+        error: "kg_service_error",
+        message: `KG service call failed: ${msg}`,
+      },
+      { status: 502 }
+    );
   }
 }
 
@@ -213,15 +145,7 @@ export async function GET(req: NextRequest) {
  * POST /api/knowledge-graph
  * Body: { cypher: string, params?: Record<string, unknown> }
  *
- * FE-008 ROOT FIX: The POST endpoint previously accepted arbitrary Cypher
- * from ANY authenticated user (including read-only viewers) and forwarded
- * it verbatim to the downstream KG service. This allowed:
- *   - Cross-tenant data exfiltration.
- *   - Destructive writes if the KG service's Neo4j user had write
- *     privileges (CREATE/DELETE/SET/REMOVE/DROP).
- *   - Resource exhaustion via Cartesian-product queries.
- *
- * Fix (defense in depth — every layer is independent):
+ * FE-008 ROOT FIX: defense in depth:
  *   1. ROLE GATE: only data-scientist / admin / owner can call POST.
  *   2. CYPHER WHITELIST: only read-only MATCH/OPTIONAL MATCH/WITH/RETURN
  *      statements are allowed.
@@ -232,7 +156,6 @@ export async function GET(req: NextRequest) {
  */
 
 const KG_MAX_ROWS = 1000;
-const KG_UPSTREAM_TIMEOUT_MS = 30_000;
 
 export async function POST(req: NextRequest) {
   // FE-008 ROOT FIX layer 1: ROLE GATE.
@@ -241,48 +164,17 @@ export async function POST(req: NextRequest) {
   const roleCheck = await requireRole(auth.user, "data-scientist", "pi", "developer");
   if (roleCheck.user === null) return roleCheck.response;
 
-  // FE-008: KG service must be configured for raw Cypher queries.
-  // The local registry cannot answer arbitrary Cypher — it is a
-  // source-level stats file, not a graph query engine.
-  const kgUrl = process.env.KG_SERVICE_URL;
-  if (!kgUrl) {
-    return NextResponse.json(
-      {
-        error: "service_not_deployed",
-        service: "Knowledge Graph Service",
-        reason:
-          "Raw Cypher queries require the standalone Neo4j service. Set " +
-          "KG_SERVICE_URL to enable the proxy. For KG statistics, call " +
-          "GET /api/knowledge-graph without params.",
-        documentation:
-          "See Phase 2 of the build plan (Neo4j Knowledge Graph Construction).",
-      },
-      { status: 503 }
-    );
-  }
-
   let body: { cypher?: string; params?: Record<string, unknown> };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "bad_request", message: "Invalid JSON" }, { status: 400 });
   }
-  // BE-029 ROOT FIX: schema-validate the body. The schema enforces:
-  //   - cypher is a non-empty string ≤10_000 chars (DoS guard)
-  //   - params, if present, is a Record<string, unknown> (object, not array/string)
-  // The previous code's `typeof body.cypher !== "string"` check accepted
-  // ANY string length — a 1MB cypher payload would have been forwarded
-  // to the upstream Neo4j service. The schema caps at 10K chars.
   const parsed = validateBody(KnowledgeGraphBody, body);
   if (!parsed.ok) return parsed.response;
   body = parsed.data;
-  // The schema guarantees cypher is a non-empty string — no extra check needed.
 
   // FE-008 ROOT FIX layer 2: CYPHER WHITELIST.
-  // FE-016 ROOT FIX (Team Member 15, v108 — pre-existing build blocker):
-  // body.cypher is typed as `string | undefined` but the KnowledgeGraphBody
-  // zod schema requires it (non-empty string). After validateBody returns
-  // ok, cypher is guaranteed present. Use `!` to assert non-null.
   const validation = validateReadOnlyCypher(body.cypher!);
   if (!validation.ok) {
     await writeAuditLog({
@@ -308,45 +200,27 @@ export async function POST(req: NextRequest) {
     _max_rows: KG_MAX_ROWS,
   };
 
+  // FE-008 ROOT FIX layer 4: COST LIMIT (hard timeout).
+  // The kg-service.ts executeCypher passes timeoutMs to mlFetch which
+  // aborts the request after the timeout. No retry on Cypher (not
+  // idempotent in general).
   try {
-    // FE-008 ROOT FIX layer 4: COST LIMIT (hard timeout).
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), KG_UPSTREAM_TIMEOUT_MS);
-
-    let upstream: Response;
-    try {
-      upstream = await fetch(`${kgUrl.replace(/\/$/, "")}/cypher`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cypher: body.cypher, params: safeParams }),
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    if (!upstream.ok) {
-      const text = await upstream.text();
-      return NextResponse.json(
-        {
-          error: "kg_service_error",
-          message: `KG service returned ${upstream.status}: ${text.slice(0, 500)}`,
-        },
-        { status: 502 }
-      );
-    }
-    const data = await upstream.json();
+    const data = await executeCypher({
+      cypher: body.cypher!,
+      params: safeParams,
+      timeoutMs: 30_000,
+    });
 
     // FE-008 ROOT FIX layer 4 (result cap).
     if (Array.isArray(data?.records) && data.records.length > KG_MAX_ROWS) {
       data.records = data.records.slice(0, KG_MAX_ROWS);
-      data._truncated = true;
-      data._max_rows = KG_MAX_ROWS;
+      (data as Record<string, unknown> & { _truncated: boolean })._truncated = true;
+      (data as Record<string, unknown> & { _max_rows: number })._max_rows = KG_MAX_ROWS;
     }
     if (Array.isArray(data?.rows) && data.rows.length > KG_MAX_ROWS) {
       data.rows = data.rows.slice(0, KG_MAX_ROWS);
-      data._truncated = true;
-      data._max_rows = KG_MAX_ROWS;
+      (data as Record<string, unknown> & { _truncated: boolean })._truncated = true;
+      (data as Record<string, unknown> & { _max_rows: number })._max_rows = KG_MAX_ROWS;
     }
 
     await writeAuditLog({
@@ -362,14 +236,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(data);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (e instanceof Error && e.name === "AbortError") {
-      return NextResponse.json(
-        {
-          error: "kg_timeout",
-          message: `KG service did not respond within ${KG_UPSTREAM_TIMEOUT_MS / 1000}s. The query is likely too expensive — add a LIMIT clause or narrow the MATCH pattern.`,
-        },
-        { status: 504 }
-      );
+    // Distinguish timeout from other errors for a clearer message.
+    if (e instanceof Error && (e.name === "MlServiceError")) {
+      const mlErr = e as { isTimeout?: boolean; httpStatus?: number };
+      if (mlErr.isTimeout) {
+        return NextResponse.json(
+          {
+            error: "kg_timeout",
+            message: `KG service did not respond within 30s. The query is likely too expensive — add a LIMIT clause or narrow the MATCH pattern.`,
+          },
+          { status: 504 }
+        );
+      }
     }
     return internalError(`KG service proxy failed: ${msg}`);
   }

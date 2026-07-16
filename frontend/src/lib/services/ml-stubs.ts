@@ -34,7 +34,10 @@ export const ML_SERVICE_STATUS = {
     description:
       "Apache Airflow ETL pipeline ingesting from ChEMBL, DrugBank, UniProt, " +
       "STRING, DisGeNET, OMIM, and PubChem. Owned by Phase 1 of the build plan.",
-    envVar: "DATASET_SERVICE_URL",
+    // Issue 233 ROOT FIX: canonical env var is PHASE1_SERVICE_URL (matches
+    // the naming convention of GT_SERVICE_URL / RL_SERVICE_URL / KG_SERVICE_URL).
+    // DATASET_SERVICE_URL is honored as a legacy alias by dataset-service.ts.
+    envVar: "PHASE1_SERVICE_URL",
     deployedAt: null as Date | null,
   },
   rl: {
@@ -82,7 +85,9 @@ export function checkKnowledgeGraphAvailability(): MlServiceAvailability {
 }
 
 export function checkDatasetAvailability(): MlServiceAvailability {
-  const url = process.env.DATASET_SERVICE_URL;
+  // Issue 233 ROOT FIX: check BOTH PHASE1_SERVICE_URL (canonical) and
+  // DATASET_SERVICE_URL (legacy alias). The canonical name wins.
+  const url = process.env.PHASE1_SERVICE_URL || process.env.DATASET_SERVICE_URL;
   if (!url) {
     return {
       available: false,
