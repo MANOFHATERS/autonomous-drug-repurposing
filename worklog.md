@@ -398,3 +398,28 @@ Stage Summary:
 - P1-043 HIGH ROOT FIX complete
 - Files touched: phase1/database/loaders.py (bulk_upsert_drugs function only)
 - Impact: One bad row (NA inchikey) no longer aborts the entire 10,000-row batch. Bad rows are quarantined to the DLQ with a clear reason, and the batch proceeds with the valid rows. Pipeline takes 4 minutes instead of 4 hours (no single-row fallback).
+
+---
+Task ID: TM3-P1-010
+Agent: main (Teammate 3 swim lane)
+Task: Fix P1-010 (HIGH) — airflow-init entrypoint mixes three shell-escaping conventions
+
+Work Log:
+- Read phase1/docker-compose.yml lines 142-186 (airflow-init entrypoint) — confirmed it mixed ${VAR:-default} (docker-compose interpolation), $$VAR (bash expansion), and \\gexec (psql meta-command) in one line
+- If an operator set POSTGRES_PASSWORD=pa$$word, bash truncated it to 'pa' at container runtime
+- Created phase1/docker/airflow-init.sh — dedicated shell script that:
+  * Uses SINGLE-QUOTED variables to avoid all expansion ambiguity
+  * Reads credentials from environment variables inside the script (not docker-compose interpolation)
+  * Creates the airflow database using createdb (with existence check) instead of \\gexec
+  * Runs init_db() and airflow db migrate
+  * Creates admin user ONLY if AIRFLOW_ADMIN_USER and AIRFLOW_ADMIN_PASSWORD are both set (v49 security)
+- Updated phase1/docker-compose.yml airflow-init service:
+  * Mount ./docker/airflow-init.sh:/opt/airflow/airflow-init.sh:ro
+  * Set entrypoint: ["bash", "/opt/airflow/airflow-init.sh"]
+  * Removed the inline entrypoint with mixed escaping conventions
+- Verified: YAML parses, entrypoint is the script, script is mounted, bash -n syntax check passes
+
+Stage Summary:
+- P1-010 HIGH ROOT FIX complete
+- Files touched: phase1/docker/airflow-init.sh (new), phase1/docker-compose.yml
+- Impact: operators can now use passwords with literal dollar signs ($), backticks, or other shell-meta characters without truncation. The entrypoint is maintainable (single-quoted variables, no mixed escaping conventions).

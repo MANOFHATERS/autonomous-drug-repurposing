@@ -124,6 +124,40 @@ services:
       # (P1-003 ROOT FIX from V100 forensic branch — same fix as above,
       # merged from fix/v100-forensic-root-fixes-integration-plan. The
       # duplicate mount lines were removed during merge resolution.)
+    # P1-010 v113 ROOT FIX: the previous entrypoint mixed THREE shell-
+    # escaping conventions in one line (${VAR:-default} docker-compose
+    # interpolation, $$VAR bash expansion, \\gexec psql meta-command).
+    # If an operator set POSTGRES_PASSWORD=pa$$word, bash truncated it to
+    # 'pa' at container runtime. ROOT FIX: move the entrypoint to a
+    # dedicated shell script (phase1/docker/airflow-init.sh) that uses
+    # single-quoted variables to avoid all expansion ambiguity. The
+    # script is mounted into the container and executed with bash.
+    volumes:
+      - ./docker/airflow-init.sh:/opt/airflow/airflow-init.sh:ro
+      - ./dags:/opt/airflow/dags
+      - ./pipelines:/opt/airflow/pipelines
+      - ./cleaning:/opt/airflow/cleaning
+      - ./entity_resolution:/opt/airflow/entity_resolution
+      - ./database:/opt/airflow/database
+      - ./config:/opt/airflow/config
+      # v100 ROOT FIX (P1-003): the previous compose file was MISSING
+      # these three mount points. Airflow tasks that import from
+      # ``data/``, ``exporters/``, or ``scripts/`` (e.g. the
+      # ``uniprot_organism_crosswalk.yaml`` in data/, the
+      # ``neo4j_exporter.py`` in exporters/, the
+      # ``download_parallel.py`` in scripts/) failed with
+      # ``FileNotFoundError`` or ``ImportError`` when invoked from
+      # inside the airflow container. The host directories exist (see
+      # ``phase1/data/``, ``phase1/exporters/``, ``phase1/scripts/``)
+      # but were invisible to the container. Mount all three.
+      - ./data:/opt/airflow/data
+      - ./exporters:/opt/airflow/exporters
+      - ./scripts:/opt/airflow/scripts
+      - ./raw_data:/opt/airflow/raw_data
+      - ./processed_data:/opt/airflow/processed_data
+      # (P1-003 ROOT FIX from V100 forensic branch — same fix as above,
+      # merged from fix/v100-forensic-root-fixes-integration-plan. The
+      # duplicate mount lines were removed during merge resolution.)
     depends_on:
       setup:
         condition: service_healthy
@@ -144,51 +178,7 @@ services:
     # step is SKIPPED and Airflow starts with NO admin user. The
     # operator must then either set the env vars and re-run, or use
     # `airflow users create` manually with a strong password.
-    #
-    # v76 ROOT FIX (T-046 — document the ${VAR} vs $$VAR vs \gexec escaping):
-    #   The entrypoint below mixes THREE different escaping conventions.
-    #   An editor unfamiliar with docker-compose + bash + psql may
-    #   "fix" the double-dollar or the backslash-gexec, breaking the
-    #   command. This comment documents each convention:
-    #
-    #   ``${VAR:-default}``  (single dollar, braces)
-    #     → docker-compose VARIABLE INTERPOLATION at compose-up time.
-    #       The ``${POSTGRES_PASSWORD:-cosmic}`` is replaced by docker-
-    #       compose BEFORE the container starts. The bash process inside
-    #       the container never sees ``${POSTGRES_PASSWORD}`` — it sees
-    #       the actual password value. This is correct for POSTGRES_PASSWORD
-    #       because the postgres service must use the SAME value, and
-    #       docker-compose interpolation ensures both services get the
-    #       same value from the same .env file.
-    #
-    #   ``$$VAR``  (double dollar)
-    #     → ESCAPED dollar for bash expansion at CONTAINER RUNTIME.
-    #       Docker-compose sees ``$$`` and passes a single ``$`` to the
-    #       container. Bash inside the container then expands ``$VAR``.
-    #       This is correct for AIRFLOW_ADMIN_USER because the env var
-    #       is set in the airflow-init container's environment (not in
-    #       the host's .env), so it must be expanded by bash at runtime,
-    #       NOT by docker-compose at compose-up time. If an editor
-    #       "fixes" ``$$AIRFLOW_ADMIN_USER`` to ``$AIRFLOW_ADMIN_USER``,
-    #       docker-compose interpolates it at compose-up time (to empty
-    #       string if not set in .env), and the user-creation step
-    #       silently fails.
-    #
-    #   ``\\gexec``  (double backslash + gexec)
-    #     → PSQL META-COMMAND. The ``\gexec`` tells psql to execute the
-    #       result of the preceding SELECT as a SQL command. The double
-    #       backslash is required because the entrypoint is a YAML
-    #       double-quoted string: YAML processes ``\\`` → ``\``, so bash
-    #       sees ``\gexec``, and psql interprets ``\gexec`` as the meta-
-    #       command. If an editor "fixes" ``\\gexec`` to ``\gexec``, YAML
-    #       passes ``\gexec`` to bash, but bash's ``-c`` string parsing
-    #       may interpret ``\g`` as an escape sequence, corrupting the
-    #       psql command. The double backslash is REQUIRED.
-    entrypoint: >
-      bash -c "PGPASSWORD=${POSTGRES_PASSWORD:-cosmic} psql -h postgres -U ${POSTGRES_USER:-cosmic} -d postgres -c \"SELECT 'CREATE DATABASE airflow' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'airflow')\\gexec\" &&
-      python -c 'from database.connection import init_db; init_db()' &&
-      airflow db migrate &&
-      (if [ -n \"$$AIRFLOW_ADMIN_USER\" ] && [ -n \"$$AIRFLOW_ADMIN_PASSWORD\" ]; then airflow users create --username \"$$AIRFLOW_ADMIN_USER\" --password \"$$AIRFLOW_ADMIN_PASSWORD\" --firstname Admin --lastname User --role Admin --email \"$${AIRFLOW_ADMIN_EMAIL:-admin@example.com}\" || true; else echo 'v49 SECURITY: AIRFLOW_ADMIN_USER / AIRFLOW_ADMIN_PASSWORD env vars not set — Airflow will start with NO admin user. Set them in .env to enable admin login.'; fi)"
+    entrypoint: ["bash", "/opt/airflow/airflow-init.sh"]
     healthcheck:
       test: ["CMD-SHELL", "airflow db check"]
       interval: 10s
