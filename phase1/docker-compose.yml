@@ -259,7 +259,12 @@ services:
         condition: service_completed_successfully
     command: webserver
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/health"]
+      # P1-040 v113 ROOT FIX: the apache/airflow:2.10.5-python3.11 image
+      # does NOT include curl by default. The previous healthcheck
+      # `curl -f http://localhost:8080/health` failed with "curl: command
+      # not found", marking the webserver as permanently unhealthy.
+      # ROOT FIX: use python's urllib (always available in the image).
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8080/health\").read()' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5

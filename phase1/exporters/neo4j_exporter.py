@@ -1087,11 +1087,12 @@ class Neo4jExporter:
     Examples
     --------
     Production (Neo4j credentials)::
-
+        # P1-021 v113 ROOT FIX: NEVER hardcode credentials. Read from env var.
+        import os
         exporter = Neo4jExporter(
             neo4j_uri="bolt://localhost:7687",
             neo4j_user="neo4j",
-            neo4j_password="drugos_dev_password",
+            neo4j_password=os.environ["NEO4J_PASSWORD"],
         )
         report = exporter.export(phase1_processed_dir="phase1/processed_data")
 

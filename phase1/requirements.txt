@@ -70,8 +70,16 @@ lxml>=5.1.0
 #   When the project upgrades to Airflow 3.x, this pin AND the Docker
 #   image tag AND the DAG code must be updated together — that's the
 #   point of pinning (force an explicit upgrade decision).
-apache-airflow>=2.10.0,<3.0.0; python_version>="3.12"
-apache-airflow>=2.8.0,<3.0.0; python_version<"3.12"
+# P1-046 v113 ROOT FIX: the previous pin split on python_version >= 3.12
+# vs < 3.12. The Docker image (apache/airflow:2.10.5-python3.11) uses
+# Python 3.11, so the second pin (>=2.8.0,<3.0.0) was selected. A
+# `pip install -r requirements.txt` inside the 2.10.5 image would
+# DOWNGRADE Airflow to 2.8.0 (the lowest version satisfying >=2.8.0),
+# breaking the image's pre-installed Airflow (2.8.0's migration schema
+# doesn't match 2.10.5's metadata DB layout). ROOT FIX: single pin
+# `>=2.10.0,<3.0.0` for ALL Python versions. The Docker image's base
+# Airflow (2.10.5) satisfies this pin and will NOT be downgraded.
+apache-airflow>=2.10.0,<3.0.0
 
 # Fuzzy matching (entity resolution)
 rapidfuzz>=3.6.1

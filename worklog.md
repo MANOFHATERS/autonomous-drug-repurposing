@@ -476,3 +476,20 @@ Work Log:
 Stage Summary:
 - 4 MEDIUM issues fixed
 - Files touched: phase1/database/migrations/012_confidence_tier_pinero_alignment.sql, phase1/database/migrations/001_initial_schema.sql, phase1/database/models.py (PipelineRun CheckConstraint), phase1/dags/_retry_policy.py, phase1/database/connection.py (verify_schema)
+
+---
+Task ID: TM3-LOW-BATCH-1
+Agent: main (Teammate 3 swim lane)
+Task: Fix LOW issues P1-021, P1-040, P1-046, P1-026
+
+Work Log:
+- P1-021: replaced hardcoded neo4j_password="drugos_dev_password" in neo4j_exporter.py docstring with os.environ["NEO4J_PASSWORD"] + comment "NEVER hardcode credentials"
+- P1-040: replaced airflow-webserver healthcheck `curl -f http://localhost:8080/health` with `python -c 'import urllib.request; urllib.request.urlopen(...)'` — the apache/airflow image doesn't include curl
+- P1-046: replaced split airflow pin (>=2.10.0 for 3.12+, >=2.8.0 for <3.12) with single pin `apache-airflow>=2.10.0,<3.0.0` — the Docker image is Python 3.11 so the old pin selected >=2.8.0 which would DOWNGRADE Airflow from 2.10.5 to 2.8.0
+- P1-026: changed _trigger_phase2 from retries=0 to retries=1 with retry_delay=5min — 5xx errors (transient Neo4j outage) now get one retry; 4xx errors still skip retry via @fail_fast_on_http_4xx
+- py_compile neo4j_exporter.py and master_pipeline_dag.py: OK
+- Verified airflow-webserver healthcheck uses urllib
+
+Stage Summary:
+- 4 LOW issues fixed
+- Files touched: phase1/exporters/neo4j_exporter.py, phase1/docker-compose.yml, phase1/requirements.txt, phase1/dags/master_pipeline_dag.py

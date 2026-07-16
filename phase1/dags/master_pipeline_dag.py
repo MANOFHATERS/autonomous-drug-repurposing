@@ -622,7 +622,15 @@ def _validate_phase1_contract() -> None:
         )
 
 
-@task(retries=0, execution_timeout=TASK_TIMEOUT, trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+@task(retries=1, retry_delay=timedelta(minutes=5), execution_timeout=TASK_TIMEOUT, trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+# P1-026 v113 ROOT FIX: the previous retries=0 was harmful for 5xx errors.
+# A 30-second Neo4j restart during a deploy caused _trigger_phase2's
+# subprocess call to fail with a connection error, and retries=0 meant
+# no retry — the entire Sunday KG build was lost for a 30-second transient.
+# ROOT FIX: set retries=1 with retry_delay=5min. The @fail_fast_on_http_4xx
+# decorator still converts 4xx errors to AirflowFailException (non-retryable
+# regardless of retries setting), so 4xx errors skip the retry. 5xx errors
+# (transient Neo4j outage, network blip) get ONE retry after 5min backoff.
 # v89 ROOT FIX (BUG #24 — inconsistent application of fail-fast policy):
 #   The comment at lines 99-118 (v83 DAG-2) says "Apply
 #   ``@fail_fast_on_http_4xx`` to EVERY @task below so 4xx errors
