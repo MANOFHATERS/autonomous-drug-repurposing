@@ -2718,8 +2718,10 @@ class PipelineRun(Base, IDMixin, TimestampMixin):
     __table_args__ = (
         # [DES-07] Source must be a known pipeline
         CheckConstraint(
-            "source IN ('chembl', 'drugbank', 'uniprot', 'string', "
-            "'disgenet', 'omim', 'pubchem')",
+            # P1-023 v113 ROOT FIX: add drugbank_open, chembl_activities,
+            # omim_susceptibility to match migration 001's extended whitelist.
+            "source IN ('chembl', 'drugbank', 'drugbank_open', 'uniprot', 'string', "
+            "'disgenet', 'omim', 'omim_susceptibility', 'pubchem', 'chembl_activities')",
             name="chk_pipeline_runs_source",
         ),
         # [DQ-08] Duration must be non-negative

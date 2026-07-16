@@ -170,9 +170,17 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     -- ===================== CONSTRAINTS (pipeline_runs) =====================
 
     -- [DES-07, COD-05] Source must be a known pipeline
+    -- P1-023 v113 ROOT FIX: the previous whitelist was missing 3 source
+    -- identifiers used by the codebase: 'drugbank_open' (open-data fallback
+    -- in _v50_downloaders.py), 'chembl_activities' (activities loader), and
+    -- 'omim_susceptibility' (OMIM susceptibility loader). A pipeline run
+    -- recording source='drugbank_open' failed with CheckViolation, losing
+    -- the audit trail even though the data was loaded successfully.
+    -- ROOT FIX: add the 3 extended source names to the CHECK.
     CONSTRAINT chk_pipeline_runs_source
-        CHECK (source IN ('chembl', 'drugbank', 'uniprot', 'string',
-                          'disgenet', 'omim', 'pubchem')),
+        CHECK (source IN ('chembl', 'drugbank', 'drugbank_open', 'uniprot', 'string',
+                          'disgenet', 'omim', 'omim_susceptibility', 'pubchem',
+                          'chembl_activities')),
     -- [DES-05] Status enum
     CONSTRAINT chk_pipeline_runs_status
         CHECK (status IS NULL OR status IN ('running', 'success', 'failed', 'partial')),

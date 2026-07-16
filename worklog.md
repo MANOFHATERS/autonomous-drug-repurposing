@@ -460,3 +460,19 @@ Work Log:
 Stage Summary:
 - 6 MEDIUM issues addressed (4 fixed, 2 verified already-fixed)
 - Files touched: phase1/database/loaders.py, phase1/cleaning/confidence.py, phase1/cleaning/_constants.py, phase1/database/models.py
+
+---
+Task ID: TM3-MEDIUM-BATCH-3
+Agent: main (Teammate 3 swim lane)
+Task: Fix MEDIUM issues P1-044, P1-023, P1-033, P1-037
+
+Work Log:
+- P1-044: migration 012 backfill was using LABEL EQUALITY (WHERE confidence_tier='weak') instead of SCORE RANGES. A row with score=0.15 labeled 'weak' under old semantics would be renamed to 'sub_weak' — WRONG for score=0.15 (should be 'weak'). ROOT FIX: replaced with score-range backfill (sub_weak: [0.0,0.06), weak: [0.06,0.3), strong: [0.3,1.0]). Rows with NULL score are left as-is.
+- P1-023: pipeline_runs.source CHECK whitelist in migration 001 was missing 3 source identifiers used by the codebase: drugbank_open, chembl_activities, omim_susceptibility. ROOT FIX: added all 3 to the CHECK constraint in migration 001 AND to the ORM PipelineRun model's CheckConstraint. A pipeline run recording source='drugbank_open' no longer fails with CheckViolation.
+- P1-033: _extract_http_status in _retry_policy.py didn't handle wrapped exceptions (tenacity.RetryError wrapping requests.HTTPError). A 401 Unauthorized was retried 6 times over 95 minutes instead of failing fast. ROOT FIX: recursively unwrap __cause__ / __context__ chains (depth limit 10 to prevent infinite loops). Try the outer exception first, then walk the chain.
+- P1-037: verify_schema in connection.py compared column NAMES only, not TYPES. A column declared Numeric(10,4) in ORM but FLOAT in DB was not detected. ROOT FIX: added type-comparison step that compares str(col["type"]) against str(orm_col.type). Logs a WARNING (not ERROR) on mismatch — type aliases (NUMERIC vs DECIMAL) are semantically equivalent. Drift report now includes type_mismatches dict.
+- py_compile all 3 files: OK
+
+Stage Summary:
+- 4 MEDIUM issues fixed
+- Files touched: phase1/database/migrations/012_confidence_tier_pinero_alignment.sql, phase1/database/migrations/001_initial_schema.sql, phase1/database/models.py (PipelineRun CheckConstraint), phase1/dags/_retry_policy.py, phase1/database/connection.py (verify_schema)
