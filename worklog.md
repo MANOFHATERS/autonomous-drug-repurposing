@@ -223,3 +223,25 @@ Stage Summary:
 - Rate limiting (1 req/sec per platform admin) on /api/admin/* state-changing routes.
 - 5 test files with 37 total tests (10 pass without DB, 27 run with postgres in CI).
 - Production build passes. TypeScript passes. ESLint passes.
+
+---
+Task ID: TM3-P1-005
+Agent: main (Teammate 3 swim lane)
+Task: Fix P1-005 — MatchConfidence enum alias collisions in phase1/entity_resolution/base.py
+
+Work Log:
+- Read phase1/entity_resolution/base.py lines 1-320 (real code, not comments)
+- Identified THREE alias collisions: UNIPROT_EXACT=1.0 (aliased INCHIKEY_EXACT), SYNTHETIC_KEY_MATCH=0.5 (aliased UNKNOWN), SMILES_CANONICAL=0.75 (aliased GENE_NAME_ORGANISM)
+- Added @enum.unique decorator to make future duplicates a hard import-time error
+- Changed UNIPROT_EXACT 1.0 → 0.99, SYNTHETIC_KEY_MATCH 0.5 → 0.49, SMILES_CANONICAL 0.75 → 0.74 (distinct values preserving hierarchy)
+- Updated _CONFIDENCE_HIERARCHY_ASSERTIONS tuple to match new values
+- Updated hierarchy comment block to document distinct values
+- Aligned METHOD_CONFIDENCE dict in resolver_utils.py (uniprot_exact 1.0→0.99, smiles_canonical 0.75→0.74)
+- Aligned register_match_method calls in drug_resolver.py (synthetic_key_match 0.5→0.49, smiles_canonical 0.75→0.74)
+- py_compile all 3 files: OK
+- Runtime verification: all 11 enum members distinct, from_method() resolves UNIPROT_EXACT/SMILES_CANONICAL/SYNTHETIC_KEY_MATCH names correctly (previously returned INCHIKEY_EXACT/GENE_NAME_ORGANISM/UNKNOWN)
+
+Stage Summary:
+- P1-005 ROOT FIX complete and verified at runtime
+- Files touched (all in TM3 swim lane): phase1/entity_resolution/base.py, phase1/entity_resolution/resolver_utils.py, phase1/entity_resolution/drug_resolver.py
+- Scientific impact: Phase 2 KG builder can now correctly distinguish UniProt-exact (sequence identity) from InChIKey-exact (structural identity); Phase 4 RL ranker no longer over-weights structural identity; patient-safety filters that distinguish structural vs sequence identity now fire correctly
