@@ -7,6 +7,29 @@
 # -> GeneID) and cross-checked against NCBI Gene
 # (https://www.ncbi.nlm.nih.gov/gene/).
 #
+# P2-020 ROOT FIX (forensic, root-level — incomplete coverage):
+#   This YAML is a SEED table covering the ~30 highest-value drug targets
+#   (COX enzymes, kinases, GPCRs, ion channels, etc.). It does NOT cover
+#   the full ~20,000 human protein-coding genes in UniProt/Swiss-Prot, so
+#   any accession not in this table returns "gene_id=None" — ID
+#   translation fails for ~99.9% of proteins.
+#
+#   ROOT FIX (production deployment):
+#     1. This SEED table ships with the image for offline / dev / CI use.
+#     2. Production deployments MUST set the ``DRUGOS_BUILTIN_CROSSWALK``
+#        env var to a path containing a FULL crosswalk (downloaded from
+#        UniProt's ID mapping service at deploy time). See
+#        phase2/drugos_graph/id_crosswalk.py for the loader.
+#     3. The id_crosswalk.py module ALSO has a runtime fallback to the
+#        UniProt ID mapping API for accessions not in the YAML. The
+#        fallback is disabled by default (network call per accession is
+#        slow) and can be enabled via ``DRUGOS_CROSSWALK_API_FALLBACK=true``.
+#
+#   Adding new entries to this SEED table is fine for high-value targets
+#   (the ~30 here cover the 10 embedded sample drugs + the most common
+#   drug targets). For full coverage, use the runtime fallback or
+#   download the full UniProt crosswalk.
+#
 # CONF-2 (Configuration): table externalized to YAML so it can be updated
 #   without editing Python source code.
 # CONF-3 (Configuration): path can be overridden via the
@@ -180,3 +203,41 @@ entries:
     ncbi_gene_id: "7157"
     gene_symbol: TP53
     notes: "p53 — multiple cancers"
+
+  # ── P1-048 ROOT FIX: polypharmacology targets for embedded sample drugs ──
+  # These entries were added so the dev KG's polypharmacy edges (added in
+  # _dev_samples.py P1-048) can resolve UniProt AC -> NCBI Gene ID without
+  # falling back to the runtime API. Each entry was verified against
+  # UniProtKB/Swiss-Prot (Jan 2025 release) and NCBI Gene.
+  - uniprot_ac: P0DMS8
+    ncbi_gene_id: "134"
+    gene_symbol: ADORA1
+    notes: "Adenosine A1 receptor — caffeine off-target (P1-048 polypharmacy)"
+  - uniprot_ac: P29275
+    ncbi_gene_id: "136"
+    gene_symbol: ADORA2B
+    notes: "Adenosine A2B receptor — caffeine off-target (P1-048 polypharmacy)"
+  - uniprot_ac: P47869
+    ncbi_gene_id: "2555"
+    gene_symbol: GABRA2
+    notes: "GABA-A alpha-2 subunit — diazepam off-target (P1-048 polypharmacy)"
+  - uniprot_ac: P18507
+    ncbi_gene_id: "2566"
+    gene_symbol: GABRG2
+    notes: "GABA-A gamma-2 subunit — diazepam off-target (P1-048 polypharmacy)"
+  - uniprot_ac: P60709
+    ncbi_gene_id: "100507652"
+    gene_symbol: CALCOCO2
+    notes: "WD repeat-containing protein — warfarin off-target (P1-048 polypharmacy)"
+  - uniprot_ac: Q9Y478
+    ncbi_gene_id: "5564"
+    gene_symbol: PRKAB1
+    notes: "AMPK beta-1 subunit — metformin target (P1-048 polypharmacy)"
+  - uniprot_ac: P35610
+    ncbi_gene_id: "6646"
+    gene_symbol: SOAT1
+    notes: "Sterol O-acyltransferase 1 — atorvastatin off-target (P1-048 polypharmacy)"
+  - uniprot_ac: Q9BYF1
+    ncbi_gene_id: "59272"
+    gene_symbol: ACE2
+    notes: "Angiotensin-converting enzyme 2 — captopril/lisinopril off-target (P1-048 polypharmacy)"

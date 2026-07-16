@@ -9,6 +9,12 @@ TASK 325 ROOT FIX (forensic, root-level):
   Both Phase 4 (writer: ``rl.validate``, ``rl.rl_drug_ranker``) and
   Phase 3 (reader: ``graph_transformer.training.trainer`` for retraining)
   import from this package.
+
+SH-002 ROOT FIX: removed `OUTCOME_INCONCLUSIVE` from the import list.
+  That constant was an artifact of the old drift (3-value enum) and is
+  NOT a valid outcome. The canonical 4-value enum (validated_positive,
+  validated_negative, validated_toxic, invalidated) is imported instead
+  via OUTCOME_NEGATIVE and OUTCOME_INVALIDATED.
 """
 from __future__ import annotations
 
@@ -21,7 +27,9 @@ from rl.contracts.phase4_schema import (
     OUTCOME_VALUES,
     OUTCOME_POSITIVE,
     OUTCOME_TOXIC,
-    OUTCOME_INCONCLUSIVE,
+    # SH-002 ROOT FIX: OUTCOME_INCONCLUSIVE removed (not a valid outcome).
+    OUTCOME_NEGATIVE,
+    OUTCOME_INVALIDATED,
     VALIDATED_BY_VALUES,
     ColumnSpec as Phase4ColumnSpec,
     OUTCOME_TO_LABEL,
@@ -41,7 +49,9 @@ __all__ = [
     "OUTCOME_VALUES",
     "OUTCOME_POSITIVE",
     "OUTCOME_TOXIC",
-    "OUTCOME_INCONCLUSIVE",
+    # SH-002 ROOT FIX: OUTCOME_INCONCLUSIVE removed.
+    "OUTCOME_NEGATIVE",
+    "OUTCOME_INVALIDATED",
     "VALIDATED_BY_VALUES",
     "Phase4ColumnSpec",
     "OUTCOME_TO_LABEL",
