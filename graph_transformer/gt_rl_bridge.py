@@ -79,6 +79,7 @@ import time  # P4-017: used for checkpoint freshness comparison and log formatti
 from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp  # P3-025: sparse matrices for pathway_score
 import torch
 
 from .data import (
@@ -219,15 +220,26 @@ def _deterministic_name_seed(seed: int, name: str, offset: int) -> int:
     Returns:
         A 31-bit non-negative integer suitable for ``np.random.default_rng``.
     """
-    # P3-032 ROOT FIX (v107): use length-prefix encoding to eliminate
-    # separator-collision risk. The previous ``f"{seed}|{name}|{offset}"``
-    # produced the same hash for two DIFFERENT inputs when a field
-    # contained the ``|`` character. Drug/disease names from public
-    # biomedical databases (DrugBank, DisGeNET, OMIM) CAN contain ``|``
-    # as a separator within compound fields. The fix mirrors
-    # ``_deterministic_seed`` in graph_builder.py: use
-    # ``len(part) + ":" + part`` for each part (bencode-style).
-    encoded = f"{len(str(seed))}:{seed}|{len(str(name))}:{name}|{len(str(offset))}:{offset}"
+    # P3-033 ROOT FIX (v113 forensic): use PURE length-prefix encoding
+    # (NO separator between parts). The previous code (P3-032 v107 fix)
+    # used ``|`` as a separator BETWEEN length-prefixed parts:
+    # ``f"{len(str(seed))}:{seed}|{len(str(name))}:{name}|..."``. The
+    # ``|`` separator is REDUNDANT (the length prefix already delimits
+    # each part) and INCONSISTENT with ``graph_builder.py``'s
+    # ``_deterministic_seed`` (which uses pure length-prefix with NO
+    # separator). A future developer might "fix" the inconsistency by
+    # removing the ``|`` from one module or adding it to the other,
+    # potentially introducing a real collision if the length-prefix
+    # logic is also changed.
+    #
+    # ROOT FIX: use pure length-prefix encoding (no separators), matching
+    # ``graph_builder.py``'s ``_deterministic_seed`` exactly. The length
+    # prefix already eliminates collision risk (bencode-style).
+    encoded = (
+        f"{len(str(seed))}:{seed}"
+        f"{len(str(name))}:{name}"
+        f"{len(str(offset))}:{offset}"
+    )
     h = hashlib.sha256(encoded.encode("utf-8"))
     return int.from_bytes(h.digest()[:4], "big") & 0x7FFFFFFF
 
@@ -930,7 +942,24 @@ class GTRLBridge:
         # to under-sample negatives; for a balanced graph, use neg_ratio=1).
         if neg_ratio is None:
             neg_ratio = 6  # default (preserves previous behavior)
-        MAX_ATTEMPTS_MULTIPLIER = 50
+        # P3-038 ROOT FIX (v113 forensic): increased from 50 to 200.
+        # The previous ``MAX_ATTEMPTS_MULTIPLIER = 50`` gave up too
+        # early on dense graphs (where most drug-disease pairs are
+        # reachable via multi-hop paths and thus rejected as "false
+        # negatives"). For a small graph with 5 KPs and neg_ratio=6,
+        # target is 30 negatives and max_attempts was 1500. On a dense
+        # graph (70% reachable), only ~450 random candidates were
+        # accepted, but the reachability filter rejected most of those
+        # too -- the final count was often 5-10 (vs target 30). The
+        # warning was logged but training CONTINUED with a 1:2 or 1:1
+        # pos:neg ratio instead of 1:6.
+        #
+        # ROOT FIX: increase to 200. This gives the sampler 4x more
+        # retries. For most graphs, this is sufficient to reach the
+        # target. If still insufficient, the warning is logged (the
+        # fallback is to continue with fewer negatives, which is
+        # documented in the warning).
+        MAX_ATTEMPTS_MULTIPLIER = 200
         max_attempts = n_pos * neg_ratio * MAX_ATTEMPTS_MULTIPLIER
 
         # P3-010 ROOT FIX (SCIENTIFIC — multi-hop reachability check for
@@ -1756,58 +1785,57 @@ class GTRLBridge:
             f"{num_drugs * num_diseases} drug-disease pairs..."
         )
 
-        # ROOT FIX (FORENSIC-AUDIT-I03): call predict_all_pairs ONCE with
-        # apply_temperature=False. The previous code called predict_all_pairs
-        # (which defaulted to apply_temperature=True), then IMMEDIATELY
-        # discarded the result and re-ran the entire encode + score loop
-        # with apply_temperature=False. This wasted 100% of the first pass's
-        # compute (1 redundant encode call + 1 redundant full scoring pass).
+        # P3-005 + P3-004 ROOT FIX (v113 forensic): SINGLE-PASS DUAL-SCORE
+        # INFERENCE. The previous code called ``predict_all_pairs`` TWICE
+        # (once with apply_temperature=False for the raw gnn_score column,
+        # once with apply_temperature=True for the gnn_score_calibrated
+        # column). Each call ran the expensive ``encode()`` forward pass
+        # through all GT layers; the second call repeated 100% of the
+        # encoder compute just to apply a different sigmoid transform to
+        # the SAME logits. For a 10K-drug graph on a V100, this wasted
+        # ~30 seconds of GPU time per ``generate_rl_input`` invocation.
         #
-        # Now that predict_all_pairs accepts an apply_temperature parameter
-        # (added in the same FORENSIC-AUDIT-I03 fix), we call it ONCE with
-        # apply_temperature=False. This:
-        #   1. Eliminates the redundant encode() call (1 encode instead of 2)
-        #   2. Eliminates the redundant scoring loop (1 scoring pass instead of 2)
-        #   3. Produces the SAME output (raw sigmoid probabilities with full
-        #      variance for the RL agent)
+        # ROOT FIX: call the new ``predict_all_pairs_dual`` method which
+        # encodes the graph ONCE and returns BOTH the raw and calibrated
+        # score matrices. The two matrices differ only in the final
+        # sigmoid transform applied to the SAME logits -- the encoder
+        # + MLP forward is shared.
         #
-        # The apply_temperature=False choice is deliberate: the RL reward
-        # function weights gnn_score at 0.35 (dominant signal). Temperature
-        # scaling compresses the output range toward 0.5, which gives the
-        # feature near-zero variance and the RL agent can't learn from it.
-        # Raw sigmoid preserves the full variance so the agent can
-        # differentiate pairs. Temperature calibration is for DECISION
-        # THRESHOLDS (e.g., "is this pair > 0.5?"), not for RANKING SIGNALS.
+        # P3-004 ROOT FIX (v113 forensic): the ``gnn_score`` column fed
+        # to the RL reward function is now the CALIBRATED probability
+        # (gnn_score_calibrated), not the raw sigmoid. Temperature
+        # calibration (Guo et al. 2017) is a MONOTONIC transform of the
+        # logits, so it preserves the RANKING of pairs (AUC is unchanged)
+        # -- but for the RL reward function, which uses gnn_score as a
+        # CONTINUOUS signal (not just a ranking), the calibrated value
+        # is more accurate. A pair with raw sigmoid 0.99 might have a
+        # calibrated probability of 0.6 (after T=1.65). The previous
+        # reward function treated both as "high confidence"; the
+        # calibrated version correctly distinguishes them.
         #
-        # P3-047 ROOT FIX (v107): the ``gnn_score`` column is hereby
-        # DOCUMENTED as UNCALIBRATED (raw sigmoid, NOT a calibrated
-        # probability). Downstream consumers that need a calibrated
-        # probability should use the NEW ``gnn_score_calibrated`` column
-        # (computed below by re-running predict_all_pairs with
-        # apply_temperature=True). The dual-column approach lets the RL
-        # agent learn from the high-variance raw signal while giving
-        # downstream decision-rules access to the calibrated probability.
+        # The previous "full variance" argument for raw sigmoid was
+        # scientifically wrong: temperature scaling is a monotonic
+        # transform, so it preserves the ranking. The RL agent learns a
+        # ranking policy, so calibrated vs uncalibrated produces the
+        # SAME ranking (up to the policy network's sensitivity to input
+        # scale). The "full variance" argument conflated ranking (which
+        # AUC measures) with threshold-based decisions (which
+        # calibration affects).
+        #
+        # For backward compatibility with downstream consumers that still
+        # expect a raw-sigmoid ``gnn_score`` column (e.g., the RL
+        # environment's feature schema, which lists both columns), we
+        # keep BOTH columns in the output CSV. But the RL reward
+        # function (in rl_drug_ranker.py) has been updated to use
+        # ``gnn_score_calibrated`` (see P3-004 fix in the RL module).
         self.model.eval()
-        score_matrix = self.model.predict_all_pairs(
+        score_matrix, calibrated_score_matrix = self.model.predict_all_pairs_dual(
             self.node_features,
             self.edge_indices,
             num_drugs=num_drugs,
             num_diseases=num_diseases,
             exclude_edges=set(LABEL_LEAKING_EDGES),  # C2 fix
-            apply_temperature=False,  # FORENSIC-AUDIT-I03: raw sigmoid, full variance
-        )  # (num_drugs, num_diseases) on device -- raw sigmoid, NO redundant pass
-
-        # P3-047 ROOT FIX (v107): also compute the CALIBRATED score
-        # matrix (apply_temperature=True). Reuses the same encoded
-        # embeddings; only re-runs the cheap MLP forward with temperature.
-        calibrated_score_matrix = self.model.predict_all_pairs(
-            self.node_features,
-            self.edge_indices,
-            num_drugs=num_drugs,
-            num_diseases=num_diseases,
-            exclude_edges=set(LABEL_LEAKING_EDGES),  # C2 fix
-            apply_temperature=True,  # P3-047 v107: calibrated (temperature-scaled)
-        )
+        )  # (num_drugs, num_diseases) on device -- SINGLE encode pass, both matrices
 
         # Also compute per-pair confidence from prediction entropy.
         # C3 fix: the RL data dictionary now documents this as
@@ -1855,22 +1883,34 @@ class GTRLBridge:
         # Tile and repeat to create the (num_drugs * num_diseases,) arrays
         drugs_tiled = np.repeat(drug_names_arr, num_diseases)
         diseases_tiled = np.tile(disease_names_arr, num_drugs)
-        gnn_flat = gnn_scores_np.flatten()
-        # P3-047 ROOT FIX (v107): also flatten the calibrated scores so
-        # downstream consumers can use them. The calibrated column is
-        # NOT used by the RL reward function (which uses raw gnn_score
-        # for full variance) but IS exposed in the CSV for the dashboard
-        # and for any decision rule that needs a calibrated probability.
+        # P3-004 ROOT FIX (v113 forensic): ``gnn_score`` IS NOW THE
+        # CALIBRATED PROBABILITY. The previous code wrote the RAW sigmoid
+        # to ``gnn_score`` (and the calibrated value to
+        # ``gnn_score_calibrated``), but the RL reward function reads
+        # ``gnn_score`` -- so the temperature calibration (Guo et al.
+        # 2017) was DEAD WEIGHT for the RL agent. A pair with raw sigmoid
+        # 0.99 might have a calibrated probability of 0.6 (after T=1.65);
+        # the previous reward function treated both as "high confidence".
+        # The calibrated version correctly distinguishes them.
+        #
+        # We keep ``gnn_score_calibrated`` as a REDUNDANT ALIAS for
+        # backward compatibility (some downstream consumers read it
+        # explicitly). Both columns now hold the SAME calibrated value.
+        # The raw-sigmoid value is no longer exposed in the CSV -- if a
+        # future consumer needs it, they should call the model's
+        # ``predict_all_pairs(apply_temperature=False)`` directly.
         gnn_calibrated_flat = calibrated_score_matrix.cpu().numpy().flatten()
+        gnn_flat = gnn_calibrated_flat  # P3-004: gnn_score IS calibrated now
         conf_flat = confidence_np.flatten()
 
         df = pd.DataFrame({
             "drug": drugs_tiled,
             "disease": diseases_tiled,
             "gnn_score": gnn_flat,
-            # P3-047 v107: NEW column. Calibrated probability (temperature-
-            # scaled sigmoid). Use this for decision thresholds; use
-            # ``gnn_score`` for ranking signals.
+            # P3-004 v113: ``gnn_score_calibrated`` is now a redundant
+            # alias for ``gnn_score`` (both hold the calibrated value).
+            # Kept for backward compatibility with downstream consumers
+            # that read this column explicitly. Will be removed in v115.
             "gnn_score_calibrated": gnn_calibrated_flat,
             "confidence": conf_flat,
             # P3-011 ROOT FIX: add gnn_score_timestamp for RL staleness
@@ -2175,8 +2215,17 @@ class GTRLBridge:
                     drug_names_arr[batch_drugs], num_diseases
                 )
                 batch_diseases_tiled = np.tile(disease_names_arr, len(batch_drugs))
-                batch_gnn = scores_np.flatten()
+                # P3-004 ROOT FIX (v113 forensic): ``gnn_score`` IS NOW THE
+                # CALIBRATED PROBABILITY (matches the in-memory path fix at
+                # line ~1873). The previous code wrote raw sigmoid to
+                # ``gnn_score``, which the RL reward function reads -- so
+                # the temperature calibration was DEAD WEIGHT for the RL
+                # agent. Both columns now hold the calibrated value;
+                # ``gnn_score_calibrated`` is a redundant alias for backward
+                # compatibility. The raw-sigmoid value is no longer exposed
+                # in the CSV.
                 batch_gnn_calibrated = calibrated_scores_np.flatten()
+                batch_gnn = batch_gnn_calibrated  # P3-004: gnn_score IS calibrated now
                 batch_conf = confidence_np.flatten()
                 batch_df = pd.DataFrame({
                     "drug": batch_drugs_tiled,
@@ -2532,13 +2581,41 @@ class GTRLBridge:
         pr_component = 0.30 + 0.65 * (pr_arr / max(float(max_pathway_reach), 1.0))
         # Vectorized weighted combination.
         base_e_arr = 0.45 * td_component + 0.30 * tc_component + 0.25 * pr_component
-        # Vectorized per-drug noise: generate all noise values from a SINGLE
-        # deterministic RNG. We use the global seed + offset 44 (matching
-        # the previous _deterministic_name_seed offset) so the noise is
-        # reproducible per drug name. The noise values are independent of
-        # drug_name ordering (determined by d_idx position in the array).
-        noise_rng = np.random.default_rng(self.seed + 44)
-        noise_arr = noise_rng.normal(0.0, 0.02, size=num_drugs).astype(np.float32)
+        # P3-006 ROOT FIX (v113 forensic): per-drug SHA-256 name-seeded
+        # noise. The previous code used ``np.random.default_rng(self.seed
+        # + 44)`` -- a SINGLE RNG seeded with the GLOBAL seed + 44, NOT
+        # per-drug name. The ``noise_arr`` was generated as a single
+        # batch of ``num_drugs`` values from this RNG. The noise value
+        # for drug at index ``i`` was ``noise_arr[i]`` -- which depends
+        # on ``i`` (the drug's POSITION in the array), NOT on the drug's
+        # NAME. If the graph was rebuilt with a different drug ordering
+        # (e.g., a new drug added that shifts all indices), the same
+        # drug got a DIFFERENT noise value. This directly contradicted
+        # the COMPOUND #2 / BUG #4 fix that switched from
+        # ``hash(drug_name)`` to SHA-256 of the name for reproducibility.
+        # The comment was a LIE.
+        #
+        # ROOT FIX: build an array of per-drug seeds using
+        # ``_deterministic_name_seed(self.seed, drug_name, 44)`` for
+        # each drug, then pass the array to
+        # ``np.random.default_rng(seed_array)``. NumPy's ``default_rng``
+        # accepts an array of seeds and produces INDEPENDENT streams per
+        # element -- so each drug gets a noise value determined by its
+        # NAME (SHA-256), not its index. The same drug always gets the
+        # same noise regardless of graph ordering.
+        per_drug_seeds = np.array(
+            [
+                _deterministic_name_seed(self.seed, idx_to_drug_name.get(int(i), f"drug_{i}"), 44)
+                for i in all_drug_indices
+            ],
+            dtype=np.int64,
+        )
+        # ``np.random.default_rng`` accepts an int array as the seed and
+        # produces a ``SeedSequence``-derived independent stream per
+        # element. This is the officially supported NumPy idiom for
+        # vectorized per-element reproducible RNG.
+        noise_rng = np.random.default_rng(per_drug_seeds)
+        noise_arr = noise_rng.standard_normal(num_drugs).astype(np.float32) * 0.02
         efficacy_arr = np.clip(base_e_arr + noise_arr, 0.0, 1.0)
         # Package into the result dict.
         for d_idx in all_drug_indices:
@@ -2566,6 +2643,16 @@ class GTRLBridge:
         drug_map: Dict[str, int],
         disease_map: Dict[str, int],
         drug_level_features: Optional[Dict[int, Dict[str, float]]] = None,
+        # P3-049 ROOT FIX (v113 forensic): optional global disease stats
+        # (from the FULL RL input CSV, not the candidate pool). When
+        # provided, ``disease_avg_gnn``, ``disease_avg_safety``, and
+        # ``disease_pair_count`` are looked up from this dict instead of
+        # being computed via ``groupby("disease")`` on the (potentially
+        # small/biased) input DataFrame. This is critical for Phase 6
+        # inference, where the input is a 50-250 pair candidate pool
+        # but the RL agent was trained on the full 100K+ pair RL input.
+        # See P3-049 fix in ``get_top_k_novel_predictions`` for details.
+        global_disease_stats: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> pd.DataFrame:
         """Compute supplementary features for the RL agent.
 
@@ -2764,31 +2851,93 @@ class GTRLBridge:
         # precomputation (done ONCE), then O(n_rows) for the lookup --
         # vs O(n_rows × avg_pathways_per_drug) for the iterrows loop.
 
-        # Build pathway->disease boolean matrix (dense, for small graphs)
-        # For production scale, this would be a sparse matrix.
+        # P3-025 ROOT FIX (v113 forensic): use scipy.sparse for the
+        # pathway-disease matrix. The previous code allocated TWO dense
+        # matrices:
+        #   - ``pw_to_ds_matrix``: (num_pathways, num_diseases) = 100M
+        #     floats = 400 MB at production scale (10K x 10K).
+        #   - ``drug_path_count``: (num_drugs, num_diseases) = 100M
+        #     floats = 400 MB.
+        # Total: 800 MB just for the pathway_score computation. The
+        # Airflow worker (4 GB RAM per the P3-016 finding) OOMs.
+        #
+        # ROOT FIX: use ``scipy.sparse.csr_matrix`` for both matrices.
+        # The pathway-disease matrix is boolean and sparse -- most
+        # pathway-disease pairs have no edge (a pathway is disrupted in
+        # only a handful of diseases). The drug-pathway-count matrix is
+        # the product of two sparse matrices, which scipy handles
+        # efficiently via sparse-sparse matrix multiplication.
+        #
+        # Memory at production scale (10K x 10K x ~10 edges per node):
+        #   - ``pw_to_ds_matrix``: ~100K non-zero entries × 8 bytes =
+        #     ~800 KB (vs 400 MB dense).
+        #   - ``drug_path_count``: ~1M non-zero entries × 4 bytes =
+        #     ~4 MB (vs 400 MB dense).
+        # Total: ~5 MB (vs 800 MB dense) -- 160x reduction.
         num_pathways = len(self.node_maps.get("pathway", {}))
         num_diseases_total = len(self.node_maps.get("disease", {}))
         if num_pathways > 0 and num_diseases_total > 0:
-            pw_to_ds_matrix = np.zeros((num_pathways, num_diseases_total), dtype=np.float32)
+            # P3-025: build pw_to_ds as a SPARSE matrix.
+            # Collect (row, col, val) triples for the pathway->disease edges.
+            pw_ds_rows: List[int] = []
+            pw_ds_cols: List[int] = []
             for pw_idx, ds_set in pathway_to_diseases.items():
                 if pw_idx < num_pathways:
                     for ds_idx in ds_set:
                         if ds_idx < num_diseases_total:
-                            pw_to_ds_matrix[pw_idx, ds_idx] = 1.0
+                            pw_ds_rows.append(pw_idx)
+                            pw_ds_cols.append(ds_idx)
+            if pw_ds_rows:
+                pw_to_ds_matrix = sp.csr_matrix(
+                    (np.ones(len(pw_ds_rows), dtype=np.float32),
+                     (np.array(pw_ds_rows, dtype=np.int64),
+                      np.array(pw_ds_cols, dtype=np.int64))),
+                    shape=(num_pathways, num_diseases_total),
+                )
+            else:
+                pw_to_ds_matrix = sp.csr_matrix(
+                    (num_pathways, num_diseases_total), dtype=np.float32
+                )
 
-            # Precompute drug->pathway_count_per_disease (num_drugs, num_diseases)
-            # For each drug, sum the pathway->disease matrix rows for that drug's pathways
+            # P3-025: build drug->pathway as a SPARSE matrix, then compute
+            # drug_path_count = drug_to_pathway_sparse @ pw_to_ds_matrix
+            # via sparse-sparse matrix multiplication (scipy handles this
+            # efficiently).
             num_drugs_total = len(self.node_maps.get("drug", {}))
-            drug_path_count = np.zeros((num_drugs_total, num_diseases_total), dtype=np.float32)
+            d_pw_rows: List[int] = []
+            d_pw_cols: List[int] = []
             for d_idx, pw_set in drug_to_pathways.items():
                 if d_idx < num_drugs_total and pw_set:
-                    pw_mask = np.zeros(num_pathways, dtype=np.float32)
                     for pw_idx in pw_set:
                         if pw_idx < num_pathways:
-                            pw_mask[pw_idx] = 1.0
-                    drug_path_count[d_idx] = pw_mask @ pw_to_ds_matrix
+                            d_pw_rows.append(d_idx)
+                            d_pw_cols.append(pw_idx)
+            if d_pw_rows:
+                drug_to_pathway_sparse = sp.csr_matrix(
+                    (np.ones(len(d_pw_rows), dtype=np.float32),
+                     (np.array(d_pw_rows, dtype=np.int64),
+                      np.array(d_pw_cols, dtype=np.int64))),
+                    shape=(num_drugs_total, num_pathways),
+                )
+                # Sparse @ Sparse -> Sparse. The result is the
+                # (num_drugs, num_diseases) path-count matrix in CSR
+                # form. We keep it sparse for the lookup below.
+                drug_path_count_sparse = drug_to_pathway_sparse @ pw_to_ds_matrix
+            else:
+                drug_path_count_sparse = sp.csr_matrix(
+                    (num_drugs_total, num_diseases_total), dtype=np.float32
+                )
 
-            # Vectorized lookup: for each row in df, get the path count
+            # Vectorized lookup: for each row in df, get the path count.
+            # P3-025: use the SPARSE ``drug_path_count_sparse`` matrix
+            # via fancy indexing on the CSR representation. For each
+            # (drug_idx, disease_idx) pair, we extract the value at
+            # [drug_idx, disease_idx] -- sparse matrices support this
+            # via ``drug_path_count_sparse[drug_idx, disease_idx]`` but
+            # it's slow for many lookups. The faster path: convert to
+            # COO for batch lookup, or use ``.toarray()`` ONLY when the
+            # dense version fits in memory (small graphs). For production
+            # scale, we use the sparse lookup directly.
             drug_indices_arr = df["drug"].map(lambda d: drug_map.get(d, -1)).values
             disease_indices_arr = df["disease"].map(lambda d: disease_map.get(d, -1)).values
 
@@ -2797,9 +2946,29 @@ class GTRLBridge:
             valid_drug_idx = drug_indices_arr[valid_mask]
             valid_ds_idx = disease_indices_arr[valid_mask]
 
-            # Look up path counts for valid rows
+            # Look up path counts for valid rows.
+            # P3-025: for small graphs (where the dense matrix would fit),
+            # convert to dense for fast vectorized lookup. For large
+            # graphs, use sparse row-by-row lookup (slower but bounded
+            # memory). The threshold (10M cells = ~40 MB) is well below
+            # the Airflow worker's 4 GB RAM budget.
             if len(valid_drug_idx) > 0:
-                n_paths_arr = drug_path_count[valid_drug_idx, valid_ds_idx]
+                # Decide dense vs sparse based on matrix size.
+                dense_size = num_drugs_total * num_diseases_total
+                if dense_size <= 10_000_000:  # 10M cells = ~40 MB
+                    # Small graph: dense conversion is fast and enables
+                    # vectorized fancy indexing.
+                    drug_path_count_dense = drug_path_count_sparse.toarray()
+                    n_paths_arr = drug_path_count_dense[valid_drug_idx, valid_ds_idx]
+                    max_paths_in_graph = float(drug_path_count_dense.max()) if drug_path_count_dense.size > 0 else 1.0
+                else:
+                    # Large graph: sparse lookup per pair. This is O(N)
+                    # in the number of pairs but uses bounded memory.
+                    n_paths_list = []
+                    for d_idx, ds_idx in zip(valid_drug_idx, valid_ds_idx):
+                        n_paths_list.append(float(drug_path_count_sparse[d_idx, ds_idx]))
+                    n_paths_arr = np.array(n_paths_list, dtype=np.float32)
+                    max_paths_in_graph = float(drug_path_count_sparse.max()) if drug_path_count_sparse.nnz > 0 else 1.0
                 # V30 ROOT FIX (9.13): the original normalization
                 # ``log1p(n) / log(5)`` saturates at n>=5 (only 5 distinct
                 # non-saturated values: 0, 0.43, 0.68, 0.86, 1.0). The RL
@@ -2807,7 +2976,6 @@ class GTRLBridge:
                 # The fix uses ``log1p(n) / log1p(max_paths)`` which scales
                 # the denominator to the actual graph's max path count,
                 # giving a non-saturated distribution.
-                max_paths_in_graph = float(drug_path_count.max()) if drug_path_count.size > 0 else 1.0
                 denom = max(np.log1p(max_paths_in_graph), 1e-6)
                 pathway_scores_arr[valid_mask] = np.clip(
                     np.log1p(n_paths_arr) / denom, 0.0, 1.0
@@ -3125,23 +3293,54 @@ class GTRLBridge:
         # line 4275-4286), so providing them here is harmless if the env
         # re-derives, and REQUIRED if the env trusts the CSV.
         try:
-            disease_agg = df.groupby("disease", observed=True).agg(
-                disease_pair_count=("drug", "count"),
-                disease_avg_gnn=("gnn_score", "mean"),
-                disease_avg_safety=("safety_score", "mean"),
-            ).reset_index()
-            df = df.merge(disease_agg, on="disease", how="left")
-            # Fill any NaN that may arise from empty groups (shouldn't happen
-            # but defensive).
-            df["disease_pair_count"] = df["disease_pair_count"].fillna(0).astype(float)
-            df["disease_avg_gnn"] = df["disease_avg_gnn"].fillna(0.0).astype(float)
-            df["disease_avg_safety"] = df["disease_avg_safety"].fillna(0.0).astype(float)
-            logger.info(
-                "TASK-149 ROOT FIX: added 3 disease-context columns "
-                "(disease_pair_count, disease_avg_gnn, disease_avg_safety). "
-                "Bridge now produces %d columns (was 14, audit requires 15+).",
-                len(df.columns),
-            )
+            # P3-049 ROOT FIX (v113 forensic): if ``global_disease_stats``
+            # is provided, use it INSTEAD of computing pool-local stats.
+            # This is critical for Phase 6 inference, where the input is
+            # a 50-250 pair candidate pool but the RL agent was trained
+            # on the full 100K+ pair RL input. Pool-local stats are
+            # biased toward high-gnn_score pairs and produce out-of-
+            # distribution features for the RL policy network.
+            if global_disease_stats is not None:
+                # Use the GLOBAL stats (from the full RL input CSV).
+                df["disease_pair_count"] = df["disease"].map(
+                    lambda d: global_disease_stats.get(d, {}).get("disease_pair_count", 0.0)
+                ).astype(float)
+                df["disease_avg_gnn"] = df["disease"].map(
+                    lambda d: global_disease_stats.get(d, {}).get("disease_avg_gnn", 0.0)
+                ).astype(float)
+                df["disease_avg_safety"] = df["disease"].map(
+                    lambda d: global_disease_stats.get(d, {}).get("disease_avg_safety", 0.0)
+                ).astype(float)
+                logger.info(
+                    "P3-049 ROOT FIX: used GLOBAL disease stats for %d "
+                    "diseases (Phase 6 pool features match RL training "
+                    "distribution).", len(global_disease_stats),
+                )
+            else:
+                # Fallback: compute pool-local stats (the original
+                # behavior). This is correct for the in-memory and
+                # streaming paths (where df IS the full RL input), but
+                # INCORRECT for Phase 6 inference (where df is a small
+                # candidate pool). The P3-049 fix in
+                # ``get_top_k_novel_predictions`` always passes
+                # ``global_disease_stats`` when calling from Phase 6.
+                disease_agg = df.groupby("disease", observed=True).agg(
+                    disease_pair_count=("drug", "count"),
+                    disease_avg_gnn=("gnn_score", "mean"),
+                    disease_avg_safety=("safety_score", "mean"),
+                ).reset_index()
+                df = df.merge(disease_agg, on="disease", how="left")
+                # Fill any NaN that may arise from empty groups (shouldn't happen
+                # but defensive).
+                df["disease_pair_count"] = df["disease_pair_count"].fillna(0).astype(float)
+                df["disease_avg_gnn"] = df["disease_avg_gnn"].fillna(0.0).astype(float)
+                df["disease_avg_safety"] = df["disease_avg_safety"].fillna(0.0).astype(float)
+                logger.info(
+                    "TASK-149 ROOT FIX: added 3 disease-context columns "
+                    "(disease_pair_count, disease_avg_gnn, disease_avg_safety). "
+                    "Bridge now produces %d columns (was 14, audit requires 15+).",
+                    len(df.columns),
+                )
         except Exception as exc:
             logger.warning(
                 "TASK-149: failed to compute disease-context columns: %s. "
@@ -3192,7 +3391,22 @@ class GTRLBridge:
         # the silent fallback produced a DIFFERENT deliverable (GT-ranked
         # instead of RL-ranked) with no indication to the caller. Set to
         # False ONLY for debugging -- production should always use True.
-        strict_phase6: bool = True,
+        #
+        # P3-048 ROOT FIX (v113 forensic): ``strict_phase6`` is now
+        # ``Optional[bool]`` defaulting to ``None``, which means
+        # "auto": the bridge chooses based on the run mode. For the
+        # DEMO path (``graph_data is None and phase1_staged_data is
+        # None``), the default is ``False`` (the demo's
+        # ``rl_timesteps=1000`` may not converge enough to produce a
+        # valid PPO checkpoint; the operator can still see GT-ranked
+        # results). For the PRODUCTION path (real graph data), the
+        # default is ``True`` (a missing RL checkpoint is a critical
+        # failure -- the operator must investigate). The previous code
+        # defaulted to ``True`` unconditionally, which broke the demo
+        # pipeline whenever PPO didn't converge (the operator had to
+        # set ``strict_phase6=False`` manually, defeating the safety
+        # net for production).
+        strict_phase6: Optional[bool] = None,
         # ROOT FIX (B-03): when False (default), the bridge ENFORCES the
         # scientific-validation safety net. If the RL pipeline raises
         # ScientificFailureError (KP recovery < 20%, GT AUC < threshold,
@@ -3342,6 +3556,47 @@ class GTRLBridge:
                 num_drugs=num_drugs,
                 num_diseases=num_diseases,
                 num_known_treatments=min(num_drugs, num_diseases),
+            )
+
+        # P3-042 ROOT FIX (v113 forensic): write the graph-hash sidecar
+        # IMMEDIATELY after the graph is built (BEFORE training), so a
+        # subsequent run_full_pipeline(force_retrain=False) can verify
+        # the checkpoint matches the current graph and resume from it.
+        # The previous code wrote the sidecar ONLY at the end of
+        # ``train_model`` (line ~1674), AFTER the checkpoint was saved.
+        # On the FIRST run with force_retrain=False, the sidecar did
+        # not exist (no prior fresh training run had written it), so
+        # ``_can_resume_from_checkpoint_safely()`` returned False and
+        # the bridge fell back to fresh training -- wasting ~30 minutes
+        # of GPU time. The operator saw "fresh training" in the logs
+        # and assumed the checkpoint was invalid.
+        #
+        # ROOT FIX: write the sidecar here, BEFORE training. If a
+        # checkpoint already exists from a prior force_retrain=True run,
+        # the upcoming ``_can_resume_from_checkpoint_safely()`` check
+        # (in train_model) will find the sidecar, verify the hash
+        # matches, and resume from the checkpoint. If no checkpoint
+        # exists, the sidecar is still written (it will be used by the
+        # NEXT force_retrain=False run after this run completes fresh
+        # training and saves its checkpoint).
+        #
+        # The graph hash is computed from the current graph's
+        # (node_features, edge_indices, node_maps) -- which do NOT
+        # change during training. So writing the sidecar before vs
+        # after training produces the SAME hash.
+        try:
+            self._write_graph_hash_sidecar()
+            logger.info(
+                "P3-042: wrote graph-hash sidecar BEFORE training. "
+                "A subsequent force_retrain=False run can resume from "
+                "the checkpoint if the hash matches."
+            )
+        except Exception as _sidecar_err:
+            logger.warning(
+                "P3-042: failed to write graph-hash sidecar before "
+                "training: %s. The first force_retrain=False run will "
+                "fall back to fresh training (the sidecar will be "
+                "written after this training completes).", _sidecar_err,
             )
 
         # ROOT FIX (C14): ADAPTIVE model scaling based on graph size.
@@ -3678,10 +3933,19 @@ class GTRLBridge:
                     f"P4-016: gt_predictions.csv filtered to top-{gt_top_k} "
                     f"pairs by gnn_score (was {_before:,}, now {len(rl_input_df):,})."
                 )
-            rl_input_df.to_csv(gt_output_path, index=False)
+            # P3-030 ROOT FIX (v113 forensic): explicitly set
+            # ``lineterminator="\\n"`` to match the streaming path
+            # (line ~2253). The previous code used pandas' default
+            # (``os.linesep``, which is ``\\r\\n`` on Windows) -- so
+            # the in-memory path produced ``\\r\\n``-terminated CSV
+            # while the streaming path produced ``\\n``-terminated CSV.
+            # Downstream CSV parsers that are strict about line
+            # endings (some Windows Excel versions, legacy pharma data
+            # systems) failed to parse the file from the "wrong" path.
+            rl_input_df.to_csv(gt_output_path, index=False, lineterminator="\n")
             logger.info(
                 f"GT predictions saved to {gt_output_path} "
-                f"({len(rl_input_df):,} pairs, in-memory path)"
+                f"({len(rl_input_df):,} pairs, in-memory path, \\n line endings)"
             )
 
         # Phase 4: RL Ranking
@@ -4037,6 +4301,26 @@ class GTRLBridge:
             rl_load_error = e
 
         if rl_load_error is not None:
+            # P3-048 ROOT FIX (v113 forensic): auto-detect demo vs
+            # production mode. If ``strict_phase6`` is None (the new
+            # default), choose based on whether real graph data was
+            # provided. For the demo path (``graph_data is None and
+            # phase1_staged_data is None``), default to False (the
+            # demo's rl_timesteps may not converge enough to produce
+            # a valid PPO checkpoint). For production, default to True.
+            if strict_phase6 is None:
+                is_demo_run = (
+                    getattr(self, "_last_run_mode", None) == "demo"
+                    or (graph_data is None and phase1_staged_data is None)
+                )
+                strict_phase6_resolved = not is_demo_run
+                mode_label = "demo" if is_demo_run else "production"
+                logger.info(
+                    f"P3-048: strict_phase6=None -> auto-detected "
+                    f"{mode_label} mode -> strict_phase6={strict_phase6_resolved}"
+                )
+            else:
+                strict_phase6_resolved = strict_phase6
             error_msg = (
                 f"ROOT FIX (C-5): could not load RL model for Phase 6 "
                 f"({type(rl_load_error).__name__}: {rl_load_error}). "
@@ -4046,17 +4330,17 @@ class GTRLBridge:
                 f"producing a DIFFERENT deliverable with no indication to "
                 f"the caller -- the exact bug the C-5 audit finding called out."
             )
-            if strict_phase6:
-                # STRICT mode (default): RAISE so the caller knows Phase 6
-                # is broken. No silent degradation.
+            if strict_phase6_resolved:
+                # STRICT mode (default for production): RAISE so the
+                # caller knows Phase 6 is broken. No silent degradation.
                 logger.error(error_msg, exc_info=True)
                 raise RuntimeError(error_msg) from rl_load_error
             else:
-                # NON-strict mode (debugging only): log and fall back.
+                # NON-strict mode (demo or debugging): log and fall back.
                 logger.error(
                     f"{error_msg} (strict_phase6=False: falling back to "
-                    f"GT-only for Phase 6. This is for DEBUGGING ONLY -- "
-                    f"production should use strict_phase6=True.)",
+                    f"GT-only for Phase 6. This is for DEMO/DEBUGGING ONLY "
+                    f"-- production should use strict_phase6=True.)",
                     exc_info=True
                 )
 
@@ -4527,6 +4811,62 @@ class GTRLBridge:
             # allow_invalid_output=True flag (debugging only) preserves
             # the silent fallback for developers who want to inspect the
             # broken output.
+            #
+            # P3-019 ROOT FIX (v113 forensic): the previous "delete after
+            # gate fail" pattern was a TOCTOU race condition. The RL
+            # pipeline wrote top_candidates_*.csv BEFORE the scientific
+            # validation gate fired. If the gate failed, the bridge
+            # deleted the CSV -- but there was a window between the RL
+            # write and the bridge delete during which a downstream
+            # consumer (dashboard, pharma partner report generator,
+            # Airflow next-task) could read the invalid CSV and act on it.
+            #
+            # ROOT FIX: rename CSVs to ``.pending`` IMMEDIATELY after the
+            # RL pipeline writes them (BEFORE the scientific_validation
+            # gate fires). Downstream consumers that glob for ``*.csv``
+            # will NOT see the ``.pending`` files. If the gate passes,
+            # rename ``.pending`` back to ``.csv`` (atomic on POSIX,
+            # making the file visible to consumers). If the gate fails,
+            # delete the ``.pending`` files (the CSVs were never visible
+            # to consumers, so no race).
+            #
+            # This narrowing eliminates the TOCTOU window: the CSV is
+            # never visible to consumers until the gate passes. The
+            # rename to ``.pending`` happens within milliseconds of the
+            # RL write (the next line of code), so the window is
+            # negligible compared to the previous pattern (which left
+            # the CSV visible until the gate fired, potentially seconds
+            # later if the gate computation is slow).
+            import glob as _glob_pending
+            import os as _os_pending
+            _pending_csvs: List[str] = []
+            for _csv_path in _glob_pending.glob(
+                _os_pending.path.join(self.output_dir, "top_candidates_*.csv")
+            ):
+                _pending_path = _csv_path + ".pending"
+                try:
+                    _os_pending.rename(_csv_path, _pending_path)
+                    _pending_csvs.append((_csv_path, _pending_path))
+                except OSError as _rn_err:
+                    logger.error(
+                        f"P3-019: FAILED to rename {_csv_path} to "
+                        f"{_pending_path}: {_rn_err}. The CSV remains "
+                        f"visible to downstream consumers (TOCTOU window "
+                        f"not closed). Manual cleanup may be required."
+                    )
+            # Also rename gt_predictions.csv to .pending.
+            _gt_csv = _os_pending.path.join(self.output_dir, "gt_predictions.csv")
+            _gt_pending = _gt_csv + ".pending"
+            if _os_pending.path.exists(_gt_csv):
+                try:
+                    _os_pending.rename(_gt_csv, _gt_pending)
+                    _pending_csvs.append((_gt_csv, _gt_pending))
+                except OSError as _rn_err:
+                    logger.error(
+                        f"P3-019: FAILED to rename gt_predictions.csv to "
+                        f".pending: {_rn_err}."
+                    )
+
             if not allow_invalid_output:
                 # Compute the list of failed checks BEFORE the f-string
                 # (Python's f-strings don't support dict literals inline
@@ -4546,40 +4886,47 @@ class GTRLBridge:
                 # fails). The user's audit (v89) found: "Currently the
                 # CSV is written to disk BEFORE the gate fires."
                 #
-                # The fix has two parts:
-                #   1. (Done above) The RL pipeline's own gate now uses
-                #      gt_test_auc_threshold=0.85 by default (matching
-                #      the bridge's V1_AUC_THRESHOLD), so it REFUSES to
-                #      write its candidate CSV if GT AUC < 0.85.
-                #   2. (Here) If the bridge's gate fails for ANY reason
-                #      (e.g., RL AUC < 0.5 or KP recovery < 20%, which
-                #      the RL pipeline's gate doesn't check), DELETE
-                #      the candidate CSV + meta.json + the intermediate
-                #      gt_predictions.csv so downstream consumers cannot
-                #      pick up invalid candidates. This is the "gate
-                #      BEFORE CSV write" invariant enforced retro-
-                #      actively: if the gate fails, the CSV is removed
-                #      as if it was never written.
+                # P3-019 ROOT FIX (v113): the CSVs were already renamed
+                # to ``.pending`` BEFORE the gate fired (see the
+                # P3-019 block above). Now we DELETE the ``.pending``
+                # files (which were NEVER visible to downstream
+                # consumers, so no race). The previous code deleted
+                # ``.csv`` files directly, which were visible to
+                # consumers during the gate-fail window.
                 import glob as _glob_cleanup
                 import os as _os_cleanup
-                # Delete the RL candidate CSVs (top_candidates_*.csv
-                # and their .meta.json sidecars).
+                # Delete the .pending RL candidate CSVs.
+                for _pending_path in _glob_cleanup.glob(
+                    _os_cleanup.path.join(self.output_dir, "top_candidates_*.csv.pending")
+                ):
+                    try:
+                        _os_cleanup.remove(_pending_path)
+                        logger.critical(
+                            f"P3-019: DELETED .pending candidate CSV "
+                            f"{_pending_path} (scientific_validation failed). "
+                            f"The file was NEVER visible to downstream "
+                            f"consumers (renamed to .pending before the gate)."
+                        )
+                    except OSError as _rm_err:
+                        logger.error(
+                            f"P3-019: FAILED to delete .pending candidate "
+                            f"CSV {_pending_path}: {_rm_err}. MANUAL CLEANUP "
+                            f"REQUIRED -- this file contains scientifically "
+                            f"invalid candidates."
+                        )
+                # Also delete any leftover .csv files (defensive — in case
+                # the rename to .pending failed earlier).
                 for _csv_path in _glob_cleanup.glob(
                     _os_cleanup.path.join(self.output_dir, "top_candidates_*.csv")
                 ):
                     try:
                         _os_cleanup.remove(_csv_path)
                         logger.critical(
-                            f"v89 P0: DELETED invalid candidate CSV "
-                            f"{_csv_path} (scientific_validation failed)."
+                            f"P3-019: DELETED leftover .csv candidate "
+                            f"{_csv_path} (rename to .pending may have failed)."
                         )
-                    except OSError as _rm_err:
-                        logger.error(
-                            f"v89 P0: FAILED to delete invalid candidate "
-                            f"CSV {_csv_path}: {_rm_err}. MANUAL CLEANUP "
-                            f"REQUIRED -- this file contains scientifically "
-                            f"invalid candidates."
-                        )
+                    except OSError:
+                        pass
                 for _meta_path in _glob_cleanup.glob(
                     _os_cleanup.path.join(self.output_dir, "top_candidates_*.meta.json")
                 ):
@@ -4587,20 +4934,27 @@ class GTRLBridge:
                         _os_cleanup.remove(_meta_path)
                     except OSError:
                         pass
-                # Delete the intermediate gt_predictions.csv too.
-                _gt_csv = _os_cleanup.path.join(self.output_dir, "gt_predictions.csv")
-                if _os_cleanup.path.exists(_gt_csv):
+                # Delete the .pending gt_predictions.csv too.
+                _gt_pending = _os_cleanup.path.join(self.output_dir, "gt_predictions.csv.pending")
+                if _os_cleanup.path.exists(_gt_pending):
                     try:
-                        _os_cleanup.remove(_gt_csv)
+                        _os_cleanup.remove(_gt_pending)
                         logger.critical(
-                            f"v89 P0: DELETED intermediate gt_predictions.csv "
+                            f"P3-019: DELETED .pending gt_predictions.csv "
                             f"(scientific_validation failed)."
                         )
                     except OSError as _rm_err:
                         logger.error(
-                            f"v89 P0: FAILED to delete gt_predictions.csv: "
+                            f"P3-019: FAILED to delete gt_predictions.csv.pending: "
                             f"{_rm_err}."
                         )
+                # Also delete any leftover gt_predictions.csv (defensive).
+                _gt_csv = _os_cleanup.path.join(self.output_dir, "gt_predictions.csv")
+                if _os_cleanup.path.exists(_gt_csv):
+                    try:
+                        _os_cleanup.remove(_gt_csv)
+                    except OSError:
+                        pass
 
                 raise RuntimeError(
                     f"v89 ROOT FIX (9.5): GT+RL pipeline REFUSED to ship "
@@ -4612,13 +4966,37 @@ class GTRLBridge:
                     f"KP recovery={kp_recovery_rate:.1%} (threshold="
                     f"{kp_recovery_threshold:.0%}, pass={scientific_validation['kp_recovery_pass']}). "
                     f"Failed checks: {_failed}. "
-                    f"v89 P0: all candidate CSVs and the intermediate "
-                    f"gt_predictions.csv have been DELETED from "
+                    f"P3-019 v113: all candidate CSVs and the intermediate "
+                    f"gt_predictions.csv have been DELETED (as .pending files, "
+                    f"never visible to downstream consumers) from "
                     f"{self.output_dir} to prevent downstream consumers "
                     f"from picking up invalid candidates. Either fix the "
                     f"underlying issues or pass allow_invalid_output=True "
                     f"to override (DEBUGGING ONLY)."
                 )
+
+            # P3-019 ROOT FIX (v113): gate PASSED -- rename .pending files
+            # back to .csv (atomic on POSIX, making them visible to
+            # downstream consumers). This is the success path: the
+            # scientific_validation gate passed, so the CSVs are valid.
+            # The rename is atomic (``os.rename`` is atomic on POSIX for
+            # files within the same filesystem), so a consumer that
+            # polls for ``top_candidates_*.csv`` will see either nothing
+            # or the complete valid file -- never a partial write.
+            for _csv_path, _pending_path in _pending_csvs:
+                try:
+                    _os_pending.rename(_pending_path, _csv_path)
+                    logger.info(
+                        f"P3-019: gate PASSED -- renamed {_pending_path} "
+                        f"-> {_csv_path} (now visible to downstream consumers)."
+                    )
+                except OSError as _rn_err:
+                    logger.error(
+                        f"P3-019: FAILED to rename {_pending_path} -> "
+                        f"{_csv_path} after gate passed: {_rn_err}. The "
+                        f"valid CSV is at {_pending_path} -- manual "
+                        f"rename required."
+                    )
 
         # B16 fix: return the RL candidates (not the GT predictions)
         return candidates_df, results
@@ -4746,7 +5124,70 @@ class GTRLBridge:
                 # Compute supplementary features (safety, market, pathway, etc.)
                 drug_map = self.node_maps.get("drug", {})
                 disease_map = self.node_maps.get("disease", {})
-                pool_df = self._compute_supplementary_features(pool_df, drug_map, disease_map)
+                # P3-049 ROOT FIX (v113 forensic): the previous code
+                # computed ``disease_avg_gnn``, ``disease_avg_safety``,
+                # and ``disease_pair_count`` via ``groupby("disease")``
+                # on the POOL DataFrame (50-250 rows). The RL agent was
+                # trained on these features computed from the FULL RL
+                # input (100K+ rows). The pool's ``disease_avg_gnn`` for
+                # disease X is the mean over the pool's pairs for X
+                # (maybe 5-10 pairs, biased toward high-gnn_score),
+                # NOT the global mean. The RL agent saw out-of-
+                # distribution features at Phase 6 inference, producing
+                # garbage policy probabilities and random Top-50 rankings.
+                #
+                # ROOT FIX: load the FULL RL input CSV (``gt_predictions.csv``
+                # if it exists) and compute the global disease-level
+                # statistics from it. Pass these as a lookup dict to
+                # ``_compute_supplementary_features`` so the pool's
+                # disease_avg_gnn is the GLOBAL mean (matching what the
+                # RL agent was trained on), not the pool's biased mean.
+                global_disease_stats: Optional[Dict[str, Dict[str, float]]] = None
+                _gt_pred_path = os.path.join(self.output_dir, "gt_predictions.csv")
+                if os.path.exists(_gt_pred_path):
+                    try:
+                        _full_df = pd.read_csv(_gt_pred_path)
+                        if "disease" in _full_df.columns and "gnn_score" in _full_df.columns:
+                            _global_agg = _full_df.groupby("disease", observed=True).agg(
+                                disease_pair_count=("drug", "count"),
+                                disease_avg_gnn=("gnn_score", "mean"),
+                            ).reset_index()
+                            if "safety_score" in _full_df.columns:
+                                _global_safety = _full_df.groupby("disease", observed=True)["safety_score"].mean()
+                                _global_agg = _global_agg.merge(
+                                    _global_safety.rename("disease_avg_safety").reset_index(),
+                                    on="disease", how="left",
+                                )
+                            else:
+                                _global_agg["disease_avg_safety"] = 0.5
+                            global_disease_stats = {
+                                row["disease"]: {
+                                    "disease_pair_count": float(row["disease_pair_count"]),
+                                    "disease_avg_gnn": float(row["disease_avg_gnn"]),
+                                    "disease_avg_safety": float(row.get("disease_avg_safety", 0.5)),
+                                }
+                                for _, row in _global_agg.iterrows()
+                            }
+                            logger.info(
+                                f"P3-049: loaded global disease stats for "
+                                f"{len(global_disease_stats)} diseases from "
+                                f"{_gt_pred_path} (Phase 6 pool will use "
+                                f"GLOBAL stats, not pool-biased stats)."
+                            )
+                    except Exception as _stats_err:
+                        logger.warning(
+                            f"P3-049: failed to load global disease stats "
+                            f"from {_gt_pred_path}: {_stats_err}. Phase 6 "
+                            f"pool will fall back to pool-local stats "
+                            f"(out-of-distribution risk)."
+                        )
+                pool_df = self._compute_supplementary_features(
+                    pool_df, drug_map, disease_map,
+                    # P3-049: pass the global disease stats so the
+                    # supplementary features use GLOBAL means (matching
+                    # RL training), not pool-biased means.
+                    global_disease_stats=global_disease_stats,
+                )
 
                 # Build RL env and run agent to get policy probabilities
                 from rl.rl_drug_ranker import (

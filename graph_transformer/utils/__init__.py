@@ -12,7 +12,34 @@ logger = logging.getLogger(__name__)
 
 
 def set_seed(seed: int) -> None:
-    """Set all relevant random seeds for reproducibility.
+    """Set all relevant random seeds for FULL reproducibility.
+
+    P3-008 ROOT FIX (v113 forensic): the previous ``set_seed`` seeded
+    Python's ``random``, NumPy, and PyTorch's CPU+CUDA RNGs, but did
+    NOT set:
+      - ``torch.backends.cudnn.deterministic = True``
+      - ``torch.backends.cudnn.benchmark = False``
+      - ``torch.use_deterministic_algorithms(True)``
+      - ``os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"``
+    On GPU, the same seed produced DIFFERENT model weights across runs
+    (cuDNN's convolution algorithms are non-deterministic by default;
+    cuDNN auto-tunes per input shape; some PyTorch ops like
+    ``scatter_add_`` have non-deterministic CUDA implementations).
+    The reproducibility claim ("Same seed => same split, every run")
+    was only true on CPU. The V1 launch contract requires
+    reproducibility for FDA 21 CFR Part 11 compliance -- partial
+    reproducibility (CPU only) is insufficient for pharma production.
+
+    ROOT FIX: set all four determinism flags. The
+    ``CUBLAS_WORKSPACE_CONFIG`` env var MUST be set BEFORE
+    ``import torch`` to take effect; we set it here as a best-effort
+    (it may not take effect for the current process if torch is
+    already imported, but it WILL take effect for child processes).
+    The ``torch.use_deterministic_algorithms(True)`` call is wrapped
+    in try/except because some ops (e.g., ``scatter_reduce_`` on
+    older PyTorch) do not have deterministic implementations and
+    will raise ``NotImplementedError`` -- we log a warning and
+    continue without strict determinism for those ops.
 
     Fixes the B5 bug pattern: the original codebase mixed
     ``np.random.default_rng(seed)`` (local RNG) with
@@ -22,11 +49,46 @@ def set_seed(seed: int) -> None:
     also seeded.
     """
     import random
+    # P3-008: CUBLAS_WORKSPACE_CONFIG must be set BEFORE torch is
+    # imported for the first time. We set it here as a best-effort
+    # (works for child processes; for the current process, torch is
+    # already imported by the time set_seed is called, so the env
+    # var may not take effect — but the cudnn flags below will).
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    # P3-008 ROOT FIX: enable full cuDNN + cuBLAS determinism.
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    try:
+        # Some ops (e.g., scatter_reduce_ on older PyTorch) do not
+        # have deterministic implementations and will raise
+        # NotImplementedError. We use ``warn_only=True`` so those ops
+        # fall back to non-deterministic with a warning, instead of
+        # raising and breaking the training loop.
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except (TypeError, AttributeError):
+        # Older PyTorch (<1.11) does not support ``warn_only``. Fall
+        # back to strict mode (which may raise on some ops).
+        try:
+            torch.use_deterministic_algorithms(True)
+        except (TypeError, AttributeError):
+            # Even older PyTorch (<1.8) does not have this function.
+            logger.warning(
+                "P3-008: torch.use_deterministic_algorithms not "
+                "available (PyTorch <1.8). Full reproducibility "
+                "requires PyTorch >=1.11."
+            )
+    except RuntimeError as exc:
+        # Some environments (CPU-only) may not support full
+        # determinism. Log and continue.
+        logger.warning(
+            "P3-008: torch.use_deterministic_algorithms failed: %s. "
+            "Reproducibility may be partial.", exc
+        )
 
 
 def drug_aware_split(
@@ -360,6 +422,21 @@ def compute_graph_degrees(
 ) -> Dict[int, int]:
     """Compute per-node degree for a given node type.
 
+    P3-007 ROOT FIX (v113 forensic): VECTORIZED dict construction.
+    The previous code converted the bincount tensor to a Python dict
+    via a ``for idx in range(len(counts))`` loop with ``.item()`` calls.
+    For a graph with 10M nodes, this was 10M Python iterations + 10M
+    Python-to-C transitions (each ``.item()`` is a transition). At
+    ~1µs per iteration, that's ~10 seconds of pure Python overhead
+    PER CALL. The bridge calls this function 4 times per
+    ``generate_rl_input`` invocation, so ~40 seconds of overhead.
+
+    ROOT FIX: use ``np.where`` + ``counts[counts > 0]`` to build the
+    dict via vectorized numpy operations. The Python loop is replaced
+    by a single numpy operation that runs in C. The dict is then
+    constructed via ``dict(zip(...))`` which is a single C-level
+    iteration over a (num_nonzero,) array (typically << num_nodes).
+
     ROOT FIX (B1): this function is now ACTUALLY CALLED by the bridge's
     ``save_rl_input_streaming`` and ``_compute_supplementary_features``
     methods to compute REAL supplementary features (safety, market,
@@ -397,8 +474,8 @@ def compute_graph_degrees(
     Returns:
         Dict mapping node index -> degree.
     """
-    # ROOT FIX (FORENSIC-AUDIT-I08): collect all relevant indices first,
-    # then use torch.bincount for vectorized counting.
+    # Collect all relevant indices first, then use torch.bincount for
+    # vectorized counting.
     all_indices: List[torch.Tensor] = []
 
     for (src, rel, tgt), ei in edge_indices.items():
@@ -419,12 +496,18 @@ def compute_graph_degrees(
         return {}
     # bincount returns a tensor of length (max_index + 1) with counts.
     counts = torch.bincount(concatenated)
-    # Convert to a dict (only non-zero entries).
-    degrees: Dict[int, int] = {}
-    for idx in range(len(counts)):
-        c = int(counts[idx].item())
-        if c > 0:
-            degrees[idx] = c
+    # P3-007 ROOT FIX: VECTORIZED dict construction. The previous code
+    # used a Python for-loop over ``range(len(counts))`` with ``.item()``
+    # calls (~10s for 10M nodes). The fix uses ``np.where`` to find
+    # non-zero indices in a single C-level operation, then constructs
+    # the dict via ``dict(zip(...))`` (also C-level). For 10M nodes
+    # with ~100K non-zero entries, this is ~100K iterations vs 10M --
+    # a 100x speedup.
+    counts_np = counts.cpu().numpy()
+    nonzero_mask = counts_np > 0
+    nonzero_indices = np.where(nonzero_mask)[0]
+    nonzero_values = counts_np[nonzero_indices]
+    degrees = dict(zip(nonzero_indices.tolist(), nonzero_values.tolist()))
     return degrees
 
 

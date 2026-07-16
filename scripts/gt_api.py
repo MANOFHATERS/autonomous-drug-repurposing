@@ -104,10 +104,28 @@ class Prediction(BaseModel):
     score: float
 
 
+# SH-006 ROOT FIX (v113 forensic): the previous PredictResponse used
+# snake_case (``model_version``, ``n_pairs``) and was MISSING the
+# fields the frontend contract requires (``source``, ``generatedAt``,
+# ``checkpointPath``). The frontend's ``api_contracts.ts`` declares
+# ``{predictions, source, modelVersion, generatedAt, count,
+# checkpointPath}`` (camelCase). ``graph_transformer/service.py`` (the
+# canonical service) already returns this shape. ``scripts/gt_api.py``
+# (used by docker-compose.yml line 211 for production) returned a
+# DIFFERENT shape, causing contract drift: the frontend's TypeScript
+# types did not match the production API response. The fix aligns
+# ``scripts/gt_api.py`` with the canonical frontend contract.
 class PredictResponse(BaseModel):
     predictions: List[Prediction]
-    model_version: str
-    n_pairs: int
+    source: str = "gt_checkpoint"
+    modelVersion: str = "gt_v113"
+    generatedAt: Optional[str] = None
+    count: int = 0
+    checkpointPath: Optional[str] = None
+    # SH-031 v113: keep error_count/error_rate as optional (the TS
+    # contract should ignore unknown fields per JSON Schema).
+    error_count: Optional[int] = None
+    error_rate: Optional[float] = None
 
 
 class TopKRequest(BaseModel):
@@ -117,7 +135,11 @@ class TopKRequest(BaseModel):
 
 class TopKResponse(BaseModel):
     predictions: List[Prediction]
-    model_version: str
+    source: str = "gt_checkpoint"
+    modelVersion: str = "gt_v113"
+    generatedAt: Optional[str] = None
+    count: int = 0
+    checkpointPath: Optional[str] = None
 
 
 # ─────────────────────── Model cache (loaded once) ──────────────────────
@@ -244,8 +266,13 @@ def predict(req: PredictRequest) -> PredictResponse:
 
     return PredictResponse(
         predictions=[Prediction(**p) for p in preds],
-        model_version=os.environ.get("GT_MODEL_VERSION", "v100"),
-        n_pairs=len(preds),
+        source="gt_checkpoint",
+        modelVersion=os.environ.get("GT_MODEL_VERSION", "gt_v113"),
+        generatedAt=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        count=len(preds),
+        checkpointPath=os.environ.get("GT_CHECKPOINT_PATH") or os.environ.get("GT_CHECKPOINT_DIR"),
+        error_count=0,
+        error_rate=0.0,
     )
 
 
@@ -280,7 +307,11 @@ def top_k(req: TopKRequest) -> TopKResponse:
 
     return TopKResponse(
         predictions=[Prediction(**p) for p in preds],
-        model_version=os.environ.get("GT_MODEL_VERSION", "v100"),
+        source="gt_checkpoint",
+        modelVersion=os.environ.get("GT_MODEL_VERSION", "gt_v113"),
+        generatedAt=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        count=len(preds),
+        checkpointPath=os.environ.get("GT_CHECKPOINT_PATH") or os.environ.get("GT_CHECKPOINT_DIR"),
     )
 
 

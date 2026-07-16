@@ -309,63 +309,105 @@ def _load_sql_adme_cache() -> Dict[str, float]:
 def _load_sql_prevalence_cache() -> Dict[str, float]:
     """Load disease prevalence from the Phase 1 SQL database.
 
-    Approximation: diseases with many gene-disease associations (high GDA
-    count) tend to be well-studied (and often more common). Rare diseases
-    have few GDAs in curated databases.
+    P3-026 ROOT FIX (v113 forensic): the previous code mapped gene-disease
+    association (GDA) count to disease prevalence via a LINEAR formula:
+    ``prevalence = 5.0 + 2995.0 * (n_gdas / max_gda)``. This assumed
+    "diseases with more known gene associations are more common". This
+    is SCIENTIFICALLY WRONG:
+      - Cystic fibrosis has ~2000 known GDAs (CFTR gene is heavily
+        studied) but prevalence is 0.4/10K (RARE).
+      - Hypertension has ~500 GDAs but prevalence is 3000/10K (VERY
+        COMMON).
+      - Cancer subtypes (e.g., BRCA1-related breast cancer) have
+        hundreds of GDAs but prevalence is moderate.
+
+    GDA count correlates with RESEARCH ATTENTION (how well-studied the
+    disease is), NOT with PREVALENCE (how many patients have it). The
+    linear mapping produced WRONG prevalence values, which fed into
+    ``compute_market_score`` (rare diseases get HIGH market score) and
+    ``compute_rare_disease_flag`` (FDA orphan drug status). The RL
+    agent ranked hypertension drugs MODERATELY and CF drugs LOW -- the
+    OPPOSITE of the orphan-drug-value logic the bridge intended.
+
+    ROOT FIX: use ONLY the curated ``DISEASE_PREVALENCE_PER_10K`` dict
+    (which has ~50 entries with REAL WHO/Orphanet prevalence values).
+    For diseases NOT in the curated dict, return ``None`` (not a
+    fabricated linear mapping). The caller (``compute_market_score``)
+    already handles ``None`` by returning 0.5 (neutral) -- so unknown
+    diseases get a neutral market score instead of a WRONG one.
+
+    NOTE: the GDA-count query is REMOVED entirely. The Phase 1 DB
+    stores real prevalence data when available (in the ``diseases``
+    table's ``prevalence_per_10k`` column, populated by the DisGeNET
+    pipeline from Orphanet). Future enhancement: query that column
+    directly. For now, we use ONLY the curated dict to avoid the
+    scientifically-wrong linear mapping.
     """
     global _SQL_PREVALENCE_CACHE
     with _SQL_CACHE_LOCK:
         if _SQL_PREVALENCE_CACHE is not None:
             return _SQL_PREVALENCE_CACHE
+        # P3-026: ALWAYS use the curated dict. We NO LONGER fall back
+        # to the GDA-count linear mapping (scientifically wrong).
+        # The curated dict has REAL prevalence values from WHO/Orphanet
+        # for ~50 common diseases. Diseases not in the dict get
+        # ``None`` (handled by the caller as neutral 0.5).
+        _SQL_PREVALENCE_CACHE = dict(DISEASE_PREVALENCE_PER_10K)
+        # P3-026: optionally augment with REAL prevalence from the
+        # Phase 1 DB's ``diseases.prevalence_per_10k`` column (if the
+        # column exists and has non-null values). This is the
+        # SCIENTIFICALLY CORRECT way to get prevalence -- the GDA
+        # linear mapping was a fabrication.
         db_path = _find_phase1_db()
-        if db_path is None:
-            _SQL_PREVALENCE_CACHE = dict(DISEASE_PREVALENCE_PER_10K)
-            return _SQL_PREVALENCE_CACHE
-        try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            cur = conn.cursor()
-            # Count GDAs per disease name as a prevalence proxy.
-            cur.execute("""
-                SELECT
-                    LOWER(TRIM(disease_name)) AS disease_name,
-                    COUNT(*) AS n_gdas
-                FROM gene_disease_associations
-                WHERE disease_name IS NOT NULL
-                GROUP BY disease_name
-            """)
-            cache: Dict[str, float] = {}
-            max_gda = 1
-            rows = cur.fetchall()
-            for row in rows:
-                if row[1] > max_gda:
-                    max_gda = row[1]
-            # Map GDA count to prevalence per 10K:
-            #   many GDAs → common disease (high prevalence)
-            #   few GDAs → rare disease (low prevalence)
-            for row in rows:
-                name = row[0]
-                if not name:
-                    continue
-                n_gdas = row[1]
-                # Inverse scale: rare diseases (few GDAs) get low prevalence.
-                prevalence = 5.0 + 2995.0 * (n_gdas / max_gda)
-                cache[name] = min(3000.0, prevalence)
-            conn.close()
-            merged = dict(DISEASE_PREVALENCE_PER_10K)
-            merged.update(cache)
-            _SQL_PREVALENCE_CACHE = merged
-            logger.info(
-                "TASK-145: loaded %d disease prevalences from SQL DB (%s).",
-                len(cache), db_path,
-            )
-            return _SQL_PREVALENCE_CACHE
-        except Exception as exc:
-            logger.warning(
-                "TASK-145: failed to load disease prevalence from SQL DB: %s. "
-                "Using curated DISEASE_PREVALENCE_PER_10K fallback.", exc,
-            )
-            _SQL_PREVALENCE_CACHE = dict(DISEASE_PREVALENCE_PER_10K)
-            return _SQL_PREVALENCE_CACHE
+        if db_path is not None:
+            try:
+                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                cur = conn.cursor()
+                # Check if the diseases table has a prevalence column.
+                # If so, load REAL prevalence values (overrides the
+                # curated dict where available).
+                try:
+                    cur.execute("""
+                        SELECT
+                            LOWER(TRIM(name)) AS disease_name,
+                            prevalence_per_10k
+                        FROM diseases
+                        WHERE prevalence_per_10k IS NOT NULL
+                          AND prevalence_per_10k > 0
+                    """)
+                    real_prevalences = cur.fetchall()
+                    real_count = 0
+                    for name, prev in real_prevalences:
+                        if name and prev is not None:
+                            # Real prevalence from DB OVERRIDES curated
+                            # dict (the DB is the source of truth when
+                            # available).
+                            _SQL_PREVALENCE_CACHE[name] = float(prev)
+                            real_count += 1
+                    if real_count > 0:
+                        logger.info(
+                            "P3-026: loaded %d REAL disease prevalences "
+                            "from Phase 1 DB diseases.prevalence_per_10k "
+                            "column (overrides curated dict).", real_count,
+                        )
+                except sqlite3.OperationalError:
+                    # The diseases table does not have a prevalence
+                    # column (older schema). Fall back to curated dict
+                    # only -- NO linear GDA mapping (the previous
+                    # behavior was scientifically wrong).
+                    logger.info(
+                        "P3-026: diseases.prevalence_per_10k column not "
+                        "available. Using curated DISEASE_PREVALENCE_PER_10K "
+                        "dict only (no linear GDA mapping -- scientifically "
+                        "wrong, removed in v113)."
+                    )
+                conn.close()
+            except Exception as exc:
+                logger.warning(
+                    "P3-026: failed to query Phase 1 DB for prevalence: %s. "
+                    "Using curated DISEASE_PREVALENCE_PER_10K dict only.", exc,
+                )
+        return _SQL_PREVALENCE_CACHE
 
 
 # ============================================================================

@@ -99,13 +99,27 @@ export interface Prediction extends DrugDiseasePair {
 }
 
 /** Response from POST /predict */
+// SH-025 ROOT FIX (v113 forensic): the previous ``source`` enum was
+// ``"gt_service" | "gt_subprocess" | "stub"`` -- but the Python
+// services (``graph_transformer/service.py`` and ``scripts/gt_api.py``)
+// actually return ``"gt_checkpoint"`` (the model was loaded from a
+// checkpoint). The TS contract's enum did not include ``"gt_checkpoint"``,
+// so the frontend's TypeScript types did not match the production API
+// response. The fix adds ``"gt_checkpoint"`` to the enum AND keeps the
+// legacy values for backward compatibility with older service versions.
 export interface PredictResponse {
   predictions: Prediction[];
-  source: "gt_service" | "gt_subprocess" | "stub";
+  source: "gt_checkpoint" | "gt_service" | "gt_subprocess" | "stub";
   modelVersion: string;
   generatedAt: IsoTimestamp;
   count: number;
   checkpointPath: string;
+  // SH-031 v113: the Python service returns these extra fields for
+  // monitoring. They are optional in the TS contract so the frontend
+  // does not break if they are absent (e.g., from older service
+  // versions). Marked optional to allow forward compatibility.
+  error_count?: number;
+  error_rate?: number;
 }
 
 /** Response from GET /top-k */
