@@ -464,17 +464,28 @@ def _validate_uniprot_id(value: Optional[str]) -> Optional[str]:
     #        test-fixture IDs that should be accepted are TEST-prefixed
     #        (explicit, self-documenting). Real UniProt accessions are
     #        always 6+ chars and match the strict regex above.
-    import os as _os
-    _env = _os.environ.get("DRUGOS_ENVIRONMENT", "prod").lower()
-    _allow_test = _env in ("dev", "development", "test", "ci")
-    if _allow_test and value.upper().startswith("TEST"):
-        return value
+    # P1-028 v113 ROOT FIX: the previous code accepted TEST-prefixed UniProt
+    # IDs (e.g. TEST001) in dev/test/ci environments. But the DB CHECK
+    # constraint (migration 016) enforces the canonical UniProt regex
+    # `^[OPQ][0-9][A-Z0-9]{3}[0-9]$` OR `^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$`
+    # — which TEST001 does NOT match. So the Python validator passed the
+    # value, the loader built an INSERT, and the DB rejected it with
+    # CheckViolation. Tests passed on SQLite (no CHECK enforced) but FAILED
+    # on PostgreSQL integration tests (CHECK enforced).
+    #
+    # ROOT FIX: remove the TEST-prefix acceptance ENTIRELY. Test fixtures
+    # MUST use real UniProt accessions (e.g. P04637 for TP53, P00533 for
+    # EGFR). This eliminates the dev/prod asymmetry. The
+    # DRUGOS_ENVIRONMENT check is removed — there is no longer any
+    # environment where TEST-prefixed IDs are valid.
     raise ValueError(
         f"Invalid UniProt accession: '{value}'. "
         "Must match pattern like P69999 or Q9Y6K9. "
-        "Test-fixture IDs (TEST... prefix only) are rejected "
-        "in production/staging environments (set DRUGOS_ENVIRONMENT=dev "
-        "to allow TEST-prefixed fixtures)."
+        "P1-028 v113: TEST-prefixed fixture IDs are NO LONGER accepted in "
+        "any environment (they violated the DB CHECK constraint on "
+        "PostgreSQL). Test fixtures MUST use real UniProt accessions "
+        "(e.g. P04637 for TP53, P00533 for EGFR, Q9Y6K9 for a generic "
+        "test protein)."
     )
 
 

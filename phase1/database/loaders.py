@@ -5667,7 +5667,21 @@ def cleanup_orphan_gda_records(
             )
             raise
 
-    return 0
+    # P1-019 v113 ROOT FIX: the previous code had `return 0` here as the
+    # implicit "all retries exhausted but no exception raised" path. But
+    # every except block above either retries (with eventual `raise` on the
+    # last attempt) or re-raises immediately. So this line is UNREACHABLE
+    # in normal control flow. However, a future refactor that wraps the
+    # retry loop in an outer try/except that swallows exceptions would
+    # silently return 0 — reporting "0 orphans deleted" when the actual
+    # count is unknown. 50,000 orphan GDA rows could accumulate silently.
+    # ROOT FIX: raise RuntimeError instead of returning 0. If this line
+    # is ever reached, it indicates a logic bug that must be investigated.
+    raise RuntimeError(
+        "cleanup_orphan_gda_records: unreachable state — all retries "
+        "exhausted without exception. This indicates a control-flow bug "
+        "in the retry loop. Please report this as a P1-019 regression."
+    )
 
 
 # ===========================================================================

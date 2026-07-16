@@ -442,3 +442,21 @@ Work Log:
 Stage Summary:
 - 6 MEDIUM issues fixed in batch
 - Files touched: docker-compose.yml, phase1/docker-compose.yml, phase1/service.py
+
+---
+Task ID: TM3-MEDIUM-BATCH-2
+Agent: main (Teammate 3 swim lane)
+Task: Fix MEDIUM issues P1-019, P1-032, P1-042, P1-028, P1-049, P1-027
+
+Work Log:
+- P1-019: replaced `return 0` at end of cleanup_orphan_gda_records with `raise RuntimeError(...)` — the return 0 was unreachable but a future refactor wrapping the retry loop in a swallowing try/except would silently return 0, reporting "0 orphans deleted" while 50,000 orphans accumulate
+- P1-032: replaced ValueError raises in classify_confidence with defensive coercion (None/NaN -> 0.0 + WARNING log) — the function is PUBLIC (exported in __all__) and callers that don't use validate_gda_scores would hit the ValueError with no remediation
+- P1-042: changed normalize_inchikey type hint from `-> str` to `-> Optional[str]` (both param and return) — the function actually returns None for None input but the type hint said str, causing mypy/pyright false positives and developer confusion
+- P1-028: removed TEST-prefix UniProt ID acceptance from _validate_uniprot_id — the DB CHECK constraint (migration 016) doesn't accept TEST-prefixed IDs, creating a dev/prod asymmetry where tests passed on SQLite but failed on PostgreSQL. Test fixtures must now use real UniProt accessions (P04637, P00533, Q9Y6K9)
+- P1-049: VERIFIED already fixed — TASK_SLA=5h, TASK_TIMEOUT=7h (lines 185-186), giving operators a 2h early-warning window before the hard kill
+- P1-027: VERIFIED already fixed by v107 — the platform is intentionally human-only (UniProt organism_id:9606, DrugBank filter_organism_humans, STRING 9606. ENSP prefix). The strict _HUMAN_GENE_SYMBOL_RE validator is correct for this design.
+- py_compile all 4 files: OK
+
+Stage Summary:
+- 6 MEDIUM issues addressed (4 fixed, 2 verified already-fixed)
+- Files touched: phase1/database/loaders.py, phase1/cleaning/confidence.py, phase1/cleaning/_constants.py, phase1/database/models.py
