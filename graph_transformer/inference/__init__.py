@@ -154,24 +154,30 @@ def top_k_novel_predictions(
     num_drugs = len(drug_names)
     num_diseases = len(disease_names)
 
-    # V31 ROOT FIX (P1-12 / Compound #10): pass apply_temperature=False
-    # to match the RL training distribution. The audit found that
-    # ``generate_rl_input`` uses ``apply_temperature=False`` (raw sigmoid,
-    # full variance) for the RL training CSV, but ``top_k_novel_predictions``
-    # used the default ``apply_temperature=True`` (calibrated, compressed
-    # variance) for Phase 6 inference. The RL policy was trained on raw
-    # scores but inferred on calibrated scores -> out-of-distribution
-    # features -> unreliable Phase 6 rankings.
+    # P3-040 + P3-004 ROOT FIX (v113 forensic): use the new
+    # ``predict_all_pairs_dual`` method to compute BOTH raw and
+    # calibrated scores in a SINGLE encode pass. The previous code
+    # called ``predict_all_pairs`` once with apply_temperature=False
+    # (raw sigmoid) -- this was already efficient (single encode),
+    # but it wrote the RAW sigmoid to ``gnn_score``, which the RL
+    # reward function reads. Temperature calibration was dead for
+    # Phase 6.
     #
-    # The fix: use ``apply_temperature=False`` here so Phase 6's candidate
-    # pool is scored with the SAME distribution the RL agent was trained
-    # on. This ensures the RL policy operates on in-distribution features.
-    score_matrix = model.predict_all_pairs(
+    # The fix: use ``predict_all_pairs_dual`` (single encode pass)
+    # and use the CALIBRATED matrix as the source of ``gnn_score``.
+    # This aligns Phase 6 with the RL training distribution (which
+    # now also uses calibrated gnn_score per P3-004 fix in
+    # ``generate_rl_input``). Both paths now use the SAME calibrated
+    # value -- no more distribution mismatch between training and
+    # Phase 6 inference.
+    raw_matrix, calibrated_matrix = model.predict_all_pairs_dual(
         node_features, edge_indices,
         num_drugs=num_drugs, num_diseases=num_diseases,
         exclude_edges=exclude_edges,
-        apply_temperature=False,  # V31 P1-12: match RL training distribution
-    )  # (num_drugs, num_diseases) on device -- raw sigmoid, same as RL training
+    )  # SINGLE encode pass; both matrices differ only in sigmoid transform
+
+    # P3-004: use calibrated score as gnn_score (matches bridge fix).
+    score_matrix = calibrated_matrix
 
     # Flatten and find top-K novel
     known_set = set((d.lower(), v.lower()) for d, v in known_pairs)

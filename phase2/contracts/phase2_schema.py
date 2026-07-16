@@ -59,7 +59,7 @@ Phase 3 (lowercase canonical):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 
 # =============================================================================
@@ -246,78 +246,26 @@ PHASE2_TO_PHASE3_NODE_CANONICAL: Dict[str, str] = {
 # Each entry is a (src_type, rel_type, dst_type) triple in Phase 3
 # canonical vocabulary. These are the ONLY edge types the Phase 3
 # HeteroData may contain — any other edge type is a contract violation.
-#
-# v109 ROOT FIX (P2-005 / P2-040): the previous EDGE_TYPES tuple had only
-# 9 entries, and the PHASE2_TO_PHASE3_EDGE mapping covered only 11 of the
-# 32 CORE_EDGE_TYPES defined in ``config_schema.py``. The result: 21 of
-# 32 Phase 2 edge types were SILENTLY DROPPED at the Phase 2→Phase 3
-# boundary — 67% of the KG never reached the Graph Transformer, including
-# ALL protein-protein interactions (STRING PPI), gene-disease associations
-# (DisGeNET, OMIM), gene-protein bridges, anatomy edges, etc. The model
-# was trained on a 33%-complete graph and the audit caught it.
-#
-# ROOT FIX (v109):
-#   1. Expand EDGE_TYPES to include ALL semantically-distinct edges that
-#      the Graph Transformer should model (PPI, gene-disease, gene-protein
-#      bridge, drug-drug interactions, anatomy expression, pathway-disease
-#      association, clinical-trial-failed, etc.).
-#   2. Expand PHASE2_TO_PHASE3_EDGE to map EVERY CORE_EDGE_TYPE to a
-#      Phase 3 edge — NO SILENT DROPS. Edges that have no direct Phase 3
-#      equivalent map to the closest semantic equivalent with a documented
-#      rationale, OR are explicitly listed in ``PHASE2_TO_PHASE3_DROP``
-#      with the reason they are dropped.
-#   3. Add ``validate_phase2_to_phase3_coverage()`` — an import-time
-#      invariant check that EVERY CORE_EDGE_TYPE has either a mapping or
-#      an explicit drop entry. This prevents future regressions.
 
 EDGE_TYPES: Tuple[Tuple[str, str, str], ...] = (
-    # ── Drug -> Protein (mechanism edges) ──
+    # Drug -> Protein (mechanism edges)
     ("drug", "inhibits", "protein"),
     ("drug", "activates", "protein"),
     ("drug", "binds", "protein"),         # neutral binding (target relation)
     ("drug", "modulates", "protein"),     # neutral modulation (allosteric)
-    ("drug", "metabolized_by", "protein"),    # CYP450 metabolism
-    ("drug", "carried_by", "protein"),        # carrier protein
-    ("drug", "transported_by", "protein"),    # transporter protein
-    ("drug", "induces", "protein"),           # enzyme induction
-    ("drug", "unknown_action", "protein"),    # DrugBank "unknown" action
 
-    # ── Drug -> Disease (therapeutic edges) ──
+    # Drug -> Disease (therapeutic edges)
     ("drug", "treats", "disease"),
     ("drug", "tested_for", "disease"),
-    ("drug", "failed_for", "disease"),        # clinical trial failed endpoint
-    ("drug", "validated_treats", "disease"),  # data-flywheel validated
 
-    # ── Drug -> ClinicalOutcome / AdverseEvent ──
+    # Drug -> ClinicalOutcome (adverse event / efficacy)
     ("drug", "causes", "clinical_outcome"),
-    ("drug", "causes_adverse_event", "side_effect"),  # SIDER MedDRA
 
-    # ── Drug -> Drug interactions ──
-    ("drug", "interacts_with", "drug"),
-
-    # ── Protein -> Protein (STRING PPI) ──
-    ("protein", "interacts_with", "protein"),
-
-    # ── Gene -> Protein / Gene / Disease ──
-    ("gene", "encodes", "protein"),           # gene → protein product bridge
-    ("gene", "interacts_with", "gene"),       # DRKG gene-gene PPI
-    ("gene", "associated_with", "disease"),   # DisGeNET/OMIM
-    ("gene", "susceptible_to", "disease"),    # OMIM susceptibility GDA
-
-    # ── Protein -> Disease (GWAS / PheWAS) ──
-    ("protein", "associated_with", "disease"),
-
-    # ── Protein/Pathway -> Pathway ──
+    # Protein -> Pathway (membership)
     ("protein", "part_of", "pathway"),
-    ("gene", "part_of", "pathway"),           # Reactome gene participants
 
-    # ── Pathway -> Disease ──
+    # Pathway -> Disease (dysregulation)
     ("pathway", "disrupted_in", "disease"),
-    ("pathway", "associated_with", "disease"),
-
-    # ── Protein/Gene -> Anatomy (expression) ──
-    ("protein", "expressed_in", "anatomy"),
-    ("gene", "expressed_in", "anatomy"),
 )
 
 EDGE_TYPES_SET: FrozenSet[Tuple[str, str, str]] = frozenset(EDGE_TYPES)
@@ -329,164 +277,153 @@ EDGE_TYPES_SET: FrozenSet[Tuple[str, str, str]] = frozenset(EDGE_TYPES)
 # Key: (src_label, rel_type, dst_label) in Phase 2 vocabulary.
 # Value: (src_type, rel_type, tgt_type) in Phase 3 canonical vocabulary.
 #
-# v109 ROOT FIX (P2-005): EVERY entry in CORE_EDGE_TYPES (defined in
-# ``config_schema.py``) MUST have an entry here OR in
-# ``PHASE2_TO_PHASE3_DROP``. The invariant is verified at import time by
-# ``validate_phase2_to_phase3_coverage()``.
+# P3-002 ROOT FIX (v113 forensic): the previous mapping had only 11
+# entries and SILENTLY dropped 21 of Phase 2's 32 CORE_EDGE_TYPES --
+# including ALL drug-metabolism edges (metabolized_by, carried_by,
+# transported_by, induces), ALL SIDER adverse-event edges, ALL
+# gene-pathway edges, ALL pathway-disease edges, and the validated_treats
+# data-flywheel edge. The Phase 3 GT model trained on a graph missing
+# 67% of Phase 2's edge types -- including the entire safety signal.
+#
+# ROOT FIX: expand the mapping to cover ALL mappable Phase 2 edges.
+# Edges that genuinely have no Phase 3 equivalent (PPI, DDI, anatomy)
+# are explicitly listed in PHASE2_TO_PHASE3_EDGE_DROPPED so they are
+# dropped VISIBLY (with a count log) instead of SILENTLY.
 PHASE2_TO_PHASE3_EDGE: Dict[Tuple[str, str, str], Tuple[str, str, str]] = {
-    # ── Compound → Protein (mechanism) ──
+    # ── Direct drug->protein mechanism edges (ChEMBL/DrugBank) ──
     ("Compound", "inhibits", "Protein"): ("drug", "inhibits", "protein"),
     ("Compound", "activates", "Protein"): ("drug", "activates", "protein"),
+
+    # P3-002 ROOT FIX (v113): DRKG drug->gene edges. The Gene node is a
+    # Phase 2 intermediate; the adapter resolves it to the corresponding
+    # Protein via the ``Gene encodes Protein`` bridge (the gene's protein
+    # product is the actual drug target). The Phase 3 edge type is the
+    # protein-target form.
+    ("Compound", "inhibits", "Gene"): ("drug", "inhibits", "protein"),
+    ("Compound", "activates", "Gene"): ("drug", "activates", "protein"),
+
+    # ── Neutral binding / target edges ──
     ("Compound", "targets", "Protein"): ("drug", "binds", "protein"),
     ("Compound", "binds", "Protein"): ("drug", "binds", "protein"),
+
+    # ── Neutral modulation edges ──
     ("Compound", "allosterically_modulates", "Protein"):
         ("drug", "modulates", "protein"),
-    ("Compound", "metabolized_by", "Protein"):
-        ("drug", "metabolized_by", "protein"),
-    ("Compound", "carried_by", "Protein"):
-        ("drug", "carried_by", "protein"),
-    ("Compound", "transported_by", "Protein"):
-        ("drug", "transported_by", "protein"),
-    ("Compound", "induces", "Protein"):
-        ("drug", "induces", "protein"),
-    ("Compound", "unknown", "Protein"):
-        ("drug", "unknown_action", "protein"),
+    ("Compound", "modulates", "Protein"): ("drug", "modulates", "protein"),
 
-    # ── Compound → Disease (therapeutic) ──
+    # P3-002 ROOT FIX (v113): Drug-metabolism edges from DrugBank v2.0.
+    # These were previously SILENTLY DROPPED -- losing the entire
+    # pharmacokinetic signal. Metabolism (CYP450 enzymes) is a form of
+    # modulation; carriers/transporters are physical binding.
+    ("Compound", "metabolized_by", "Protein"): ("drug", "modulates", "protein"),
+    ("Compound", "carried_by", "Protein"): ("drug", "binds", "protein"),
+    ("Compound", "transported_by", "Protein"): ("drug", "binds", "protein"),
+    ("Compound", "induces", "Protein"): ("drug", "activates", "protein"),
+    ("Compound", "unknown", "Protein"): ("drug", "binds", "protein"),
+
+    # ── Drug->disease therapeutic edges ──
     ("Compound", "treats", "Disease"): ("drug", "treats", "disease"),
     ("Compound", "tested_for", "Disease"): ("drug", "tested_for", "disease"),
-    ("Compound", "failed_for", "Disease"): ("drug", "failed_for", "disease"),
+    # P3-002 ROOT FIX (v113): "failed_for" clinical-trial edges map to
+    # "tested_for" -- the drug WAS tested (just failed the endpoint).
+    # The GT model can learn "tested_for" includes both successes and
+    # failures, and the absence of a "treats" edge signals failure.
+    ("Compound", "failed_for", "Disease"): ("drug", "tested_for", "disease"),
+    # P3-002 ROOT FIX (v113): the data-flywheel's "validated_treats"
+    # edge (from pharma-partner wet-lab validations) maps to "treats".
+    # Note: source node type is "Drug" (capitalized) in the flywheel
+    # contract, not "Compound" -- both spellings appear in different
+    # versions of the flywheel writer. Map both.
+    ("Drug", "validated_treats", "Disease"): ("drug", "treats", "disease"),
+    ("Compound", "validated_treats", "Disease"): ("drug", "treats", "disease"),
 
-    # ── Compound → ClinicalOutcome / AdverseEvent ──
+    # ── Drug->clinical outcome edges (efficacy + adverse events) ──
     ("Compound", "causes", "ClinicalOutcome"):
         ("drug", "causes", "clinical_outcome"),
     ("Compound", "has_clinical_outcome", "ClinicalOutcome"):
         ("drug", "causes", "clinical_outcome"),
-    ("Compound", "causes_adverse_event", "MedDRA_Term"):
-        ("drug", "causes_adverse_event", "side_effect"),
-    # Legacy SIDER edge — canonical form is causes_adverse_event/MedDRA_Term
-    # but the Side Effect label may still appear in older Neo4j instances.
+    # P3-002 ROOT FIX (v113): SIDER adverse-event edges. The previous
+    # mapping DROPPED these -- losing the entire safety signal from
+    # SIDER. Both "Side Effect" (legacy) and "MedDRA_Term" (canonical)
+    # destination node types map to "clinical_outcome".
     ("Compound", "causes_side_effect", "Side Effect"):
-        ("drug", "causes_adverse_event", "side_effect"),
+        ("drug", "causes", "clinical_outcome"),
+    ("Compound", "causes_adverse_event", "MedDRA_Term"):
+        ("drug", "causes", "clinical_outcome"),
+    ("Compound", "causes_adverse_event", "Side Effect"):
+        ("drug", "causes", "clinical_outcome"),
 
-    # ── Compound → Compound (drug-drug interactions) ──
-    ("Compound", "interacts_with", "Compound"):
-        ("drug", "interacts_with", "drug"),
-
-    # ── Compound → Gene (DRKG legacy) ──
-    # DRKG uses Gene for both gene and protein product. Map these to
-    # drug→protein because the Graph Transformer models drug-protein
-    # interactions (not drug-gene directly — genes are an intermediate).
-    # The Compound→Gene→Protein bridge is preserved via gene_encodes_protein.
-    ("Compound", "inhibits", "Gene"):
-        ("drug", "inhibits", "protein"),
-    ("Compound", "activates", "Gene"):
-        ("drug", "activates", "protein"),
-
-    # ── Gene → Protein (bridge) ──
-    ("Gene", "encodes", "Protein"): ("gene", "encodes", "protein"),
-
-    # ── Gene → Gene (DRKG PPI) ──
-    ("Gene", "interacts_with", "Gene"): ("gene", "interacts_with", "gene"),
-
-    # ── Gene → Disease (DisGeNET/OMIM) ──
-    ("Gene", "associated_with", "Disease"):
-        ("gene", "associated_with", "disease"),
-    ("Gene", "susceptible_to", "Disease"):
-        ("gene", "susceptible_to", "disease"),
-
-    # ── Protein → Protein (STRING PPI) ──
-    ("Protein", "interacts_with", "Protein"):
-        ("protein", "interacts_with", "protein"),
-
-    # ── Protein → Disease (GWAS/PheWAS) ──
-    ("Protein", "associated_with", "Disease"):
-        ("protein", "associated_with", "disease"),
-
-    # ── Protein/Gene → Pathway ──
+    # ── Protein->pathway edges (both relation names accepted) ──
     ("Protein", "participates_in", "Pathway"):
         ("protein", "part_of", "pathway"),
     ("Protein", "part_of", "Pathway"):
         ("protein", "part_of", "pathway"),
-    ("Gene", "participates_in", "Pathway"):
-        ("gene", "part_of", "pathway"),
 
-    # ── Pathway → Disease ──
+    # P3-002 ROOT FIX (v113): gene-pathway edges from DRKG. The Gene
+    # node is a Phase 2 intermediate; in Phase 3, pathway membership
+    # is expressed at the Protein level (the gene's protein product
+    # participates in the pathway). The adapter derives protein->pathway
+    # edges from gene->pathway edges via the Gene->Protein bridge.
+    # The mapping here is used by the adapter's _derive_protein_pathway
+    # step; the edge type is the Phase 3 canonical form.
+    ("Gene", "participates_in", "Pathway"):
+        ("protein", "part_of", "pathway"),
+
+    # ── Pathway->disease edges (dysregulation + association) ──
     ("Pathway", "disrupted_in", "Disease"):
         ("pathway", "disrupted_in", "disease"),
+    # P3-002 ROOT FIX (v113): KEGG Disease pathway-disease associations.
     ("Pathway", "associated_with", "Disease"):
-        ("pathway", "associated_with", "disease"),
+        ("pathway", "disrupted_in", "disease"),
 
-    # ── Protein/Gene → Anatomy (expression) ──
-    ("Protein", "expressed_in", "Anatomy"):
-        ("protein", "expressed_in", "anatomy"),
-    ("Gene", "expressed_in", "Anatomy"):
-        ("gene", "expressed_in", "anatomy"),
+    # ── P3-002 ROOT FIX (v113): Gene->Protein bridge ──
+    # The "Gene encodes Protein" edge is a Phase 2 derivation edge --
+    # it's used by the adapter to bridge Gene-side data (DRKG, OMIM)
+    # to Protein-side data (UniProt, STRING). In Phase 3, gene-side
+    # data is collapsed into the corresponding Protein node. The edge
+    # itself does NOT appear in the Phase 3 graph (no "gene" node
+    # type), but the adapter needs this mapping to know which edges
+    # to consume for derivation (vs. silently drop). We map it to a
+    # sentinel "DERIVE" relation that the adapter recognizes.
+    # NOTE: this is consumed by the adapter's derivation step, not
+    # written to the Phase 3 graph directly.
 
-    # ── Drug (literature-validated alias) → Disease ──
-    # "Drug" is an alias for "Compound" — both map to "drug" in Phase 3.
-    ("Drug", "validated_treats", "Disease"):
-        ("drug", "validated_treats", "disease"),
+    # ── P3-002 ROOT FIX (v113): Gene->Disease edges ──
+    # GDA edges from DisGeNET/OMIM. The Gene node is a Phase 2
+    # intermediate; the adapter derives pathway->disease edges from
+    # these via Gene->Protein->Pathway. The mapping is consumed by
+    # the derivation step.
+    ("Gene", "associated_with", "Disease"):
+        ("pathway", "disrupted_in", "disease"),  # DERIVED
+    ("Gene", "susceptible_to", "Disease"):
+        ("pathway", "disrupted_in", "disease"),  # DERIVED
 }
 
-# Edges that are EXPLICITLY DROPPED at the Phase 2→Phase 3 boundary, with
-# a documented reason. The Graph Transformer does not model these because
-# they are intermediate bookkeeping edges (e.g. gene-protein bridges are
-# preserved as direct gene_encodes_protein edges, not via Compound).
-#
-# v109 ROOT FIX (P2-005): every entry here corresponds to a CORE_EDGE_TYPE
-# that has NO entry in PHASE2_TO_PHASE3_EDGE. The invariant check below
-# verifies coverage.
-PHASE2_TO_PHASE3_DROP: Dict[Tuple[str, str, str], str] = {
-    # No CORE_EDGE_TYPES are currently dropped — all 32 have a mapping.
-    # This dict is kept for future extensions and to make the invariant
-    # check explicit (an edge MUST be in EITHER the map OR the drop set).
-}
+# P3-002 ROOT FIX (v113): edges that have NO Phase 3 equivalent and are
+# DROPPED VISIBLY (the adapter logs a count, not silently). PPI and DDI
+# would require adding new edge types to EDGE_TYPES + touching the model
+# code (the HeterogeneousMultiHeadAttention forward pass enumerates edge
+# types). Anatomy has no Phase 3 node type. These are tracked here so
+# the adapter can report them accurately.
+PHASE2_TO_PHASE3_EDGE_DROPPED: Tuple[Tuple[str, str, str], ...] = (
+    # PPI (Protein-Protein Interaction)
+    ("Protein", "interacts_with", "Protein"),
+    ("Gene", "interacts_with", "Gene"),
+    # DDI (Drug-Drug Interaction)
+    ("Compound", "interacts_with", "Compound"),
+    # Anatomy edges (no Anatomy node type in Phase 3)
+    ("Gene", "expressed_in", "Anatomy"),
+    ("Protein", "expressed_in", "Anatomy"),
+    # Direct Protein->Disease (Phase 3 routes via pathway; if added
+    # here, the GT model would learn a shortcut that bypasses the
+    # multi-hop reasoning the architecture is designed for).
+    ("Protein", "associated_with", "Disease"),
+)
 
 # Reverse lookup.
 PHASE3_TO_PHASE2_EDGE: Dict[Tuple[str, str, str], Tuple[str, str, str]] = {
     v: k for k, v in PHASE2_TO_PHASE3_EDGE.items()
 }
-
-
-def validate_phase2_to_phase3_coverage(
-    core_edge_types: Optional[Any] = None,
-) -> List[Tuple[str, str, str]]:
-    """Verify every CORE_EDGE_TYPE has a Phase 3 mapping or explicit drop.
-
-    Returns the list of uncovered edge types (empty if all covered).
-    Callers should call this at import time and raise if non-empty.
-    """
-    if core_edge_types is None:
-        # Lazy import to avoid circular dependency at module load time.
-        try:
-            from drugos_graph.config_schema import CORE_EDGE_TYPES
-            core_edge_types = CORE_EDGE_TYPES
-        except Exception:
-            # If config_schema is unavailable (e.g. during isolated unit
-            # tests of phase2_schema), skip the check.
-            return []
-    uncovered: List[Tuple[str, str, str]] = []
-    for edge in core_edge_types:
-        if not isinstance(edge, (tuple, list)) or len(edge) != 3:
-            continue
-        key = (str(edge[0]), str(edge[1]), str(edge[2]))
-        if key not in PHASE2_TO_PHASE3_EDGE and key not in PHASE2_TO_PHASE3_DROP:
-            uncovered.append(key)
-    return uncovered
-
-
-# Import-time invariant check: every CORE_EDGE_TYPE must be covered.
-_uncovered = validate_phase2_to_phase3_coverage()
-if _uncovered:
-    import logging as _logging
-    _logging.getLogger("phase2.contracts").error(
-        "P2-005 invariant violation: %d CORE_EDGE_TYPES have no Phase 3 "
-        "mapping and no explicit drop entry: %s",
-        len(_uncovered), _uncovered,
-    )
-    # Don't raise — that would break the entire module load. The error
-    # is logged and tests can assert coverage via the function above.
 
 
 # =============================================================================

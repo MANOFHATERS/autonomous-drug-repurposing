@@ -652,8 +652,17 @@ def test_c5_get_top_k_non_strict_falls_back():
 
 
 def test_c5_run_full_pipeline_strict_phase6():
-    """C-5: run_full_pipeline has strict_phase6 parameter (default True)
-    that raises RuntimeError if the RL model fails to load.
+    """C-5: run_full_pipeline has strict_phase6 parameter.
+
+    P3-048 ROOT FIX (v113 forensic): the default is now ``None`` (auto-detect):
+    - For the DEMO path (graph_data is None and phase1_staged_data is None),
+      the default resolves to ``False`` (the demo's rl_timesteps may not
+      converge enough to produce a valid PPO checkpoint).
+    - For the PRODUCTION path (real graph data), the default resolves to
+      ``True`` (a missing RL checkpoint is a critical failure).
+
+    The previous default was ``True`` unconditionally, which broke the demo
+    pipeline whenever PPO didn't converge.
     """
     from graph_transformer.gt_rl_bridge import GTRLBridge
     import inspect
@@ -662,16 +671,20 @@ def test_c5_run_full_pipeline_strict_phase6():
     assert "strict_phase6" in sig.parameters, (
         "C-5: run_full_pipeline must have strict_phase6 parameter"
     )
-    assert sig.parameters["strict_phase6"].default == True, (
-        "C-5: strict_phase6 must default to True"
+    # P3-048: default is now None (auto-detect demo vs production).
+    assert sig.parameters["strict_phase6"].default is None, (
+        "C-5/P3-048: strict_phase6 must default to None (auto-detect)"
     )
 
-    print("  C-5: run_full_pipeline has strict_phase6=True default (PASS)")
+    print("  C-5: run_full_pipeline has strict_phase6=None (auto-detect) default (PASS)")
 
 
 def test_c5_no_silent_fallback_in_source():
     """C-5: verify the source code no longer has the silent GT-only fallback
     in strict mode. The fallback should only be reachable in non-strict mode.
+
+    P3-048 ROOT FIX (v113): the default is now ``Optional[bool] = None``
+    (auto-detect). The previous ``bool = True`` is replaced.
     """
     bridge_path = os.path.join(
         _PROJECT_ROOT, "graph_transformer", "gt_rl_bridge.py"
@@ -685,10 +698,13 @@ def test_c5_no_silent_fallback_in_source():
         "C-5: get_top_k_novel_predictions must have strict=True default"
     )
 
-    # The run_full_pipeline method must have strict_phase6 parameter
+    # The run_full_pipeline method must have strict_phase6 parameter.
+    # P3-048 v113: the default is now ``Optional[bool] = None`` (auto-detect),
+    # not ``bool = True``. The auto-detection resolves to True for
+    # production runs and False for demo runs.
     run_pipeline_section = source[source.index("def run_full_pipeline"):]
-    assert "strict_phase6: bool = True" in run_pipeline_section, (
-        "C-5: run_full_pipeline must have strict_phase6=True default"
+    assert "strict_phase6: Optional[bool] = None" in run_pipeline_section, (
+        "C-5/P3-048: run_full_pipeline must have strict_phase6=None (auto-detect) default"
     )
 
     # Both must raise RuntimeError in strict mode (not just log)

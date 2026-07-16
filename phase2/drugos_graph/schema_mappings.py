@@ -41,6 +41,7 @@ from phase2.contracts.phase2_schema import (
     INTERMEDIATE_NODE_TYPES,
     EDGE_TYPES,
     PHASE2_TO_PHASE3_EDGE,
+    PHASE2_TO_PHASE3_EDGE_DROPPED,
     PHASE3_TO_PHASE2_EDGE,
     NODE_FEATURE_SCHEMAS,
     EDGE_FEATURE_SCHEMAS,
@@ -107,6 +108,7 @@ __all__ = [
     # Edge types
     "EDGE_TYPES",
     "PHASE2_TO_PHASE3_EDGE",
+    "PHASE2_TO_PHASE3_EDGE_DROPPED",
     "PHASE3_TO_PHASE2_EDGE",
     # Feature schemas
     "NODE_FEATURE_SCHEMAS",

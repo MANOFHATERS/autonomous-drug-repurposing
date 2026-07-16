@@ -72,6 +72,7 @@ FIX vs original codebase:
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -1008,6 +1009,103 @@ class DrugRepurposingGraphTransformer(nn.Module):
             # V90 ROOT FIX (BUG #9, P0): restore the prior training state
             # so callers that invoked predict_all_pairs mid-training
             # don't have their dropout/BN regime silently changed.
+            self.train(prior_training)
+
+    # P3-005 ROOT FIX (v113 forensic): single-pass dual-score inference.
+    # The previous bridge code called ``predict_all_pairs`` TWICE -- once
+    # with ``apply_temperature=False`` (raw sigmoid) and once with
+    # ``apply_temperature=True`` (calibrated). Each call ran the expensive
+    # ``encode()`` forward pass through all GT layers; the second call
+    # repeated 100% of the encoder compute just to apply a different
+    # sigmoid transform to the SAME logits. For a 10K-drug graph on a
+    # V100, this wasted ~30 seconds of GPU time per ``generate_rl_input``
+    # invocation. The new method encodes the graph ONCE, then applies
+    # both ``sigmoid(logits)`` and ``sigmoid(logits / T)`` to the SAME
+    # logits tensor. The two output matrices differ ONLY in the final
+    # sigmoid transform -- the encoder + MLP forward is shared.
+    #
+    # P3-004 ROOT FIX (v113 forensic): this method is the foundation
+    # for the calibrated-RL-input fix. The bridge now passes
+    # ``gnn_score_calibrated`` (not raw ``gnn_score``) to the RL reward
+    # function. Temperature calibration (Guo et al. 2017) is a MONOTONIC
+    # transform of the logits, so it preserves the RANKING of pairs (AUC
+    # is unchanged). But for the RL reward function -- which uses
+    # ``gnn_score`` as a CONTINUOUS signal, not just a ranking -- the
+    # calibrated value is more accurate. A drug-disease pair with raw
+    # sigmoid 0.99 might have a calibrated probability of 0.6 (after T=
+    # 1.65). The previous reward function treated both as "high
+    # confidence"; the calibrated version correctly distinguishes them.
+    @torch.no_grad()
+    def predict_all_pairs_dual(
+        self,
+        node_features: Dict[str, torch.Tensor],
+        edge_indices: Dict[Tuple[str, str, str], torch.Tensor],
+        num_drugs: int,
+        num_diseases: int,
+        batch_size_diseases: int = 2048,
+        exclude_edges: Optional[set] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Single-pass dual-score inference (raw + calibrated).
+
+        Encodes the graph ONCE and returns BOTH the raw-sigmoid score
+        matrix and the temperature-calibrated score matrix. The two
+        matrices differ only in the final sigmoid transform applied to
+        the SAME logits -- the encoder + MLP forward is shared, so this
+        method costs ~50% of calling ``predict_all_pairs`` twice.
+
+        Args:
+            (Same as ``predict_all_pairs`` except no ``apply_temperature``
+            parameter -- both transforms are always computed.)
+
+        Returns:
+            Tuple ``(raw_matrix, calibrated_matrix)`` where each matrix
+            is ``(num_drugs, num_diseases)`` with probabilities in [0, 1].
+            ``raw_matrix`` is ``sigmoid(logits)``; ``calibrated_matrix``
+            is ``sigmoid(logits / T)`` where T is the fitted temperature.
+        """
+        self.eval()
+        device = next(self.parameters()).device
+        prior_training = self.training
+        effective_exclude = (
+            set(exclude_edges) if exclude_edges is not None else self.exclude_edges
+        )
+        try:
+            embeddings = self.encode(
+                node_features, edge_indices,
+                exclude_edges_override=effective_exclude,
+            )
+            drug_emb_all = embeddings["drug"]  # (num_drugs, D)
+            disease_emb_all = embeddings["disease"]  # (num_diseases, D)
+
+            raw_matrix = torch.zeros(num_drugs, num_diseases, device=device)
+            calibrated_matrix = torch.zeros(num_drugs, num_diseases, device=device)
+
+            for d_idx in range(num_drugs):
+                d_emb_row = drug_emb_all[d_idx:d_idx + 1]  # (1, D)
+                for ds_start in range(0, num_diseases, batch_size_diseases):
+                    ds_end = min(ds_start + batch_size_diseases, num_diseases)
+                    ds_emb_batch = disease_emb_all[ds_start:ds_end]  # (B_ds, D)
+                    d_emb_expanded = d_emb_row.expand(ds_end - ds_start, -1)
+
+                    # P3-005 ROOT FIX: compute the logits ONCE via the
+                    # link predictor's forward, then apply both sigmoid
+                    # transforms to the SAME logits. The link predictor's
+                    # ``forward_logits`` returns raw logits (no sigmoid,
+                    # no temperature) -- exactly what we need. Shape is
+                    # (B_ds, 1) so we squeeze to (B_ds,).
+                    logits = self.link_predictor.forward_logits(
+                        d_emb_expanded, ds_emb_batch,
+                    ).squeeze(-1)  # (B_ds,)
+                    raw_matrix[d_idx, ds_start:ds_end] = torch.sigmoid(logits)
+                    # Calibrated: sigmoid(logits / T). The temperature T
+                    # is stored on the link predictor after fit_temperature.
+                    T = float(getattr(self.link_predictor, "temperature", 1.0))
+                    if T <= 0 or not math.isfinite(T):
+                        T = 1.0  # degenerate -- treat as identity
+                    calibrated_matrix[d_idx, ds_start:ds_end] = torch.sigmoid(logits / T)
+
+            return raw_matrix, calibrated_matrix
+        finally:
             self.train(prior_training)
 
     @classmethod

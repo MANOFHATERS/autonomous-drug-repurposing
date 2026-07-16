@@ -151,6 +151,20 @@ LABEL_LEAKING_EDGES: frozenset = frozenset({
     # Direct disease->drug reverse relationships (2 tuples)
     ("disease", "treated_by", "drug"),
     ("disease", "tested_on", "drug"),
+    # P3-018 ROOT FIX (v113 forensic): the previous set covered only 4 of
+    # 18 edge types -- it missed the ``causes`` (adverse-event) edge that
+    # can leak the safety signal. A drug with many ``causes`` edges to
+    # severe outcomes is likely a drug the model should score LOW for any
+    # disease (safety concern). If the model learns "drug has many AE
+    # edges -> score low", it's using a feature (AE edge count) that is
+    # NOT available at inference time for novel drugs (novel drugs have
+    # no AE edges because they haven't been prescribed yet). This is a
+    # form of label leakage: the AE edges are a PROXY for "this drug is
+    # unsafe", which correlates with "this drug should not be
+    # repurposed". The model learns the proxy instead of the actual
+    # treatment signal.
+    ("drug", "causes", "clinical_outcome"),
+    ("clinical_outcome", "caused_by", "drug"),
     # V30 ROOT FIX (1.3): the 4-tuple set above covers BOTH directions
     # of "treats"/"treated_by" and "tested_for"/"tested_on". Callers
     # sometimes pass exclude_edges as a list (not a frozenset) and the
@@ -267,14 +281,26 @@ def validate_edge_type(edge_type: Tuple[str, str, str]) -> None:
 
 
 def compliance_note() -> str:
-    """Return the V1 launch compliance contract (DOCX Phase 6)."""
+    """Return the V1 launch compliance contract (DOCX Phase 6).
+
+    P3-037 ROOT FIX (v113 forensic): the previous code used
+    ``set(LABEL_LEAKING_EDGES)`` which created a mutable copy of the
+    frozenset SOLELY for the string representation. The ``set()`` call
+    allocated a new set object on every invocation -- wasteful (the
+    function is called by tests and manual inspection, never in the
+    hot path, so the waste is negligible but the misleading mutable
+    copy is a code-quality issue). The fix uses ``LABEL_LEAKING_EDGES``
+    directly; the frozenset's ``__repr__`` is ``frozenset({...})`` which
+    is slightly uglier but conveys the same information and is honest
+    about the type.
+    """
     return (
         f"V1 LAUNCH CONTRACT:\n"
         f"  1. AUC > {V1_AUC_THRESHOLD} on held-out TEST set\n"
         f"  2. Three-way train/val/test split (drug-aware)\n"
-        f"  3. exclude_edges = {set(LABEL_LEAKING_EDGES)}\n"
+        f"  3. exclude_edges = {LABEL_LEAKING_EDGES}\n"
         f"  4. Top-50 novel predictions: >= 5 literature-supported\n"
-        f"  5. API handles 100 concurrent requests\n"
+        f"  5. API handles 100 concurrent requests (rate-limited via GT_MAX_CONCURRENT_INFERENCE)\n"
         f"  6. Dashboard renders in < 3 seconds"
     )
 

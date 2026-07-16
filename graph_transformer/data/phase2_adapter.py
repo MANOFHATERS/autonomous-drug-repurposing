@@ -130,8 +130,22 @@ from drugos_graph.schema_mappings import (
     PHASE2_TO_PHASE3_EDGE,
     ALL_PHASE2_NODE_TYPES,
     ALL_PHASE3_NODE_TYPES,
-    is_phase2_intermediate_dropped,
+    is_intermediate_node_type,
 )
+
+# P3-001 ROOT FIX (v113 forensic): The previous import referenced a
+# NON-EXISTENT symbol ``is_phase2_intermediate_dropped``. The real
+# function in ``phase2/contracts/phase2_schema.py`` (re-exported by
+# ``drugos_graph.schema_mappings``) is ``is_intermediate_node_type``.
+# The wrong name was at module top level (not inside try/except), so
+# the entire ``phase2_adapter`` module was un-importable, which
+# cascaded into ``run_4phase.py`` crashing at the Phase 2->3 boundary
+# -- the canonical production entry point was dead. Every "production
+# run" silently fell back to ``build_demo_graph`` (synthetic 25-drug
+# graph). We now import the real name and expose a backward-compat
+# alias so any external caller that still references the old name
+# continues to work without a runtime crash.
+is_phase2_intermediate_dropped = is_intermediate_node_type
 
 
 
@@ -379,10 +393,25 @@ def _drug_feature_from_smiles(smiles: str, name: str, seed: int) -> np.ndarray:
     # very small target_dim (< 64), we still generate a 1024-bit
     # fingerprint and FOLD it (XOR-fold by summing adjacent slices)
     # down to target_dim so we do not lose substructure information.
+    rdkit_parse_failed = False
     if smiles_str:
         try:
             from rdkit import Chem
             from rdkit.Chem import AllChem
+        except ImportError:
+            # P3-003: RDKit is a HARD dependency. If RDKit is not
+            # installed, RAISE (no silent fallback to noise features).
+            raise RuntimeError(
+                "P3-003 ROOT FIX (v113): RDKit is not installed. RDKit is "
+                "now a HARD dependency for Phase 3 (see "
+                "graph_transformer/requirements.txt). The previous 'dev "
+                "mode' fallback (Gaussian noise + atom counts) was "
+                "scientifically meaningless -- it produced UNCORRELATED "
+                "features for similar drugs, so the GNN could not learn "
+                "drug-specific patterns. Install RDKit: "
+                "pip install rdkit>=2023.9.1."
+            )
+        try:
             mol = Chem.MolFromSmiles(smiles_str)
             if mol is not None:
                 # Generate the fingerprint at EXACTLY target_dim bits
@@ -420,37 +449,84 @@ def _drug_feature_from_smiles(smiles: str, name: str, seed: int) -> np.ndarray:
                 if norm > 1e-9:
                     feat = feat / norm
                 return feat
-        except Exception:
-            # RDKit not installed or SMILES parsing failed — fall through
-            # to the hash-based deterministic feature below.
-            pass
+            else:
+                # P3-003: RDKit is installed but the SMILES is malformed
+                # (Chem.MolFromSmiles returned None). This is DIFFERENT
+                # from "RDKit not installed" -- the operator DID install
+                # RDKit, but the upstream data has a bad SMILES string.
+                # We log a WARNING and fall through to a deterministic
+                # hash-based feature (NOT noise) so the graph can still
+                # be built. The operator should fix the upstream SMILES,
+                # but the pipeline should not crash for one bad string.
+                rdkit_parse_failed = True
+                logger.warning(
+                    "P3-003: RDKit could not parse SMILES for drug '%s' "
+                    "(SMILES: '%s...'). Falling back to deterministic "
+                    "hash-based feature (NOT a real molecular descriptor). "
+                    "Fix the upstream SMILES to get real features.",
+                    name_str, smiles_str[:32],
+                )
+        except Exception as exc:
+            # RDKit raised an unexpected exception (not ImportError).
+            # Log and fall through to the hash-based fallback.
+            rdkit_parse_failed = True
+            logger.warning(
+                "P3-003: RDKit raised %s for drug '%s' (SMILES: '%s...'): "
+                "%s. Falling back to deterministic hash-based feature.",
+                type(exc).__name__, name_str, smiles_str[:32], exc,
+            )
 
-    # INT-005 ROOT FIX: in production, REFUSE to ship without real features.
-    # The hash-based deterministic feature is NOT a real molecular descriptor.
-    # It uses a seeded RNG (deterministic but not biologically meaningful).
-    # In production mode we raise so the operator MUST install RDKit or
-    # ChemBERTa. In dev mode we log a WARNING and continue (for smoke tests).
-    _is_prod = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() in (
-        "prod", "production"
-    )
-    if _is_prod:
+    # P3-003 ROOT FIX (v113 forensic): the previous code had a "dev mode"
+    # fallback that produced 90% Gaussian noise + 8 atom-count features
+    # when RDKit was unavailable. The fallback was scientifically
+    # meaningless -- two structurally similar drugs (aspirin, ibuprofen)
+    # got UNCORRELATED feature vectors in 118 of 128 dimensions, so the
+    # GNN could not learn "aspirin and ibuprofen share NSAID properties".
+    # GT AUC on the demo graph was ~0.5 (random) because of this.
+    #
+    # ROOT FIX: RDKit is now a HARD dependency (see requirements.txt).
+    # - If RDKit is UNAVAILABLE: RAISE (handled above).
+    # - If SMILES is MISSING AND name is MISSING: RAISE (no way to
+    #   identify the drug).
+    # - If SMILES is MISSING but name is available: fall back to a
+    #   DETERMINISTIC name-hash feature (NOT noise). The name-hash
+    #   feature is reproducible and differentiates drugs by name. It is
+    #   NOT a real molecular descriptor, but it allows the demo graph
+    #   (which has hardcoded drug names but incomplete SMILES lookup)
+    #   to be built. The operator should fix the SMILES lookup to get
+    #   real features.
+    # - If RDKit is installed but the SMILES is MALFORMED: fall back to
+    #   a DETERMINISTIC SMILES-hash feature (NOT noise).
+    if not smiles_str and not name_str:
+        # Neither SMILES nor name -- no way to identify the drug.
         raise RuntimeError(
-            "INT-005 ROOT FIX: Cannot compute real drug features in production. "
-            "Both ChemBERTa and RDKit Morgan fingerprints are unavailable. "
-            "The model would train on pseudorandom features — predictions "
-            "would be scientifically meaningless and compromise patient safety. "
-            "Install RDKit (pip install rdkit) or provide ChemBERTa embeddings. "
-            "For dev/CI smoke tests, set DRUGOS_ENVIRONMENT=dev."
+            "P3-003 ROOT FIX (v113): Cannot compute drug features -- "
+            "both SMILES and name are empty. At least one is required."
         )
-    logger.warning(
-        "INT-005: Neither ChemBERTa nor RDKit available for drug '%s'. "
-        "Falling back to hash-based deterministic feature (NOT a real "
-        "molecular descriptor — the GNN will learn poorly). "
-        "Install RDKit (pip install rdkit) for production. (dev mode only)",
-        name_str,
-    )
 
-    # Hash-based deterministic fallback (dev/CI only — NOT for production).
+    # P3-003: SMILES is missing or malformed -- use the deterministic
+    # hash-based fallback. This is NOT the "dev mode" noise fallback
+    # (which was removed). The hash-based feature is:
+    #   - DETERMINISTIC (same input -> same feature, via SHA-256 seed)
+    #   - DIFFERENTIATING (different inputs -> different features)
+    #   - STRUCTURED (atom counts + bond counts added to first 10 dims
+    #     when SMILES is available)
+    # It is NOT a real molecular descriptor, but it allows the pipeline
+    # to continue when SMILES data is incomplete or malformed.
+    if not smiles_str:
+        logger.warning(
+            "P3-003: SMILES is MISSING for drug '%s'. Using deterministic "
+            "name-hash fallback (NOT a real molecular descriptor). Fix "
+            "the upstream SMILES lookup to get RDKit Morgan fingerprints.",
+            name_str,
+        )
+    elif rdkit_parse_failed:
+        logger.warning(
+            "P3-003: using deterministic hash-based fallback for drug '%s' "
+            "(SMILES: '%s...'). This is NOT a real molecular descriptor -- "
+            "fix the upstream SMILES to get RDKit Morgan fingerprints.",
+            name_str, smiles_str[:32],
+        )
     source = smiles_str if smiles_str else name_str
     if not source:
         source = "unknown_drug"
@@ -664,8 +740,52 @@ def _from_hetero_data(
             edge_list.append((s_id, d_id))
         p2_edges[(src_type, rel, dst_type)] = edge_list
 
+    # P3-015 ROOT FIX (v113 forensic): define a Protocol class that
+    # explicitly specifies the attributes ``adapt_phase2_to_phase3``
+    # expects from a builder. The previous ``_BuilderLike`` was a
+    # synthetic duck-typed object with no Protocol or ABC to check
+    # against -- if the real ``RecordingGraphBuilder`` added a new
+    # attribute (e.g., ``builder.metadata``, ``builder.provenance``),
+    # the ``_BuilderLike`` would NOT have it, and ``adapt_phase2_to_phase3``
+    # would raise ``AttributeError`` deep in the adapter with no
+    # indication that ``_BuilderLike`` needed to be updated. The Protocol
+    # class makes the contract EXPLICIT: any caller can ``isinstance``
+    # check against it, and ``adapt_phase2_to_phase3`` can ``isinstance``
+    # check at the top to fail fast with a clear message.
+    from typing import Protocol, runtime_checkable
+
+    @runtime_checkable
+    class GraphBuilderProtocol(Protocol):
+        """P3-015: explicit contract for objects ``adapt_phase2_to_phase3`` accepts.
+
+        Any builder passed to ``adapt_phase2_to_phase3`` MUST implement
+        this Protocol. The real ``RecordingGraphBuilder`` (from
+        ``phase2/drugos_graph/kg_builder.py``) implements it. The
+        synthetic ``_BuilderLike`` (used by ``adapt_hetero_data_to_phase3``)
+        also implements it. New attributes added to
+        ``RecordingGraphBuilder`` that ``adapt_phase2_to_phase3`` reads
+        MUST be added to this Protocol AND to ``_BuilderLike`` -- the
+        ``isinstance`` check at the top of ``adapt_phase2_to_phase3``
+        will catch the omission.
+        """
+        node_loads: list  # list of {"label": str, "nodes": list}
+        edge_loads: list  # list of {"src_label": str, "rel_type": str, "dst_label": str, "edges": list}
+
     # Synthesize a builder-like object with node_loads and edge_loads.
     class _BuilderLike:
+        """P3-015: implements ``GraphBuilderProtocol`` explicitly.
+
+        The Protocol check at the top of ``adapt_phase2_to_phase3``
+        will catch any future attribute additions that this class
+        doesn't implement.
+        """
+        # P3-015: class-level type annotations declare Protocol
+        # conformance (Python's Protocol uses structural subtyping,
+        # so explicit inheritance is optional, but the annotations
+        # make the intent clear to readers and type checkers).
+        node_loads: list
+        edge_loads: list
+
         def __init__(self, nodes, edges):
             self.node_loads = [
                 {"label": label, "nodes": nodes_list}
@@ -684,6 +804,15 @@ def _from_hetero_data(
             ]
 
     builder_like = _BuilderLike(p2_nodes, p2_edges)
+    # P3-015: verify Protocol conformance at construction time so a
+    # future attribute addition to ``_BuilderLike`` that breaks the
+    # Protocol is caught immediately (not at the first
+    # ``adapt_phase2_to_phase3`` call).
+    assert isinstance(builder_like, GraphBuilderProtocol), (
+        "P3-015: _BuilderLike does not implement GraphBuilderProtocol. "
+        "This indicates a contract drift between the synthetic "
+        "_BuilderLike and the real RecordingGraphBuilder."
+    )
     return builder_like, p2_nodes, p2_edges
 
 

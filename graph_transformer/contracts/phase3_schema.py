@@ -313,6 +313,56 @@ def validate_checkpoint_dict(
                 f"AUC > 1.0 indicates a bug in the trainer's metric computation."
             )
 
+    # P3-036 ROOT FIX (v113 forensic): validate best_val_loss.
+    # The previous validator checked best_val_auc is in [0, 1] but did
+    # NOT check best_val_loss. best_val_loss is a BCEWithLogitsLoss
+    # value, which is always non-negative (negative log likelihood). A
+    # corrupted checkpoint could have best_val_loss = -1.0 (sign error)
+    # or best_val_loss = NaN (numerical instability) and the validator
+    # would accept it. Downstream consumers (the service, the bridge)
+    # would display "best val loss = -1.0" or "best val loss = NaN" to
+    # the operator, losing confidence in the platform's quality metrics.
+    best_loss = checkpoint.get("best_val_loss")
+    if best_loss is not None:
+        import math as _math
+        if not isinstance(best_loss, (int, float)):
+            errors.append(
+                f"best_val_loss must be a float, got {type(best_loss).__name__}."
+            )
+        elif _math.isnan(best_loss):
+            errors.append(
+                f"best_val_loss is NaN -- indicates numerical instability "
+                f"during training (e.g., exploding gradients, fp16 overflow). "
+                f"The checkpoint is corrupt; retrain with gradient clipping "
+                f"and/or a lower learning rate."
+            )
+        elif _math.isinf(best_loss):
+            errors.append(
+                f"best_val_loss is Inf -- indicates a training divergence "
+                f"(loss overflowed to +Inf). The checkpoint is corrupt; "
+                f"retrain with gradient clipping and/or a lower learning rate."
+            )
+        elif best_loss < 0.0:
+            errors.append(
+                f"best_val_loss must be non-negative (BCEWithLogitsLoss is a "
+                f"negative log likelihood), got {best_loss}. A negative loss "
+                f"indicates a sign error in the trainer's loss computation."
+            )
+
+    # P3-036 ROOT FIX (v113): also validate best_epoch is a non-negative int.
+    best_epoch = checkpoint.get("best_epoch")
+    if best_epoch is not None:
+        if not isinstance(best_epoch, int) or isinstance(best_epoch, bool):
+            errors.append(
+                f"best_epoch must be an int, got {type(best_epoch).__name__}."
+            )
+        elif best_epoch < 0:
+            errors.append(
+                f"best_epoch must be non-negative, got {best_epoch}. "
+                f"A negative epoch index indicates a bug in the trainer's "
+                f"checkpoint-selection logic."
+            )
+
     return errors
 
 
