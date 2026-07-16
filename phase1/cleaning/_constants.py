@@ -474,7 +474,7 @@ def is_canonical_inchikey(inchikey: str) -> bool:
 # for any value that cannot be coerced to a positive integer.
 
 
-def normalize_inchikey(s: str) -> str:
+def normalize_inchikey(s: Optional[str]) -> Optional[str]:
     """Normalize an InChIKey to canonical form.
 
     - Uppercase (InChIKey hash chars are uppercase by IUPAC spec).
@@ -501,10 +501,19 @@ def normalize_inchikey(s: str) -> str:
     should use truthiness checks, not ``is None`` checks, to handle
     both sentinels uniformly.
 
+    P1-042 v113 ROOT FIX: the type hint was ``-> str`` but the function
+    actually returns ``str | None`` (returns None for None input). A
+    static type checker (mypy, pyright) would flag downstream code that
+    assigns the result to a ``str`` variable. A developer who reads the
+    ``-> str`` hint may write ``normalize_inchikey(raw).upper()`` which
+    crashes on ``None``. ROOT FIX: change the type hint to
+    ``Optional[str]`` (both parameter and return) so static analysis
+    matches the actual behavior.
+
     Parameters
     ----------
-    s : str
-        Raw InChIKey (e.g. ``"bsynrymutxbxsq-uhfffaoysa-n"``).
+    s : str or None
+        Raw InChIKey (e.g. ``"bsynrymutxbxsq-uhfffaoysa-n"``), or ``None``.
 
     Returns
     -------

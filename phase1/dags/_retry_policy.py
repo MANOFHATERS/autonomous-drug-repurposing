@@ -300,21 +300,40 @@ def _extract_http_status(exc: BaseException) -> int | None:
         "404 Not Found: ...") -- last-resort heuristic for wrapped errors
         where the original response object is lost.
 
+    P1-033 v113 ROOT FIX: recursively unwrap ``__cause__`` and
+    ``__context__`` chains. A wrapped exception (e.g.
+    ``tenacity.RetryError`` wrapping ``requests.HTTPError``, or
+    ``airflow.exceptions.AirflowException`` wrapping a 4xx) does NOT have
+    ``status_code`` or ``response`` on the OUTER exception. Without
+    unwrapping, a 401 Unauthorized (expired API key) is retried 6 times
+    over 95 minutes instead of failing fast.
+
     Returns ``None`` if no status code can be extracted.
     """
-    # Direct attribute access (requests, httpx, custom API clients)
-    for attr in ("status_code", "status", "code"):
-        val = getattr(exc, attr, None)
-        if isinstance(val, int) and 100 <= val <= 599:
-            return val
-    # Nested response object (requests.HTTPError.response.status_code)
-    response = getattr(exc, "response", None)
-    if response is not None:
+    # P1-033 v113 ROOT FIX: unwrap __cause__ / __context__ chains.
+    # Try the outer exception first, then walk the cause/context chain.
+    # Limit depth to 10 to prevent infinite loops on circular references.
+    _current: BaseException | None = exc
+    _depth = 0
+    while _current is not None and _depth < 10:
+        # Direct attribute access (requests, httpx, custom API clients)
         for attr in ("status_code", "status", "code"):
-            val = getattr(response, attr, None)
+            val = getattr(_current, attr, None)
             if isinstance(val, int) and 100 <= val <= 599:
                 return val
-    # String heuristic -- last resort
+        # Nested response object (requests.HTTPError.response.status_code)
+        response = getattr(_current, "response", None)
+        if response is not None:
+            for attr in ("status_code", "status", "code"):
+                val = getattr(response, attr, None)
+                if isinstance(val, int) and 100 <= val <= 599:
+                    return val
+        # Move to the next layer of the exception chain
+        _current = _current.__cause__ or _current.__context__
+        _depth += 1
+
+    # String heuristic -- last resort (on the ORIGINAL exception, not the
+    # unwrapped inner one, because str(RetryError) is unhelpful).
     # v83 FORENSIC ROOT FIX (P2-12): the previous code extracted leading
     # digits from the message -- but "2024-01-15 download failed" would
     # extract "202" (stops at 3 digits) and treat it as HTTP 202 (a

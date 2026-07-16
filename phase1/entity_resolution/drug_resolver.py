@@ -2252,10 +2252,10 @@ class _MatchPipeline:
 #   semantic -- creation fallback, not matching). The two labels now
 #   have distinct, consistent confidence values.
 register_match_method("synthetic_key", 0.0)
-register_match_method("synthetic_key_match", 0.5)
+register_match_method("synthetic_key_match", 0.49)  # P1-005 v113: was 0.5 (aliased UNKNOWN in MatchConfidence enum); aligned with MatchConfidence.SYNTHETIC_KEY_MATCH = 0.49
 register_match_method("inchikey_exact_unvalidated", 0.5)
 register_match_method("name_only", 0.3)
-register_match_method("smiles_canonical", 0.75)
+register_match_method("smiles_canonical", 0.74)  # P1-005 v113: was 0.75 (aliased GENE_NAME_ORGANISM in MatchConfidence enum); aligned with MatchConfidence.SMILES_CANONICAL = 0.74
 register_match_method("no_match", 0.0)
 register_match_method("no_match_pubchem_degraded", 0.0)
 
