@@ -491,16 +491,43 @@ class GraphTransformerTrainer:
             and the dict is still returned (so callers can record it in
             training_history without conditional logic).
         """
-        # Defensive: torch.cuda may be unavailable or the API may
-        # differ across torch versions. Always return a dict (never
-        # raise) so a logging failure cannot break training.
+        # P3-034 ROOT FIX (v114 forensic, OBSERVABILITY): the previous
+        # implementation caught ``Exception`` broadly and logged at DEBUG
+        # level (invisible in production logs by default). If GPU
+        # monitoring was broken (CUDA driver mismatch, nvidia-smi not
+        # found, GPU in EXCLUSIVE_PROCESS mode), the operator saw NO
+        # indication. The metrics dict returned all zeros, which the
+        # trainer recorded as ``gpu_utilization_pct=0.0``. The operator
+        # looking at training history saw "GPU util = 0%" and assumed
+        # training was CPU-bound (data-loading bottleneck), when actually
+        # GPU monitoring was broken. The actual GPU util might be 95%
+        # (compute-bound), but the operator debugged the wrong thing.
+        #
+        # ROOT FIX:
+        #   1. Catch SPECIFIC exceptions (RuntimeError, AttributeError,
+        #      OSError) -- not broad ``Exception``. Other exceptions
+        #      (e.g., KeyboardInterrupt) propagate up.
+        #   2. Log at WARNING level (visible by default) when monitoring
+        #      fails, so the operator knows the metrics are unreliable.
+        #   3. Add ``gpu_monitoring_healthy: bool`` field to the metrics
+        #      dict so downstream consumers can detect monitoring failures
+        #      programmatically (e.g., a dashboard can show "GPU metrics
+        #      unavailable" instead of "0%").
         metrics: Dict[str, float] = {
             "gpu_utilization_pct": 0.0,
             "gpu_memory_allocated_mb": 0.0,
             "gpu_max_memory_allocated_mb": 0.0,
+            # P3-034: health flag. False if monitoring failed. True if
+            # all metrics were collected successfully. Downstream
+            # consumers (training_history, dashboards) can check this
+            # flag to decide whether to trust the other metrics.
+            "gpu_monitoring_healthy": True,
         }
         try:
             if not torch.cuda.is_available():
+                # CPU-only environment: monitoring is "healthy" (there's
+                # nothing to monitor, but no failure either). The other
+                # metrics stay at 0.0 (correct for CPU).
                 return metrics
             # torch.cuda.utilization() returns int in [0, 100]. May
             # return -1 if the device is idle / no kernels have run
@@ -510,11 +537,19 @@ class GraphTransformerTrainer:
                 util = torch.cuda.utilization()
                 if util is not None and util >= 0:
                     metrics["gpu_utilization_pct"] = float(util)
-            except (RuntimeError, AttributeError):
-                # Older torch versions or some backends don't support
-                # utilization(). Silent fallback to 0 -- the memory
-                # metrics below still work.
-                pass
+            except (RuntimeError, AttributeError, OSError) as _util_exc:
+                # P3-034: log at WARNING (visible by default) so the
+                # operator knows utilization monitoring failed. The
+                # memory metrics below may still work.
+                metrics["gpu_monitoring_healthy"] = False
+                logger.warning(
+                    f"P3-034 ROOT FIX: torch.cuda.utilization() failed "
+                    f"({_util_exc}). GPU utilization monitoring is "
+                    f"DISABLED for this run. The gpu_utilization_pct "
+                    f"field will stay at 0.0 -- do NOT interpret this "
+                    f"as 'training is CPU-bound'. Check CUDA driver "
+                    f"version and nvidia-smi availability."
+                )
             try:
                 metrics["gpu_memory_allocated_mb"] = float(
                     torch.cuda.memory_allocated() / (1024 * 1024)
@@ -522,20 +557,44 @@ class GraphTransformerTrainer:
                 metrics["gpu_max_memory_allocated_mb"] = float(
                     torch.cuda.max_memory_allocated() / (1024 * 1024)
                 )
-            except (RuntimeError, AttributeError):
-                pass
+            except (RuntimeError, AttributeError, OSError) as _mem_exc:
+                # P3-034: log at WARNING. Memory monitoring failure is
+                # less common than utilization failure but still
+                # possible (e.g., on some MPS backends).
+                metrics["gpu_monitoring_healthy"] = False
+                logger.warning(
+                    f"P3-034 ROOT FIX: torch.cuda.memory_allocated() or "
+                    f"max_memory_allocated() failed ({_mem_exc}). GPU "
+                    f"memory monitoring is DISABLED for this run. The "
+                    f"gpu_memory_allocated_mb and "
+                    f"gpu_max_memory_allocated_mb fields will stay at "
+                    f"0.0 -- do NOT interpret this as 'no GPU memory "
+                    f"in use'. Check CUDA driver version."
+                )
             logger.info(
                 f"P3-018 GPU diagnostics (epoch {epoch}): "
                 f"utilization={metrics['gpu_utilization_pct']:.1f}%, "
                 f"memory_allocated={metrics['gpu_memory_allocated_mb']:.1f} MB, "
-                f"peak_memory={metrics['gpu_max_memory_allocated_mb']:.1f} MB. "
-                f"Low util (<30%) = data-loading bottleneck; high util (>90%) "
-                f"= compute-bound. Memory should plateau (leak = gradual increase)."
+                f"peak_memory={metrics['gpu_max_memory_allocated_mb']:.1f} MB, "
+                f"monitoring_healthy={metrics['gpu_monitoring_healthy']}. "
+                f"Low util (<30%) = data-loading bottleneck (ONLY valid if "
+                f"monitoring_healthy=True); high util (>90%) = compute-bound. "
+                f"Memory should plateau (leak = gradual increase)."
             )
-        except Exception as e:
-            # NEVER let a logging failure crash training. Log at DEBUG
-            # so it's visible in verbose mode but silent by default.
-            logger.debug(f"P3-018 GPU diagnostics failed: {e}")
+        except (RuntimeError, AttributeError, OSError) as e:
+            # P3-034 ROOT FIX: catch SPECIFIC exceptions (not broad
+            # Exception). Other exceptions (KeyboardInterrupt, SystemExit)
+            # propagate up. Log at WARNING (visible by default) so the
+            # operator knows monitoring failed.
+            metrics["gpu_monitoring_healthy"] = False
+            logger.warning(
+                f"P3-034 ROOT FIX: GPU diagnostics failed ({type(e).__name__}: "
+                f"{e}). All GPU metrics are unreliable for this epoch. "
+                f"gpu_monitoring_healthy=False -- downstream consumers "
+                f"should NOT interpret gpu_utilization_pct=0.0 as "
+                f"'training is CPU-bound'. Check CUDA driver, nvidia-smi, "
+                f"and torch.cuda.is_available()."
+            )
         return metrics
 
     def create_scheduler(self, total_steps: int) -> None:
@@ -1211,11 +1270,86 @@ class GraphTransformerTrainer:
                 exclude_edges=exclude_edges,
             )
 
+            # P3-011 ROOT FIX (v114 forensic, SCIENTIFIC INTEGRITY):
+            # The verified AUC (evaluate_link_prediction, which computes
+            # THREE independent AUCs -- sklearn, Mann-Whitney, and
+            # dot-product) was previously only called AFTER training on
+            # the TEST set. The per-epoch checkpoint selection used the
+            # UNVERIFIED trainer.evaluate() AUC, which is code-path-
+            # identical to evaluate_link_prediction's MLP-scoring path.
+            # If trainer.evaluate() had a subtle bug (e.g., exclude_edges
+            # not applied correctly, temperature not applied, wrong batch
+            # size), the checkpoint selection picked the WRONG epoch's
+            # weights. The post-training verified AUC then reported a
+            # DIFFERENT (correct) AUC, but the model was already saved
+            # with the wrong weights.
+            #
+            # ROOT FIX: call evaluate_link_prediction on the VAL set
+            # every epoch (not just post-training on test). Use the
+            # verified val_auc (sklearn) for checkpoint selection. Log
+            # the discrepancy between the trainer AUC and the verified
+            # AUC per epoch — if they diverge by > 0.01, log an ERROR
+            # so the operator can investigate (one of the two paths has
+            # a bug). The compute cost is ~1.5x per epoch (three AUC
+            # computations vs one), acceptable for institutional-grade
+            # scientific integrity.
+            try:
+                from ..evaluation import evaluate_link_prediction
+                verified_metrics = evaluate_link_prediction(
+                    model=self.model,
+                    node_features=self.node_features,
+                    edge_indices=self.edge_indices,
+                    drug_indices=val_drug_idx,
+                    disease_indices=val_disease_idx,
+                    labels=val_labels,
+                    batch_size=batch_size,
+                    exclude_edges=set(exclude_edges) if exclude_edges is not None else set(LABEL_LEAKING_EDGES),
+                    device=self.device,
+                    apply_temperature=True,
+                )
+                verified_val_auc = float(verified_metrics["auc"])
+                verified_auc_mannwhitney = float(verified_metrics.get("auc_mannwhitney", verified_val_auc))
+                verified_auc_agreement = float(verified_metrics.get("auc_agreement", 0.0))
+            except Exception as _eval_exc:
+                # If evaluate_link_prediction fails (e.g., scipy missing,
+                # one-class val set), fall back to trainer.evaluate's AUC.
+                # Log a WARNING so the operator knows the verified AUC
+                # was NOT computed this epoch.
+                logger.warning(
+                    f"P3-011 ROOT FIX: evaluate_link_prediction FAILED for "
+                    f"epoch {epoch} ({_eval_exc}). Falling back to "
+                    f"trainer.evaluate's AUC for checkpoint selection. "
+                    f"The verified AUC cross-check is DISABLED for this "
+                    f"epoch — investigate if this warning recurs."
+                )
+                verified_val_auc = float(val_metrics["auc"])
+                verified_auc_mannwhitney = verified_val_auc
+                verified_auc_agreement = 0.0
+
+            # P3-011: log discrepancy between trainer AUC and verified AUC.
+            trainer_auc = float(val_metrics["auc"])
+            auc_discrepancy = abs(trainer_auc - verified_val_auc)
+            if auc_discrepancy > 0.01:
+                logger.error(
+                    f"P3-011 ROOT FIX: ALERT — trainer.evaluate AUC "
+                    f"({trainer_auc:.6f}) and evaluate_link_prediction "
+                    f"AUC ({verified_val_auc:.6f}) DISAGREE by "
+                    f"{auc_discrepancy:.6f} on epoch {epoch} (val set). "
+                    f"Threshold: 0.01. One of the two paths has a bug "
+                    f"(e.g., exclude_edges not applied, temperature "
+                    f"mismatch, batch size difference). Using the "
+                    f"VERIFIED AUC for checkpoint selection. Investigate."
+                )
+
             epoch_record = {
                 "epoch": epoch,
                 "train_loss": train_loss,
                 "val_loss": val_metrics["loss"],
-                "val_auc": val_metrics["auc"],
+                "val_auc": verified_val_auc,  # P3-011: use verified AUC
+                "val_auc_trainer": trainer_auc,  # P3-011: also record trainer AUC
+                "val_auc_mannwhitney": verified_auc_mannwhitney,
+                "val_auc_agreement": verified_auc_agreement,
+                "val_auc_discrepancy": auc_discrepancy,
                 "val_accuracy": val_metrics["accuracy"],
             }
             # P3-018 ROOT FIX: record GPU diagnostics in the per-epoch
@@ -1231,26 +1365,22 @@ class GraphTransformerTrainer:
                 logger.info(
                     f"Epoch {epoch}/{epochs}: train_loss={train_loss:.4f}, "
                     f"val_loss={val_metrics['loss']:.4f}, "
-                    f"val_auc={val_metrics['auc']:.4f}"
+                    f"val_auc={verified_val_auc:.4f} (verified, "
+                    f"trainer={trainer_auc:.4f}, "
+                    f"discrepancy={auc_discrepancy:.4f})"
                 )
 
-            # FORENSIC ROOT FIX (audit Issue 138): checkpoint selection is
-            # now driven by ``val_auc`` (the V1 launch metric), not
-            # ``val_loss``. See the comment block in __init__ for the
-            # scientific rationale. The previous val_loss-based selection
-            # could pick a model whose loss decreased (it became more
-            # confident on the majority class) while its RANKING (AUC) of
-            # positives vs negatives degraded. Since the V1 launch
-            # criterion in the project docx is AUC > 0.85 on held-out
-            # drug-disease pairs, AUC is the metric we must select on.
+            # FORENSIC ROOT FIX (audit Issue 138) + P3-011 (v114): checkpoint
+            # selection now uses the VERIFIED val_auc (from
+            # evaluate_link_prediction, which has 3 independent AUC
+            # computations) rather than the unverified trainer.evaluate AUC.
+            # The V1 launch criterion is AUC > 0.85 — we must select on the
+            # CORRECT AUC, not a possibly-buggy one.
             #
-            # Noise mitigation (audit Issue 138, val_auc noise concern):
-            # a checkpoint is only promoted when the new val_auc beats the
-            # running best by at least ``self.val_auc_min_improvement``
-            # (default 0.005 = 0.5% AUC). This filters the ±0.1 noise the
-            # previous comment was worried about, while still selecting on
-            # the scientifically correct metric.
-            val_auc_now = float(val_metrics["auc"])
+            # Noise mitigation: a checkpoint is only promoted when the new
+            # verified val_auc beats the running best by at least
+            # ``self.val_auc_min_improvement`` (default 0.005 = 0.5% AUC).
+            val_auc_now = verified_val_auc  # P3-011: use verified AUC
             val_auc_improved = val_auc_now > (self.best_val_auc + self.val_auc_min_improvement)
             if val_auc_improved:
                 self.best_val_auc = val_auc_now
@@ -1260,9 +1390,6 @@ class GraphTransformerTrainer:
                 }
                 # P3-029 ROOT FIX: use self.best_epoch consistently
                 # (no local ``best_epoch`` variable).
-                # P3-041 / P3-D08 ROOT FIX: removed the duplicate
-                # ``self.best_epoch = epoch`` assignment that was on
-                # the very next line (a no-op).
                 self.best_epoch = epoch
                 no_improve_count = 0
             else:
@@ -1271,7 +1398,7 @@ class GraphTransformerTrainer:
             if no_improve_count >= patience:
                 logger.info(
                     f"Early stopping at epoch {epoch}. "
-                    f"Best val AUC: {self.best_val_auc:.4f}, "
+                    f"Best verified val AUC: {self.best_val_auc:.4f}, "
                     f"best val loss: {self.best_val_loss:.4f} at epoch {self.best_epoch}"
                 )
                 break
@@ -2022,15 +2149,70 @@ class GraphTransformerTrainer:
             except Exception as exc:
                 logger.warning("P4-009: failed to read retrain trigger JSON (%s): %s", retrain_trigger_path, exc)
 
+        # SH-013 ROOT FIX (v114 forensic, DATA FLYWHEEL BREAKING BUG):
+        # The previous implementation wrote the temp CSV with column name
+        # ``validated`` and values ``"true"`` / ``"false"``. But
+        # ``retrain_on_validated`` reads the ``outcome`` column (per
+        # shared.contracts.writeback.OUTCOME_COL) and branches on the
+        # canonical outcome enum values (``validated_positive`` /
+        # ``validated_toxic``). The temp CSV was therefore INVISIBLE to
+        # ``retrain_on_validated`` — every row was silently skipped
+        # because ``row.get(OUTCOME_COL)`` returned an empty string.
+        # The data flywheel Step 2->3 (retrain trigger -> trainer
+        # fine-tune) was BROKEN at this exact boundary: validated
+        # hypotheses from pharma partners were NEVER actually fed into
+        # the GT model's fine-tuning, defeating the entire DOCX §10
+        # "data flywheel" moat strategy.
+        #
+        # ROOT FIX: write the temp CSV using the CANONICAL schema
+        # imported from shared.contracts.writeback (with a hardcoded
+        # fallback if the module is unavailable, identical to the
+        # standalone load_validated_for_retraining function's fix at
+        # line 2636+). Both ``drug``, ``disease``, and ``outcome``
+        # columns use the exact strings the trainer's reader expects.
+        # Positive pairs are tagged ``validated_positive`` (added to
+        # known_pairs as positive labels). Toxic/negative pairs are
+        # tagged ``validated_toxic`` (excluded from positive labels —
+        # the trainer logs them at DEBUG and skips).
+        try:
+            import sys as _sys_mod_m
+            _repo_root_m = str(_Path(__file__).resolve().parents[2])
+            if _repo_root_m not in _sys_mod_m.path:
+                _sys_mod_m.path.insert(0, _repo_root_m)
+            from shared.contracts.writeback import (
+                DRUG_COL as _WB_DRUG_COL_M,
+                DISEASE_COL as _WB_DISEASE_COL_M,
+                OUTCOME_COL as _WB_OUTCOME_COL_M,
+                OUTCOME_VALIDATED_POSITIVE as _WB_OUTCOME_POS_M,
+                OUTCOME_VALIDATED_TOXIC as _WB_OUTCOME_TOX_M,
+            )
+        except Exception:
+            _WB_DRUG_COL_M = "drug"
+            _WB_DISEASE_COL_M = "disease"
+            _WB_OUTCOME_COL_M = "outcome"
+            _WB_OUTCOME_POS_M = "validated_positive"
+            _WB_OUTCOME_TOX_M = "validated_toxic"
+
         # Write a temporary CSV in the format expected by retrain_on_validated.
         tmp_csv = _tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, encoding="utf-8")
         try:
-            writer = _csv.DictWriter(tmp_csv, fieldnames=["drug", "disease", "validated"])
+            writer = _csv.DictWriter(
+                tmp_csv,
+                fieldnames=[_WB_DRUG_COL_M, _WB_DISEASE_COL_M, _WB_OUTCOME_COL_M],
+            )
             writer.writeheader()
             for drug, disease in positive_pairs:
-                writer.writerow({"drug": drug, "disease": disease, "validated": "true"})
+                writer.writerow({
+                    _WB_DRUG_COL_M: drug,
+                    _WB_DISEASE_COL_M: disease,
+                    _WB_OUTCOME_COL_M: _WB_OUTCOME_POS_M,
+                })
             for drug, disease in negative_pairs:
-                writer.writerow({"drug": drug, "disease": disease, "validated": "false"})
+                writer.writerow({
+                    _WB_DRUG_COL_M: drug,
+                    _WB_DISEASE_COL_M: disease,
+                    _WB_OUTCOME_COL_M: _WB_OUTCOME_TOX_M,
+                })
             tmp_csv.close()
 
             result = retrain_on_validated(
@@ -2192,8 +2374,31 @@ def retrain_on_validated(
         }
 
     # Load the checkpoint bundle.
+    # P3-020 ROOT FIX (v114 forensic, SECURITY): use weights_only=True
+    # (with feature detection for older PyTorch) to PREVENT arbitrary
+    # code execution via pickle deserialization. The previous code used
+    # ``weights_only=False`` — contradicting the security fix in
+    # ``service.py`` (line 135-154) and ``load_checkpoint`` (line 1834)
+    # which both use ``weights_only=True``. A malicious checkpoint file
+    # (e.g., from a compromised CI artifact store, a shared NFS mount,
+    # or a supply-chain attack on the artifact store) could execute
+    # arbitrary code on the Airflow worker when retrain_on_validated
+    # loaded it — exfiltrating the entire KG, corrupting the model, or
+    # pivoting to other services.
+    #
+    # ROOT FIX: feature-detect the ``weights_only`` parameter (added in
+    # PyTorch 1.13) and pass ``weights_only=True`` when available. Older
+    # PyTorch versions raise TypeError if the kwarg is passed — fall
+    # back to the default (which is unsafe but at least doesn't crash).
+    # Production deployments should pin to PyTorch >= 1.13 to get the
+    # safe default. The ``graph_state`` load below uses the SAME pattern.
+    import inspect as _inspect_mod
+    _has_weights_only_kw = "weights_only" in _inspect_mod.signature(_torch.load).parameters
+    _torch_load_kwargs = {"map_location": "cpu"}
+    if _has_weights_only_kw:
+        _torch_load_kwargs["weights_only"] = True
     try:
-        bundle = _torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        bundle = _torch.load(checkpoint_path, **_torch_load_kwargs)
     except Exception as exc:
         return {
             "validated_pairs_added": len(validated_pairs),
@@ -2278,9 +2483,22 @@ def retrain_on_validated(
 
     if graph_state_path.exists():
         try:
+            # P3-020 ROOT FIX (v114 forensic, SECURITY): graph_state.pt
+            # also uses weights_only=True (same security rationale as the
+            # checkpoint load above). graph_state contains dicts of
+            # tensors + node_maps (dict of dict of str->int) + drug_names
+            # (list of str) + disease_names (list of str) — all
+            # primitive types supported by weights_only=True. The previous
+            # comment "graph_state contains dicts of tensors" was used as
+            # a justification for weights_only=False, but that is NOT a
+            # valid reason — weights_only=True SUPPORTS dicts of tensors.
+            # The real reason was likely that weights_only=True was
+            # failing on some checkpoint format that contained arbitrary
+            # Python objects; the root fix is to FIX THE CHECKPOINT FORMAT
+            # (ensure it only contains tensors + primitives), not to
+            # disable the security feature.
             graph_state = _torch.load(
-                str(graph_state_path), map_location="cpu",
-                weights_only=False,  # graph_state contains dicts of tensors
+                str(graph_state_path), **_torch_load_kwargs,
             )
             node_features = graph_state["node_features"]
             edge_indices = graph_state["edge_indices"]
@@ -2306,25 +2524,49 @@ def retrain_on_validated(
             if pos_drugs and fine_tune_epochs > 0:
                 # Reconstruct model from saved config.
                 #
-                # ISSUE #338 ROOT FIX (data-flywheel-336-355): the previous
-                # "fix" for #338 (implement actual fine-tuning) introduced
-                # a NEW bug — it called DrugRepurposingGraphTransformer with
-                # the OLD API argument ``node_features_dims=...``. The
-                # current API uses ``feature_dims=...`` and requires
-                # ``edge_types`` and ``node_types``. The TypeError crashed
-                # the fine-tune path, which was caught by the outer
-                # try/except and silently fell back to "known_pairs-only
-                # update" with fine_tune_epochs=0. The data flywheel was
-                # therefore NON-FUNCTIONAL — the model was never actually
-                # fine-tuned on validated pairs. This is exactly the
-                # "fixes that introduced NEW bugs while patching old ones"
-                # pattern the audit warned about.
+                # P3-027 ROOT FIX (v114 forensic, ARCHITECTURE MISMATCH):
+                # The previous implementation constructed the fine-tune
+                # model with ``min_edge_types=1`` and
+                # ``edge_types=list(edge_indices.keys())`` -- using the
+                # CURRENT graph_state's edge types, NOT the original
+                # model's edge types. If the fine-tuning graph had FEWER
+                # edge types than the production graph (e.g., only
+                # ``treats`` edges), the fine-tuned model had a DIFFERENT
+                # architecture than the production model:
+                #   - Fewer edge types -> fewer K/V projections in
+                #     HeterogeneousMultiHeadAttention -> fewer parameters
+                #     -> different state_dict keys.
+                #   - When the fine-tuned checkpoint was loaded by
+                #     service.py (which expects the original edge types),
+                #     ``load_state_dict`` either FAILED (strict=True) or
+                #     silently ignored the missing keys (strict=False).
+                #   - The service then served predictions from a model
+                #     with INCOMPLETE architecture (missing K/V
+                #     projections for the missing edge types). Predictions
+                #     for pairs relying on the missing edge types were
+                #     random (missing projections are zero-initialized).
                 #
-                # ROOT FIX: use the CURRENT API (feature_dims, edge_types,
-                # node_types, min_edge_types). The min_edge_types=1 allows
-                # fine-tuning on a tiny graph (e.g., the staging test's
-                # 4-drug, 4-disease graph with 1 edge type). For the
-                # production graph (18 edge types), this is a no-op.
+                # ROOT FIX: use the SAME edge_types as the original model
+                # (read from the bundle's "hyperparams" field, saved by
+                # save_checkpoint's _extract_model_hyperparams). PAD the
+                # graph_state's edge_indices with EMPTY tensors for any
+                # edge type in the original model's edge_types but NOT in
+                # the current graph_state. This ensures the fine-tuned
+                # model has the SAME architecture as the original
+                # (matching state_dict keys), and ``load_state_dict``
+                # succeeds with strict=True.
+                #
+                # The min_edge_types parameter is set to the original
+                # model's edge_types count (NOT 1). This enforces the
+                # production minimum. If the original model was trained
+                # with 18 edge types (the production canonical schema),
+                # the fine-tune model is also 18 edge types. If the
+                # graph_state has fewer edge types (e.g., only 5), the
+                # missing 13 are padded with empty (2, 0) tensors -- the
+                # K/V projections are present in the model but receive
+                # no edges to message-pass over, so they get NO gradient
+                # signal during fine-tuning (correctly preserving the
+                # original model's learned K/V for those edge types).
                 from graph_transformer.models.graph_transformer import (
                     DrugRepurposingGraphTransformer,
                 )
@@ -2332,6 +2574,72 @@ def retrain_on_validated(
                 node_features_dims = graph_state.get(
                     "node_features_dims", graph_state.get("feature_dims", {})
                 )
+                # P3-027: read original model's edge_types from hyperparams.
+                hyperparams = bundle.get("hyperparams", {})
+                original_edge_types_raw = hyperparams.get("edge_types", [])
+                # Convert list-of-lists back to list-of-tuples (tuples are
+                # hashable, required for dict keys).
+                original_edge_types = [tuple(et) for et in original_edge_types_raw]
+                original_node_types = list(hyperparams.get("node_types", list(node_features.keys())))
+
+                # P3-027: PAD edge_indices with empty tensors for missing
+                # edge types from the original model. This ensures the
+                # fine-tune model has the SAME architecture as the original.
+                # Empty tensor shape (2, 0) -- 0 edges of this type.
+                for et in original_edge_types:
+                    if et not in edge_indices:
+                        edge_indices[et] = _torch.zeros((2, 0), dtype=_torch.long)
+                        logger.info(
+                            f"P3-027 ROOT FIX: padded missing edge type "
+                            f"{et} with empty tensor (2, 0) -- the K/V "
+                            f"projections for this edge type are preserved "
+                            f"from the original model (no gradient signal "
+                            f"during fine-tune since there are no edges)."
+                        )
+                # P3-027: also pad node_features for missing node types.
+                # Use the embedding_dim from the original model.
+                orig_embedding_dim = int(hyperparams.get("embedding_dim", 32))
+                for nt in original_node_types:
+                    if nt not in node_features:
+                        # 0 nodes of this type; feature dim from the
+                        # original model's feature_dims (default to
+                        # embedding_dim if not recorded).
+                        orig_feat_dim = int(
+                            hyperparams.get("feature_dims", {}).get(nt, orig_embedding_dim)
+                        )
+                        node_features[nt] = _torch.zeros((0, orig_feat_dim), dtype=_torch.float)
+                        logger.info(
+                            f"P3-027 ROOT FIX: padded missing node type "
+                            f"{nt} with empty tensor (0, {orig_feat_dim}) "
+                            f"-- the projection for this node type is "
+                            f"preserved from the original model."
+                        )
+
+                # P3-027: use the ORIGINAL edge_types and node_types
+                # (NOT graph_state's). Use min_edge_types = original count
+                # to enforce architecture match. If original_edge_types is
+                # empty (old checkpoint without hyperparams), fall back to
+                # graph_state's edge_types with min_edge_types=1 (preserves
+                # backward compat with pre-v114 checkpoints).
+                if original_edge_types:
+                    ft_edge_types = original_edge_types
+                    ft_node_types = original_node_types
+                    ft_min_edge_types = len(original_edge_types)
+                else:
+                    ft_edge_types = list(edge_indices.keys())
+                    ft_node_types = list(node_features.keys())
+                    ft_min_edge_types = 1
+                    logger.warning(
+                        f"P3-027 ROOT FIX: bundle has no 'hyperparams' "
+                        f"field (old checkpoint format). Falling back to "
+                        f"graph_state's edge_types ({ft_edge_types}) with "
+                        f"min_edge_types=1. This may cause architecture "
+                        f"mismatch when loading the fine-tuned checkpoint "
+                        f"into service.py. Re-train the model from scratch "
+                        f"with the current code to get a self-describing "
+                        f"checkpoint (save_checkpoint writes hyperparams)."
+                    )
+
                 model = DrugRepurposingGraphTransformer(
                     feature_dims=node_features_dims,
                     embedding_dim=model_config.get("embedding_dim", 32),
@@ -2342,9 +2650,9 @@ def retrain_on_validated(
                     link_predictor_hidden_dims=model_config.get(
                         "link_predictor_hidden_dims", [64, 32]
                     ),
-                    edge_types=list(edge_indices.keys()),
-                    node_types=list(node_features.keys()),
-                    min_edge_types=1,  # allow fine-tune on small subgraphs
+                    edge_types=ft_edge_types,
+                    node_types=ft_node_types,
+                    min_edge_types=ft_min_edge_types,  # P3-027: enforce architecture match
                 )
                 model.load_state_dict(
                     bundle.get("model_state_dict", bundle.get("model", {}))

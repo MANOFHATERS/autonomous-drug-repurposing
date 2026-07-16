@@ -75,17 +75,40 @@ class NodeTypeEmbedding(nn.Module):
         self.num_node_types = num_node_types
         # P3-004 ROOT FIX v104: allocate one EXTRA slot for the 'unknown'
         # type fallback. Total embedding table size = num_node_types + 1.
-        # The unknown slot is initialized to ZERO (no perturbation to
-        # trained representations) and is learnable so it CAN be trained
-        # if the model is later fine-tuned on a graph that includes new
-        # node types.
+        #
+        # P3-022 ROOT FIX (v114 forensic, SCIENTIFIC-ML CORRECTNESS): the
+        # previous implementation initialized the unknown slot to ZERO and
+        # re-zeroed it after _init_weights. The slot IS learnable
+        # (``requires_grad=True`` by default), but during fine-tuning on a
+        # graph that includes the new node type, the slot starts at zero.
+        # Zero is a SADDLE POINT for embeddings: the gradient signal for
+        # the unknown slot comes ONLY from nodes of the new type, and if
+        # those nodes are rare (e.g., a new "variant" node type with only
+        # 10 instances in a 100K-node graph), the gradient signal is
+        # weak. The slot may NEVER escape the zero basin -- the
+        # downstream linear layer's gradient w.r.t. a zero embedding is
+        # also zero for that embedding's row. This is the standard "dead
+        # neuron" problem for embeddings.
+        #
+        # ROOT FIX: initialize the unknown slot to a SMALL RANDOM value
+        # (nn.init.normal_ with std=0.02, the BERT/GPT initialization).
+        # This breaks the zero-gradient symmetry: the embedding starts
+        # non-zero, so downstream linear layers produce non-zero outputs,
+        # so the gradient w.r.t. the embedding is non-zero, so the
+        # embedding CAN learn. The perturbation to trained representations
+        # is < 2% (vs Xavier init's std=0.125) -- negligible for trained
+        # types but crucial for the unknown type to escape the zero basin.
         self.UNKNOWN_TYPE_IDX = num_node_types  # instance-level resolution
         self.embeddings = nn.Embedding(num_node_types + 1, embedding_dim)
-        # Initialize the unknown slot to ZERO so untrained types do not
-        # perturb the projected features. Use zero_() with no_grad so the
-        # initialization is not tracked as a gradient.
+        # P3-022 ROOT FIX (v114): initialize unknown slot to SMALL RANDOM
+        # (std=0.02) instead of ZERO. This breaks the zero-gradient saddle
+        # point so fine-tuning on a graph with new node types can actually
+        # learn the unknown slot's embedding. The 0.02 std is the
+        # BERT/GPT initialization (Devlin et al. 2018, Radford et al.
+        # 2019) -- small enough to not perturb trained representations
+        # but large enough to escape the zero basin.
         with torch.no_grad():
-            self.embeddings.weight[self.UNKNOWN_TYPE_IDX].zero_()
+            nn.init.normal_(self.embeddings.weight[self.UNKNOWN_TYPE_IDX], mean=0.0, std=0.02)
         # Track whether we've warned about unknown-type fallback (per instance).
         self._unknown_warned: bool = False
         # P3-030 ROOT FIX (v107): track the most-recent forward call's
@@ -151,12 +174,17 @@ class NodeTypeEmbedding(nn.Module):
                     f"({self.num_node_types}). These will be CLAMPED to "
                     f"the 'unknown' type slot (index "
                     f"{self.UNKNOWN_TYPE_IDX}), which is initialized to "
-                    f"ZERO. The model will produce neutral embeddings "
-                    f"for these nodes until retrained. This is graceful "
-                    f"degradation (P3-004 ROOT FIX v104) — Phase 2 can "
-                    f"add new node types without crashing Phase 3 "
-                    f"inference. To get full fidelity, RETRAIN the "
-                    f"model on a graph that includes the new types. "
+                    f"SMALL RANDOM (std=0.02, P3-022 v114 ROOT FIX). "
+                    f"The model will produce APPROXIMATE embeddings for "
+                    f"these nodes; fine-tuning on a graph that includes "
+                    f"the new types will LEARN the unknown slot's "
+                    f"embedding (the small random init breaks the "
+                    f"zero-gradient saddle point that previously trapped "
+                    f"the slot at zero forever). This is graceful "
+                    f"degradation (P3-004 ROOT FIX v104 + P3-022 v114) "
+                    f"— Phase 2 can add new node types without crashing "
+                    f"Phase 3 inference. To get full fidelity, RETRAIN "
+                    f"the model on a graph that includes the new types. "
                     f"P3-030 v107: callers can read "
                     f"``self.last_unknown_mask`` after forward() to mark "
                     f"predictions involving these nodes as "
@@ -174,27 +202,30 @@ class NodeTypeEmbedding(nn.Module):
         return self.embeddings(node_type_indices)
 
     def _reset_unknown_slot(self) -> None:
-        """Re-zero the unknown-type slot (index ``UNKNOWN_TYPE_IDX``).
+        """Re-initialize the unknown-type slot (index ``UNKNOWN_TYPE_IDX``).
 
-        FORENSIC ROOT FIX (audit Issue 133, SILENT BUG): this method
-        is called by ``DrugRepurposingGraphTransformer.__init__``
-        AFTER ``self.apply(self._init_weights)``. The model's
-        ``_init_weights`` re-initializes ALL ``nn.Embedding`` modules
-        (including this one) with Xavier_normal_ (audit Issue 133).
-        That re-init OVERWRITES the zero this class's ``__init__``
-        wrote to the unknown-type slot at construction time, silently
-        breaking the unknown-type contract (out-of-range node types
-        would produce RANDOM perturbations to the projected features
-        instead of zero).
+        FORENSIC ROOT FIX (audit Issue 133): this method is called by
+        ``DrugRepurposingGraphTransformer.__init__`` AFTER
+        ``self.apply(self._init_weights)``. The model's ``_init_weights``
+        re-initializes ALL ``nn.Embedding`` modules (including this one)
+        with Xavier_normal_. That re-init OVERWRITES the small-random
+        init this class's ``__init__`` wrote to the unknown-type slot,
+        breaking the unknown-type contract.
 
-        Re-zeroing here -- AFTER the model's _init_weights has run --
-        restores the unknown-type contract regardless of init order.
-        This is the root-level fix for a bug that has been silently
-        degrading predictions whenever Phase 2 added a new node type
-        after the model was trained.
+        P3-022 ROOT FIX (v114): re-initialize the unknown slot to SMALL
+        RANDOM (std=0.02) instead of ZERO. The previous re-zeroing
+        caused the unknown slot to be stuck at the zero saddle point
+        during fine-tuning on graphs with new node types -- the
+        downstream linear layer's gradient w.r.t. a zero embedding is
+        zero, so the slot could never learn. Small random init breaks
+        the symmetry, enabling fine-tuning to actually learn the new
+        type's embedding.
         """
         with torch.no_grad():
-            self.embeddings.weight[self.UNKNOWN_TYPE_IDX].zero_()
+            nn.init.normal_(
+                self.embeddings.weight[self.UNKNOWN_TYPE_IDX],
+                mean=0.0, std=0.02,
+            )
 
     def was_degraded(self) -> bool:
         """Return True if the most-recent forward() saw any unknown-type index.

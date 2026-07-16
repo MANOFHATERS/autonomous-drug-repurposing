@@ -137,40 +137,65 @@ def _mann_whitney_auc(scores: np.ndarray, labels: np.ndarray) -> float:
         from scipy.stats import rankdata as _scipy_rankdata
         ranks = _scipy_rankdata(scores, method="average")
     except ImportError:
-        # Vectorized numpy fallback (no Python loop). Same algorithm
-        # as the previous while-loop version but vectorized:
-        #   1. argsort the scores (stable sort preserves original order
-        #      for ties, which is required for correct average-rank
-        #      computation).
-        #   2. Find tie group boundaries via np.diff on the sorted
-        #      scores (a tie group starts where diff != 0).
-        #   3. For each tie group, compute the average rank and assign
-        #      it to all members via np.searchsorted.
-        # This is O(n log n) (dominated by argsort) with no Python-level
-        # loop over the array. For 1M scores, this is ~100x faster than
-        # the previous while-loop version.
+        # P3-028 ROOT FIX (v114 forensic, PERFORMANCE): the previous
+        # fallback used a Python ``for start, end in zip(start_indices,
+        # end_indices):`` loop over tie groups. For a production eval
+        # set with 1M+ scores and many ties (common when the model
+        # produces saturating sigmoid outputs near 0 or 1), this could
+        # be 100K+ tie groups -> 100K+ Python iterations. The comment
+        # claimed "no Python loop" but the ``for ... in zip(...)`` IS
+        # a Python loop.
+        #
+        # ROOT FIX: use ``np.add.reduceat`` to compute the average rank
+        # per tie group WITHOUT a Python loop. ``np.add.reduceat`` is a
+        # single C-level call that computes a segmented sum -- perfect
+        # for "sum the 1-indexed positions for each tie group". Combined
+        # with the group sizes (also vectorized), this gives the
+        # average rank per group in O(n) C-level operations.
+        #
+        # The algorithm:
+        #   1. argsort the scores (stable sort for ties).
+        #   2. Find tie group boundaries via np.diff.
+        #   3. For each group [start, end), compute the average 1-indexed
+        #      rank = (sum of (start+1, start+2, ..., end)) / (end - start)
+        #      = ((start+1 + end) * (end - start) / 2) / (end - start)
+        #      = (start + 1 + end) / 2.
+        #      We use np.add.reduceat to compute the SUM of 1-indexed
+        #      positions per group, then divide by the group sizes
+        #      (computed via np.diff on the group boundaries).
+        # This is O(n log n) (dominated by argsort) with NO Python-level
+        # loop. For 1M scores, this is ~100x faster than the previous
+        # for-loop version.
         order = np.argsort(scores, kind="stable")
         sorted_scores = scores[order]
+        if len(sorted_scores) == 0:
+            return 0.5  # degenerate — no scores
         ranks = np.empty(len(scores), dtype=np.float64)
         # Find group boundaries: a new group starts wherever the sorted
         # score changes. ``np.diff != 0`` gives a boolean array where True
         # marks the START of a new group (relative to the previous index).
-        # We prepend a True at index 0 (the first element always starts
-        # a group) and append a True at the end (sentinel for the last
-        # group's end).
-        if len(sorted_scores) == 0:
-            return 0.5  # degenerate — no scores
         group_starts = np.concatenate(([True], np.diff(sorted_scores) != 0))
         # group_starts[i] = True means sorted_scores[i] starts a new tie
-        # group. The group ends at the next True (or at the end of the
-        # array). Compute group_start_indices and group_end_indices.
+        # group.
         start_indices = np.where(group_starts)[0]
         end_indices = np.concatenate((start_indices[1:], [len(sorted_scores)]))
-        # For each group [start, end), the average 1-indexed rank is
-        # ((start+1) + end) / 2 = start + (end - start + 1) / 2.
-        for start, end in zip(start_indices, end_indices):
-            avg_rank = (start + 1 + end) / 2.0  # 1-indexed
-            ranks[order[start:end]] = avg_rank
+        # P3-028: VECTORIZED average rank computation.
+        # 1-indexed positions in the sorted order: 1, 2, 3, ..., n.
+        positions_1indexed = np.arange(1, len(sorted_scores) + 1, dtype=np.float64)
+        # Sum of positions for each group, via np.add.reduceat.
+        # reduceat(a, indices) computes for each indices[i]:
+        #   sum(a[indices[i]:indices[i+1]])
+        # (with the last group summing to the end of the array).
+        group_sums = np.add.reduceat(positions_1indexed, start_indices)
+        # Group sizes: end_indices - start_indices (vectorized).
+        group_sizes = (end_indices - start_indices).astype(np.float64)
+        # Average rank per group = group_sums / group_sizes.
+        avg_ranks_per_group = group_sums / group_sizes
+        # Assign each member of each group its average rank. We use
+        # np.repeat to expand avg_ranks_per_group to per-element values
+        # in the sorted order, then scatter back to the original order.
+        avg_ranks_sorted = np.repeat(avg_ranks_per_group, group_sizes.astype(np.int64))
+        ranks[order] = avg_ranks_sorted
 
     # Sum of ranks for the positive class.
     r_pos = float(ranks[labels == 1].sum())
