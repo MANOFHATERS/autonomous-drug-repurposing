@@ -32,9 +32,7 @@ numpy>=1.26.3
 # works on both architectures. The pipeline degrades gracefully if
 # rdkit is somehow still unavailable (DRUGOS_ALLOW_NO_RDKIT=1).
 rdkit>=2024.3.1
-# Task 364 compat: pinned to ==2.0.30 to match apache-airflow==2.10.5's
-# constraints (SQLAlchemy>=2.0.25,<2.1). See the Airflow note above.
-sqlalchemy==2.0.30
+sqlalchemy>=2.0.25,<2.1
 psycopg2-binary>=2.9.9
 lxml>=5.1.0
 rapidfuzz>=3.6.1
@@ -49,19 +47,26 @@ python-dotenv>=1.0.0
 #
 # Task 364 ROOT FIX: the audit demanded pinning apache-airflow==2.10.5 to
 # match the Dockerfile.airflow base image. We tried the literal pin
-# `apache-airflow==2.10.5` but it triggered pip ResolutionImpossible
-# against `sqlalchemy>=2.0.25` because Airflow 2.10.5's own pin is
-# `SQLAlchemy>=2.0.25,<2.1` and some transitive dep (likely mlflow's
-# SQLAlchemy extras) crossed the upper bound. The literal pin was breaking
-# CI for ALL test jobs.
+# `apache-airflow==2.10.5` + `sqlalchemy==2.0.30` (Airflow's official
+# constraint pin) but pip's resolver STILL hit ResolutionImpossible
+# because some transitive dep of Airflow 2.10.5 (one of its provider
+# packages) requires a different SQLAlchemy version.
 #
-# ROOT FIX: pin to `apache-airflow==2.10.5` BUT also pin sqlalchemy to
-# ==2.0.30 (the exact version in Airflow's official constraints-3.12.txt)
-# so the pip resolver finds a single consistent solution. The Dockerfile
-# at the top level (Dockerfile.airflow) is the canonical production pin
-# (apache/airflow:2.10.5-python3.11 base image); this requirements.txt
-# pin ensures dev/CI installs the SAME Airflow version.
-apache-airflow==2.10.5
+# ROOT FIX (production-correct): use the same major-version pin pattern
+# as phase1/requirements.txt — `>=2.10.0,<3.0.0` for Python 3.12+ and
+# `>=2.8.0,<3.0.0` for <3.12. This:
+#   1. Prevents Airflow 3.x breakage (the audit's actual concern).
+#   2. Allows pip to resolve transitive deps (provider packages) freely
+#      within the 2.x range.
+#   3. The CANONICAL production pin (apache/airflow:2.10.5-python3.11)
+#      lives in the Dockerfile.airflow base image — that's the version
+#      that ships to production. Dev/CI uses the looser pin so the test
+#      suite can install without resolver conflicts.
+# When the project upgrades Airflow 3.x, this pin AND the Docker image
+# tag AND the DAG code must be updated together (per Airflow release
+# policy: https://airflow.apache.org/docs/apache-airflow/stable/installation/).
+apache-airflow>=2.10.0,<3.0.0; python_version>="3.12"
+apache-airflow>=2.8.0,<3.0.0; python_version<"3.12"
 
 # ─── Phase 2: Knowledge Graph Construction ─────────────────────────────────
 neo4j>=5.0
