@@ -332,3 +332,24 @@ Stage Summary:
 - P1-011 HIGH ROOT FIX complete
 - Files touched: phase1/database/connection.py, conftest.py (new, repo root)
 - Impact: phase1.database.connection is now importable from EVERY context (Phase 2 bridge, tests, external scripts, direct `python -m` invocations) without depending on phase1/__init__.py having run first. The try/except fallback is backward-compatible — existing bare-import callers continue to work via the except branch.
+
+---
+Task ID: TM3-P1-007
+Agent: main (Teammate 3 swim lane)
+Task: Fix P1-007 (HIGH) — Drug.inchikey nullable=False vs biologics docstring
+
+Work Log:
+- Read phase1/database/models.py lines 595-650 (Drug class, inchikey column) — confirmed `inchikey: Mapped[str] = mapped_column(String(INCHIKEY_LENGTH), nullable=False, unique=True)`
+- Read phase1/database/models.py lines 324-369 (_validate_inchikey function) — confirmed it returns None for None input (shared with nullable columns)
+- Read phase1/database/models.py lines 790-810 (Drug._validate_inchikey validator) — confirmed it delegated to shared function without rejecting None
+- ROOT FIX: overrode Drug._validate_inchikey to reject None and empty strings with a clear ValueError naming the SYNTH-prefix convention:
+  * "Drug.inchikey cannot be NULL or empty. The Drug table requires a non-NULL InChIKey. Biologics MUST use a SYNTH-prefixed surrogate key (e.g. 'SYNTH-ANTIBODY-TRASTUZUMAB'). See entity_resolution.drug_resolver._create_canonical_entry."
+- This gives developers an actionable error instead of a cryptic IntegrityError at INSERT time
+- The shared _validate_inchikey() function is UNCHANGED so nullable columns (DrugCandidate.canonical_inchikey) continue to accept None
+- py_compile phase1/database/models.py: OK
+- Did NOT touch phase1/pipelines/__init__.py docstring (potentially TM1's swim lane — noted for TM1 to update)
+
+Stage Summary:
+- P1-007 HIGH ROOT FIX complete
+- Files touched: phase1/database/models.py (Drug._validate_inchikey validator only)
+- Impact: developers who try to insert a Drug with inchikey=None now get a clear ValueError explaining the SYNTH-prefix convention, instead of a confusing IntegrityError. The schema contract (nullable=False) and the validator are now aligned. Biologics continue to work via SYNTH-prefixed surrogate keys.

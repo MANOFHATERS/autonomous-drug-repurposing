@@ -795,6 +795,25 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # -- validators --
     @validates("inchikey")
     def _validate_inchikey(self, key: str, value: Optional[str]) -> Optional[str]:
+        # P1-007 v113 ROOT FIX: Drug.inchikey is nullable=False, unique=True.
+        # The shared _validate_inchikey() function returns None for None input
+        # (because it's also used by nullable columns like
+        # DrugCandidate.canonical_inchikey). But for Drug, a None or empty
+        # string would pass the Python validator and then fail at INSERT with
+        # a confusing IntegrityError. ROOT FIX: reject None and empty strings
+        # HERE with a clear ValueError naming the SYNTH-prefix convention for
+        # biologics. This gives developers an actionable error message instead
+        # of a cryptic NOT NULL constraint violation.
+        if value is None or (isinstance(value, str) and value.strip() == ""):
+            raise ValueError(
+                "Drug.inchikey cannot be NULL or empty. The Drug table "
+                "requires a non-NULL InChIKey for every record. Biologics "
+                "(antibodies, proteins, cell therapies) that cannot have a "
+                "real InChIKey MUST use a SYNTH-prefixed surrogate key "
+                "(e.g. 'SYNTH-ANTIBODY-TRASTUZUMAB'). See "
+                "entity_resolution.drug_resolver._create_canonical_entry "
+                "for the SYNTH-key generation logic."
+            )
         return _validate_inchikey(value)
 
     @validates("max_phase")
