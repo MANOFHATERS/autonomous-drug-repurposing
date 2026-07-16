@@ -8,7 +8,28 @@ version = "2.0.0"
 description = "DrugOS Knowledge Graph Construction & GNN Data Pipeline — Week 2"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.10"
+# P2-065 ROOT FIX (Teammate 4): the previous ``requires-python = ">=3.10"``
+# was too permissive. The codebase uses ``from __future__ import annotations``
+# (PEP 563) which has DIFFERENT behavior between Python 3.10 and 3.12:
+#   - Python 3.10: PEP 563 is the default behavior for ``from __future__
+#     import annotations`` — annotations are strings, evaluated lazily.
+#   - Python 3.11+: same as 3.10 (PEP 563 still requires the future import).
+#   - Python 3.13+: PEP 649 (deferred evaluation) is the DEFAULT — no
+#     future import needed, and the behavior is slightly different
+#     (annotations are computed lazily via __annotations__ descriptor).
+#
+# The codebase was tested on Python 3.11 and 3.12 in CI. Python 3.10 has
+# subtle differences in:
+#   - typing.TypeAlias (added in 3.10 but with quirks)
+#   - match-case exhaustiveness checking
+#   - tomllib (added in 3.11 — pyproject.toml parsing fails on 3.10)
+#
+# ROOT FIX: bump the minimum to 3.11 (the lowest version actually tested
+# in CI). Cap the maximum at 3.12 to prevent 3.13's PEP 649 behavior
+# changes from silently breaking annotation-based runtime introspection
+# (e.g. pydantic v1, which the codebase still uses in some places).
+# When the codebase is fully tested on 3.13+, bump the upper cap.
+requires-python = ">=3.11,<3.13"
 authors = [
     {name = "DrugOS Team"},
 ]

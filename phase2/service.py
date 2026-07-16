@@ -157,12 +157,25 @@ def _get_kg_stats_from_neo4j() -> Optional[Dict[str, Any]]:
                 "MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS c"
             )
             edge_types = {record["t"]: record["c"] for record in result}
+        # SH-026 ROOT FIX (Teammate 4): return BOTH the legacy snake_case
+        # fields AND the canonical contract fields (node_type_counts,
+        # edge_type_counts, source, last_updated) so the TypeScript
+        # contract in frontend/contracts/api_contracts.ts:KgStatsResponse
+        # matches exactly. The ``source`` field uses the contract's enum
+        # ("neo4j" | "in_memory").
+        from datetime import datetime, timezone
         return {
+            # Legacy fields (backward compat)
             "node_count": int(node_count),
             "edge_count": int(edge_count),
             "node_types": node_types,
             "edge_types": edge_types,
             "backend": "neo4j",
+            # SH-026: canonical contract fields
+            "node_type_counts": node_types,
+            "edge_type_counts": edge_types,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "source": "neo4j",
         }
 
     try:
@@ -221,9 +234,16 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
 
     try:
         from drugos_graph.phase1_bridge import run_phase1_to_phase2
+        # SH-010 ROOT FIX (Teammate 4): the previous code HARDCODED
+        # ``prefer_postgres=False``, which bypassed Phase 1's PostgreSQL
+        # staging DB even in production. ROOT FIX: read the
+        # ``DRUGOS_PREFER_POSTGRES`` env var (default: "0" for dev/CI
+        # backward compat; set to "1" in production).
         result = run_phase1_to_phase2(
             phase1_processed_dir=str(pdir),
-            prefer_postgres=False,
+            prefer_postgres=os.environ.get(
+                "DRUGOS_PREFER_POSTGRES", "0"
+            ).lower() in ("1", "true", "yes", "on"),
         )
         builder = result["builder"]
         summary = result["summary"]
@@ -246,13 +266,32 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
             n_edges = len(load.get("edges", []) or [])
             edge_types[rel] = edge_types.get(rel, 0) + n_edges
 
+        # SH-026 ROOT FIX (Teammate 4): return BOTH the legacy snake_case
+        # fields (node_types, edge_types, backend) AND the canonical
+        # contract fields (node_type_counts, edge_type_counts, source,
+        # last_updated) so the TypeScript contract in
+        # frontend/contracts/api_contracts.ts:KgStatsResponse matches.
+        # The ``source`` field uses the contract's enum
+        # ("neo4j" | "in_memory") — we map ``in_memory_bridge`` →
+        # ``in_memory`` and keep the legacy ``backend`` field for
+        # backward compat with kg-service.ts (which reads both).
+        from datetime import datetime, timezone
+        _last_updated = datetime.now(timezone.utc).isoformat()
+        _backend_legacy = "in_memory_bridge"
+        _source = "in_memory"
         return {
+            # Legacy fields (backward compat with kg-service.ts)
             "node_count": int(summary.get("nodes_loaded", 0)),
             "edge_count": int(summary.get("edges_loaded", 0)),
             "node_types": node_types,
             "edge_types": edge_types,
-            "backend": "in_memory_bridge",
+            "backend": _backend_legacy,
             "sources_read": summary.get("sources_read", []),
+            # SH-026: canonical contract fields (matches TS KgStatsResponse)
+            "node_type_counts": node_types,
+            "edge_type_counts": edge_types,
+            "last_updated": _last_updated,
+            "source": _source,
         }
     except FileNotFoundError:
         # Re-raise P2-001 missing-data errors unchanged.
@@ -292,9 +331,13 @@ def _explore_subgraph_in_memory(
         pdir = _REPO_ROOT / "phase1" / "processed_data"
         if not pdir.exists() or not any(pdir.glob("*.csv*")):
             return None
+        # SH-010 ROOT FIX (Teammate 4): same fix as /kg/stats — read the
+        # ``DRUGOS_PREFER_POSTGRES`` env var instead of hardcoding False.
         result = run_phase1_to_phase2(
             phase1_processed_dir=str(pdir),
-            prefer_postgres=False,
+            prefer_postgres=os.environ.get(
+                "DRUGOS_PREFER_POSTGRES", "0"
+            ).lower() in ("1", "true", "yes", "on"),
         )
         builder = result["builder"]
     except Exception as exc:
@@ -491,7 +534,74 @@ def _explore_subgraph_neo4j(
         # inflating the visual graph. ROOT FIX: deduplicate edges by
         # (source, target, type) tuple.
         with driver.session() as session:
-            if drug:
+            # P2-062 ROOT FIX (Teammate 4, forensic, root-level): the
+            # previous code used ``if drug: ... elif disease: ...`` which
+            # IGNORED the disease parameter when BOTH drug and disease were
+            # provided. The /query endpoint accepts both, so a caller asking
+            # "show me the subgraph between aspirin and diabetes" would get
+            # ONLY the aspirin subgraph (disease silently ignored). ROOT FIX:
+            # when BOTH are provided, run a DEDICATED query that finds paths
+            # BETWEEN the drug and disease nodes (the scientifically useful
+            # result for drug-repurposing hypothesis exploration). When only
+            # one is provided, fall back to the original 2-hop BFS.
+            if drug and disease:
+                # P2-062: find paths BETWEEN the drug and disease nodes.
+                # This is the most useful query for drug repurposing — it
+                # shows the biological pathway chain connecting a drug to
+                # a disease, which is exactly what the project doc's
+                # "Knowledge Graph Explorer" screen is supposed to display.
+                q = """
+                MATCH (d:Compound {name: $drug}), (dis:Disease {name: $disease})
+                CALL {
+                    WITH d, dis
+                    MATCH p = shortestPath((d)-[*1..5]-(dis))
+                    RETURN p LIMIT $limit
+                }
+                UNWIND relationships(p) AS r
+                WITH d, dis, r, startNode(r) AS sn, endNode(r) AS en
+                RETURN d, dis, r, sn, en
+                LIMIT $limit
+                """
+                result = session.run(q, drug=drug, disease=disease, limit=limit)
+                for record in result:
+                    d_node = record["d"]
+                    nodes.append({
+                        "id": d_node.id,
+                        "label": list(d_node.labels)[0] if d_node.labels else "Unknown",
+                        "labels": list(d_node.labels),
+                        "properties": dict(d_node),
+                    })
+                    dis_node = record["dis"]
+                    nodes.append({
+                        "id": dis_node.id,
+                        "label": list(dis_node.labels)[0] if dis_node.labels else "Unknown",
+                        "labels": list(dis_node.labels),
+                        "properties": dict(dis_node),
+                    })
+                    r = record["r"]
+                    if r is not None:
+                        edges.append({
+                            "source": r.start_node.id,
+                            "target": r.end_node.id,
+                            "type": r.type,
+                        })
+                    sn = record["sn"]
+                    if sn is not None:
+                        nodes.append({
+                            "id": sn.id,
+                            "label": list(sn.labels)[0] if sn.labels else "Unknown",
+                            "labels": list(sn.labels),
+                            "properties": dict(sn),
+                        })
+                    en = record["en"]
+                    if en is not None:
+                        nodes.append({
+                            "id": en.id,
+                            "label": list(en.labels)[0] if en.labels else "Unknown",
+                            "labels": list(en.labels),
+                            "properties": dict(en),
+                        })
+            elif drug:
                 # P2-030 ROOT FIX (v107): bounded 2-hop traversal using
                 # subqueries with LIMIT inside each hop. The previous
                 # ``[*1..2]`` variable-length path was UNBOUNDED — on a

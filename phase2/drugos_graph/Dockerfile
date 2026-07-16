@@ -15,12 +15,32 @@
 # for the GT checkpoint → RL ranker handoff to work — see the
 # docker-compose.yml comment block on version drift).
 #
+# IN-015 ROOT FIX (Teammate 4, forensic, root-level): the previous
+# Dockerfile used ``FROM drugos-python-ml:latest`` — a non-reproducible
+# build anti-pattern. Two builds on different days could produce
+# different images because ``drugos-python-ml:latest`` may have been
+# rebuilt with different transitive deps. This breaks supply-chain
+# attestation, makes SBOM diffing impossible, and means a compromised
+# rebuild of ``drugos-python-ml:latest`` (e.g. via a CI token leak)
+# silently ships to production.
+#
+# ROOT FIX:
+#   1. Pin to a specific version tag (``drugos-python-ml:2.0.0``)
+#      matching the pyproject.toml version.
+#   2. Accept a ``BASE_IMAGE`` build-arg so CI can override (e.g. to
+#      pin by digest ``drugos-python-ml@sha256:...`` in production).
+#   3. CI should add a job that verifies the base image digest matches
+#      the pinned value (future work — outside this Dockerfile's scope).
+#
 # Build context: repo root (``dockerfile: phase2/drugos_graph/Dockerfile``
 # in docker-compose.yml sets context: .). The build copies the entire
 # repo so ``uvicorn phase2.drugos_graph.kg_api:app`` can import sibling
 # modules (phase1, graph_transformer) without a separate volume mount.
 # =============================================================================
-FROM drugos-python-ml:latest
+# IN-015 ROOT FIX: build-arg with version-pinned default. Override in
+# production with: ``docker build --build-arg BASE_IMAGE=drugos-python-ml@sha256:<digest>``.
+ARG BASE_IMAGE=drugos-python-ml:2.0.0
+FROM ${BASE_IMAGE}
 
 # Re-declare WORKDIR because the base image sets it but the build context
 # resets it to /.
