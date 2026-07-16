@@ -1,111 +1,81 @@
 """
-Shared schema for validated_hypotheses — single source of truth.
+Shared schema for validated_hypotheses — re-exports from canonical location.
 
-INT-014 + INT-015 + INT-016 ROOT FIX:
-The previous codebase had THREE different ways to reference the same data:
-  1. Writeback wrote to: phase1/processed_data/validated_hypotheses.csv
-     with column name "outcome" containing values like
-     "validated_positive" / "validated_toxic".
-  2. RL ranker searched:  rl/validated_hypotheses.csv (via module_dir,
-     CWD, and env var — NEVER the Phase 1 path).
-  3. Trainer read column: "validated" with values in ("true","1","yes"),
-     filtering out ALL rows from the writeback file.
+DEPRECATED: this module is kept for backward compatibility with code that
+imports from ``common.validated_hypotheses_schema``. The CANONICAL source
+of truth is now ``shared.contracts.writeback``. New code should import
+directly from there:
 
-Result: the data flywheel was broken at EVERY link. Validated hypotheses
-from pharma partners were INVISIBLE to both the RL ranker and the GT
-trainer. The DOCX §10 promise ("validated hypotheses feed back into the
-model") was unfulfilled.
+    from shared.contracts.writeback import (
+        CANONICAL_VALIDATED_CSV,
+        OUTCOME_COL,
+        OUTCOME_VALIDATED_POSITIVE,
+        OUTCOME_VALIDATED_TOXIC,
+        POSITIVE_OUTCOMES,
+        PENALTY_OUTCOMES,
+    )
 
-ROOT FIX: This module defines ONE canonical path, ONE canonical column
-schema, and ONE canonical set of outcome values. All writers and readers
-import from here. No file should hardcode its own path or column names.
+This file re-exports every public name from shared.contracts.writeback so
+existing imports continue to work without modification. The actual schema
+definitions live in shared/contracts/writeback.py.
 """
-
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
-from typing import Final, List
 
-# ---------------------------------------------------------------------------
-# CANONICAL PATH
-# ---------------------------------------------------------------------------
-# The single write/read location for validated hypotheses CSV.
-# INT-014: both writeback.py AND rl_drug_ranker.py AND trainer.py MUST
-# use this path. No component should define its own path.
+# Make shared.contracts.writeback importable when common/ is imported
+# standalone (e.g., by tests that manipulate sys.path). This is defensive —
+# if shared/ is already importable (normal case), the insert is a no-op.
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
-_REPO_ROOT: Final[str] = str(Path(__file__).resolve().parents[1])
-
-CANONICAL_VALIDATED_CSV: Final[str] = os.path.join(
-    _REPO_ROOT, "phase1", "processed_data", "validated_hypotheses.csv"
-)
-
-# Fallback for legacy deployments (still searched if canonical missing).
-LEGACY_RL_VALIDATED_CSV: Final[str] = os.path.join(
-    _REPO_ROOT, "rl", "validated_hypotheses.csv"
-)
-
-# ---------------------------------------------------------------------------
-# CANONICAL COLUMN NAMES
-# ---------------------------------------------------------------------------
-# INT-015: writeback writes "outcome"; trainer reads "validated".
-# ROOT FIX: everyone uses OUTCOME_COL. The trainer converts on read.
-
-OUTCOME_COL: Final[str] = "outcome"
-DRUG_COL: Final[str] = "drug"
-DISEASE_COL: Final[str] = "disease"
-TIMESTAMP_COL: Final[str] = "validated_at"
-VALIDATED_BY_COL: Final[str] = "validated_by"
-
-# ---------------------------------------------------------------------------
-# CANONICAL OUTCOME VALUES
-# ---------------------------------------------------------------------------
-# Writeback produces these values in the outcome column.
-# Consumers MUST branch on these exact strings.
-
-OUTCOME_VALIDATED_POSITIVE: Final[str] = "validated_positive"
-OUTCOME_VALIDATED_TOXIC: Final[str] = "validated_toxic"
-OUTCOME_VALIDATED_NEGATIVE: Final[str] = "validated_negative"
-OUTCOME_INVALIDATED: Final[str] = "invalidated"
-
-# For the trainer: which outcomes count as "positive" labels for retraining.
-POSITIVE_OUTCOMES: Final[List[str]] = [OUTCOME_VALIDATED_POSITIVE]
-
-# For the RL ranker: which outcomes get +bonus vs -penalty.
-BONUS_OUTCOMES: Final[List[str]] = [OUTCOME_VALIDATED_POSITIVE]
-PENALTY_OUTCOMES: Final[List[str]] = [OUTCOME_VALIDATED_TOXIC]
-
-# All valid outcome values (for schema validation).
-VALID_OUTCOMES: Final[List[str]] = [
+# Re-export EVERYTHING from the canonical contract.
+from shared.contracts.writeback import *  # noqa: F401,F403,E402
+from shared.contracts.writeback import (  # noqa: F401,E402  (explicit for IDE)
+    CANONICAL_VALIDATED_CSV,
+    LEGACY_RL_VALIDATED_CSV,
+    get_validated_csv_path,
+    ensure_csv_dir,
+    OUTCOME_COL,
+    DRUG_COL,
+    DISEASE_COL,
+    TIMESTAMP_COL,
+    VALIDATED_BY_COL,
+    VALIDATION_STUDY_ID_COL,
+    NOTES_COL,
+    ORIGINAL_GT_SCORE_COL,
+    ORIGINAL_RL_RANK_COL,
+    WRITEBACK_VERSION_COL,
+    WRITEBACK_CSV_COLUMNS,
+    REQUIRED_COLUMNS,
     OUTCOME_VALIDATED_POSITIVE,
     OUTCOME_VALIDATED_TOXIC,
     OUTCOME_VALIDATED_NEGATIVE,
     OUTCOME_INVALIDATED,
-]
-
-# ---------------------------------------------------------------------------
-# REQUIRED CSV COLUMNS (schema validation)
-# ---------------------------------------------------------------------------
-REQUIRED_COLUMNS: Final[List[str]] = [
-    DRUG_COL,
-    DISEASE_COL,
-    OUTCOME_COL,
-    TIMESTAMP_COL,
-]
-
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
-
-def ensure_csv_dir() -> None:
-    """Ensure the directory for the canonical CSV exists."""
-    os.makedirs(os.path.dirname(CANONICAL_VALIDATED_CSV), exist_ok=True)
-
-
-def get_validated_csv_path() -> str:
-    """Return the canonical path, respecting env-var override.
-
-    The env var ``VALIDATED_HYPOTHESES_CSV`` can override the canonical
-    path for deployments that need a custom location.
-    """
-    return os.environ.get("VALIDATED_HYPOTHESES_CSV", CANONICAL_VALIDATED_CSV)
+    VALID_OUTCOMES,
+    POSITIVE_OUTCOMES,
+    TOXIC_OUTCOMES,
+    NEGATIVE_OUTCOMES,
+    BONUS_OUTCOMES,
+    PENALTY_OUTCOMES,
+    VALIDATED_POSITIVE_BONUS,
+    VALIDATED_TOXIC_PENALTY,
+    EDGE_VALIDATED_TREATS,
+    EDGE_VALIDATED_TOXIC_FOR,
+    EDGE_VALIDATED_NEGATIVE_FOR,
+    edge_label_for_outcome,
+    NEO4J_DRUG_LABEL_PREFERRED,
+    NEO4J_DRUG_LABEL_LEGACY,
+    NEO4J_DRUG_LABELS,
+    NEO4J_DISEASE_LABEL,
+    NEO4J_DRUG_ID_PROP,
+    NEO4J_DRUG_NAME_PROP,
+    NEO4J_DISEASE_ID_PROP,
+    NEO4J_DISEASE_NAME_PROP,
+    ATOMIC_WRITE_TMP_SUFFIX,
+    ATOMIC_WRITE_FSYNC,
+    WRITEBACK_VERSION,
+)
