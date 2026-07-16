@@ -123,12 +123,38 @@ from urllib.parse import urlparse, urlunparse
 #   "open" / "half_open") on the canonical class -- callers that
 #   previously compared to UPPERCASE should use ``.upper()`` or migrate
 #   to lowercase.
-from _circuit_breaker import _CircuitBreaker  # noqa: E402 -- canonical impl
+# P1-011 v113 ROOT FIX (bare module imports):
+#   The bare import `from _circuit_breaker import _CircuitBreaker` only
+#   resolves if `phase1/` is on sys.path (which `phase1/__init__.py`
+#   arranges via sys.path.insert). But `phase1/__init__.py` only runs
+#   when something imports `phase1` AS A PACKAGE. If a downstream
+#   consumer imports `phase1.database.connection` from a context where
+#   `phase1/__init__.py` has NOT yet executed (e.g. a direct
+#   `python -m phase2.drugos_graph` invocation where phase2 imports
+#   phase1.database.connection before phase1's __init__ finishes), the
+#   bare import raises `ModuleNotFoundError: No module named
+#   '_circuit_breaker'`.
+#
+#   ROOT FIX: try the absolute package-qualified import FIRST (works
+#   when phase1 is a proper package on sys.path), then fall back to the
+#   bare import (works when phase1/ itself is on sys.path, e.g. when
+#   running `cd phase1 && python -c "from database.connection import ..."`).
+#   This makes the module importable from EVERY context without depending
+#   on __init__.py having run first. The same pattern is applied to the
+#   `database.base` import below.
+try:
+    from phase1._circuit_breaker import _CircuitBreaker  # absolute (preferred)
+except ImportError:  # pragma: no cover -- fallback for bare-import contexts
+    from _circuit_breaker import _CircuitBreaker  # noqa: E402 -- canonical impl
 
 # [ARCH-02] Import Base from database.base to eliminate circular-import risk.
 # Previously, models.py imported Base from connection.py while connection.py
 # lazily imported from models.py — creating a fragile circular dependency.
-from database.base import Base  # noqa: E402
+# P1-011 v113 ROOT FIX: same try/except fallback as above.
+try:
+    from phase1.database.base import Base  # absolute (preferred)
+except ImportError:  # pragma: no cover -- fallback for bare-import contexts
+    from database.base import Base  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module logger — MUST be defined BEFORE any code that references it.
