@@ -47,7 +47,22 @@ CORE_NODE_TYPES = ["Compound", "Disease", "Gene", "Protein", "Pathway",
                    # dual-write". Neo4j labels with spaces require backtick
                    # quoting (``:``Side Effect````) which is fragile and
                    # error-prone. The fix: standardize on "MedDRA_Term".
-                   "MedDRA_Term"]  # "Side Effect" deprecated — see v38 fix
+                   "MedDRA_Term",  # "Side Effect" deprecated — see v38 fix
+                   # v109 ROOT FIX (P2-004): "Drug" was referenced by
+                   # CORE_EDGE_TYPES entry ("Drug", "validated_treats",
+                   # "Disease") at line 136 but was NOT in CORE_NODE_TYPES
+                   # — invariant violation. The data flywheel creates
+                   # "Drug" nodes from literature-validated treatment
+                   # records (separate from "Compound" nodes which are
+                   # sourced from ChEMBL/DrugBank structural records).
+                   # ROOT FIX: add "Drug" as a CORE_NODE_TYPE alias. The
+                   # ``NODE_LABEL_LOWERCASE`` map (below) already maps
+                   # both "Compound" and "Drug" to "drug" — so they are
+                   # the SAME Phase 3 node type, but stored as distinct
+                   # Neo4j labels in Phase 2 (allowing the data flywheel
+                   # to distinguish literature-validated from
+                   # structurally-derived drug records).
+                   "Drug"]
 
 # Extended node types from DRKG (13 entity types)
 # NOTE: 'Protein' is NOT in DRKG; DRKG uses 'Gene' for both gene and protein

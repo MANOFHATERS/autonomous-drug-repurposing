@@ -2880,6 +2880,28 @@ class GraphEdgeLoader:
                     # eventually apply "high-priority source wins" semantics
                     # in a future patch without re-architecting the Cypher.
                     if create_or_merge == "MERGE":
+                        # v109 ROOT FIX (P2-010): the previous ``ON MATCH SET
+                        # r += row.props`` OVERWROTE ALL edge properties on
+                        # every re-load. If the same edge was loaded by two
+                        # different sources (e.g. ChEMBL with
+                        # pchembl_value=8.5 and DrugBank with no
+                        # pchembl_value), the second load would overwrite
+                        # the first's pchembl_value to null, silently
+                        # corrupting the scientific data. The audit caught
+                        # this as a HIGH-severity data-corruption bug.
+                        #
+                        # ROOT FIX: on MATCH, do NOT touch the data
+                        # properties (``row.props``). Only update the
+                        # lineage metadata (``_updated_at`` and
+                        # ``_version``). This preserves the first-loaded
+                        # data values. If an operator wants to refresh
+                        # data, they must DELETE the edge and re-CREATE it
+                        # (an explicit, audited operation — not a silent
+                        # side-effect of MERGE).
+                        #
+                        # The ``SET r._pipeline_run_id = $run_id`` is kept
+                        # because it tracks which pipeline run last
+                        # touched the edge (lineage metadata, not data).
                         cypher = (
                             f"UNWIND $batch AS row\n"
                             f"MATCH (src:{safe_src} {{id: row.src_id}})\n"
@@ -2887,7 +2909,7 @@ class GraphEdgeLoader:
                             f"MERGE (src)-[r:{safe_rel}]->(dst)\n"
                             f"ON CREATE SET r += row.props, "
                             f"r._created_at = $loaded_at\n"
-                            f"ON MATCH SET r += row.props, "
+                            f"ON MATCH SET "
                             f"r._updated_at = $loaded_at, "
                             f"r._version = coalesce(r._version, 0) + 1\n"
                             f"SET r._pipeline_run_id = $run_id"

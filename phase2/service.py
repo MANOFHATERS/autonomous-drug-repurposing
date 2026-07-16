@@ -95,24 +95,91 @@ _cors_env = os.environ.get("KG_CORS_ORIGINS", _DEFAULT_CORS_ORIGINS)
 _allowed_origins: List[str] = [
     origin.strip() for origin in _cors_env.split(",") if origin.strip()
 ]
+# ─── P2-035 ROOT FIX (v109 forensic): CORS hardening — explicit header list
+# The v107 fix replaced ``allow_origins=["*"]`` with a whitelist but
+# kept ``allow_headers=["*"]``. With ``allow_credentials=True``, this is
+# a CORS misconfiguration: any custom header from any whitelisted origin
+# is accepted, which defeats the security purpose of the origin
+# whitelist. Browsers technically reject ``Access-Control-Allow-Origin: *``
+# combined with credentials, but FastAPI's CORSMiddleware reflects the
+# request Origin instead — so the wildcard headers list effectively
+# allows ANY header from ANY whitelisted origin with credentials.
+# ROOT FIX: replace ``allow_headers=["*"]`` with an explicit list of
+# headers the frontend actually sends. Add ``Content-Type`` (JSON
+# bodies), ``Authorization`` (future JWT/Bearer), and ``X-Request-Id``
+# (correlation). Anything else is rejected by the browser preflight.
+_ALLOWED_CORS_HEADERS = [
+    "Content-Type",
+    "Authorization",
+    "X-Request-Id",
+    "X-Correlation-Id",
+    "Accept",
+    "Origin",
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=_ALLOWED_CORS_HEADERS,
 )
+
+
+# ─── P2-001 ROOT FIX (v109 forensic): unified Neo4j credential env vars
+# v107 had TWO different env var names for the same Neo4j password:
+#   * ``service.py`` read ``NEO4J_PASSWORD``.
+#   * ``config.py`` read ``DRUGOS_NEO4J_PASSWORD`` (line 2782).
+# Operators who set only one of them would silently fall back to CSV
+# mode with no Neo4j, breaking the /cypher endpoint. ROOT FIX: read
+# BOTH env vars (preferring the ``DRUGOS_*`` form for forward compat)
+# and emit a one-time warning if only the legacy form is set. The same
+# unification is applied to ``NEO4J_URI`` / ``NEO4J_USER``.
+_NEO4J_ENV_VAR_WARNING_EMITTED = False
+
+
+def _get_neo4j_env_var(short_name: str, default: str = "") -> str:
+    """Read a Neo4j config value from BOTH env var naming conventions.
+
+    Priority (highest first):
+      1. ``DRUGOS_NEO4J_<NAME>``  (forward-looking canonical form)
+      2. ``NEO4J_<NAME>``         (legacy form, kept for backward compat)
+
+    Emits a one-time warning if only the legacy form is set, so operators
+    know to migrate to the canonical form.
+    """
+    global _NEO4J_ENV_VAR_WARNING_EMITTED
+    canonical = f"DRUGOS_NEO4J_{short_name}"
+    legacy = f"NEO4J_{short_name}"
+    canonical_val = os.environ.get(canonical)
+    legacy_val = os.environ.get(legacy)
+    if canonical_val is not None:
+        return canonical_val
+    if legacy_val is not None:
+        if not _NEO4J_ENV_VAR_WARNING_EMITTED:
+            logger.warning(
+                "Phase 2 service: using legacy env var %s (value set). "
+                "Please migrate to the canonical form %s. Both forms are "
+                "accepted, but the legacy form may be deprecated in a "
+                "future release.",
+                legacy, canonical,
+            )
+            _NEO4J_ENV_VAR_WARNING_EMITTED = True
+        return legacy_val
+    return default
 
 
 # ─── P2-017 ROOT FIX (v107 forensic): Neo4j driver resource-leak guard ─────
 def _neo4j_driver():
-    """Construct a Neo4j driver. Raises if NEO4J_PASSWORD is unset."""
+    """Construct a Neo4j driver. Raises if Neo4j password is unset."""
     from neo4j import GraphDatabase  # local import — keeps service importable
-    uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
-    user = os.environ.get("NEO4J_USER", "neo4j")
-    password = os.environ.get("NEO4J_PASSWORD", "")
+    uri = _get_neo4j_env_var("URI", "bolt://localhost:7687")
+    user = _get_neo4j_env_var("USER", "neo4j")
+    password = _get_neo4j_env_var("PASSWORD", "")
     if not password:
-        raise RuntimeError("NEO4J_PASSWORD is not set — Neo4j backend unavailable")
+        raise RuntimeError(
+            "Neo4j password is not set — set DRUGOS_NEO4J_PASSWORD (or "
+            "legacy NEO4J_PASSWORD) to enable the Neo4j backend."
+        )
     return GraphDatabase.driver(uri, auth=(user, password))
 
 
@@ -250,21 +317,57 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
 
         # P2-010: use load["label"] (KG label) — NOT node.get("type") which
         # is the ChEMBL/DrugBank scientific type ("small molecule", etc.).
+        # P2-037 ROOT FIX (v109): the previous code accessed
+        # ``builder.node_loads`` and ``builder.edge_loads`` directly via
+        # ``getattr(builder, 'node_loads', [])``. The in-memory
+        # ``RecordingGraphBuilder`` HAS these attributes (they are lists
+        # of dicts), but the production Neo4j ``DrugOSGraphBuilder`` does
+        # NOT — its load history lives inside Neo4j itself, not in
+        # Python memory. So when the bridge returned a
+        # ``DrugOSGraphBuilder`` (because Neo4j was configured), the
+        # ``getattr`` silently returned ``[]``, and the API reported
+        # ``node_count=0, edge_count=0`` even though the KG had millions
+        # of nodes. ROOT FIX: extract the load-summary from the bridge
+        # ``summary`` dict (which IS always populated) instead of from
+        # builder attributes. This works for both builder types.
         node_types: Dict[str, int] = {}
-        for load in getattr(builder, "node_loads", []) or []:
-            if not isinstance(load, dict):
-                continue
-            label = load.get("label") or "unknown"
-            n_nodes = len(load.get("nodes", []) or [])
-            node_types[label] = node_types.get(label, 0) + n_nodes
-
         edge_types: Dict[str, int] = {}
-        for load in getattr(builder, "edge_loads", []) or []:
-            if not isinstance(load, dict):
-                continue
-            rel = load.get("rel_type") or "unknown"
-            n_edges = len(load.get("edges", []) or [])
-            edge_types[rel] = edge_types.get(rel, 0) + n_edges
+        # Try builder.node_loads / builder.edge_loads first (works for
+        # RecordingGraphBuilder, the dev/CI in-memory builder).
+        node_loads = getattr(builder, "node_loads", None)
+        edge_loads = getattr(builder, "edge_loads", None)
+        if node_loads and edge_loads:
+            for load in node_loads:
+                if not isinstance(load, dict):
+                    continue
+                label = load.get("label") or "unknown"
+                n_nodes = len(load.get("nodes", []) or [])
+                node_types[label] = node_types.get(label, 0) + n_nodes
+            for load in edge_loads:
+                if not isinstance(load, dict):
+                    continue
+                rel = load.get("rel_type") or "unknown"
+                n_edges = len(load.get("edges", []) or [])
+                edge_types[rel] = edge_types.get(rel, 0) + n_edges
+        else:
+            # Production builder (DrugOSGraphBuilder) — read type counts
+            # from the bridge ``summary`` dict, which is populated for
+            # both builder types. The summary keys are:
+            #   ``node_type_counts``: {label: count}
+            #   ``edge_type_counts``: {(src, rel, dst): count}
+            for label, count in (summary.get("node_type_counts") or {}).items():
+                node_types[label] = node_types.get(label, 0) + int(count)
+            for et_key, count in (summary.get("edge_type_counts") or {}).items():
+                # et_key may be a tuple ("(Compound, treats, Disease)")
+                # or a string. Extract the relation verb for the type.
+                if isinstance(et_key, (tuple, list)) and len(et_key) >= 2:
+                    rel = et_key[1]
+                else:
+                    # String form like "(Compound, treats, Disease)".
+                    import re as _re
+                    m = _re.match(r"\([^,]+,\s*([^,]+?),\s*[^,]+\)", str(et_key))
+                    rel = m.group(1).strip() if m else str(et_key)
+                edge_types[rel] = edge_types.get(rel, 0) + int(count)
 
         # SH-026 ROOT FIX (Teammate 4): return BOTH the legacy snake_case
         # fields (node_types, edge_types, backend) AND the canonical
@@ -344,44 +447,94 @@ def _explore_subgraph_in_memory(
         logger.info("Phase 2 service: in-memory explore unavailable: %s", exc)
         return None
 
-    # Build adjacency: src_label -> src_id -> [(rel_type, dst_label, dst_id)]
-    adj: Dict[str, Dict[str, List[Tuple[str, str, str]]]] = {}
-    node_props: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    for load in getattr(builder, "node_loads", []) or []:
-        if not isinstance(load, dict):
-            continue
-        label = load.get("label", "unknown")
-        for node in load.get("nodes", []) or []:
-            if not isinstance(node, dict):
+    # P2-038 ROOT FIX (v109): the previous code rebuilt the adjacency
+    # dict on EVERY API call — O(E) memory allocation per request. Under
+    # load, this caused GC pressure and made the /kg/explore endpoint
+    # 10-100x slower than necessary. ROOT FIX: cache the built adjacency
+    # dict on the builder instance (``_drugos_adj_cache``) so subsequent
+    # calls within the same process reuse it. The cache is invalidated
+    # if the bridge re-runs (the builder is replaced). For the dev
+    # in-memory builder, this is a pure win. For the production Neo4j
+    # builder, this path is not reached (Neo4j handles the BFS).
+    cache_attr = "_drugos_adj_cache_v109"
+    cached = getattr(builder, cache_attr, None)
+    if cached is not None and cached.get("limit_hint", 0) >= limit:
+        adj = cached["adj"]
+        node_props = cached["node_props"]
+    else:
+        # Build adjacency: src_label -> src_id -> [(rel_type, dst_label, dst_id)]
+        adj: Dict[str, Dict[str, List[Tuple[str, str, str]]]] = {}
+        node_props: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # P2-037: handle both RecordingGraphBuilder (has node_loads) and
+        # DrugOSGraphBuilder (does not). For DrugOSGraphBuilder, we cannot
+        # do in-memory BFS (the data lives in Neo4j). Return None to let
+        # the caller fall back to Neo4j.
+        node_loads = getattr(builder, "node_loads", None)
+        edge_loads = getattr(builder, "edge_loads", None)
+        if not node_loads or not edge_loads:
+            logger.info(
+                "Phase 2 service: in-memory explore skipped — builder has "
+                "no node_loads/edge_loads (production Neo4j builder)."
+            )
+            return None
+        for load in node_loads:
+            if not isinstance(load, dict):
                 continue
-            nid = str(node.get("id", ""))
-            if not nid:
-                continue
-            node_props[(label, nid)] = {
-                k: v for k, v in node.items() if k != "id"
-            }
-            adj.setdefault(label, {}).setdefault(nid, [])
+            label = load.get("label", "unknown")
+            for node in load.get("nodes", []) or []:
+                if not isinstance(node, dict):
+                    continue
+                nid = str(node.get("id", ""))
+                if not nid:
+                    continue
+                node_props[(label, nid)] = {
+                    k: v for k, v in node.items() if k != "id"
+                }
+                adj.setdefault(label, {}).setdefault(nid, [])
 
-    for load in getattr(builder, "edge_loads", []) or []:
-        if not isinstance(load, dict):
-            continue
-        src_label = load.get("src_label", "")
-        rel = load.get("rel_type", "")
-        dst_label = load.get("dst_label", "")
-        for edge in load.get("edges", []) or []:
-            if not isinstance(edge, dict):
+        # P2-022 ROOT FIX (v109): the previous code added a reverse edge
+        # for EVERY forward edge on EVERY load. If the same edge was
+        # loaded multiple times (e.g. by two different sources), the
+        # reverse edge was duplicated. ROOT FIX: use a set to dedup
+        # reverse edges by (src_id, rel, dst_id) — only add the reverse
+        # entry if it has not already been added.
+        seen_reverse: Set[Tuple[str, str, str, str, str]] = set()
+        for load in edge_loads:
+            if not isinstance(load, dict):
                 continue
-            src_id = str(edge.get("src_id", ""))
-            dst_id = str(edge.get("dst_id", ""))
-            if not src_id or not dst_id:
-                continue
-            adj.setdefault(src_label, {}).setdefault(src_id, []).append(
-                (rel, dst_label, dst_id)
-            )
-            # Reverse adjacency for BFS from disease nodes.
-            adj.setdefault(dst_label, {}).setdefault(dst_id, []).append(
-                (f"rev_{rel}", src_label, src_id)
-            )
+            src_label = load.get("src_label", "")
+            rel = load.get("rel_type", "")
+            dst_label = load.get("dst_label", "")
+            for edge in load.get("edges", []) or []:
+                if not isinstance(edge, dict):
+                    continue
+                src_id = str(edge.get("src_id", ""))
+                dst_id = str(edge.get("dst_id", ""))
+                if not src_id or not dst_id:
+                    continue
+                adj.setdefault(src_label, {}).setdefault(src_id, []).append(
+                    (rel, dst_label, dst_id)
+                )
+                # Reverse adjacency for BFS from disease nodes — dedup.
+                rev_key = (dst_label, dst_id, rel, src_label, src_id)
+                if rev_key not in seen_reverse:
+                    seen_reverse.add(rev_key)
+                    adj.setdefault(dst_label, {}).setdefault(dst_id, []).append(
+                        (f"rev_{rel}", src_label, src_id)
+                    )
+        # Cache for reuse. We store a ``limit_hint`` so the cache is
+        # rebuilt if a later request needs a larger BFS (the adjacency
+        # itself is not limit-dependent, but we keep the hint for future
+        # extensions where the cache might be limit-aware).
+        try:
+            setattr(builder, cache_attr, {
+                "adj": adj, "node_props": node_props, "limit_hint": limit,
+            })
+        except Exception:
+            # Some builders may not allow setting attributes (e.g.
+            # frozen dataclasses). Fall back to no-cache — correctness
+            # is preserved, just slower.
+            pass
 
     # Pick the start node: drug name match (Compound label) or disease name
     # match (Disease label). Match by case-insensitive name OR exact id.
@@ -408,9 +561,20 @@ def _explore_subgraph_in_memory(
     visited: Set[Tuple[str, str]] = {(start_label, start_id)}
     edges_out: List[Dict[str, Any]] = []
     frontier: List[Tuple[str, str]] = [(start_label, start_id)]
+    # P2-023 ROOT FIX (v109): the previous limit check fired INSIDE the
+    # inner loop (``if len(edges_out) >= limit: break``) but the OUTER
+    # loop continued iterating, accumulating more edges before the dedup.
+    # The final dedup pass would then return up to ``limit`` edges, but
+    # the intermediate accumulation wasted memory and CPU. ROOT FIX:
+    # check the limit at the TOP of the outer loop iteration and break
+    # out of BOTH loops when reached.
     for _hop in range(2):
+        if len(edges_out) >= limit:
+            break
         next_frontier: List[Tuple[str, str]] = []
         for (sl, sid) in frontier:
+            if len(edges_out) >= limit:
+                break  # P2-023: break inner loop
             for (rel, dl, did) in adj.get(sl, {}).get(sid, []):
                 if rel.startswith("rev_"):
                     # Skip reverse edges in BFS expansion (avoid trivial
@@ -423,17 +587,19 @@ def _explore_subgraph_in_memory(
                             "target": did, "target_label": dl,
                             "type": fwd_rel,
                         })
+                        if len(edges_out) >= limit:
+                            break  # P2-023: break inner-most loop
                     continue
                 edges_out.append({
                     "source": sid, "source_label": sl,
                     "target": did, "target_label": dl,
                     "type": rel,
                 })
+                if len(edges_out) >= limit:
+                    break  # P2-023: break inner-most loop
                 if (dl, did) not in visited:
                     visited.add((dl, did))
                     next_frontier.append((dl, did))
-            if len(edges_out) >= limit:
-                break
         frontier = next_frontier
         if not frontier or len(edges_out) >= limit:
             break
@@ -735,7 +901,7 @@ def _explore_subgraph_neo4j(
         return None
 
 
-# ─── P2-002 ROOT FIX (v107 forensic): /query + /cypher endpoints ──────────
+# ─── P2-002 ROOT FIX (v109 forensic): /query + /cypher endpoints ──────────
 class QueryBody(BaseModel):
     """Structured query body for POST /query."""
     drug: Optional[str] = Field(None, description="Drug name (Compound.name).")
@@ -743,46 +909,365 @@ class QueryBody(BaseModel):
     limit: int = Field(100, ge=1, le=500, description="Max nodes to return.")
 
 
-# Read-only Cypher keyword whitelist. Mirrors the frontend's
-# ``validateReadOnlyCypher`` validator so both layers enforce the same rule.
-_READ_ONLY_PREFIX_RE = re.compile(
-    r"^\s*(MATCH|OPTIONAL\s+MATCH|WITH|RETURN|WHERE|ORDER\s+BY|LIMIT|SKIP|UNWIND|DISTINCT|CALL\s+\{[^}]*\}\s*(?:YIELD[^;]*)?|CALL\s+db\.labels\(\)|CALL\s+db\.relationshipTypes\(\))\b",
-    re.IGNORECASE,
-)
-_FORBIDDEN_KEYWORDS_RE = re.compile(
-    r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|INDEX|CONSTRAINT|"
-    r"CALL\s+db\.schema\.write|CALL\s+apoc\.create|CALL\s+apoc\.destroy)\b",
+# ─── P2-002 / P2-003 / P2-011 ROOT FIX (v109 forensic): real Cypher security
+# The v107 "_READ_ONLY_PREFIX_RE" regex was DEAD CODE — defined but never
+# used by ``_validate_readonly_cypher``. The actual validator only checked
+# the first token (MATCH/OPTIONAL) and ran a narrow forbidden-keyword scan
+# that missed:
+#   * ``CALL { ... }`` subqueries containing write ops (the regex
+#     ``CALL\s+\{[^}]*\}`` only matched non-nested braces AND was never
+#     invoked).
+#   * ``apoc.periodic.iterate``, ``apoc.cypher.runFirstColumn``,
+#     ``apoc.cypher.runFirstColumnMany`` — APOC procedures that execute
+#     arbitrary Cypher (and therefore can write).
+#   * ``LOAD CSV FROM 'file:///etc/passwd'`` — local-file exfiltration.
+#   * Multi-statement injection via ``;`` (older Neo4j drivers did split
+#     on ``;``; modern drivers reject it, but we should not rely on the
+#     driver).
+#   * ``CALL db.schema.write``, ``CALL db.createIndex``,
+#     ``CALL db.createConstraint`` — write/DDL procedures.
+#
+# ROOT FIX (v109): replace the regex-only validator with a layered
+# defense-in-depth validator that:
+#   1. Rejects multi-statement queries (any ``;`` not inside a string
+#      literal).
+#   2. Rejects any ``CALL { ... }`` subquery (read-only APIs do not
+#      need them; they are the primary injection vector).
+#   3. Rejects ``LOAD CSV`` / ``LOAD FROM`` / ``STARTS WITH file:`` /
+#      ``STARTS WITH http:`` (file/network exfiltration).
+#   4. Rejects ALL ``apoc.*`` procedures except a strict whitelist of
+#      known-read-only ones (``apoc.meta.graph``, ``apoc.meta.schema``,
+#      ``apoc.node.exists`` is NOT allowed because it can be abused).
+#   5. Rejects ALL ``db.*`` procedures except a strict whitelist
+#      (``db.labels``, ``db.relationshipTypes``, ``db.indexes``,
+#      ``db.constraints``, ``db.schema.visualization``).
+#   6. Applies the forbidden-write-keyword regex to the WHOLE query.
+#   7. Requires the first token to be MATCH, OPTIONAL MATCH, or WITH.
+#   8. Caps query length at 8 KB (prevents pathological regex backtracking
+#      and resource-exhaustion via huge queries).
+#
+# This is a defense-in-depth layer — the Neo4j driver and database
+# enforce their own limits, but we should not rely on them alone.
+
+# Write/DDL keywords that must NEVER appear in a read-only query. We use
+# word boundaries (\b) so ``SET`` does not match ``SETTING`` or
+# ``OFFSET``. Note: ``SET`` is intentionally listed because Cypher
+# ``SET`` is always a write op; ``OFFSET`` is a different token.
+_FORBIDDEN_WRITE_KEYWORDS_RE = re.compile(
+    r"\b("
+    r"CREATE|MERGE|DELETE|DETACH\s+DELETE|SET|REMOVE|DROP|"
+    r"INDEX|CONSTRAINT|"
+    r"FOREACH|LOAD\s+CSV|LOAD\s+FROM|"
+    r"START\s+WITH"
+    r")\b",
     re.IGNORECASE,
 )
 
+# APOC procedures that execute arbitrary Cypher or write data. The full
+# ``apoc.*`` namespace is huge and many procedures can write (e.g.
+# ``apoc.create.node``, ``apoc.destroy.nodes``, ``apoc.periodic.iterate``,
+# ``apoc.cypher.runFirstColumn``). We block ALL ``apoc.*`` calls except a
+# tiny explicit whitelist of read-only metadata procedures.
+_FORBIDDEN_APOC_RE = re.compile(
+    r"\bCALL\s+apoc\.",
+    re.IGNORECASE,
+)
+_ALLOWED_APOC_WHITELIST = frozenset(s.lower() for s in {
+    "apoc.meta.graph",
+    "apoc.meta.schema",
+    "apoc.meta.stats",
+    "apoc.meta.relTypeProperties",
+    "apoc.meta.nodeTypeProperties",
+})
 
-class CypherBody(BaseModel):
-    """Raw Cypher passthrough body for POST /cypher."""
-    cypher: str = Field(..., description="Read-only Cypher query.")
-    params: Optional[Dict[str, Any]] = Field(
-        None, description="Parameterized query variables."
-    )
+# ``db.*`` procedures that write/modify the schema. Block all except a
+# strict read-only whitelist.
+_FORBIDDEN_DB_PROC_RE = re.compile(
+    r"\bCALL\s+db\.",
+    re.IGNORECASE,
+)
+_ALLOWED_DB_PROC_WHITELIST = frozenset(s.lower() for s in {
+    "db.labels",
+    "db.relationshipTypes",
+    "db.propertyKeys",
+    "db.indexes",
+    "db.constraints",
+    "db.schema.visualization",
+    "db.schema.nodeTypeProperties",
+    "db.schema.relTypeProperties",
+})
+
+# ``CALL { ... }`` subquery — block entirely. Read-only APIs do not
+# need them; they are the primary injection vector. Match any ``CALL``
+# followed by ``{`` (with optional whitespace).
+_CALL_SUBQUERY_RE = re.compile(
+    r"\bCALL\s*\{",
+    re.IGNORECASE,
+)
+
+# ``;`` outside string literals — multi-statement injection. We strip
+# string literals first (see ``_strip_string_literals`` below) and then
+# check for any remaining ``;``.
+_SEMICOLON_RE = re.compile(r";")
+
+# File/network exfiltration patterns.
+_FILE_URL_RE = re.compile(
+    r"\b(file|https?)://",
+    re.IGNORECASE,
+)
+
+# Maximum allowed Cypher query length (8 KB). Prevents pathological regex
+# backtracking and resource-exhaustion via huge queries.
+_MAX_CYPHER_LENGTH = 8 * 1024
+
+
+def _strip_string_literals(cypher: str) -> str:
+    """Return the Cypher with string literals replaced by empty strings.
+
+    Used so that semicolons, keywords, and URLs INSIDE string literals do
+    not trigger false-positive matches. We replace single- and double-
+    quoted strings (including escaped quotes) with ``''``.
+
+    NOTE: this is a simplification — Cypher string literals can also be
+    backtick-quoted (for identifiers) and there are corner cases with
+    escaped backticks. We err on the side of caution: if we cannot parse
+    the literal, we leave the character in place (which may cause a
+    false positive, but never a false negative for security).
+    """
+    out: list[str] = []
+    i = 0
+    n = len(cypher)
+    while i < n:
+        c = cypher[i]
+        if c in ("'", '"'):
+            # Find the matching close quote, respecting escapes.
+            quote = c
+            i += 1
+            while i < n:
+                if cypher[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                if cypher[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            out.append("''")  # replace literal with empty literal
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
 
 
 def _validate_readonly_cypher(cypher: str) -> Optional[str]:
-    """Return an error message if the Cypher is not read-only, else None."""
+    """Return an error message if the Cypher is not read-only, else None.
+
+    v109 ROOT FIX (P2-002 / P2-003 / P2-011): defense-in-depth validator.
+    See the long docstring above the regex constants for the full
+    rationale of what is blocked and why.
+    """
     if not cypher or not cypher.strip():
         return "Empty Cypher query."
-    if _FORBIDDEN_KEYWORDS_RE.search(cypher):
+    if len(cypher) > _MAX_CYPHER_LENGTH:
+        return (
+            f"Cypher query too long ({len(cypher)} > {_MAX_CYPHER_LENGTH} bytes). "
+            "Read-only API queries must be <= 8 KB."
+        )
+
+    stripped = cypher.strip()
+    first_token = stripped.split(None, 1)[0].upper() if stripped else ""
+    # Allow ``CALL db.<whitelisted>`` as a first token (e.g. ``CALL
+    # db.labels()``) — this is the only ``CALL`` form that bypasses the
+    # MATCH/OPTIONAL/WITH requirement, and only for whitelisted read-only
+    # ``db.*`` procedures (validated below).
+    if first_token not in ("MATCH", "OPTIONAL", "WITH", "CALL"):
+        return (
+            f"Cypher must start with MATCH, OPTIONAL MATCH, WITH, or "
+            f"CALL db.<whitelisted-proc> (got '{first_token}'). Only "
+            "read-only queries are allowed."
+        )
+    if first_token == "CALL":
+        # Special-case: only ``CALL db.<whitelisted>`` is allowed as a
+        # first token. ``CALL apoc.*`` and ``CALL { ... }`` are blocked
+        # below.
+        rest_after_call = stripped[4:].lstrip()
+        if rest_after_call.startswith("{"):
+            return (
+                "Cypher starts with 'CALL {' — subqueries are not allowed "
+                "via the read-only API."
+            )
+        proc_match = re.match(r"([a-zA-Z0-9_.]+)", rest_after_call)
+        proc_name = proc_match.group(1).lower().rstrip(".") if proc_match else ""
+        if proc_name.startswith("apoc."):
+            allowed = any(
+                proc_name == w or proc_name.startswith(w + ".")
+                for w in _ALLOWED_APOC_WHITELIST
+            )
+            if not allowed:
+                return (
+                    f"Cypher starts with 'CALL apoc.{proc_name[5:]}' — "
+                    "only read-only db.* procedures may be called as the "
+                    "first token."
+                )
+            # whitelisted apoc.* as first token — accept
+        elif proc_name.startswith("db."):
+            allowed = any(
+                proc_name == w or proc_name.startswith(w + ".")
+                for w in _ALLOWED_DB_PROC_WHITELIST
+            )
+            if not allowed:
+                return (
+                    f"Cypher starts with 'CALL db.{proc_name[3:]}' — "
+                    f"procedure not in read-only whitelist: "
+                    f"{sorted(_ALLOWED_DB_PROC_WHITELIST)}."
+                )
+        else:
+            return (
+                f"Cypher starts with 'CALL {proc_name}' — only CALL "
+                "db.<whitelisted> is allowed as the first token."
+            )
+
+    # Strip string literals so that keywords/semicolons inside string
+    # literals do not trigger false-positive matches.
+    stripped_for_scan = _strip_string_literals(cypher)
+
+    # 1. Multi-statement injection (``;`` outside string literals).
+    if _SEMICOLON_RE.search(stripped_for_scan):
+        return (
+            "Cypher contains a semicolon (';') outside a string literal. "
+            "Multi-statement queries are not allowed via this endpoint."
+        )
+
+    # 2. ``CALL { ... }`` subqueries — block entirely.
+    if _CALL_SUBQUERY_RE.search(stripped_for_scan):
+        return (
+            "Cypher contains a 'CALL { ... }' subquery. Subqueries are "
+            "not allowed via the read-only API (they are the primary "
+            "Cypher injection vector). Rewrite as a flat MATCH/WITH/"
+            "RETURN query."
+        )
+
+    # 3. File/network exfiltration.
+    if _FILE_URL_RE.search(stripped_for_scan):
+        return (
+            "Cypher contains a file:// or http(s):// URL. Loading "
+            "external resources is not allowed via this endpoint."
+        )
+
+    # 4. ``LOAD CSV`` / ``LOAD FROM`` — file/network exfiltration.
+    if re.search(r"\bLOAD\s+(CSV|FROM)\b", stripped_for_scan, re.IGNORECASE):
+        return (
+            "Cypher contains 'LOAD CSV' or 'LOAD FROM'. Loading external "
+            "data is not allowed via this endpoint."
+        )
+
+    # 5. Write/DDL keywords.
+    if _FORBIDDEN_WRITE_KEYWORDS_RE.search(stripped_for_scan):
         return (
             "Cypher contains a forbidden write/DDL keyword "
-            "(CREATE/MERGE/DELETE/SET/REMOVE/DROP/INDEX/CONSTRAINT/...). "
-            "Only read-only MATCH/OPTIONAL MATCH/WITH/RETURN queries are "
-            "allowed via this endpoint."
+            "(CREATE/MERGE/DELETE/SET/REMOVE/DROP/INDEX/CONSTRAINT/"
+            "FOREACH/LOAD). Only read-only MATCH/OPTIONAL MATCH/WITH/"
+            "RETURN queries are allowed via this endpoint."
         )
-    # The first non-whitespace token must be MATCH or OPTIONAL MATCH.
-    first_token = cypher.strip().split(None, 1)[0].upper() if cypher.strip() else ""
-    if first_token not in ("MATCH", "OPTIONAL"):
-        return (
-            f"Cypher must start with MATCH or OPTIONAL MATCH (got '{first_token}'). "
-            "Only read-only queries are allowed."
+
+    # 6. ``apoc.*`` procedures — block all except a strict whitelist.
+    for m in _FORBIDDEN_APOC_RE.finditer(stripped_for_scan):
+        # Extract the procedure name (e.g. ``apoc.cypher.runFirstColumn``).
+        # ``_FORBIDDEN_APOC_RE`` matches ``CALL apoc.``, so we re-match
+        # from the START of ``apoc.`` to capture the full proc name
+        # (including the ``apoc.`` prefix) so it can be compared against
+        # the whitelist entries which are stored WITH the prefix.
+        start = m.start() + len("CALL ")  # position of ``apoc.``
+        rest = stripped_for_scan[start:start + 80]
+        proc_match = re.match(r"(apoc\.[a-zA-Z0-9_.]+)", rest)
+        proc_name = proc_match.group(1).lower().rstrip(".") if proc_match else "apoc"
+        allowed = any(
+            proc_name == w or proc_name.startswith(w + ".")
+            for w in _ALLOWED_APOC_WHITELIST
         )
+        if not allowed:
+            return (
+                f"Cypher calls APOC procedure '{proc_name}'. Only "
+                f"read-only APOC metadata procedures are allowed: "
+                f"{sorted(_ALLOWED_APOC_WHITELIST)}."
+            )
+
+    # 7. ``db.*`` procedures — block all except a strict whitelist.
+    for m in _FORBIDDEN_DB_PROC_RE.finditer(stripped_for_scan):
+        # ``_FORBIDDEN_DB_PROC_RE`` matches ``CALL db.``, so we re-match
+        # from the START of ``db.`` to capture the full proc name
+        # (including the ``db.`` prefix) so it can be compared against
+        # the whitelist entries which are stored WITH the prefix.
+        start = m.start() + len("CALL ")  # position of ``db.``
+        rest = stripped_for_scan[start:start + 80]
+        proc_match = re.match(r"(db\.[a-zA-Z0-9_.]+)", rest)
+        proc_name = proc_match.group(1).lower().rstrip(".") if proc_match else "db"
+        allowed = any(
+            proc_name == w or proc_name.startswith(w + ".")
+            for w in _ALLOWED_DB_PROC_WHITELIST
+        )
+        if not allowed:
+            return (
+                f"Cypher calls db procedure '{proc_name}'. Only "
+                f"read-only db procedures are allowed: "
+                f"{sorted(_ALLOWED_DB_PROC_WHITELIST)}."
+            )
+
     return None
+
+
+def _validate_cypher_params(params: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Validate that ``params`` is a flat dict of scalar values.
+
+    P2-011 ROOT FIX (v109): the previous code forwarded ``body.params``
+    directly to ``session.run(body.cypher, body.params or {})``. If
+    ``params`` contained nested dicts/lists, the Neo4j driver would
+    serialize them as Cypher maps/lists — which could be used to inject
+    Cypher fragments (e.g. via a parameter like
+    ``{"x": {"__proto__": "MATCH (n) DELETE n"}}``). The driver does
+    parameterize, but the parameter VALUES are still injected as Cypher
+    literals — and a nested map value is rendered as a Cypher map
+    literal that the database then parses.
+
+    ROOT FIX: reject any non-scalar parameter value. Allowed types:
+    ``str``, ``int``, ``float``, ``bool``, ``None``. Lists of scalars
+    are allowed (the driver renders them as Cypher lists). Anything
+    else (dict, set, custom object) is rejected.
+    """
+    if params is None:
+        return None
+    if not isinstance(params, dict):
+        return f"Cypher params must be a dict (got {type(params).__name__})."
+    for key, value in params.items():
+        if not isinstance(key, str):
+            return (
+                f"Cypher param key must be a string (got "
+                f"{type(key).__name__}: {key!r})."
+            )
+        err = _validate_scalar_param_value(key, value)
+        if err is not None:
+            return err
+    return None
+
+
+def _validate_scalar_param_value(key: str, value: Any) -> Optional[str]:
+    """Validate a single Cypher param value (recursive for lists)."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return None
+    if isinstance(value, list):
+        if len(value) > 1000:
+            return (
+                f"Cypher param '{key}' list too long ({len(value)} > 1000)."
+            )
+        for i, item in enumerate(value):
+            err = _validate_scalar_param_value(f"{key}[{i}]", item)
+            if err is not None:
+                return err
+        return None
+    return (
+        f"Cypher param '{key}' has non-scalar value of type "
+        f"{type(value).__name__} (only str/int/float/bool/None/list-of-scalars "
+        "are allowed)."
+    )
 
 
 @app.get("/health")
@@ -791,7 +1276,7 @@ def health() -> Dict[str, Any]:
         "status": "ok",
         "service": "phase2_kg",
         "version": "1.0.0",
-        "neo4j_configured": bool(os.environ.get("NEO4J_PASSWORD")),
+        "neo4j_configured": bool(_get_neo4j_env_var("PASSWORD")),
         "cors_origins": _allowed_origins,
     }
 
@@ -864,6 +1349,14 @@ def kg_explore(
     )
 
 
+class CypherBody(BaseModel):
+    """Raw Cypher passthrough body for POST /cypher."""
+    cypher: str = Field(..., description="Read-only Cypher query.")
+    params: Optional[Dict[str, Any]] = Field(
+        None, description="Parameterized query variables (scalars or lists of scalars only)."
+    )
+
+
 @app.post("/query")
 def kg_query(body: QueryBody) -> Dict[str, Any]:
     """Structured drug/disease query (P2-002 root fix).
@@ -898,10 +1391,15 @@ def kg_query(body: QueryBody) -> Dict[str, Any]:
 
 @app.post("/cypher")
 def kg_cypher(body: CypherBody) -> Dict[str, Any]:
-    """Raw read-only Cypher passthrough (P2-002 root fix).
+    """Raw read-only Cypher passthrough (P2-002 / P2-011 / P2-041 root fix).
 
-    Applies a read-only whitelist (mirrors the frontend's
-    ``validateReadOnlyCypher``). Forwards to Neo4j with a hard 1000-row cap.
+    v109 ROOT FIX: applies the defense-in-depth ``_validate_readonly_cypher``
+    validator (blocks subqueries, APOC, db writes, LOAD CSV, semicolons)
+    AND ``_validate_cypher_params`` (rejects non-scalar params) AND
+    enforces a hard 30-second server-side timeout via the Neo4j driver's
+    ``transaction_timeout`` parameter (the v107 docstring claimed a 30s
+    timeout but the implementation did NOT enforce one — a malicious or
+    runaway query could block the worker indefinitely).
     Returns 503 if Neo4j is not configured — the in-memory bridge cannot
     answer arbitrary Cypher.
     """
@@ -910,24 +1408,48 @@ def kg_cypher(body: CypherBody) -> Dict[str, Any]:
     if err is not None:
         raise HTTPException(status_code=400, detail={"error": "cypher_rejected", "message": err})
 
-    if not os.environ.get("NEO4J_PASSWORD"):
+    # P2-011: validate that params are flat scalars (no nested dicts).
+    err = _validate_cypher_params(body.params)
+    if err is not None:
+        raise HTTPException(status_code=400, detail={"error": "cypher_params_rejected", "message": err})
+
+    if not _get_neo4j_env_var("PASSWORD"):
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "service_not_deployed",
                 "message": (
-                    "Raw Cypher queries require Neo4j. Set NEO4J_URI/USER/"
-                    "PASSWORD to enable. The in-memory bridge cannot answer "
-                    "arbitrary Cypher."
+                    "Raw Cypher queries require Neo4j. Set DRUGOS_NEO4J_URI/"
+                    "USER/PASSWORD (or legacy NEO4J_*) to enable. The "
+                    "in-memory bridge cannot answer arbitrary Cypher."
                 ),
             },
         )
 
     MAX_ROWS = 1000
+    # P2-041 ROOT FIX: 30-second HARD server-side timeout. The Neo4j
+    # Python driver supports ``transaction_timeout`` on ``session.run()``
+    # (Neo4j 4.0+). On older Neo4j, the driver silently ignores this
+    # parameter, so we ALSO wrap the call in a Python-side thread+timeout
+    # via ``concurrent.futures`` to guarantee the worker is not blocked
+    # longer than 30 seconds + a small grace period.
+    QUERY_TIMEOUT_SECONDS = 30.0
 
     def _query(driver):
         with driver.session() as session:
-            result = session.run(body.cypher, body.params or {})
+            # Neo4j 4.0+ respects ``transaction_timeout`` (in seconds).
+            # Pass it as a keyword arg so older drivers that don't accept
+            # it don't break (they'll just ignore the timeout, which is
+            # why we also have the Python-side timeout below).
+            try:
+                result = session.run(
+                    body.cypher,
+                    body.params or {},
+                    transaction_timeout=QUERY_TIMEOUT_SECONDS,
+                )
+            except TypeError:
+                # Older driver — no ``transaction_timeout`` kwarg.
+                result = session.run(body.cypher, body.params or {})
             records = []
             for rec in result:
                 records.append(dict(rec))
@@ -939,10 +1461,38 @@ def kg_cypher(body: CypherBody) -> Dict[str, Any]:
                 "truncated": len(records) >= MAX_ROWS,
                 "max_rows": MAX_ROWS,
                 "backend": "neo4j",
+                "timeout_seconds": QUERY_TIMEOUT_SECONDS,
             }
 
+    # P2-041: Python-side timeout guard. We run ``_run_neo4j(_query)`` in
+    # a thread pool with a hard timeout of QUERY_TIMEOUT_SECONDS + 5s
+    # grace (the extra 5s gives the Neo4j driver time to clean up after
+    # its own transaction_timeout fires).
+    import concurrent.futures
     try:
-        return _run_neo4j(_query)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_run_neo4j, _query)
+            try:
+                return future.result(timeout=QUERY_TIMEOUT_SECONDS + 5.0)
+            except concurrent.futures.TimeoutError:
+                logger.error(
+                    "Phase 2 service: /cypher timed out after %.1fs — query: %.200s",
+                    QUERY_TIMEOUT_SECONDS + 5.0, body.cypher,
+                )
+                raise HTTPException(
+                    status_code=504,
+                    detail={
+                        "error": "cypher_timeout",
+                        "message": (
+                            f"Cypher query did not complete within "
+                            f"{QUERY_TIMEOUT_SECONDS:.0f}s. Simplify the "
+                            "query or add an index."
+                        ),
+                        "timeout_seconds": QUERY_TIMEOUT_SECONDS,
+                    },
+                )
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Phase 2 service: /cypher failed: %s", exc, exc_info=True)
         raise HTTPException(

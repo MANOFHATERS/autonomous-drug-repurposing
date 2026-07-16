@@ -2692,11 +2692,44 @@ def train_transe(
                         rel_idx, ht, tt, exc,
                     )
                 failed.add(rel_idx)
-                # Preserve the previous epoch's pool for this relation
-                # so per-epoch refreshes don't lose ground on flaky
-                # relations.
-                if rel_idx in per_relation_neg_pools:
-                    new_pools[rel_idx] = per_relation_neg_pools[rel_idx]
+                # v109 ROOT FIX (P2-034): the previous code preserved the
+                # PREVIOUS EPOCH'S pool for failed relations. This meant
+                # that if a relation failed in epoch 1, the SAME stale
+                # negatives were used for ALL subsequent epochs — no
+                # fresh negative signal, no exploration. The model
+                # effectively memorized the stale negatives instead of
+                # learning generalizable representations.
+                # ROOT FIX: fall back to RANDOM sampling (which always
+                # succeeds) so the model sees FRESH random negatives
+                # each epoch. Random negatives are less informative than
+                # type-correct ones, but they are FAR better than stale
+                # ones (which provide zero gradient signal after the
+                # first epoch). Log at DEBUG level (not WARNING) to
+                # avoid audit-log spam on every epoch.
+                try:
+                    # Get the total entity count from the negative sampler.
+                    _n_entities = getattr(negative_sampler, "n_entities", 0) or 0
+                    if _n_entities > 0:
+                        import random as _random_p34
+                        _heads = [_random_p34.randrange(_n_entities) for _ in range(pool_size)]
+                        _tails = [_random_p34.randrange(_n_entities) for _ in range(pool_size)]
+                        new_pools[rel_idx] = (_heads, _tails)
+                        logger.debug(
+                            "P2-034 v109: relation_idx=%d fell back to "
+                            "RANDOM negative sampling (fresh each epoch). "
+                            "pool_size=%d, n_entities=%d.",
+                            rel_idx, pool_size, _n_entities,
+                        )
+                    elif rel_idx in per_relation_neg_pools:
+                        # Last resort: no entity count available, use the
+                        # previous pool (this branch is rarely hit).
+                        new_pools[rel_idx] = per_relation_neg_pools[rel_idx]
+                except Exception:
+                    # If random fallback also fails (e.g. n_entities is
+                    # invalid), preserve the previous pool as a last
+                    # resort. This is the v107 behavior.
+                    if rel_idx in per_relation_neg_pools:
+                        new_pools[rel_idx] = per_relation_neg_pools[rel_idx]
         if log_failures and failed:
             logger.critical(
                 "NEG_SAMPLER_DEGRADED: %d/%d relations had no "
@@ -3561,6 +3594,35 @@ def train_transe(
                         f"{len(pos_scores)} * {_num_negatives} = "
                         f"{len(pos_scores) * _num_negatives}. The negative "
                         f"sampler may be broken. (v39 P2 #22 fix)"
+                    )
+                # v109 ROOT FIX (P2-033): the previous assertion only checked
+                # that ``pos_expanded.shape[0] == neg_scores.shape[0]`` and
+                # later that the full shapes match. But it did NOT verify
+                # the RELATIONSHIP between ``pos_expanded`` and ``pos_scores``
+                # — specifically, that ``pos_expanded.shape[0]`` equals
+                # ``len(pos_scores) * _num_negatives``. If ``repeat_interleave``
+                # was called with the wrong dimension (e.g. ``dim=1`` on a
+                # 1D tensor) or with the wrong count, ``pos_expanded`` could
+                # have a different length that happens to match
+                # ``neg_scores.shape[0]`` (if the negative sampler has the
+                # same bug). The shapes would match each other but BOTH
+                # would be wrong — silent gradient corruption.
+                # ROOT FIX: explicitly verify the repeat_interleave
+                # relationship. ``pos_expanded.shape[0]`` MUST equal
+                # ``len(pos_scores) * _num_negatives``.
+                _expected_pos_expanded_len = len(pos_scores) * _num_negatives
+                if pos_expanded.shape[0] != _expected_pos_expanded_len:
+                    raise RuntimeError(
+                        f"P2-033 v109 ROOT FIX: pos_expanded has "
+                        f"{pos_expanded.shape[0]} elements but expected "
+                        f"len(pos_scores) * _num_negatives = "
+                        f"{len(pos_scores)} * {_num_negatives} = "
+                        f"{_expected_pos_expanded_len}. The "
+                        f"repeat_interleave call may have used the wrong "
+                        f"dimension or count. pos_scores shape: "
+                        f"{tuple(pos_scores.shape)}, _num_negatives: "
+                        f"{_num_negatives}, pos_expanded shape: "
+                        f"{tuple(pos_expanded.shape)}."
                     )
                 # P2-033 ROOT FIX (v107): explicit full-shape assertion.
                 # The previous code only checked ``shape[0]`` (the first

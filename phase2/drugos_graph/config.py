@@ -6033,7 +6033,33 @@ EDGE_DEDUP_EARLY_REDUCTION_THRESHOLD: int = int(
 # patient-safety system. The new default is 0.0 ("no trust until
 # proven"). Callers MUST set confidence explicitly when constructing
 # an EntityMapping.
+#
+# v109 ROOT FIX (P2-009): the previous default of 0.0 was CORRECT for
+# ``EntityMapping`` construction (where 0.0 means "no trust until proven"),
+# but it was ALSO used as the fallback for ``coalesce(r.confidence, 0.0)``
+# in ``graph_queries.find_drug_candidates`` multi-hop Cypher scoring.
+# When edges did not have a ``.confidence`` property (which is the common
+# case for DRKG / STRING / DisGeNET edges that have no per-edge confidence
+# score), the multi-hop score became ``0.0 * 0.0 = 0.0`` — making every
+# multi-hop candidate tie at score 0.0 with arbitrary ordering.
+# ROOT FIX: introduce a SEPARATE constant for the multi-hop edge-score
+# fallback. ``DEFAULT_EDGE_CONFIDENCE`` is 1.0 because:
+#   - 1-hop: a direct edge with no confidence contributes 1.0 (the edge
+#     existence IS the signal — this matches the docx's "Drug → inhibits →
+#     Protein" model where the edge itself is the assertion).
+#   - 2-hop: ``1.0 * 1.0 = 1.0`` for two no-confidence edges (both edges
+#     contribute full signal). If one edge HAS a confidence of 0.8, the
+#     score becomes ``0.8 * 1.0 = 0.8`` — properly down-weighted.
+#   - 3-hop: ``1.0 * 1.0 * 1.0 = 1.0`` for three no-confidence edges.
+# This preserves relative ordering: edges with explicit confidence
+# scores are down-weighted, edges without confidence contribute neutral
+# 1.0 weight. The ``DEFAULT_ENTITY_CONFIDENCE`` (0.0) is kept for
+# ``EntityMapping`` construction — these are DIFFERENT semantic contexts
+# and conflating them was the original bug.
 DEFAULT_ENTITY_CONFIDENCE: float = 0.0
+DEFAULT_EDGE_CONFIDENCE: float = float(
+    os.environ.get("DRUGOS_DEFAULT_EDGE_CONFIDENCE", "1.0")
+)
 
 # D5-012 / D12-003 -- replaces hardcoded "|" on entity_resolver.py:77.
 # RATIONALE: DrugBank exports atc_codes as a pipe-delimited string.

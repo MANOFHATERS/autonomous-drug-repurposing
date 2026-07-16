@@ -97,6 +97,7 @@ from .config import (  # noqa: E402
     SIDER_EDGE_TYPE,
     SIDER_LEGACY_EDGE_TYPE,
     DEFAULT_ENTITY_CONFIDENCE,
+    DEFAULT_EDGE_CONFIDENCE,
     ENTITY_CONFIDENCE_REJECT_THRESHOLD,
     EDGE_EVIDENCE_STRENGTH,
     EDGE_CAUSALITY,
@@ -1404,7 +1405,7 @@ class DrugOSGraphQueries:
 
         # ── Build UNION ALL branches ──
         queries: list[str] = []
-        dc = DEFAULT_ENTITY_CONFIDENCE  # 0.0 per config.py
+        dc = DEFAULT_EDGE_CONFIDENCE  # v109 P2-009: 1.0 (edge existence = full signal)
 
         # ── 1-hop: Direct drug-disease edges ──
         # Fixes KILL-3: Remove 'palliates'/'indication' (not in CORE_EDGE_TYPES)
@@ -1739,7 +1740,7 @@ class DrugOSGraphQueries:
             extra={"run_id": RUN_ID, "correlation_id": CORRELATION_ID},
         )
 
-        dc = DEFAULT_ENTITY_CONFIDENCE
+        dc = DEFAULT_EDGE_CONFIDENCE  # v109 P2-009: 1.0 (edge existence = full signal)
         lineage = _build_query_metadata()
 
         # Fixes 4.1: max_depth is validated int -- safe f-string interpolation
@@ -1867,7 +1868,7 @@ class DrugOSGraphQueries:
         else:
             match_clause = "MATCH (center {id: $node_id})"
 
-        dc = DEFAULT_ENTITY_CONFIDENCE
+        dc = DEFAULT_EDGE_CONFIDENCE  # v109 P2-009: 1.0 (edge existence = full signal)
         lineage = _build_query_metadata()
 
         # Fixes 8.11: Combine into single query with OPTIONAL MATCH
@@ -1987,7 +1988,7 @@ class DrugOSGraphQueries:
         )
 
         lineage = _build_query_metadata()
-        dc = DEFAULT_ENTITY_CONFIDENCE
+        dc = DEFAULT_EDGE_CONFIDENCE  # v109 P2-009: 1.0 (edge existence = full signal)
         se_limit = DEFAULT_SAFETY_PROFILE_LIMIT
 
         side_effects: list[dict[str, Any]] = []
@@ -2258,7 +2259,7 @@ class DrugOSGraphQueries:
         )
 
         results: dict[str, bool] = {}
-        dc = DEFAULT_ENTITY_CONFIDENCE
+        dc = DEFAULT_EDGE_CONFIDENCE  # v109 P2-009: 1.0 (edge existence = full signal)
         min_conf = ENTITY_CONFIDENCE_REJECT_THRESHOLD
 
         # Build UNWIND parameter list
