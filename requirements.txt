@@ -118,8 +118,15 @@ stable-baselines3>=2.2
 # ChEMBL/UniProt pipelines (Bio.Seq, Bio.PDB) so it is not a new
 # transitive dependency.
 biopython>=1.83
-# pytest is needed by the Phase 3/4 test suites (tests/test_*.py).
-pytest>=7.4
+# IN-075 ROOT FIX: removed `pytest>=7.4` from requirements.txt. pytest
+# is a DEV dependency — it should NOT be in the production requirements
+# file. The previous entry here (`pytest>=7.4`) plus the entry in
+# requirements-dev.txt (`pytest>=7.4.0`) was a version-drift code smell
+# (pip resolves them as equivalent, but the inconsistency signals a
+# lack of dependency hygiene). pytest now lives ONLY in
+# requirements-dev.txt (which `-r requirements.txt`'s for dev installs).
+# If any production code path actually needs pytest (e.g., a runtime
+# test runner), add it explicitly with a comment explaining why.
 
 # ─── RT-005 ROOT FIX (Team Member 17) + Phase 6 V1 launch: Literature Cross-Check ──
 # The V1 launch contract (project docx Section 8) requires:

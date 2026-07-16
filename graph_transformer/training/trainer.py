@@ -2124,14 +2124,19 @@ def retrain_on_validated(
     # were NEVER DEFINED, causing UnboundLocalError at line 1959
     # (``row.get(OUTCOME_COL)``). The fix: ALWAYS import the schema
     # constants at the top of the function (with a fallback if the
-    # common module is unavailable), so they're defined regardless of
+    # shared module is unavailable), so they're defined regardless of
     # whether validated_csv_path was passed.
+    #
+    # SH-027 ROOT FIX: import DIRECTLY from `shared.contracts.writeback`
+    # (the AUTHORITATIVE source), NOT via the deprecated
+    # `common.validated_hypotheses_schema` re-export shim. The shim is
+    # marked DEPRECATED in its own docstring and is slated for removal.
     try:
         import sys as _sys_mod
         _repo_root = str(_Path(__file__).resolve().parents[2])
         if _repo_root not in _sys_mod.path:
             _sys_mod.path.insert(0, _repo_root)
-        from common.validated_hypotheses_schema import (
+        from shared.contracts.writeback import (
             CANONICAL_VALIDATED_CSV,
             OUTCOME_COL,
             OUTCOME_VALIDATED_POSITIVE,

@@ -40,11 +40,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ─── Python build deps (torch CPU + PyG + scientific stack) ─────────────
-# Pin torch to 2.1.x CPU build for reproducible installs. PyG wheels are
-# built against a specific torch version; using torch==2.1.2 ensures the
-# PyG 2.4.0 wheels from data.pyg.org match exactly.
+# IN-070 ROOT FIX (forensic, root-level — torch/PyG version mismatch):
+#   The previous Dockerfile installed ``torch==2.2.2+cpu`` but fetched
+#   PyG wheels from ``https://data.pyg.org/whl/torch-2.2.0+cpu.html``
+#   (the wheel page for torch 2.2.0, NOT 2.2.2). The ``+pt22cpu`` tag
+#   on torch-scatter / torch-sparse means "PyTorch 2.2 CPU" — but the
+#   wheel was built against torch 2.2.0's C++ ABI, not 2.2.2's. While
+#   torch 2.2.x is ABI-stable within the minor version (so this works
+#   in 99% of cases), the 1% edge case is an ``undefined symbol``
+#   crash at runtime when a torch_scatter op uses a C++ symbol that
+#   changed between 2.2.0 and 2.2.2. This is extremely hard to debug
+#   because the import succeeds — the crash only happens when the
+#   specific op is called.
+#
+#   ROOT FIX: align torch and PyG wheels to the EXACT same patch
+#   version (2.2.0). The PyG project's official recommendation is to
+#   use the EXACT torch version match. We use 2.2.0 (not 2.2.2)
+#   because the PyG wheel page is published under the 2.2.0 URL —
+#   using 2.2.2 would require checking if a 2.2.2 wheel page exists,
+#   which adds a network dependency to the build.
+#
+#   Downgrading from 2.2.2 to 2.2.0 is safe — both are patch releases
+#   within the 2.2 minor line, and the 2.2.0 → 2.2.2 changelog
+#   contains only bug fixes (no API changes that affect PyG).
 RUN pip install --no-cache-dir --prefix=/install \
-    "torch==2.2.2+cpu" \
+    "torch==2.2.0+cpu" \
     --index-url https://download.pytorch.org/whl/cpu
 
 RUN pip install --no-cache-dir --prefix=/install \
