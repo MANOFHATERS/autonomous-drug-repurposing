@@ -464,17 +464,28 @@ def _validate_uniprot_id(value: Optional[str]) -> Optional[str]:
     #        test-fixture IDs that should be accepted are TEST-prefixed
     #        (explicit, self-documenting). Real UniProt accessions are
     #        always 6+ chars and match the strict regex above.
-    import os as _os
-    _env = _os.environ.get("DRUGOS_ENVIRONMENT", "prod").lower()
-    _allow_test = _env in ("dev", "development", "test", "ci")
-    if _allow_test and value.upper().startswith("TEST"):
-        return value
+    # P1-028 v113 ROOT FIX: the previous code accepted TEST-prefixed UniProt
+    # IDs (e.g. TEST001) in dev/test/ci environments. But the DB CHECK
+    # constraint (migration 016) enforces the canonical UniProt regex
+    # `^[OPQ][0-9][A-Z0-9]{3}[0-9]$` OR `^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$`
+    # — which TEST001 does NOT match. So the Python validator passed the
+    # value, the loader built an INSERT, and the DB rejected it with
+    # CheckViolation. Tests passed on SQLite (no CHECK enforced) but FAILED
+    # on PostgreSQL integration tests (CHECK enforced).
+    #
+    # ROOT FIX: remove the TEST-prefix acceptance ENTIRELY. Test fixtures
+    # MUST use real UniProt accessions (e.g. P04637 for TP53, P00533 for
+    # EGFR). This eliminates the dev/prod asymmetry. The
+    # DRUGOS_ENVIRONMENT check is removed — there is no longer any
+    # environment where TEST-prefixed IDs are valid.
     raise ValueError(
         f"Invalid UniProt accession: '{value}'. "
         "Must match pattern like P69999 or Q9Y6K9. "
-        "Test-fixture IDs (TEST... prefix only) are rejected "
-        "in production/staging environments (set DRUGOS_ENVIRONMENT=dev "
-        "to allow TEST-prefixed fixtures)."
+        "P1-028 v113: TEST-prefixed fixture IDs are NO LONGER accepted in "
+        "any environment (they violated the DB CHECK constraint on "
+        "PostgreSQL). Test fixtures MUST use real UniProt accessions "
+        "(e.g. P04637 for TP53, P00533 for EGFR, Q9Y6K9 for a generic "
+        "test protein)."
     )
 
 
@@ -795,6 +806,25 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # -- validators --
     @validates("inchikey")
     def _validate_inchikey(self, key: str, value: Optional[str]) -> Optional[str]:
+        # P1-007 v113 ROOT FIX: Drug.inchikey is nullable=False, unique=True.
+        # The shared _validate_inchikey() function returns None for None input
+        # (because it's also used by nullable columns like
+        # DrugCandidate.canonical_inchikey). But for Drug, a None or empty
+        # string would pass the Python validator and then fail at INSERT with
+        # a confusing IntegrityError. ROOT FIX: reject None and empty strings
+        # HERE with a clear ValueError naming the SYNTH-prefix convention for
+        # biologics. This gives developers an actionable error message instead
+        # of a cryptic NOT NULL constraint violation.
+        if value is None or (isinstance(value, str) and value.strip() == ""):
+            raise ValueError(
+                "Drug.inchikey cannot be NULL or empty. The Drug table "
+                "requires a non-NULL InChIKey for every record. Biologics "
+                "(antibodies, proteins, cell therapies) that cannot have a "
+                "real InChIKey MUST use a SYNTH-prefixed surrogate key "
+                "(e.g. 'SYNTH-ANTIBODY-TRASTUZUMAB'). See "
+                "entity_resolution.drug_resolver._create_canonical_entry "
+                "for the SYNTH-key generation logic."
+            )
         return _validate_inchikey(value)
 
     @validates("max_phase")
@@ -2688,8 +2718,10 @@ class PipelineRun(Base, IDMixin, TimestampMixin):
     __table_args__ = (
         # [DES-07] Source must be a known pipeline
         CheckConstraint(
-            "source IN ('chembl', 'drugbank', 'uniprot', 'string', "
-            "'disgenet', 'omim', 'pubchem')",
+            # P1-023 v113 ROOT FIX: add drugbank_open, chembl_activities,
+            # omim_susceptibility to match migration 001's extended whitelist.
+            "source IN ('chembl', 'drugbank', 'drugbank_open', 'uniprot', 'string', "
+            "'disgenet', 'omim', 'omim_susceptibility', 'pubchem', 'chembl_activities')",
             name="chk_pipeline_runs_source",
         ),
         # [DQ-08] Duration must be non-negative

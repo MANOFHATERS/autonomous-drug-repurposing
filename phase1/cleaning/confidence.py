@@ -232,20 +232,33 @@ def classify_confidence(
     # divergent tier labels that corrupt the KG.
     _ensure_lockstep_verified()
 
-    # Defensive invariant (SCI-12): the caller (validate_gda_scores) is
-    # responsible for clipping and coercing before this function is
-    # called.  If we ever see a None or NaN score here, the contract has
-    # been violated -- fail LOUDLY with a real exception (not assert,
-    # which is disabled by `python -O`).
+    # P1-032 v113 ROOT FIX (defensive coercion for public API):
+    #   The previous code raised ValueError if score is None or NaN,
+    #   claiming "validate_gda_scores should have coerced NaN -> 0.0
+    #   first." But this function is PUBLIC (exported in __all__). A
+    #   caller that does NOT use validate_gda_scores (e.g. a future
+    #   pipeline, a test, an ad-hoc script) hits this ValueError with
+    #   no clear remediation. The error message says "should have
+    #   coerced" but doesn't say HOW.
+    #
+    #   ROOT FIX: coerce None and NaN to 0.0 DEFENSIVELY (with a WARNING
+    #   log so the caller can trace the unexpected input). This makes the
+    #   public API safe to call from any context. The 0.0 score classifies
+    #   as "sub_weak" (the lowest tier), which is the scientifically
+    #   correct classification for an unknown score.
     if score is None:
-        raise ValueError(
-            "classify_confidence invariant violated: score is None "
-            "(validate_gda_scores should have coerced NaN -> 0.0 first)"
+        logger.warning(
+            "classify_confidence: score is None (validate_gda_scores "
+            "should have coerced NaN -> 0.0 first). Coercing to 0.0 "
+            "defensively — classify as 'sub_weak'."
         )
-    if pd.isna(score):
-        raise ValueError(
-            f"classify_confidence invariant violated: score is NaN ({score!r})"
+        score = 0.0
+    elif pd.isna(score):
+        logger.warning(
+            "classify_confidence: score is NaN (%r). Coercing to 0.0 "
+            "defensively — classify as 'sub_weak'.", score,
         )
+        score = 0.0
 
     # v84 FORENSIC ROOT FIX (BUG #49): removed the deprecated
     # ``allow_negative=False`` code path (dead code -- the default was

@@ -47,6 +47,41 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# SH-035 ROOT FIX: import URL constants from the canonical
+# shared.contracts.urls module. The previous code hardcoded the path
+# strings ("/validate", "/rank", "/health") which silently drifted
+# from the shared contract. Now the service registers the EXACT same
+# path strings the frontend imports from frontend/contracts/api_contracts.ts
+# (which mirrors shared.contracts.urls).
+try:
+    from shared.contracts.urls import (
+        URL_HEALTH as _URL_HEALTH,
+        URL_RANK as _URL_RANK,
+        URL_RANK_BY_DRUG as _URL_RANK_BY_DRUG,
+        URL_VALIDATE as _URL_VALIDATE,
+    )
+except Exception:  # Defensive fallback for stripped-down deployments.
+    _URL_HEALTH = "/health"
+    _URL_RANK = "/rank"
+    _URL_RANK_BY_DRUG = "/rank/{drug}"
+    _URL_VALIDATE = "/validate"
+
+# SH-002/SH-003 ROOT FIX: import the canonical outcome enum + column
+# names from the shared contract. The previous code hardcoded a 4-value
+# set in the /validate handler — which happened to match the shared
+# contract, but the hardcoded copy could drift. Now the set is sourced
+# from shared.contracts.writeback.VALID_OUTCOMES so any change to the
+# canonical enum is automatically picked up.
+try:
+    from shared.contracts.writeback import VALID_OUTCOMES as _VALID_OUTCOMES
+except Exception:  # Defensive fallback.
+    _VALID_OUTCOMES = (
+        "validated_positive",
+        "validated_negative",
+        "validated_toxic",
+        "invalidated",
+    )
+
 logger = logging.getLogger("rl.service")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
 
@@ -349,7 +384,7 @@ def _load_candidates_from_checkpoint(
     return []
 
 
-@app.get("/health")
+@app.get(_URL_HEALTH)
 def health() -> Dict[str, Any]:
     return {
         "status": "ok",
@@ -447,7 +482,7 @@ def _rank_impl(
     }
 
 
-@app.get("/rank")
+@app.get(_URL_RANK)
 def rank_get(
     drug: Optional[str] = Query(None),
     disease: Optional[str] = Query(None),
@@ -461,7 +496,7 @@ def rank_get(
     return _rank_impl(drug, disease, limit, offset)
 
 
-@app.get("/rank/{drug}")
+@app.get(_URL_RANK_BY_DRUG)
 def rank_by_drug(
     drug: str,
     limit: int = Query(50, ge=1, le=500),
@@ -471,7 +506,7 @@ def rank_by_drug(
     return _rank_impl(drug=drug, disease=None, limit=limit, offset=offset)
 
 
-@app.post("/rank")
+@app.post(_URL_RANK)
 def rank_post(req: RankRequest) -> Dict[str, Any]:
     """Get ranked hypotheses with body filters."""
     # INT-022: offset from query params (POST body doesn't include it).
@@ -505,6 +540,10 @@ class ValidateRequest(BaseModel):
     Matches the ValidatedHypothesis dataclass in phase4/writeback.py.
     The frontend's RlValidateRequestSchema (ml-contracts.ts) is the
     TypeScript mirror of this Pydantic model — the two MUST stay in sync.
+
+    SH-004 ROOT FIX: the `outcome` field accepts the 4 canonical
+    values from shared.contracts.writeback.VALID_OUTCOMES. The
+    frontend's ValidateRequest type mirrors this enum exactly.
     """
     drug: str
     disease: str
@@ -516,7 +555,7 @@ class ValidateRequest(BaseModel):
     original_rl_rank: Optional[int] = None
 
 
-@app.post("/validate")
+@app.post(_URL_VALIDATE)
 def validate(req: ValidateRequest) -> Dict[str, Any]:
     """Write a validated hypothesis back to all 3 phases (data flywheel).
 
@@ -544,14 +583,13 @@ def validate(req: ValidateRequest) -> Dict[str, Any]:
       - 400: invalid outcome enum value
       - 500: writeback failed (CSV append error, Neo4j connection error, etc.)
     """
-    # Validate the outcome enum (Pydantic accepts any string for `outcome`
-    # because we typed it as `str` for forward-compat with new outcomes).
-    valid_outcomes = {
-        "validated_positive",
-        "validated_negative",
-        "validated_toxic",
-        "invalidated",
-    }
+    # SH-002 + SH-035 ROOT FIX: validate the outcome enum against the
+    # CANONICAL shared contract set (VALID_OUTCOMES), not a hardcoded
+    # copy. The previous hardcoded set happened to match the shared
+    # contract, but a hardcoded copy can silently drift. Sourcing the
+    # set from `shared.contracts.writeback.VALID_OUTCOMES` guarantees
+    # any change to the canonical enum is picked up here automatically.
+    valid_outcomes = set(_VALID_OUTCOMES)
     if req.outcome not in valid_outcomes:
         raise HTTPException(
             status_code=400,

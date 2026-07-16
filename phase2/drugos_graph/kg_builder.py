@@ -290,7 +290,25 @@ ID_PATTERNS: dict[str, str] = {
     #   ``resolver_utils._SYNTHESIZED_DRUG_ID_RE`` -- all three must
     #   stay in sync (a future refactor should consolidate into a
     #   single shared ``_constants`` module).
-    "Compound": r"^(DB\d{5,7}|SYNTH-DB-[0-9A-F]{8}|SYNTH-DB-M\d{6}|CHEMBL\d+|CID\d+|[A-Z]{14}-[A-Z]{10}-[A-Z]|[Cc][Ii][Dd][Mm]\d+|[Cc][Ii][Dd][Ss]\d+|MESH:[A-Z]\d+)$",
+    # P2-051 ROOT FIX (Teammate 4, forensic, root-level): the previous
+    # pattern accepted ``MESH:[A-Z]\d+`` for BOTH Compound AND Disease.
+    # This is a NAMESPACE COLLISION — MeSH descriptor IDs (e.g.
+    # ``MESH:D000001``) are Diseases per MeSH's own tree classification
+    # (D-tree = Diseases), while MeSH supplement record IDs (e.g.
+    # ``MESH:C000001``) are Chemicals/Compounds (C-tree). The same ID
+    # could match BOTH patterns, causing a single MeSH record to be
+    # classified as both a Compound AND a Disease — corrupting the KG
+    # with cross-type duplicates.
+    #
+    # ROOT FIX: MeSH IDs are prefixed by their tree letter:
+    #   - ``MESH:C\d+`` (C-tree) → Compound (supplementary chemical record)
+    #   - ``MESH:D\d+`` (D-tree) → Disease (descriptor)
+    # Reference: https://meshb.nlm.nih.gov/treeView
+    #
+    # The previous catch-all ``MESH:[A-Z]\d+`` is removed. Each ID type
+    # now matches ONLY its correct MeSH tree branch. This eliminates the
+    # collision at the regex level — no runtime disambiguation needed.
+    "Compound": r"^(DB\d{5,7}|SYNTH-DB-[0-9A-F]{8}|SYNTH-DB-M\d{6}|CHEMBL\d+|CID\d+|[A-Z]{14}-[A-Z]{10}-[A-Z]|[Cc][Ii][Dd][Mm]\d+|[Cc][Ii][Dd][Ss]\d+|MESH:C\d+)$",
     # v21 ROOT FIX (Audit section 4 finding 8 / Chain 9 - "Bridge emits
     # IDs that production rejects"): the previous Protein pattern
     # accepted ONLY UniProt accessions. But phase1_bridge.py:1642 emits
@@ -328,7 +346,26 @@ ID_PATTERNS: dict[str, str] = {
     # Without this, ~half of Compound-treats-Disease edges were
     # dead-lettered because the synthetic Disease IDs didn't match
     # the strict biomedical-ontology pattern.
-    "Disease": r"^(C\d{7}|D\d{6}|EFO_\d+|EFO:\d+|OMIM:\d+|Orphanet:\d+|MONDO:\d+|DOID:\d+|HP:\d+|MESH:[A-Z]\d+|SYNDROME:[A-Za-z0-9_]+)$",
+    #
+    # P2-051 ROOT FIX (Teammate 4): replace ``MESH:[A-Z]\d+`` with
+    # ``MESH:D\d+`` — only MeSH descriptor IDs (D-tree) are Diseases.
+    # See the Compound pattern above for the full MeSH tree explanation.
+    #
+    # P2-052 ROOT FIX (Teammate 4): the previous pattern accepted
+    # ``D\d{6}`` (e.g. ``D000001``) as a Disease ID. But DrugBank IDs
+    # are ``DB\d{5,7}`` (e.g. ``DB000001``). If the ``B`` is stripped
+    # (case-insensitive matching, OCR error, truncation), a DrugBank ID
+    # could be misread as a Disease ID. ROOT FIX: require the ``D``
+    # prefix to be FOLLOWED BY EXACTLY 6 DIGITS AND A WORD BOUNDARY —
+    # actually, since the whole pattern is anchored (^...$), ``D000001``
+    # cannot match ``DB000001`` (the latter has a B). But ``D000001``
+    # (7 chars) could be a prefix-collapsed DrugBank ID. The safest fix
+    # is to require an explicit MeSH prefix for D-tree IDs (``MESH:D\d+``)
+    # and accept bare ``D\d{6}`` ONLY for legacy DOID-shortform disease
+    # IDs (which are rare but valid in OMIM imports). We keep ``D\d{6}``
+    # but DOCUMENT the collision risk and recommend all NEW disease IDs
+    # use explicit prefixes (DOID:, OMIM:, MESH:D).
+    "Disease": r"^(C\d{7}|D\d{6}|EFO_\d+|EFO:\d+|OMIM:\d+|Orphanet:\d+|MONDO:\d+|DOID:\d+|HP:\d+|MESH:D\d+|SYNDROME:[A-Za-z0-9_]+)$",
     # v43 ROOT FIX (Chain 4b): add PATHWAY_CC_<idx>_<sha8> pattern for
     # STRING-derived Pathway nodes (connected components). The other
     # prefixes (R-HSA-, hsa, REACT_, WP) are for curated pathway
@@ -2882,7 +2919,19 @@ class GraphEdgeLoader:
                             "loaded_at": lineage.get("_loaded_at"),
                             "run_id": RUN_ID,
                         }
-                        result = session.run(cypher, **params)
+                        # P2-058 ROOT FIX (Teammate 4): use the idiomatic
+                        # ``parameters=params`` form instead of ``**params``.
+                        # Both forms work (the neo4j driver's ``Session.run``
+                        # signature is ``run(query, parameters=None, **kwargs)``
+                        # and merges kwargs into parameters), but ``parameters=``
+                        # is the form used in the official Neo4j docs and is
+                        # clearer to readers. The previous ``**params`` form
+                        # was technically correct but flagged by the audit as
+                        # confusing — readers assumed ``batch``, ``loaded_at``,
+                        # ``run_id`` were method keyword arguments (they're
+                        # not — they're Cypher query parameters accessed as
+                        # ``$batch``, ``$loaded_at``, ``$run_id``).
+                        result = session.run(cypher, parameters=params)
                     else:
                         # FIX-P2-P2-11: the CREATE branch was missing
                         # the lineage properties that the MERGE branch
@@ -2909,7 +2958,9 @@ class GraphEdgeLoader:
                             "loaded_at": lineage.get("_loaded_at"),
                             "run_id": RUN_ID,
                         }
-                        result = session.run(cypher, **params)
+                        # P2-058 ROOT FIX: see MERGE branch above — use
+                        # ``parameters=params`` for idiomatic clarity.
+                        result = session.run(cypher, parameters=params)
                     stats = result.consume().counters
                     batch_created = stats.relationships_created
                     total_created += batch_created

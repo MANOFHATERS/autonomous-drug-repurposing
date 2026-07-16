@@ -49,20 +49,42 @@ BEGIN;
 ALTER TABLE gene_disease_associations DROP CONSTRAINT IF EXISTS chk_gda_confidence_tier;
 
 -- Step 2: backfill existing rows.
--- Phase 2a: old 'weak' rows whose score is in the sub-floor band [0.0, 0.06)
---           become 'sub_weak'. (If score is NULL or in a different band, we
---           still rename the label because the old label set is being
---           retired — but we log via a COMMENT so an operator can audit.)
+-- P1-044 v113 ROOT FIX (score-range backfill, not label-equality):
+--   The previous backfill used LABEL EQUALITY:
+--     UPDATE ... SET confidence_tier = 'sub_weak' WHERE confidence_tier = 'weak';
+--     UPDATE ... SET confidence_tier = 'weak' WHERE confidence_tier = 'moderate';
+--   This renamed ALL rows with the old label, regardless of their actual
+--   score. A row with score=0.15 (which should be 'weak' under the new
+--   semantics) that was labeled 'weak' under the OLD semantics (which
+--   meant [0.0, 0.06)) would be renamed to 'sub_weak' — WRONG for
+--   score=0.15 (should be 'weak'). The migration assumed the OLD label
+--   was always consistent with the OLD score range, but stale labels
+--   (from buggy inserts) propagated the inconsistency.
+--
+--   ROOT FIX: use SCORE RANGES, not label equality. This ensures every
+--   row gets the correct new tier based on its ACTUAL score, regardless
+--   of what the old label was. Rows with NULL score are left as-is
+--   (they'll be handled by the application layer or a future cleanup).
+--   The thresholds match Piñero et al. 2020 §2.3 and the classify_confidence
+--   function in cleaning/confidence.py.
+
+-- Phase 2a: score in [0.0, 0.06) -> 'sub_weak' (below the published weak-evidence floor)
 UPDATE gene_disease_associations
 SET confidence_tier = 'sub_weak'
-WHERE confidence_tier = 'weak';
+WHERE score IS NOT NULL AND score >= 0.0 AND score < 0.06;
 
--- Phase 2b: old 'moderate' rows become 'weak' (the actual Piñero weak band).
+-- Phase 2b: score in [0.06, 0.3) -> 'weak' (the actual Piñero weak band)
 UPDATE gene_disease_associations
 SET confidence_tier = 'weak'
-WHERE confidence_tier = 'moderate';
+WHERE score IS NOT NULL AND score >= 0.06 AND score < 0.3;
 
--- Phase 2c: 'strong' rows stay 'strong' (no rename needed).
+-- Phase 2c: score in [0.3, 1.0] -> 'strong'
+-- (Migration 017 later adds 'very_strong' for [0.5, 1.0]; at migration 012
+-- time, the tier set is only sub_weak/weak/strong. Migration 017 will
+-- re-partition the [0.3, 1.0] band into [0.3, 0.5)='strong' and [0.5, 1.0]='very_strong'.)
+UPDATE gene_disease_associations
+SET confidence_tier = 'strong'
+WHERE score IS NOT NULL AND score >= 0.3 AND score <= 1.0;
 
 -- Step 3: re-add the constraint with the new label set. Use a DO block
 -- so the migration is idempotent (safe to re-run).

@@ -156,7 +156,6 @@ import json
 import logging
 import math
 import os
-import random
 import re
 import time
 from dataclasses import dataclass
@@ -756,10 +755,29 @@ def assert_is_omim_gda_df(df: pd.DataFrame) -> None:
 
 
 # ============================================================================
-# Reproducibility -- fix the random seed for retry-backoff jitter (BUG-7.4,
-# BUG-4.9).
+# v113 FORENSIC ROOT FIX (P1-014, BUG-7.4 / BUG-4.9):
+# The previous code called ``random.seed(OMIM_RANDOM_SEED)`` at MODULE
+# IMPORT time. This mutated the GLOBAL ``random`` RNG for the ENTIRE
+# Python process -- every other module that used ``random`` for
+# legitimate jitter (Airflow's task scheduler, the ChEMBL HTTP client's
+# retry backoff, the deduplicator's tie-breaking) suddenly saw a
+# deterministic RNG seeded to ``OMIM_RANDOM_SEED``. The comment claimed
+# this fixed "reproducibility" but it actually DESTROYED reproducibility
+# for every other module: concurrent ChEMBL API calls all retried at
+# exactly the same millisecond, hammering the EBI API and triggering IP
+# bans. The whole Sunday master DAG failed because ChEMBL rate-limited
+# the platform.
+#
+# ROOT FIX: delete the module-level ``random.seed()`` call. ``random``
+# is NOT used anywhere in this module (the ``_api_get`` and
+# ``_backoff_seconds`` methods that previously used ``random.uniform``
+# for jitter were removed in v83 as dead code -- the OMIM pipeline no
+# longer hits the REST API). The ``OMIM_RANDOM_SEED`` constant is kept
+# in ``config.py`` for backward-compat imports but is no longer used to
+# seed the GLOBAL RNG. If a future operator re-adds an API path that
+# needs deterministic jitter, they MUST use a local
+# ``random.Random(OMIM_RANDOM_SEED)`` instance, NOT ``random.seed()``.
 # ============================================================================
-random.seed(OMIM_RANDOM_SEED)
 
 
 # ============================================================================

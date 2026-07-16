@@ -329,8 +329,18 @@ _RE_INHIBIT = re.compile(
     # INACTIVATION, INACTIVATOR, INACTIVATE, INACTIVATES, INACTIVATED.
     # This is SAFE because _RE_ACTIVATE now uses \bACTIVAT (word
     # boundary), so INACTIVAT* cannot be mis-routed to "activates".
+    #
+    # P2-018 ROOT FIX: removed `re.IGNORECASE`. The input is ALWAYS
+    # uppercased at line 432 (``std_upper = standard_type.strip().upper()``)
+    # before any of the _RE_* regexes are applied (see usages at lines
+    # 445-452 — all use ``std_upper``, never the raw ``standard_type``).
+    # The IGNORECASE flag was DEAD CODE — it appeared to be doing
+    # something but had no effect because the input was already
+    # uppercase. Removing it makes the code HONEST about what's
+    # happening, and avoids the false impression that the regex would
+    # catch lowercase input if a future maintainer added a code path
+    # that bypassed the uppercasing.
     r"(INHIBIT|INACTIVAT|ANTAGONIST|BLOCKER|REDUC|SUPPRESS|DECREAS|DOWNREG)",
-    re.IGNORECASE,
 )
 _RE_ACTIVATE = re.compile(
     # v57 ROOT FIX (P2L-008 -- covalent inhibitors misclassified as activators):
@@ -357,16 +367,25 @@ _RE_ACTIVATE = re.compile(
     # removes the \b, or if a non-standard ChEMBL variant uses a
     # non-word delimiter before "ACTIVAT", the negative lookbehind
     # still catches "INACTIVAT*". This is the audit's recommended fix.
+    #
+    # P2-018 ROOT FIX: the negative lookbehind `(?<![A-Z])` is NOT dead
+    # code (the issue title was misleading). The input IS always
+    # uppercased at line 432, so [A-Z] correctly matches uppercase
+    # letters — the lookbehind actively prevents "ACTIVAT" from matching
+    # inside "INACTIVAT...". What WAS dead was `re.IGNORECASE` — the
+    # input is already uppercase, so the case-insensitive flag had no
+    # effect. Removed the flag.
     r"((?<![A-Z])ACTIVAT|AGONIST|STIMUL|ENHANC|INCREAS|INDUC)",
-    re.IGNORECASE,
 )
 _RE_BIND = re.compile(
+    # P2-018 ROOT FIX: removed dead `re.IGNORECASE` (input is always
+    # uppercased at line 432 before this regex is applied).
     r"(BIND|AFFINITY|DISSOCIAT|ASSOCIAT|INTERACT|COMPLEX)",
-    re.IGNORECASE,
 )
 _RE_MODULATE = re.compile(
+    # P2-018 ROOT FIX: removed dead `re.IGNORECASE` (input is always
+    # uppercased at line 432 before this regex is applied).
     r"(MODULAT|ALLOSTER|REGULAT)",
-    re.IGNORECASE,
 )
 
 

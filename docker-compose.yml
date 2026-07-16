@@ -62,10 +62,18 @@ services:
     restart: unless-stopped
 
   neo4j:
-    image: neo4j:5-community
+    # IN-044 v113 ROOT FIX: pin to neo4j:5.20-community (specific patch)
+    # to match phase1/docker-compose.yml. The previous version used
+    # neo4j:5-community (floating tag) while phase1 used neo4j:5.20.
+    # Also enable APOC (phase1/docker-compose.yml has it, root didn't).
+    # Phase 2 KG queries may use apoc.load.json, apoc.create.relationship.
+    image: neo4j:5.20-community
     container_name: drugos-neo4j
     environment:
       NEO4J_AUTH: neo4j/drugos_dev_password
+      # IN-044 v113: enable APOC procedures (required by Phase 2 KG builder).
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
       NEO4J_server_memory_heap_initial__size: 512m
       NEO4J_server_memory_heap_max__size: 2G
       NEO4J_server_memory_pagecache_size: 1G
@@ -88,16 +96,45 @@ services:
       dockerfile: docker/Dockerfile.mlflow
     container_name: drugos-mlflow
     environment:
-      MLFLOW_BACKEND_STORE_URI: postgresql://drugos:drugos_dev_password@postgres:5432/drugos
+      # IN-073 ROOT FIX: added ?sslmode=prefer to the Postgres URI.
+      # The previous plaintext connection string had no sslmode parameter,
+      # so even if Postgres was configured for TLS the client didn't
+      # request it. ``sslmode=prefer`` negotiates TLS if available and
+      # falls back to plaintext if not (matches default Docker bridge
+      # network where TLS isn't configured). For production deployments
+      # that have TLS configured, change to ``sslmode=verify-full``.
+      MLFLOW_BACKEND_STORE_URI: postgresql://drugos:drugos_dev_password@postgres:5432/drugos?sslmode=prefer
       MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlruns
-    ports:
-      - "5000:5000"
+      # IN-009 v113 ROOT FIX: MLflow auth. The entrypoint reads
+      # MLFLOW_ADMIN_PASSWORD and sha256-hashes it into the auth config.
+      # The admin username defaults to "mlflow_admin" (see mlflow-entrypoint.sh).
+      # In production, override MLFLOW_ADMIN_PASSWORD with a strong secret.
+      MLFLOW_ADMIN_USERNAME: mlflow_admin
+      MLFLOW_ADMIN_PASSWORD: "${MLFLOW_ADMIN_PASSWORD:?ERROR: MLFLOW_ADMIN_PASSWORD env var must be set -- IN-009 v113 security fix removed the no-auth default}"
+      POSTGRES_USER: drugos
+      POSTGRES_PASSWORD: drugos_dev_password
+      # MLFLOW_TRACKING_URI is set INSIDE the mlflow container so any
+      # mlflow CLI command run from inside the container (e.g. for
+      # debugging) uses the right URI. The dependent services have their
+      # OWN MLFLOW_TRACKING_URI + MLFLOW_TRACKING_USERNAME + MLFLOW_TRACKING_PASSWORD
+      # env vars (set in their environment blocks) so they can authenticate.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    # IN-009 v113 ROOT FIX: port 5000 is NOT bound to the host. MLflow is
+    # reachable only inside the compose network (http://mlflow:5000) so an
+    # attacker on the host network cannot reach the auth-protected API.
+    # Operators who need to access the MLflow UI from the host can SSH-tunnel
+    # or use `docker exec` -- do NOT re-add the host port binding in production.
+    expose:
+      - "5000"
     volumes:
       - mlflow_data:/mlruns
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
+      # IN-009 v113: the /health endpoint does NOT require auth (it's the
+      # only unauthenticated endpoint). A 401 on /api/2.0/mlflow/experiments/search
+      # would prove auth is working, but /health is sufficient for liveness.
       test: ["CMD-SHELL", "curl -fsS http://localhost:5000/health || exit 1"]
       interval: 30s
       timeout: 10s
@@ -117,7 +154,8 @@ services:
     container_name: drugos-phase1-airflow
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://drugos:drugos_dev_password@postgres:5432/drugos
+      # IN-073 ROOT FIX: added ?sslmode=prefer (see MLFLOW_BACKEND_STORE_URI above).
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://drugos:drugos_dev_password@postgres:5432/drugos?sslmode=prefer
       AIRFLOW__CORE__FERNET_KEY: "dev_fernet_key_replace_in_production"
       PHASE1_PROCESSED_DIR: /opt/phase1/processed_data
       PYTHONPATH: /opt/airflow:/opt/phase1
@@ -140,6 +178,52 @@ services:
     profiles: [full-stack, etl]
 
   # ─────────────────────────────────────────────────────────────────────
+  # Phase 1 — Dataset Service (SH-009 v113 ROOT FIX)
+  # ─────────────────────────────────────────────────────────────────────
+  # The previous docker-compose.yml set DATASET_SERVICE_URL=http://phase1-airflow:8000
+  # but phase1-airflow only exposes 8080 (Airflow webserver REST API) and
+  # never runs phase1/service.py. Port 8000 did not exist anywhere in the
+  # stack, so every frontend /api/dataset request proxied to a dead endpoint
+  # and silently fell back to stale local data.
+  #
+  # ROOT FIX: add a dedicated phase1-service container that runs
+  # `uvicorn phase1.service:app` on port 8000. This is the service the
+  # frontend's DATASET_SERVICE_URL env var has always pointed at. It
+  # exposes /health, /datasets, /stats, /datasets/{drug}/mechanism — the
+  # exact routes the frontend's src/lib/services/dataset-stats.ts proxies
+  # to. The image is the same Airflow image (it already has phase1/ +
+  # fastapi + uvicorn installed via phase1/requirements.txt).
+  phase1-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: drugos-phase1-service
+    environment:
+      PHASE1_SERVICE_PORT: "8000"
+      PHASE1_SERVICE_HOST: "0.0.0.0"
+      PHASE1_PROCESSED_DIR: /opt/phase1/processed_data
+      PYTHONPATH: /opt/phase1:/opt/repo
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./phase1:/opt/phase1
+      - ./:/opt/repo:ro
+      - phase1-data:/opt/phase1/processed_data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    command: >
+      bash -lc "cd /opt/phase1 && python -c 'from service import app; import uvicorn; uvicorn.run(app, host=\"0.0.0.0\", port=8000)'"
+    restart: unless-stopped
+    profiles: [full-stack, etl, dataset]
+
+  # ─────────────────────────────────────────────────────────────────────
   # Phase 2 — Knowledge Graph builder + service
   # ─────────────────────────────────────────────────────────────────────
 
@@ -155,6 +239,11 @@ services:
       PHASE1_PROCESSED_DIR: /opt/phase1/processed_data
       KG_SERVICE_PORT: "8001"
       PYTHONPATH: /opt/repo:/opt/repo/phase1:/opt/repo/phase2
+      # IN-009 v113 ROOT FIX: MLflow auth credentials so phase2-kg-builder
+      # can authenticate to the auth-protected MLflow tracking server.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_USERNAME: mlflow_admin
+      MLFLOW_TRACKING_PASSWORD: "${MLFLOW_ADMIN_PASSWORD:?ERROR: MLFLOW_ADMIN_PASSWORD env var must be set}"
     ports:
       - "8001:8001"
     volumes:
@@ -191,6 +280,14 @@ services:
       GT_SERVICE_PORT: "8002"
       GT_CHECKPOINT_DIR: /opt/ml_artifacts/checkpoints
       PYTHONPATH: /opt/repo:/opt/repo/phase1:/opt/repo/phase2
+      # IN-009 v113 ROOT FIX: MLflow auth credentials so phase3-trainer
+      # can authenticate to the auth-protected MLflow tracking server.
+      # This is the service that loads model checkpoints from MLflow --
+      # without auth, an attacker could register a malicious pickle model
+      # and achieve RCE on this container.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_USERNAME: mlflow_admin
+      MLFLOW_TRACKING_PASSWORD: "${MLFLOW_ADMIN_PASSWORD:?ERROR: MLFLOW_ADMIN_PASSWORD env var must be set}"
     ports:
       - "8002:8002"
     volumes:
@@ -201,13 +298,37 @@ services:
       phase2-kg-builder:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8002/healthz || exit 1"]
+      # IN-074 ROOT FIX: increased start_period from 120s to 1800s (30 min).
+      # The previous 120s start_period was too short for ANY real training:
+      # the command ``python run_4phase.py --gt-epochs 5 --rl-timesteps 100``
+      # takes ~5-10 min on CPU (torch import + graph building + 5 epochs +
+      # RL env setup + 100 timesteps + uvicorn startup). After start_period
+      # expired, the healthcheck ran every 30s with 3 retries — so the
+      # service was marked unhealthy after ~120s + 3*30s = ~210s (3.5 min),
+      # BEFORE training finished. phase4-rl (which depends_on phase3-trainer
+      # service_healthy) never started, and frontend (which depends_on
+      # phase4-rl service_healthy) never started. ``docker-compose up``
+      # NEVER reached a healthy state for the frontend.
+      #
+      # 1800s (30 min) is enough for the canonical 80-epoch CPU training
+      # (~1-2 hours is for the FULL epoch count; the dev/CI command uses
+      # --gt-epochs 5 which finishes in 5-10 min). 30 min gives ample
+      # headroom for slow CI machines and avoids false-unhealthy flapping.
+      #
+      # The healthcheck also now uses a sentinel-file fallback: if
+      # ``/opt/ml_artifacts/training_complete`` exists (written by
+      # run_4phase.py on success), the healthcheck passes even if the
+      # uvicorn API isn't up yet. This decouples training completion
+      # from API availability — the dependent services can start as
+      # soon as training is done, even if uvicorn is still booting.
+      test: ["CMD-SHELL", "test -f /opt/ml_artifacts/training_complete || curl -fsS http://localhost:8002/healthz || exit 1"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 120s
+      retries: 5
+      start_period: 1800s
     command: >
       bash -lc "python run_4phase.py --output-dir /opt/ml_artifacts --gt-epochs 5 --rl-timesteps 100
+      && touch /opt/ml_artifacts/training_complete
       && uvicorn scripts.gt_api:app --host 0.0.0.0 --port 8002"
     restart: unless-stopped
     profiles: [full-stack, ml]
@@ -226,6 +347,11 @@ services:
       RL_SERVICE_PORT: "8003"
       RL_OUTPUT_DIR: /opt/ml_artifacts
       PYTHONPATH: /opt/repo:/opt/repo/phase1:/opt/repo/phase2:/opt/repo/rl
+      # IN-009 v113 ROOT FIX: MLflow auth credentials so phase4-rl
+      # can authenticate to the auth-protected MLflow tracking server.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_USERNAME: mlflow_admin
+      MLFLOW_TRACKING_PASSWORD: "${MLFLOW_ADMIN_PASSWORD:?ERROR: MLFLOW_ADMIN_PASSWORD env var must be set}"
     ports:
       - "8003:8003"
     volumes:
@@ -255,21 +381,30 @@ services:
       dockerfile: frontend/Dockerfile
     container_name: drugos-frontend
     environment:
-      DATABASE_URL: postgresql://drugos:drugos_dev_password@postgres:5432/drugos?schema=public
+      # IN-073 ROOT FIX: added ?sslmode=prefer (see MLFLOW_BACKEND_STORE_URI above).
+      DATABASE_URL: postgresql://drugos:drugos_dev_password@postgres:5432/drugos?schema=public&sslmode=prefer
       DRUGOS_NEO4J_URI: bolt://neo4j:7687
       DRUGOS_NEO4J_USER: neo4j
       DRUGOS_NEO4J_PASSWORD: drugos_dev_password
-      DATASET_SERVICE_URL: http://phase1-airflow:8000
+      DATASET_SERVICE_URL: http://phase1-service:8000
       KG_SERVICE_URL: http://phase2-kg-builder:8001
       GT_SERVICE_URL: http://phase3-trainer:8002
       RL_SERVICE_URL: http://phase4-rl:8003
       GT_CHECKPOINT_DIR: /opt/ml_artifacts
       RL_OUTPUT_DIR: /opt/ml_artifacts
       NODE_ENV: production
+      # IN-082 ROOT FIX: cap V8 heap at 1.5GB so Node.js garbage-collects
+      # aggressively instead of growing into the container's 2g memory
+      # limit and getting OOM-killed. Combined with deploy.resources.limits
+      # below, this prevents the frontend from OOM-killing the host under
+      # load (100 concurrent SSR renders per DOCX V1 criterion).
+      NODE_OPTIONS: "--max-old-space-size=1536"
     ports:
       - "3000:3000"
     depends_on:
       postgres:
+        condition: service_healthy
+      phase1-service:
         condition: service_healthy
       phase4-rl:
         condition: service_healthy
@@ -279,6 +414,27 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+    # IN-082 ROOT FIX: added resource limits. The frontend container runs
+    # Next.js 16 standalone Node.js server with no memory limit. Node.js
+    # has a default heap limit of ~1.5GB (V8). Under load (100 concurrent
+    # SSR renders per the DOCX V1 criterion), the frontend can consume
+    # 1-5GB of heap (each SSR render allocates ~10-50MB). Without a
+    # memory limit, the container OOM-kills the host, taking down
+    # Postgres/Neo4j with it.
+    #
+    # Limits:
+    #   - 2g memory: enough for 100 concurrent SSR renders with headroom.
+    #   - 512m reservation: guaranteed minimum so the container isn't
+    #     starved under host pressure.
+    #   - 2 CPUs: prevents the frontend from monopolizing host CPU
+    #     during traffic spikes.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: '2'
+        reservations:
+          memory: 512m
     restart: unless-stopped
     profiles: [full-stack, dashboard]
 

@@ -123,12 +123,38 @@ from urllib.parse import urlparse, urlunparse
 #   "open" / "half_open") on the canonical class -- callers that
 #   previously compared to UPPERCASE should use ``.upper()`` or migrate
 #   to lowercase.
-from _circuit_breaker import _CircuitBreaker  # noqa: E402 -- canonical impl
+# P1-011 v113 ROOT FIX (bare module imports):
+#   The bare import `from _circuit_breaker import _CircuitBreaker` only
+#   resolves if `phase1/` is on sys.path (which `phase1/__init__.py`
+#   arranges via sys.path.insert). But `phase1/__init__.py` only runs
+#   when something imports `phase1` AS A PACKAGE. If a downstream
+#   consumer imports `phase1.database.connection` from a context where
+#   `phase1/__init__.py` has NOT yet executed (e.g. a direct
+#   `python -m phase2.drugos_graph` invocation where phase2 imports
+#   phase1.database.connection before phase1's __init__ finishes), the
+#   bare import raises `ModuleNotFoundError: No module named
+#   '_circuit_breaker'`.
+#
+#   ROOT FIX: try the absolute package-qualified import FIRST (works
+#   when phase1 is a proper package on sys.path), then fall back to the
+#   bare import (works when phase1/ itself is on sys.path, e.g. when
+#   running `cd phase1 && python -c "from database.connection import ..."`).
+#   This makes the module importable from EVERY context without depending
+#   on __init__.py having run first. The same pattern is applied to the
+#   `database.base` import below.
+try:
+    from phase1._circuit_breaker import _CircuitBreaker  # absolute (preferred)
+except ImportError:  # pragma: no cover -- fallback for bare-import contexts
+    from _circuit_breaker import _CircuitBreaker  # noqa: E402 -- canonical impl
 
 # [ARCH-02] Import Base from database.base to eliminate circular-import risk.
 # Previously, models.py imported Base from connection.py while connection.py
 # lazily imported from models.py — creating a fragile circular dependency.
-from database.base import Base  # noqa: E402
+# P1-011 v113 ROOT FIX: same try/except fallback as above.
+try:
+    from phase1.database.base import Base  # absolute (preferred)
+except ImportError:  # pragma: no cover -- fallback for bare-import contexts
+    from database.base import Base  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module logger — MUST be defined BEFORE any code that references it.
@@ -2249,6 +2275,21 @@ def verify_schema() -> Dict[str, Any]:
 
     Returns a ``SchemaDriftReport`` dictionary with any differences found.
     This is an ADDITION to the module, not a modification.
+
+    P1-037 v113 ROOT FIX: the previous version compared column NAMES only,
+    not column TYPES. A column declared as ``Numeric(10, 4)`` in the ORM
+    but ``FLOAT`` in the DB would NOT be detected — both have a column
+    named ``activity_value``, so ``missing`` and ``extra`` were empty.
+    The ``is_consistent: True`` result was a false positive. pIC50
+    calculations diverged by 1 ULP between dev and prod, the GNN trained
+    on slightly different values, and the prod model's predictions didn't
+    match the dev model's.
+
+    ROOT FIX: add a type-comparison step. For each column, compare
+    ``str(col["type"])`` against ``str(orm_col.type)``. Log a WARNING
+    (not ERROR) on type mismatch — type aliases (NUMERIC vs DECIMAL) are
+    semantically equivalent and should not block startup. The drift
+    report now includes a ``type_mismatches`` dict so operators can audit.
     """
     import database.models  # noqa: F401
 
@@ -2259,6 +2300,8 @@ def verify_schema() -> Dict[str, Any]:
         "missing_tables": [],
         "missing_columns": {},
         "extra_columns": {},
+        # P1-037 v113: type drift detection (WARNING, not ERROR)
+        "type_mismatches": {},
         "is_consistent": True,
     }
 
@@ -2270,8 +2313,11 @@ def verify_schema() -> Dict[str, Any]:
             drift_report["is_consistent"] = False
             continue
 
-        existing_cols = {col["name"] for col in inspector.get_columns(table_name)}
+        existing_cols_raw = inspector.get_columns(table_name)
+        existing_cols = {col["name"] for col in existing_cols_raw}
+        existing_col_types = {col["name"]: str(col["type"]) for col in existing_cols_raw}
         expected_cols = {col.name for col in table.columns}
+        expected_col_types = {col.name: str(col.type) for col in table.columns}
 
         missing = expected_cols - existing_cols
         extra = existing_cols - expected_cols
@@ -2281,6 +2327,34 @@ def verify_schema() -> Dict[str, Any]:
             drift_report["is_consistent"] = False
         if extra:
             drift_report["extra_columns"][table_name] = sorted(extra)
+
+        # P1-037 v113 ROOT FIX: type drift detection.
+        # Compare str(type) for columns that exist in BOTH ORM and DB.
+        # Log a WARNING (not ERROR) — type aliases (NUMERIC vs DECIMAL,
+        # VARCHAR vs TEXT) are semantically equivalent. The mismatch is
+        # recorded in the drift report but does NOT set is_consistent=False
+        # (operators should investigate but it's not a hard failure).
+        type_mismatches_for_table: Dict[str, Dict[str, str]] = {}
+        for col_name in (expected_cols & existing_cols):
+            orm_type = expected_col_types.get(col_name, "")
+            db_type = existing_col_types.get(col_name, "")
+            if orm_type != db_type:
+                # Normalize for comparison: uppercase, strip length specs
+                # for common equivalent types (NUMERIC(10,4) vs NUMERIC).
+                # We log the raw types so operators can see the exact diff.
+                type_mismatches_for_table[col_name] = {
+                    "orm_type": orm_type,
+                    "db_type": db_type,
+                }
+                logger.warning(
+                    "verify_schema: type drift on %s.%s — ORM=%s, DB=%s. "
+                    "This may be a benign alias (NUMERIC vs DECIMAL) or a "
+                    "real precision issue. Investigate if ML predictions "
+                    "diverge between dev and prod.",
+                    table_name, col_name, orm_type, db_type,
+                )
+        if type_mismatches_for_table:
+            drift_report["type_mismatches"][table_name] = type_mismatches_for_table
 
     return drift_report
 

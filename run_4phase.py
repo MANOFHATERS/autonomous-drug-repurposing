@@ -284,7 +284,21 @@ def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
     result = run_phase1_to_phase2(
         phase1_processed_dir=str(resolved_phase1_dir),
         builder=builder,  # RT-012: None -> bridge uses RecordingGraphBuilder
-        prefer_postgres=False,  # CSV path for dev/CI; set True for prod
+        # SH-010 ROOT FIX (Teammate 4): the previous code HARDCODED
+        # ``prefer_postgres=False``, which meant Phase 1's PostgreSQL
+        # staging DB (populated by the Phase 1 ORM loaders) was ALWAYS
+        # bypassed — even in production. The bridge silently fell back
+        # to reading Phase 1's CSV outputs, which may be stale or
+        # partial compared to the DB. ROOT FIX: read the
+        # ``DRUGOS_PREFER_POSTGRES`` env var (default: "0" for dev/CI
+        # backward compat; set to "1" in production via docker-compose
+        # / k8s configmap). When ``prefer_postgres=True`` AND the Phase
+        # 1 DB is populated, the bridge reads from the DB (authoritative
+        # source). When the DB is unavailable or empty, the bridge
+        # falls back to CSVs (existing v29 behaviour).
+        prefer_postgres=os.environ.get(
+            "DRUGOS_PREFER_POSTGRES", "0"
+        ).lower() in ("1", "true", "yes", "on"),
     )
     builder = result["builder"]
     staged = result["staged"]

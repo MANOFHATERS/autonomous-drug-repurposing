@@ -53,17 +53,77 @@ import csv
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
+# -----------------------------------------------------------------------------
+# SH-027 + SH-012 ROOT FIX: import DIRECTLY from shared.contracts.writeback
+# (the AUTHORITATIVE source), NOT via the deprecated common re-export shim.
+#
+# SH-027: the previous code imported from
+# `common.validated_hypotheses_schema` which is a thin re-export shim
+# over `shared.contracts.writeback`. Importing through the shim:
+#   1. Hides the true source of the contract from IDE / static analysis.
+#   2. Creates a false sense of "two valid import paths" — new code
+#      might import from either location, fragmenting the contract
+#      surface area.
+#   3. Breaks if the shim is removed (it's marked DEPRECATED in its
+#      own docstring — its removal is planned).
+#
+# SH-012: the previous code ALSO defined a local WRITEBACK_VERSION
+# constant ("1.0.0-rt010") that DRIFTED from the shared contract's
+# version ("2.0.0-shared-contract"). The CSV was being written with
+# the local version while readers (graph_transformer/training/trainer.py)
+# used the shared version — making it impossible to tell which schema
+# a row was written with. Now WRITEBACK_VERSION is imported from the
+# shared contract, so writer and reader agree.
+# -----------------------------------------------------------------------------
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from shared.contracts.writeback import (  # noqa: E402
+    CANONICAL_VALIDATED_CSV,
+    DRUG_COL,
+    DISEASE_COL,
+    OUTCOME_COL,
+    TIMESTAMP_COL,
+    VALIDATED_BY_COL,
+    VALIDATION_STUDY_ID_COL,
+    NOTES_COL,
+    ORIGINAL_GT_SCORE_COL,
+    ORIGINAL_RL_RANK_COL,
+    WRITEBACK_VERSION_COL,
+    WRITEBACK_CSV_COLUMNS,
+    REQUIRED_COLUMNS,
+    OUTCOME_VALIDATED_POSITIVE,
+    OUTCOME_VALIDATED_TOXIC,
+    OUTCOME_VALIDATED_NEGATIVE,
+    OUTCOME_INVALIDATED,
+    VALID_OUTCOMES,
+    POSITIVE_OUTCOMES,
+    PENALTY_OUTCOMES,
+    WRITEBACK_VERSION,            # SH-012: import from shared (was "1.0.0-rt010")
+    get_validated_csv_path,
+    ensure_csv_dir,
+)
+
 logger = logging.getLogger(__name__)
 
-# Phase 4 writeback module version
-WRITEBACK_VERSION = "1.0.0-rt010"
+# SH-012 ROOT FIX: WRITEBACK_VERSION is now imported from
+# shared.contracts.writeback (= "2.0.0-shared-contract"). The previous
+# local override ("1.0.0-rt010") caused version drift between the
+# writer (this module) and the reader (graph_transformer/training/
+# trainer.py). Removed the local override — any code that imports
+# WRITEBACK_VERSION from phase4.writeback now gets the shared value.
 
 # Outcome enum — the possible validation outcomes a pharma partner can report.
+# SH-002 ROOT FIX: this Literal now mirrors the shared contract's 4-value
+# enum (was previously 4 values locally but only 3 in rl/contracts/
+# phase4_schema.py — the drift was the bug).
 ValidationOutcome = Literal[
     "validated_positive",  # Wet lab / clinical study confirmed efficacy
     "validated_negative",  # Wet lab / clinical study confirmed NO efficacy
@@ -100,19 +160,13 @@ class ValidatedHypothesis:
 # INT-014 ROOT FIX: use the canonical path from shared schema so RL
 # ranker and GT trainer read the SAME file. No component should define
 # its own path.
-from common.validated_hypotheses_schema import (
-    CANONICAL_VALIDATED_CSV,
-    get_validated_csv_path,
-    DRUG_COL,
-    DISEASE_COL,
-    OUTCOME_COL,
-    TIMESTAMP_COL,
-    VALIDATED_BY_COL,
-    OUTCOME_VALIDATED_POSITIVE,
-    OUTCOME_VALIDATED_TOXIC,
-    POSITIVE_OUTCOMES,
-    PENALTY_OUTCOMES,
-)
+#
+# SH-027 ROOT FIX: the previous code imported the constants above from
+# `common.validated_hypotheses_schema` (a deprecated re-export shim).
+# The duplicates have been removed — the canonical imports at the top
+# of this module (from `shared.contracts.writeback`) are now the SOLE
+# source. `common.validated_hypotheses_schema` is no longer referenced
+# anywhere in this file.
 
 # Backward-compatible env var lookup (falls back to canonical schema path).
 # Read LAZILY via _get_phase1_validated_csv() so tests and runtime config
@@ -159,12 +213,12 @@ def writeback_to_phase1(vh: ValidatedHypothesis) -> Path:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     file_exists = csv_path.exists() and csv_path.stat().st_size > 0
 
-    fieldnames = [
-        "drug", "disease", "outcome", "validated_by",
-        "validation_study_id", "validated_at", "notes",
-        "original_gt_score", "original_rl_rank",
-        "writeback_version",
-    ]
+    # SH-003 ROOT FIX: use the canonical WRITEBACK_CSV_COLUMNS from the
+    # shared contract instead of a hardcoded list. This GUARANTEES the
+    # CSV header matches what readers (graph_transformer/training/
+    # trainer.py) expect. If the shared contract adds/removes a column,
+    # this writer picks up the change automatically.
+    fieldnames: List[str] = list(WRITEBACK_CSV_COLUMNS)
 
     # P4-011: check for duplicate (same drug, disease, validated_by)
     # If found, UPDATE instead of append.
@@ -175,17 +229,17 @@ def writeback_to_phase1(vh: ValidatedHypothesis) -> Path:
             with open(csv_path, "r", newline="") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    if (row.get("drug", "").strip() == vh.drug.strip()
-                            and row.get("disease", "").strip() == vh.disease.strip()
-                            and row.get("validated_by", "").strip() == vh.validated_by.strip()):
+                    if (row.get(DRUG_COL, "").strip() == vh.drug.strip()
+                            and row.get(DISEASE_COL, "").strip() == vh.disease.strip()
+                            and row.get(VALIDATED_BY_COL, "").strip() == vh.validated_by.strip()):
                         # UPDATE this row with new data
-                        row["outcome"] = vh.outcome
-                        row["validation_study_id"] = vh.validation_study_id or ""
-                        row["validated_at"] = vh.validated_at
-                        row["notes"] = vh.notes or ""
-                        row["original_gt_score"] = str(vh.original_gt_score) if vh.original_gt_score is not None else ""
-                        row["original_rl_rank"] = str(vh.original_rl_rank) if vh.original_rl_rank is not None else ""
-                        row["writeback_version"] = WRITEBACK_VERSION
+                        row[OUTCOME_COL] = vh.outcome
+                        row[VALIDATION_STUDY_ID_COL] = vh.validation_study_id or ""
+                        row[TIMESTAMP_COL] = vh.validated_at
+                        row[NOTES_COL] = vh.notes or ""
+                        row[ORIGINAL_GT_SCORE_COL] = str(vh.original_gt_score) if vh.original_gt_score is not None else ""
+                        row[ORIGINAL_RL_RANK_COL] = str(vh.original_rl_rank) if vh.original_rl_rank is not None else ""
+                        row[WRITEBACK_VERSION_COL] = WRITEBACK_VERSION
                         duplicate_found = True
                     existing_rows.append(row)
         except Exception as exc:
@@ -209,16 +263,16 @@ def writeback_to_phase1(vh: ValidatedHypothesis) -> Path:
             if not file_exists:
                 writer.writeheader()
             writer.writerow({
-                "drug": vh.drug,
-                "disease": vh.disease,
-                "outcome": vh.outcome,
-                "validated_by": vh.validated_by,
-                "validation_study_id": vh.validation_study_id or "",
-                "validated_at": vh.validated_at,
-                "notes": vh.notes or "",
-                "original_gt_score": vh.original_gt_score if vh.original_gt_score is not None else "",
-                "original_rl_rank": vh.original_rl_rank if vh.original_rl_rank is not None else "",
-                "writeback_version": WRITEBACK_VERSION,
+                DRUG_COL: vh.drug,
+                DISEASE_COL: vh.disease,
+                OUTCOME_COL: vh.outcome,
+                VALIDATED_BY_COL: vh.validated_by,
+                VALIDATION_STUDY_ID_COL: vh.validation_study_id or "",
+                TIMESTAMP_COL: vh.validated_at,
+                NOTES_COL: vh.notes or "",
+                ORIGINAL_GT_SCORE_COL: vh.original_gt_score if vh.original_gt_score is not None else "",
+                ORIGINAL_RL_RANK_COL: vh.original_rl_rank if vh.original_rl_rank is not None else "",
+                WRITEBACK_VERSION_COL: WRITEBACK_VERSION,
             })
         logger.info(
             "RT-010 Phase 1 writeback: appended (%s, %s, %s) by %s to %s",

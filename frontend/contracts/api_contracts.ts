@@ -47,12 +47,29 @@ export type ApiUrl = (typeof API_URLS)[keyof typeof API_URLS];
 /** ISO 8601 timestamp string (e.g. "2025-01-15T12:34:56Z"). */
 export type IsoTimestamp = string;
 
-/** A drug-disease pair identifier. */
+/**
+ * A drug-disease pair identifier.
+ *
+ * SH-024 ROOT FIX: the Python rl/service.py /rank and /validate
+ * endpoints return `drug` and `disease` (canonical shared schema), NOT
+ * `drug_id` / `drug_name` / `disease_id` / `disease_name`. The previous
+ * 4-field shape caused every rank/validate response from the Python
+ * backend to fail TypeScript validation in the frontend, because the
+ * required `drug_id` / `disease_id` / `drug_name` / `disease_name`
+ * fields were missing.
+ *
+ * The frontend now mirrors the Python service's actual response shape:
+ * `drug` and `disease` (canonical names from the shared contract
+ * `shared/contracts/writeback.py`).
+ *
+ * If a screen needs both an ID and a display name, derive one from the
+ * other client-side (they are the same string in V1 — the canonical
+ * name IS the identifier). Phase 2 will introduce separate ID/name
+ * fields when the KG starts storing them as distinct properties.
+ */
 export interface DrugDiseasePair {
-  drug_id: string;
-  disease_id: string;
-  drug_name: string;
-  disease_name: string;
+  drug: string;
+  disease: string;
 }
 
 // ============================================================================
@@ -118,45 +135,133 @@ export interface TopKResponse extends PredictResponse {
 // Phase 4 (RL Ranker) response shapes
 // ============================================================================
 
-/** Single candidate in a RankResponse. */
+/**
+ * Single candidate in a RankResponse.
+ *
+ * SH-024 ROOT FIX: the previous shape used snake_case + id fields
+ * (drug_id, drug_name, gnn_score, safety_score, etc.) but the Python
+ * rl/service.py /rank endpoint returns camelCase + bare names
+ * (drug, disease, gnnScore, safetyScore, ...). Every frontend call to
+ * /rank was silently breaking because the typed fields were missing.
+ *
+ * This interface now mirrors the ACTUAL Python response shape returned
+ * by rl/service.py `_load_candidates_from_csv` and
+ * `_load_candidates_from_checkpoint`. Sub-score keys are camelCase to
+ * match the Python service exactly.
+ *
+ * The Python service is the authoritative writer of this contract —
+ * the frontend MUST mirror it, not the other way around. If the
+ * Python service changes, this file changes in the same commit (the
+ * contract consistency test enforces this).
+ */
 export interface RankedCandidate extends DrugDiseasePair {
-  score: number;          // RL composite score [0, 1]
   rank: number;           // 1-indexed rank
-  gnn_score: number;
-  safety_score: number;
-  market_score: number;
-  efficacy_score: number;
-  patent_score: number;
-  adme_score: number;
-  literature_support: boolean;
-  is_known_positive: boolean;
-  reward?: number;
+  reward?: number;        // RL reward from the policy
+  policyProb?: number;    // PPO policy probability
+  gnnScore?: number;      // Graph Transformer score [0, 1]
+  safetyScore?: number;   // Safety score [0, 1]
+  marketScore?: number;   // Market opportunity score [0, 1]
+  plausibilityScore?: number;  // alias for gnnScore
+  overallScore?: number;  // weighted composite
+  confidence?: number;    // model confidence
+  pathwayScore?: number;
+  unmetNeedScore?: number;
+  efficacyScore?: number;
+  admeScore?: number;
+  literatureSupport?: number;
+  isKnownPositive?: boolean;
 }
 
 /** Response from GET /rank or POST /rank */
 export interface RankResponse {
   candidates: RankedCandidate[];
-  source: "rl_service" | "rl_csv" | "stub";
+  source: "service" | "csv" | "none";
+  modelVersion?: string;
   generatedAt: IsoTimestamp;
-  count: number;
+  total: number;          // total count BEFORE pagination
+  page?: number;          // 0-indexed current page
+  pageSize?: number;      // items per page
+  count: number;          // items in THIS response
+  backend?: "checkpoint" | "csv";
+  csvPath?: string;
+  note?: string;
 }
 
 // ============================================================================
 // Validation (writeback) request / response shapes
 // ============================================================================
 
-/** Request body for POST /validate */
+/**
+ * Request body for POST /validate
+ *
+ * SH-004 ROOT FIX: the previous enum had only 3 values
+ * (`validated_positive | validated_toxic | validated_inconclusive`)
+ * but the Python rl/service.py /validate endpoint accepts 4 values
+ * (the canonical shared contract enum from
+ * shared/contracts/writeback.py):
+ *
+ *   - validated_positive  : wet lab / clinical study confirmed efficacy
+ *   - validated_negative  : wet lab / clinical study confirmed NO efficacy
+ *   - validated_toxic     : drug caused adverse events — DO NOT retarget
+ *   - invalidated         : partner could not reproduce the prediction
+ *
+ * `validated_inconclusive` is NOT a valid outcome — it was an artifact
+ * of the old rl/contracts/phase4_schema.py drift (SH-002). Submitting
+ * it would cause the Python service to return HTTP 400. The TS enum
+ * now mirrors the canonical 4-value set so the frontend can never
+ * submit an invalid outcome.
+ *
+ * The `drug` and `disease` fields use the canonical shared schema
+ * (not drug_id / drug_name / disease_id / disease_name) — see
+ * DrugDiseasePair for the rationale.
+ */
 export interface ValidateRequest extends DrugDiseasePair {
-  outcome: "validated_positive" | "validated_toxic" | "validated_inconclusive";
+  outcome:
+    | "validated_positive"
+    | "validated_negative"
+    | "validated_toxic"
+    | "invalidated";
   validated_by: string;
+  validation_study_id?: string;
   notes?: string;
+  original_gt_score?: number;
+  original_rl_rank?: number;
 }
 
-/** Response from POST /validate */
+/**
+ * Response from POST /validate
+ *
+ * SH-005 ROOT FIX: the previous shape was
+ *   { success, writeback_path, validated_at, message }
+ * but the Python rl/service.py /validate endpoint returns
+ *   { ok, writeback: { phase1_csv_path, phase2_neo4j_written,
+ *                      phase3_trigger_path, validated_hypothesis,
+ *                      writeback_version }, message }
+ *
+ * Every frontend call to /validate was silently breaking because the
+ * typed `success` / `writeback_path` / `validated_at` fields were
+ * missing. This interface now mirrors the ACTUAL Python response so
+ * the frontend can read the writeback result correctly.
+ */
 export interface ValidateResponse {
-  success: boolean;
-  writeback_path: string;
-  validated_at: IsoTimestamp;
+  ok: boolean;
+  writeback: {
+    phase1_csv_path: string;
+    phase2_neo4j_written: boolean;
+    phase3_trigger_path: string;
+    validated_hypothesis: {
+      drug: string;
+      disease: string;
+      outcome: string;
+      validated_by: string;
+      validation_study_id?: string;
+      validated_at: string;
+      notes?: string;
+      original_gt_score?: number;
+      original_rl_rank?: number;
+    };
+    writeback_version: string;
+  };
   message: string;
 }
 

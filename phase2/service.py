@@ -224,12 +224,25 @@ def _get_kg_stats_from_neo4j() -> Optional[Dict[str, Any]]:
                 "MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS c"
             )
             edge_types = {record["t"]: record["c"] for record in result}
+        # SH-026 ROOT FIX (Teammate 4): return BOTH the legacy snake_case
+        # fields AND the canonical contract fields (node_type_counts,
+        # edge_type_counts, source, last_updated) so the TypeScript
+        # contract in frontend/contracts/api_contracts.ts:KgStatsResponse
+        # matches exactly. The ``source`` field uses the contract's enum
+        # ("neo4j" | "in_memory").
+        from datetime import datetime, timezone
         return {
+            # Legacy fields (backward compat)
             "node_count": int(node_count),
             "edge_count": int(edge_count),
             "node_types": node_types,
             "edge_types": edge_types,
             "backend": "neo4j",
+            # SH-026: canonical contract fields
+            "node_type_counts": node_types,
+            "edge_type_counts": edge_types,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "source": "neo4j",
         }
 
     try:
@@ -288,9 +301,16 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
 
     try:
         from drugos_graph.phase1_bridge import run_phase1_to_phase2
+        # SH-010 ROOT FIX (Teammate 4): the previous code HARDCODED
+        # ``prefer_postgres=False``, which bypassed Phase 1's PostgreSQL
+        # staging DB even in production. ROOT FIX: read the
+        # ``DRUGOS_PREFER_POSTGRES`` env var (default: "0" for dev/CI
+        # backward compat; set to "1" in production).
         result = run_phase1_to_phase2(
             phase1_processed_dir=str(pdir),
-            prefer_postgres=False,
+            prefer_postgres=os.environ.get(
+                "DRUGOS_PREFER_POSTGRES", "0"
+            ).lower() in ("1", "true", "yes", "on"),
         )
         builder = result["builder"]
         summary = result["summary"]
@@ -349,13 +369,32 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
                     rel = m.group(1).strip() if m else str(et_key)
                 edge_types[rel] = edge_types.get(rel, 0) + int(count)
 
+        # SH-026 ROOT FIX (Teammate 4): return BOTH the legacy snake_case
+        # fields (node_types, edge_types, backend) AND the canonical
+        # contract fields (node_type_counts, edge_type_counts, source,
+        # last_updated) so the TypeScript contract in
+        # frontend/contracts/api_contracts.ts:KgStatsResponse matches.
+        # The ``source`` field uses the contract's enum
+        # ("neo4j" | "in_memory") — we map ``in_memory_bridge`` →
+        # ``in_memory`` and keep the legacy ``backend`` field for
+        # backward compat with kg-service.ts (which reads both).
+        from datetime import datetime, timezone
+        _last_updated = datetime.now(timezone.utc).isoformat()
+        _backend_legacy = "in_memory_bridge"
+        _source = "in_memory"
         return {
+            # Legacy fields (backward compat with kg-service.ts)
             "node_count": int(summary.get("nodes_loaded", 0)),
             "edge_count": int(summary.get("edges_loaded", 0)),
             "node_types": node_types,
             "edge_types": edge_types,
-            "backend": "in_memory_bridge",
+            "backend": _backend_legacy,
             "sources_read": summary.get("sources_read", []),
+            # SH-026: canonical contract fields (matches TS KgStatsResponse)
+            "node_type_counts": node_types,
+            "edge_type_counts": edge_types,
+            "last_updated": _last_updated,
+            "source": _source,
         }
     except FileNotFoundError:
         # Re-raise P2-001 missing-data errors unchanged.
@@ -395,9 +434,13 @@ def _explore_subgraph_in_memory(
         pdir = _REPO_ROOT / "phase1" / "processed_data"
         if not pdir.exists() or not any(pdir.glob("*.csv*")):
             return None
+        # SH-010 ROOT FIX (Teammate 4): same fix as /kg/stats — read the
+        # ``DRUGOS_PREFER_POSTGRES`` env var instead of hardcoding False.
         result = run_phase1_to_phase2(
             phase1_processed_dir=str(pdir),
-            prefer_postgres=False,
+            prefer_postgres=os.environ.get(
+                "DRUGOS_PREFER_POSTGRES", "0"
+            ).lower() in ("1", "true", "yes", "on"),
         )
         builder = result["builder"]
     except Exception as exc:
@@ -591,6 +634,53 @@ def _explore_subgraph_neo4j(
 ) -> Optional[Dict[str, Any]]:
     """Try Neo4j first for subgraph exploration."""
 
+    # v113 FORENSIC ROOT FIX (P2-044 + P2-045, MEDIUM):
+    #   P2-044: the previous code used ``d_node.id`` (Neo4j INTERNAL ID)
+    #   as the response ``id``. Neo4j internal IDs are NOT stable across
+    #   database restarts -- a node that was internal-id 42 before a
+    #   restart may be internal-id 17 after. The frontend cached these
+    #   IDs and broke on the next KG rebuild.
+    #
+    #   P2-045: the previous code used ``r1.start_node.id`` and
+    #   ``r1.end_node.id`` for edge source/target. For UNDIRECTED
+    #   ``MATCH (d)-[r1]-(n1)`` patterns, ``start_node`` and
+    #   ``end_node`` are ARBITRARY (not the actual src/dst of the
+    #   traversal) -- the edge's source/target in the response could
+    #   be SWAPPED on consecutive runs of the same query, breaking
+    #   the visual graph rendering.
+    #
+    #   ROOT FIX: use the BUSINESS ``id`` property from node properties
+    #   (``dict(node).get("id")``), falling back to the Neo4j internal
+    #   ID only when the business ``id`` property is missing (e.g., for
+    #   legacy nodes created before the ``id`` property was mandatory).
+    #   For edges, use the business IDs of the nodes we ALREADY have
+    #   from the query (``d``, ``n1``, ``n2``) -- do NOT use
+    #   ``r.start_node.id`` / ``r.end_node.id`` which are arbitrary for
+    #   undirected patterns. The edge source is always the node CLOSER
+    #   to the query root (``d`` for r1, ``n1`` for r2), and the target
+    #   is the node FARTHER from the root (``n1`` for r1, ``n2`` for r2).
+    #   This produces STABLE, DETERMINISTIC edge source/target pairs.
+    def _business_id(node) -> Any:
+        """Return the business ``id`` property, falling back to Neo4j internal id."""
+        if node is None:
+            return None
+        props = dict(node)
+        bid = props.get("id")
+        if bid is not None and bid != "":
+            return bid
+        # Legacy nodes without a business ``id`` property -- fall back
+        # to the Neo4j internal id (stringified so it's JSON-serializable
+        # and visually distinct from business IDs).
+        return f"__neo4j_internal:{node.id}"
+
+    def _node_record(node) -> Dict[str, Any]:
+        return {
+            "id": _business_id(node),
+            "label": list(node.labels)[0] if node.labels else "Unknown",
+            "labels": list(node.labels),
+            "properties": dict(node),
+        }
+
     def _query(driver):
         nodes: List[Dict[str, Any]] = []
         edges: List[Dict[str, Any]] = []
@@ -610,7 +700,74 @@ def _explore_subgraph_neo4j(
         # inflating the visual graph. ROOT FIX: deduplicate edges by
         # (source, target, type) tuple.
         with driver.session() as session:
-            if drug:
+            # P2-062 ROOT FIX (Teammate 4, forensic, root-level): the
+            # previous code used ``if drug: ... elif disease: ...`` which
+            # IGNORED the disease parameter when BOTH drug and disease were
+            # provided. The /query endpoint accepts both, so a caller asking
+            # "show me the subgraph between aspirin and diabetes" would get
+            # ONLY the aspirin subgraph (disease silently ignored). ROOT FIX:
+            # when BOTH are provided, run a DEDICATED query that finds paths
+            # BETWEEN the drug and disease nodes (the scientifically useful
+            # result for drug-repurposing hypothesis exploration). When only
+            # one is provided, fall back to the original 2-hop BFS.
+            if drug and disease:
+                # P2-062: find paths BETWEEN the drug and disease nodes.
+                # This is the most useful query for drug repurposing — it
+                # shows the biological pathway chain connecting a drug to
+                # a disease, which is exactly what the project doc's
+                # "Knowledge Graph Explorer" screen is supposed to display.
+                q = """
+                MATCH (d:Compound {name: $drug}), (dis:Disease {name: $disease})
+                CALL {
+                    WITH d, dis
+                    MATCH p = shortestPath((d)-[*1..5]-(dis))
+                    RETURN p LIMIT $limit
+                }
+                UNWIND relationships(p) AS r
+                WITH d, dis, r, startNode(r) AS sn, endNode(r) AS en
+                RETURN d, dis, r, sn, en
+                LIMIT $limit
+                """
+                result = session.run(q, drug=drug, disease=disease, limit=limit)
+                for record in result:
+                    d_node = record["d"]
+                    nodes.append({
+                        "id": d_node.id,
+                        "label": list(d_node.labels)[0] if d_node.labels else "Unknown",
+                        "labels": list(d_node.labels),
+                        "properties": dict(d_node),
+                    })
+                    dis_node = record["dis"]
+                    nodes.append({
+                        "id": dis_node.id,
+                        "label": list(dis_node.labels)[0] if dis_node.labels else "Unknown",
+                        "labels": list(dis_node.labels),
+                        "properties": dict(dis_node),
+                    })
+                    r = record["r"]
+                    if r is not None:
+                        edges.append({
+                            "source": r.start_node.id,
+                            "target": r.end_node.id,
+                            "type": r.type,
+                        })
+                    sn = record["sn"]
+                    if sn is not None:
+                        nodes.append({
+                            "id": sn.id,
+                            "label": list(sn.labels)[0] if sn.labels else "Unknown",
+                            "labels": list(sn.labels),
+                            "properties": dict(sn),
+                        })
+                    en = record["en"]
+                    if en is not None:
+                        nodes.append({
+                            "id": en.id,
+                            "label": list(en.labels)[0] if en.labels else "Unknown",
+                            "labels": list(en.labels),
+                            "properties": dict(en),
+                        })
+            elif drug:
                 # P2-030 ROOT FIX (v107): bounded 2-hop traversal using
                 # subqueries with LIMIT inside each hop. The previous
                 # ``[*1..2]`` variable-length path was UNBOUNDED — on a
@@ -640,40 +797,31 @@ def _explore_subgraph_neo4j(
                 result = session.run(q, drug=drug, limit=limit)
                 for record in result:
                     d_node = record["d"]
-                    nodes.append({
-                        "id": d_node.id,
-                        "label": list(d_node.labels)[0] if d_node.labels else "Unknown",
-                        "labels": list(d_node.labels),
-                        "properties": dict(d_node),
-                    })
+                    nodes.append(_node_record(d_node))
                     n1 = record["n1"]
                     if n1 is not None:
-                        nodes.append({
-                            "id": n1.id,
-                            "label": list(n1.labels)[0] if n1.labels else "Unknown",
-                            "labels": list(n1.labels),
-                            "properties": dict(n1),
-                        })
+                        nodes.append(_node_record(n1))
                         r1 = record["r1"]
                         if r1 is not None:
+                            # v113 P2-044/045 ROOT FIX: use business IDs
+                            # of the nodes we already have (d, n1), NOT
+                            # r1.start_node.id / r1.end_node.id (which
+                            # are arbitrary for undirected MATCH).
                             edges.append({
-                                "source": r1.start_node.id,
-                                "target": r1.end_node.id,
+                                "source": _business_id(d_node),
+                                "target": _business_id(n1),
                                 "type": r1.type,
                             })
                     n2 = record["n2"]
                     if n2 is not None:
-                        nodes.append({
-                            "id": n2.id,
-                            "label": list(n2.labels)[0] if n2.labels else "Unknown",
-                            "labels": list(n2.labels),
-                            "properties": dict(n2),
-                        })
+                        nodes.append(_node_record(n2))
                         r2 = record["r2"]
                         if r2 is not None:
+                            # v113 P2-044/045 ROOT FIX: use business IDs
+                            # of n1 and n2 (NOT r2.start_node/end_node).
                             edges.append({
-                                "source": r2.start_node.id,
-                                "target": r2.end_node.id,
+                                "source": _business_id(n1) if n1 is not None else _business_id(d_node),
+                                "target": _business_id(n2),
                                 "type": r2.type,
                             })
             elif disease:
@@ -702,40 +850,27 @@ def _explore_subgraph_neo4j(
                 result = session.run(q, disease=disease, limit=limit)
                 for record in result:
                     d_node = record["d"]
-                    nodes.append({
-                        "id": d_node.id,
-                        "label": list(d_node.labels)[0] if d_node.labels else "Unknown",
-                        "labels": list(d_node.labels),
-                        "properties": dict(d_node),
-                    })
+                    nodes.append(_node_record(d_node))
                     n1 = record["n1"]
                     if n1 is not None:
-                        nodes.append({
-                            "id": n1.id,
-                            "label": list(n1.labels)[0] if n1.labels else "Unknown",
-                            "labels": list(n1.labels),
-                            "properties": dict(n1),
-                        })
+                        nodes.append(_node_record(n1))
                         r1 = record["r1"]
                         if r1 is not None:
+                            # v113 P2-044/045 ROOT FIX: use business IDs.
                             edges.append({
-                                "source": r1.start_node.id,
-                                "target": r1.end_node.id,
+                                "source": _business_id(d_node),
+                                "target": _business_id(n1),
                                 "type": r1.type,
                             })
                     n2 = record["n2"]
                     if n2 is not None:
-                        nodes.append({
-                            "id": n2.id,
-                            "label": list(n2.labels)[0] if n2.labels else "Unknown",
-                            "labels": list(n2.labels),
-                            "properties": dict(n2),
-                        })
+                        nodes.append(_node_record(n2))
                         r2 = record["r2"]
                         if r2 is not None:
+                            # v113 P2-044/045 ROOT FIX: use business IDs.
                             edges.append({
-                                "source": r2.start_node.id,
-                                "target": r2.end_node.id,
+                                "source": _business_id(n1) if n1 is not None else _business_id(d_node),
+                                "target": _business_id(n2),
                                 "type": r2.type,
                             })
             else:

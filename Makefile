@@ -55,10 +55,22 @@ dry-run: run
 run: run-4phase
 
 run-full-platform:
-	$(PYTHON) run_full_platform.py
+	@# v113 IN-072 ROOT FIX: deprecated target -- alias for ``make run``.
+	@# The previous target invoked ``run_full_platform.py`` (a deprecated
+	@# shim). The shim and its 5 sibling copies (3 at root + 3 in
+	@# scripts/legacy/) have been deleted -- the canonical runner is
+	@# ``run_4phase.py`` per ORCH-003. This alias preserves backward
+	@# compat for any CI / external script that calls
+	@# ``make run-full-platform``.
+	@echo "NOTE: 'make run-full-platform' is DEPRECATED (ORCH-003, IN-072)."
+	@echo "      Alias for 'make run' (invokes run_4phase.py)."
+	@$(MAKE) --no-print-directory run
 
 run-unified:
-	$(PYTHON) run_unified.py
+	@# v113 IN-072 ROOT FIX: deprecated target -- alias for ``make run``.
+	@echo "NOTE: 'make run-unified' is DEPRECATED (ORCH-003, IN-072)."
+	@echo "      Alias for 'make run' (invokes run_4phase.py)."
+	@$(MAKE) --no-print-directory run
 
 run-4phase:
 	@if [ -n "$$DRUGOS_NEO4J_URI" ]; then \
@@ -76,7 +88,10 @@ run-demo:
 	$(PYTHON) run_4phase.py
 
 run-real:
-	$(PYTHON) run_real_pipeline.py
+	@# v113 IN-072 ROOT FIX: deprecated target -- alias for ``make run``.
+	@echo "NOTE: 'make run-real' is DEPRECATED (ORCH-003, IN-072)."
+	@echo "      Alias for 'make run' (invokes run_4phase.py)."
+	@$(MAKE) --no-print-directory run
 
 run-json:
 	@# Task 363 ROOT FIX: the previous target invoked `run_unified.py --json`
@@ -116,3 +131,10 @@ clean:
 	find . -type d -name .pytest_cache -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
 	@echo "Clean complete."
+
+# v113 IN-096 ROOT FIX: backup restore-test target.
+# Run weekly (or before any disaster-recovery drill) to verify backups
+# are restorable. Requires staging Postgres + Neo4j instances.
+restore-test:
+	@echo "Running backup restore-test (v113 IN-096)..."
+	$(PYTHON) scripts/restore_test.py

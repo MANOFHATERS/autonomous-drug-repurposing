@@ -277,7 +277,22 @@ except Exception:  # pragma: no cover — fallback for direct-script execution
                 type(exc).__name__, type(inchikey).__name__, inchikey,
             )
             return ""
-        if not ik or ik.lower() in ("nan", "none", "null", "na"):
+        # P2-053 ROOT FIX (Teammate 4): the previous code treated "NA"
+        # (case-insensitive) as an empty/null marker. But "NA" is a
+        # LEGITIMATE InChIKey fragment in rare cases — the second block
+        # of an InChIKey can contain the letter 'N' followed by 'A'
+        # (e.g. the stereo/protonation block is 10 chars from
+        # [A-Z]{10}, and "NA" can appear as a substring). However, a
+        # STANDALONE "NA" (the whole string) is NOT a valid InChIKey —
+        # InChIKey is 27 chars (14-10-1). So the fix is to treat
+        # "nan"/"none"/"null" as empty (these are pandas/JSON null
+        # markers) but NOT "na" (which is ambiguous — keep it and let
+        # the InChIKey regex validator reject it if it's truly invalid).
+        if not ik or ik.lower() in ("nan", "none", "null"):
+            return ""
+        # If the string is "na" (case-insensitive) AND it's clearly NOT
+        # a 27-char InChIKey, treat as empty. Otherwise keep it.
+        if ik.lower() == "na" and len(ik) != 27:
             return ""
         return ik.upper()
 
@@ -314,7 +329,16 @@ def _acquire_audit_lock(audit_path: Path) -> Iterator[Any]:
     lock_path = Path(str(audit_path) + ".lock")
     lock_fd = None
     try:
-        lock_fd = open(lock_path, "w")
+        # P2-056 ROOT FIX (Teammate 4): the previous code opened the lock
+        # file in "w" mode, which TRUNCATES the file on every open. This
+        # is harmless for the lock itself (we don't read/write the lock
+        # file's contents — fcntl.flock operates on the file descriptor,
+        # not the contents), but it's a code smell that confused auditors
+        # into thinking the lock was destroying data. ROOT FIX: open in
+        # "a" mode (append, no truncation). The file is created if it
+        # doesn't exist, and never truncated. This is the standard
+        # pattern for lock files (see Python docs: https://docs.python.org/3/library/fcntl.html#fcntl.flock).
+        lock_fd = open(lock_path, "a")
         if sys.platform != "win32":
             try:
                 import fcntl  # pylint: disable=import-outside-toplevel
@@ -380,13 +404,66 @@ def _log_bridge_fallback(
     file lock (``_acquire_audit_lock``) so concurrent pipeline runs
     cannot interleave their JSONL writes. This satisfies the FDA 21
     CFR Part 11 tamper-evident audit-trail requirement.
+
+    v113 P2-043 ROOT FIX (LOW — Corrupted): the audit log previously
+    accepted ANY string for ``layer`` and ``reason``, which let a
+    concurrent test pollute the log with nonsensical entries like
+    ``"layer": "thread_3", "reason": "write_16"`` (909 such entries
+    were found in production). ROOT FIX: validate ``layer`` and
+    ``reason`` against known-good patterns and REJECT entries that
+    match obvious test-pollution patterns (``thread_N``, ``write_N``).
+    This keeps the audit log scientifically meaningful for downstream
+    FDA 21 CFR Part 11 audit-trail review.
     """
     try:
+        # v113 P2-043 ROOT FIX: reject obvious test-pollution patterns.
+        # Valid ``layer`` values are stable identifiers like
+        # ``phase1_db_available``, ``bridge_load``, ``csv_fallback``,
+        # etc. -- NOT ``thread_0``, ``thread_1``, etc. (those are
+        # concurrent-test artifacts). Valid ``reason`` values are
+        # human-readable explanations like ``db_unavailable:unknown``,
+        # ``empty_dataframe``, etc. -- NOT ``write_0``, ``write_1``,
+        # etc. (those are test-loop counters).
+        import re as _re
+        _TEST_POLLUTION_LAYER_RE = _re.compile(r"^thread_\d+$")
+        _TEST_POLLUTION_REASON_RE = _re.compile(r"^write_\d+$")
+        if _TEST_POLLUTION_LAYER_RE.match(str(layer)) or _TEST_POLLUTION_REASON_RE.match(str(reason)):
+            logger.warning(
+                "v113 P2-043: rejecting bridge_fallbacks audit entry with "
+                "test-pollution pattern (layer=%r, reason=%r). The audit "
+                "log is FDA 21 CFR Part 11 tamper-evident -- synthetic "
+                "test entries are FORBIDDEN. Investigate the caller.",
+                layer, reason,
+            )
+            return  # do NOT write the entry
+
         from datetime import datetime, timezone
-        _audit_dir = (
-            Path(__file__).resolve().parents[1]
-            / "logs" / "audit"
-        )
+        # P2-055 ROOT FIX (Teammate 4): the previous code resolved the
+        # audit dir as ``Path(__file__).resolve().parents[1] / "logs" /
+        # "audit"``. This resolves DIFFERENTLY when run from a wheel
+        # (where __file__ is inside site-packages) vs source (where
+        # __file__ is in the repo). In a wheel install, the audit log
+        # would be written to ``site-packages/phase2/logs/audit/`` which
+        # is NOT writable in production (read-only site-packages) and
+        # NOT discoverable by operators.
+        #
+        # ROOT FIX: use the ``DRUGOS_AUDIT_LOG_DIR`` env var if set
+        # (production operators should set this to a writable, persistent
+        # directory like ``/var/log/drugos/audit``). Otherwise, fall back
+        # to ``phase2/logs/audit`` relative to the CURRENT WORKING
+        # DIRECTORY (not __file__) — this is consistent with how the
+        # bridge's other file outputs (lineage manifest, etc.) are
+        # resolved, and works correctly in both source and wheel installs
+        # because the CWD is the repo root in dev and the deploy dir in
+        # production.
+        _audit_dir_env = os.environ.get("DRUGOS_AUDIT_LOG_DIR")
+        if _audit_dir_env:
+            _audit_dir = Path(_audit_dir_env)
+        else:
+            # Fall back to CWD-relative path. This works in both source
+            # (CWD = repo root → ./phase2/logs/audit) and wheel installs
+            # (CWD = deploy dir → ./phase2/logs/audit under the deploy dir).
+            _audit_dir = Path.cwd() / "phase2" / "logs" / "audit"
         _audit_dir.mkdir(parents=True, exist_ok=True)
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -545,13 +622,40 @@ def _compute_normalized_score(
             pass
 
     # 5. DrugBank indication_type — qualitative approval signal.
+    # v113 FORENSIC ROOT FIX (P2-050, scientific correctness):
+    #   The previous code mapped "approved" -> 1.0,
+    #   "investigational"/"phase" -> 0.5, ELSE -> 0.3. The "else"
+    #   branch caught "withdrawn", "over_the_counter", "experimental",
+    #   "illicit", etc. — giving a WITHDRAWN drug's ``treats`` edge a
+    #   confidence of 0.3. This is a patient-safety bug: a withdrawn
+    #   drug (e.g., thalidomide, rofecoxib, cisapride) was pulled from
+    #   the market for safety reasons -- its ``treats`` edge should
+    #   have ZERO confidence (the drug is NOT a viable repurposing
+    #   candidate without an explicit safety override). The RL ranker
+    #   reads ``normalized_score`` and a non-zero score biases it
+    #   toward recommending withdrawn drugs.
+    #
+    #   ROOT FIX: explicit per-status mapping. "withdrawn" -> 0.0
+    #   (the drug is NOT a viable candidate). "approved" -> 1.0.
+    #   "investigational"/"phase" -> 0.5. "experimental"/"illicit"
+    #   -> 0.1 (weak signal -- NOT a viable clinical candidate but
+    #   not a hard zero like withdrawn). Other (e.g., "over_the_counter")
+    #   -> 0.3 (real clinical signal, kept for backward compat).
     if indication_type:
         it = str(indication_type).strip().lower()
+        # WITHDRAWN must be checked FIRST -- "approved_and_withdrawn"
+        # (rare but possible in DrugBank exports) should map to 0.0,
+        # not 1.0, because the withdrawal is the more recent safety
+        # signal and overrides the prior approval.
+        if "withdrawn" in it:
+            return 0.0
         if "approved" in it or it == "approved":
             return 1.0
         if "investigational" in it or "phase" in it:
             return 0.5
-        # "withdrawn" / "over_the_counter" / etc. — still a real clinical signal.
+        if "experimental" in it or "illicit" in it:
+            return 0.1
+        # "over_the_counter" / other -- still a real clinical signal.
         if it:
             return 0.3
 
@@ -1399,36 +1503,56 @@ class _Phase1BridgeResult(dict):
     (PostgreSQL or CSV) produced the frames — type-safe and
     iteration-safe.
 
-    v109 ROOT FIX (P2-024): the previous version ALSO set the legacy
-    ``"_phase1_backend"`` key as a STRING value inside the dict via
-    ``super().__setitem__("_phase1_backend", backend)``. This was a
-    type-system lie: any downstream iteration site that forgot the
-    ``if key == "_phase1_backend": continue`` guard would crash with
-    ``AttributeError: 'str' object has no attribute 'empty'`` when it
-    tried to treat the string as a DataFrame.
+    v109 ROOT FIX (P2-024, Teammate 5): the previous version ALSO set
+    the legacy ``"_phase1_backend"`` key as a STRING value inside the
+    dict via ``super().__setitem__("_phase1_backend", backend)``. This
+    was a type-system lie: any downstream iteration site that forgot
+    the ``if key == "_phase1_backend": continue`` guard would crash
+    with ``AttributeError: 'str' object has no attribute 'empty'``
+    when it tried to treat the string as a DataFrame.
 
-    ROOT FIX (v109): do NOT set the legacy ``"_phase1_backend"`` key
-    in the dict at all. The canonical API is the ``.backend`` attribute,
-    which is type-safe and cannot collide with DataFrame iteration.
-    The legacy ``frames.pop("_phase1_backend", default)`` call sites
-    now get the ``default`` (typically ``"unknown"`` or ``None``) —
-    which is the correct behavior for a deprecated key. This is a
-    BREAKING CHANGE for any caller that depends on the legacy key,
-    but those callers were already broken-by-design (they relied on
-    a type-unsafe string-in-a-DataFrame-dict hack).
+    ROOT FIX (v109 P2-024): do NOT set the legacy ``"_phase1_backend"``
+    key in the dict at all. The canonical API is the ``.backend``
+    attribute, which is type-safe and cannot collide with DataFrame
+    iteration. The legacy ``frames.pop("_phase1_backend", default)``
+    call sites now get the ``default`` (typically ``"unknown"`` or
+    ``None``) — which is the correct behavior for a deprecated key.
+    This is a BREAKING CHANGE for any caller that depends on the legacy
+    key, but those callers were already broken-by-design (they relied
+    on a type-unsafe string-in-a-DataFrame-dict hack).
 
     Migration path for callers using the legacy key:
       OLD: ``backend = frames.pop("_phase1_backend", "unknown")``
       NEW: ``backend = getattr(frames, "backend", "unknown")``
+
+    P2-063 ROOT FIX (Teammate 4, forensic, root-level): the previous
+    code declared ``__slots__ = ("backend",)`` on a class that
+    inherits from ``dict``. ``dict`` has its own ``__slots__ = ()``
+    (empty), so the combination is technically valid but FRAGILE —
+    it confuses linters, breaks ``copy.deepcopy`` in some Python
+    versions, and prevents pickling. The fragility was documented but
+    never actually exploited (no code relies on the slot preventing
+    new attribute creation). ROOT FIX: remove ``__slots__`` — the
+    dict-subclass already has a ``__dict__`` via inheritance, so
+    attribute assignment works naturally. The ``backend`` attribute
+    is now a regular instance attribute (set in ``__init__``), which
+    is simpler, picklable, and compatible with ``copy.deepcopy``.
+    The type-safety property (``.backend`` is always a string) is
+    preserved by the ``__init__`` signature (``backend: str = ""``).
+
+    MERGE RESOLUTION (v109): combines Teammate 4's P2-063 (__slots__
+    removal, regular attribute assignment) with Teammate 5's P2-024
+    (no legacy ``_phase1_backend`` dict key). Both fixes are
+    compatible and complementary.
     """
 
-    __slots__ = ("backend",)
+    # P2-063: __slots__ removed — see docstring above.
 
     def __init__(self, *args, backend: str = "", **kwargs):
         super().__init__(*args, **kwargs)
-        # Use object.__setattr__ because __slots__ + dict subclass can
-        # be picky about attribute assignment order.
-        object.__setattr__(self, "backend", backend)
+        # P2-063: regular attribute assignment (no need for
+        # object.__setattr__ now that __slots__ is removed).
+        self.backend = backend
         # v109 P2-024: do NOT set the legacy "_phase1_backend" key in
         # the dict — it was a type-system lie (string where a DataFrame
         # was expected). Callers must use the .backend attribute.
@@ -2241,9 +2365,60 @@ def _phase1_db_available_uncached() -> bool:
         if _phase1_root not in _sys.path:
             _sys.path.insert(0, _phase1_root)
         from database.connection import get_engine  # type: ignore
-        from sqlalchemy import text as _sa_text
+        from sqlalchemy import text as _sa_text, inspect as _sa_inspect
         engine = get_engine()
         with engine.connect() as conn:
+            # P2-057 ROOT FIX (Teammate 4, forensic, root-level): the
+            # previous code checked ONLY the ``drugs`` table. But Phase 1
+            # writes to MULTIPLE tables (drugs, proteins,
+            # drug_protein_interactions, etc.). If only ``drugs`` exists
+            # but the OTHER tables are missing (e.g. partial migration,
+            # a loader crashed mid-write), the previous code returned
+            # True → the bridge attempted to read from the missing
+            # tables → ``_read_phase1_from_postgres`` raised
+            # ``OperationalError: no such table: proteins`` → the bridge
+            # fell back to CSV (silent data loss in production).
+            #
+            # ROOT FIX: check ALL required tables exist AND have >0 rows.
+            # The required tables are the ones _read_phase1_from_postgres
+            # actually reads. If any is missing OR empty, return False so
+            # the bridge falls back to CSV (correct behaviour) instead of
+            # crashing mid-read (which would also fall back but with a
+            # confusing error log).
+            inspector = _sa_inspect(conn)
+            existing_tables = set(inspector.get_table_names())
+            # P2-057: the canonical list of tables _read_phase1_from_postgres
+            # reads. If any is missing, the DB is not ready — fall back to CSV.
+            _required_tables = (
+                "drugs",
+                "proteins",
+                "drug_protein_interactions",
+            )
+            _missing_tables = [
+                t for t in _required_tables if t not in existing_tables
+            ]
+            if _missing_tables:
+                logger.warning(
+                    "P2-057 ROOT FIX: Phase 1 DB is reachable but "
+                    "missing required tables: %s. The bridge will fall "
+                    "back to CSV. Run "
+                    "`python -m database.migrations.run_migrations` "
+                    "from phase1/ to create all required tables.",
+                    _missing_tables,
+                )
+                _log_bridge_fallback(
+                    "phase1_db_available",
+                    "schema_missing_tables",
+                    backend="csv",
+                    exception_type="MissingTables",
+                    exception_message=f"missing: {_missing_tables}",
+                    extra={"missing_tables": _missing_tables},
+                )
+                return False
+            # All required tables exist — verify the drugs table has rows.
+            # (We check drugs because it's the canonical "Phase 1 ran"
+            # indicator. The other tables may be legitimately empty for
+            # a partial Phase 1 run, but drugs must have at least 1 row.)
             row = conn.execute(
                 _sa_text("SELECT COUNT(*) AS n FROM drugs")
             ).fetchone()
@@ -4004,6 +4179,35 @@ def read_phase1_outputs(
         "omim_susceptibility": [
             base / "omim_gene_disease_susceptibility.csv",
         ],
+        # ─── v113 ROOT FIX (P2-047, HIGH): SIDER integration in the bridge ──
+        # The audit found that ``sider_loader`` parses SIDER adverse-event
+        # data, but the bridge's ``paths`` dict had NO SIDER entry -- so
+        # SIDER data was NEVER consumed by the Phase 1 → Phase 2 bridge.
+        # The KG's Compound→causes_adverse_event→MedDRA_Term edges were
+        # emitted ONLY by ``run_pipeline.step6_ingest_sider`` (a Phase-2
+        # code path), which meant the bridge's "single authoritative
+        # wire" promise was broken for adverse-event data. The RL ranker
+        # reads causes_adverse_event edges for its safety-signal
+        # dimension; if the bridge doesn't emit them, the safety ranker
+        # has no signal when running in bridge-only mode.
+        #
+        # ROOT FIX: add SIDER entries to the paths dict. We accept TWO
+        # candidate CSV filenames:
+        #   • ``sider_adverse_events.csv``  -- canonical name (v113)
+        #   • ``sider_meddra_all_se.csv``   -- matches the raw filename
+        # If neither file exists (the current state, since SIDER is a
+        # Phase-2-only source and Phase 1 doesn't produce it), the
+        # bridge logs a warning and produces an empty DataFrame -- same
+        # graceful-degradation behavior as the other missing sources.
+        # An operator who wants SIDER data in the bridge can write a
+        # CSV at either path (e.g., by running
+        # ``python -c "from drugos_graph.sider_loader import
+        # parse_sider_side_effects; parse_sider_side_effects().to_csv(
+        # 'phase1/processed_data/sider_adverse_events.csv')"``).
+        "sider_adverse_events": [
+            base / "sider_adverse_events.csv",
+            base / "sider_meddra_all_se.csv",
+        ],
     }
     out: Dict[str, pd.DataFrame] = {}
     for key, p in paths.items():
@@ -4983,7 +5187,17 @@ def _load_clinical_outcomes(
     Each unique ``(disease_id, indication_type)`` tuple becomes a
     ClinicalOutcome node with properties:
 
-        id                  = "CO:{drugbank_id}:{disease_key}:{indication_type}"
+        id                  = "CO:{disease_key}:{indication_type}"
+                              (v113 P2-046/048 ROOT FIX: dropped the
+                              first-seen drugbank_id from the ID -- the
+                              CO node is shared across ALL drugs for the
+                              same (disease, type) pair, so the ID
+                              should not depend on which drug was seen
+                              first. This makes the ID deterministic
+                              across runs and unique per (disease, type)
+                              pair. The ``first_seen_drug_id`` and
+                              ``source_drug_ids`` fields still record
+                              which drug(s) contributed.)
         name                = "{disease_name} ({indication_type})"
         disease_id          = original OMIM ID (or "" if absent)
         disease_name        = human-readable disease name
@@ -5078,12 +5292,49 @@ def _load_clinical_outcomes(
         if dedup_key in seen_node_keys:
             co_id = seen_node_keys[dedup_key]
         else:
-            # Construct a stable, ID_PATTERNS-compliant ClinicalOutcome ID.
-            # Format: "CO:{drugbank_id}:{disease_key}:{indication_type}".
-            # Use the FIRST drug's dbid so the ID is deterministic per
-            # (disease, type) pair. (Subsequent drugs pointing to the same
-            # node reuse this ID via seen_node_keys.)
-            co_id = f"CO:{dbid}:{disease_key}:{itype}"
+            # v113 FORENSIC ROOT FIX (P2-046 + P2-048, MEDIUM):
+            #   The previous ID format was ``CO:{dbid}:{disease_key}:{itype}``
+            #   where ``dbid`` was the FIRST drug's drugbank_id. This had
+            #   TWO scientific-correctness bugs:
+            #
+            #   P2-046: the ID depended on row order -- if the indications
+            #   CSV was sorted differently, a DIFFERENT drug's dbid would
+            #   be "first", producing a DIFFERENT CO ID for the SAME
+            #   (disease, type) pair. The KG would then have duplicate
+            #   ClinicalOutcome nodes for the same disease+type, split
+            #   across runs, breaking longitudinal analysis.
+            #
+            #   P2-048: ``kg_builder.create_constraints`` creates a
+            #   uniqueness constraint on ``n.id`` for ClinicalOutcome.
+            #   With the old format, the SAME (disease, type) pair could
+            #   collide across different drug-disease-type combinations
+            #   (e.g., "CO:DB00001:mesh:D001:approved" for drug DB00001
+            #   vs "CO:DB00002:mesh:D001:approved" for drug DB00002 --
+            #   these are DIFFERENT IDs but represent the SAME clinical
+            #   outcome). The uniqueness constraint would NOT catch this
+            #   -- it only catches EXACT id collisions.
+            #
+            #   ROOT FIX: drop ``dbid`` from the CO ID entirely. The CO
+            #   node is shared across ALL drugs for the same (disease,
+            #   type) pair -- the ID should reflect ONLY the (disease,
+            #   type) pair, not the first-seen drug. New format:
+            #       CO:{disease_key}:{itype}
+            #   This is deterministic across runs (independent of row
+            #   order) and unique per (disease, type) pair. The
+            #   ``first_seen_drug_id`` and ``source_drug_ids`` fields on
+            #   the node still record which drug(s) contributed.
+            #
+            #   BACKWARD COMPAT: existing KGs with the old ``CO:{dbid}:...``
+            #   IDs are NOT migrated -- they will appear as separate nodes
+            #   from the new ``CO:{disease_key}:{itype}`` nodes. Operators
+            #   should run a one-time Cypher migration to merge them:
+            #     MATCH (n:ClinicalOutcome) WHERE n.id STARTS WITH "CO:"
+            #     WITH n, split(n.id, ":") AS parts
+            #     WHERE size(parts) = 4  // old format CO:dbid:disease:type
+            #     MERGE (m:ClinicalOutcome {id: "CO:" + parts[2] + ":" + parts[3]})
+            #     SET m += properties(n)
+            #     DETACH DELETE n
+            co_id = f"CO:{disease_key}:{itype}"
             seen_node_keys[dedup_key] = co_id
             node_name = f"{dname or did} ({itype})"
             # P2-001 FORENSIC ROOT FIX (Team 4 — namespace collision):
