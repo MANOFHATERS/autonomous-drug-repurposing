@@ -32,7 +32,7 @@ numpy>=1.26.3
 # works on both architectures. The pipeline degrades gracefully if
 # rdkit is somehow still unavailable (DRUGOS_ALLOW_NO_RDKIT=1).
 rdkit>=2024.3.1
-sqlalchemy>=2.0.25,<2.1
+sqlalchemy>=2.0.25
 psycopg2-binary>=2.9.9
 lxml>=5.1.0
 rapidfuzz>=3.6.1
