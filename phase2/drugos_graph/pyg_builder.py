@@ -3883,7 +3883,42 @@ def build_pyg_hetero_data(
                 "build_pyg_hetero_data: node missing 'label', skipping"
             )
             continue
-        gt_label = _PHASE2_TO_GT_NODE_TYPE.get(p2_label, p2_label.lower())
+        # P2-006 ROOT FIX (v109): the previous code used ``.lower()`` as
+        # a fallback for unknown Phase 2 labels — silently letting
+        # "AdverseEvent", "Side Effect", "Drug" (when not in the map),
+        # and any other arbitrary label through the contract. This
+        # corrupted the Phase 3 HeteroData with node types that the
+        # Graph Transformer's contract does not recognize (it expects
+        # only: drug, protein, gene, pathway, disease, clinical_outcome,
+        # side_effect, anatomy). ROOT FIX: do NOT silently fall back to
+        # ``.lower()``. If the label is not in the contract, log a
+        # warning and SKIP the node — this preserves the contract and
+        # surfaces the data-quality issue in the audit log.
+        gt_label = _PHASE2_TO_GT_NODE_TYPE.get(p2_label)
+        if gt_label is None:
+            # ``_PHASE2_TO_GT_NODE_TYPE`` is ``PHASE2_TO_PHASE3_NODE``
+            # from ``phase2_schema``. Some entries map to ``None`` (e.g.
+            # ``Gene`` and ``MedDRA_Term`` are intermediates that fold
+            # into other types). For those, the node is intentionally
+            # dropped at the Phase 2→3 boundary — skip silently.
+            if p2_label in _PHASE2_TO_GT_NODE_TYPE:
+                logger.debug(
+                    "build_pyg_hetero_data: dropping intermediate "
+                    "Phase 2 node label %r (maps to None in Phase 3 "
+                    "contract).",
+                    p2_label,
+                )
+                continue
+            # GENUINELY unknown label — skip with a warning so the
+            # operator can fix the upstream data quality issue.
+            logger.warning(
+                "build_pyg_hetero_data: unknown Phase 2 node label %r "
+                "(not in PHASE2_TO_PHASE3_NODE contract) — skipping. "
+                "Known labels: %s. This is a data-quality issue in the "
+                "Phase 1→2 bridge.",
+                p2_label, sorted(_PHASE2_TO_GT_NODE_TYPE.keys()),
+            )
+            continue
         if gt_label not in entity_maps:
             entity_maps[gt_label] = {}
             _phase2_nodes_by_type[gt_label] = []
@@ -3921,8 +3956,32 @@ def build_pyg_hetero_data(
         if not (p2_src and p2_dst and relation):
             continue
 
-        gt_src = _PHASE2_TO_GT_NODE_TYPE.get(p2_src, p2_src.lower())
-        gt_dst = _PHASE2_TO_GT_NODE_TYPE.get(p2_dst, p2_dst.lower())
+        # P2-006 ROOT FIX (v109): same fix as for nodes — do NOT fall
+        # back to ``.lower()`` for unknown labels. Skip the edge with a
+        # warning so the operator can fix the upstream issue.
+        gt_src = _PHASE2_TO_GT_NODE_TYPE.get(p2_src)
+        gt_dst = _PHASE2_TO_GT_NODE_TYPE.get(p2_dst)
+        if gt_src is None or gt_dst is None:
+            # If the label is in the map but maps to None, it's an
+            # intentional drop (e.g. Gene→None). Otherwise it's an
+            # unknown label — warn loudly.
+            if p2_src not in _PHASE2_TO_GT_NODE_TYPE:
+                logger.warning(
+                    "build_pyg_hetero_data: unknown source label %r "
+                    "(not in PHASE2_TO_PHASE3_NODE contract) — skipping "
+                    "edge %r. Known labels: %s.",
+                    p2_src, relation,
+                    sorted(_PHASE2_TO_GT_NODE_TYPE.keys()),
+                )
+            if p2_dst not in _PHASE2_TO_GT_NODE_TYPE:
+                logger.warning(
+                    "build_pyg_hetero_data: unknown target label %r "
+                    "(not in PHASE2_TO_PHASE3_NODE contract) — skipping "
+                    "edge %r. Known labels: %s.",
+                    p2_dst, relation,
+                    sorted(_PHASE2_TO_GT_NODE_TYPE.keys()),
+                )
+            continue
         edge_key = (gt_src, relation, gt_dst)
 
         src_id = str(edge.get("source_id", ""))

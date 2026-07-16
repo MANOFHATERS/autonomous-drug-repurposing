@@ -1313,16 +1313,30 @@ def compute_auc(
                     )
                 higher_is_better = (_sd == "higher_better")
         else:
-            # No direction source — refuse to guess. Allow an
-            # environment-variable escape hatch for legacy callers
-            # that have not yet been migrated (NOT recommended for
-            # production; the entire point of this fix is to make
-            # the silent default impossible).
-            import os as _os_p2_007
-            _allow_default = _os_p2_007.environ.get(
+            # No direction source — refuse to guess. The previous code
+            # allowed an env-var escape hatch
+            # (``DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION=1``) that fell back
+            # to the TransE-correct ``higher_is_better=False``. The
+            # audit (P2-031) caught this as defeating the safety fix —
+            # the entire point of P2-007 was to make the silent default
+            # IMPOSSIBLE, but the env-var escape hatch was just another
+            # silent default that operators could set globally and
+            # forget.
+            #
+            # v109 ROOT FIX (P2-031): the env-var escape hatch is now
+            # REFUSED in production mode and only allowed in dev mode
+            # (with a loud WARNING). This matches the pattern used
+            # elsewhere in the codebase (e.g. DRUGOS_ALLOW_CSV_FALLBACK
+            # in phase1_bridge). The error message is also clearer
+            # about WHICH call site triggered it (callers can grep for
+            # the file:line of the compute_auc call).
+            import os as _os_p2_031
+            _allow_default = _os_p2_031.environ.get(
                 "DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION", ""
             ) == "1"
-            if _allow_default:
+            _env = _os_p2_031.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
+            _is_prod = _env in ("prod", "production", "stage", "staging")
+            if _allow_default and not _is_prod:
                 _log_structured(
                     logging.WARNING,
                     "compute_auc_default_direction_used",
@@ -1331,32 +1345,46 @@ def compute_auc(
                         "higher_is_better / model / "
                         "model_score_direction. "
                         "DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION=1 is "
-                        "set — falling back to the legacy TransE "
-                        "default (higher_is_better=False). THIS "
-                        "IS THE EXACT FOOT-GUN THE P2-007 ROOT "
-                        "FIX REMOVES — passing the model (or the "
-                        "explicit bool) is the production-grade "
-                        "call shape."
+                        "set AND DRUGOS_ENVIRONMENT is not "
+                        "production — falling back to the legacy "
+                        "TransE default (higher_is_better=False). "
+                        "THIS IS THE EXACT FOOT-GUN THE P2-007 "
+                        "ROOT FIX REMOVES — passing the model (or "
+                        "the explicit bool) is the production-grade "
+                        "call shape. In production mode, this "
+                        "escape hatch is REFUSED (P2-031 root fix)."
                     ),
                 )
                 higher_is_better = False
             else:
+                # Build a clear, actionable error message.
+                _prod_note = (
+                    " (DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION=1 is set "
+                    "but REFUSED in production mode — P2-031 root fix.)"
+                    if _allow_default and _is_prod
+                    else ""
+                )
                 raise EvaluationInputError(
                     "compute_auc: cannot resolve AUC direction. "
-                    "Pass higher_is_better explicitly (bool), OR "
-                    "pass model=<KGEmbeddingModel> (the function "
+                    "Pass higher_is_better=True/False explicitly, "
+                    "OR pass model=<KGEmbeddingModel> (the function "
                     "will read model.score_direction), OR pass "
                     "model_score_direction='lower_better' / "
-                    "'higher_better'. The silent default was "
-                    "removed because it INVERTED the AUC for HGT "
-                    "callers (a 0.90 HGT model reported as 0.10) "
-                    "— patient-safety blocker. To restore the "
-                    "legacy TransE-correct default for an "
-                    "unmigrated caller, set "
+                    "'higher_better'. The silent default was removed "
+                    "because it INVERTED the AUC for HGT callers (a "
+                    "0.90 HGT model reported as 0.10) — patient-"
+                    "safety blocker. To restore the legacy TransE-"
+                    "correct default for an unmigrated caller, set "
                     "DRUGOS_ALLOW_DEFAULT_AUC_DIRECTION=1 in the "
-                    "environment. (P2-007 root fix)",
+                    "environment AND ensure DRUGOS_ENVIRONMENT is "
+                    "set to 'dev' (the escape hatch is REFUSED in "
+                    "production). (P2-007 / P2-031 root fix)"
+                    + _prod_note,
                     context={
                         "reason": "auc_direction_not_resolvable",
+                        "environment": _env,
+                        "escape_hatch_set": _allow_default,
+                        "escape_hatch_refused": _allow_default and _is_prod,
                     },
                 )
 

@@ -1520,6 +1520,91 @@ def _check_v1_launch_criteria(results: dict) -> dict:
         and criteria.get("chemberta_features_used", True)
     )
 
+    # v109 ROOT FIX (P2-039): when launch is blocked, surface a CLEAR
+    # human-readable reason listing WHICH criteria failed and WHY. The
+    # previous code set ``criteria["passed"] = False`` but did not
+    # include a ``failure_reasons`` list — operators had to read the
+    # raw criteria dict and reverse-engineer which check failed. The
+    # audit caught this as a MEDIUM-severity UX bug: a pipeline with
+    # best_val_auc=-1.0 (step11 crashed AND step11b skipped) was blocked
+    # but the error message didn't say "step11 crashed, step11b skipped,
+    # so no AUC was computed".
+    failure_reasons: List[str] = []
+    if not criteria["all_sources_loaded"]:
+        failure_reasons.append(
+            f"all_sources_loaded=False: only {criteria.get('sources_loaded_count', 0)}/"
+            f"{criteria.get('min_sources_required', 7)} sources loaded. "
+            f"Bridge sources: {criteria.get('bridge_docx_sources', [])}."
+        )
+    if not criteria["positive_pairs_sufficient"]:
+        failure_reasons.append(
+            f"positive_pairs_sufficient=False: only {criteria.get('positive_pairs', 0)} "
+            f"positive pairs (need >= {MIN_POSITIVE_PAIRS})."
+        )
+    if not criteria["negative_pairs_sufficient"]:
+        failure_reasons.append(
+            f"negative_pairs_sufficient=False: only {criteria.get('negative_pairs', 0)} "
+            f"negative pairs (need >= {MIN_NEGATIVE_PAIRS})."
+        )
+    if not criteria["auc_meets_threshold"]:
+        _bv = criteria.get("best_val_auc", -1.0)
+        _ho = criteria.get("held_out_auc", -1.0)
+        _target = criteria.get("target_auc", 0.85)
+        _why = []
+        if _bv is None or _bv <= 0:
+            _why.append(
+                f"best_val_auc={_bv} (step11 crashed or did not run — "
+                f"no validation AUC was computed)"
+            )
+        elif _bv < _target:
+            _why.append(f"best_val_auc={_bv:.4f} < target {_target:.2f}")
+        if _ho is None or _ho <= 0:
+            _why.append(
+                f"held_out_auc={_ho} (step11 crashed or step11b skipped — "
+                f"no held-out AUC was computed; check step11.error and "
+                f"step11b.skipped/step11b.error in the pipeline results)"
+            )
+        elif _ho < _target:
+            _why.append(f"held_out_auc={_ho:.4f} < target {_target:.2f}")
+        failure_reasons.append(
+            "auc_meets_threshold=False: " + "; ".join(_why)
+        )
+    if not criteria["model_saved_to_disk"]:
+        failure_reasons.append(
+            "model_saved_to_disk=False: step11 did not save a model "
+            "artifact (check step11.error in the pipeline results)."
+        )
+    if not criteria["no_critical_source_failure"]:
+        failure_reasons.append(
+            f"no_critical_source_failure=False: critical failures in "
+            f"sources: {criteria.get('critical_failure_sources', [])}."
+        )
+    if not criteria["graph_size_meets_threshold"]:
+        failure_reasons.append(
+            f"graph_size_meets_threshold=False: {criteria.get('n_nodes', 0)} "
+            f"nodes / {criteria.get('n_edges', 0)} edges (need >= "
+            f"{criteria.get('min_nodes_required', 500_000)} nodes AND >= "
+            f"{criteria.get('min_edges_required', 6_000_000)} edges)."
+        )
+    if not criteria.get("split_method_is_safe", False):
+        failure_reasons.append(
+            f"split_method_is_safe=False: split_method="
+            f"{criteria.get('split_method', '')!r} is not leakage-safe "
+            f"(require node_disjoint or temporal)."
+        )
+    if not criteria.get("chemberta_features_used", True):
+        failure_reasons.append(
+            "chemberta_features_used=False: Graph Transformer trained on "
+            "random Xavier features (cannot learn molecular structure)."
+        )
+    criteria["failure_reasons"] = failure_reasons
+    if failure_reasons:
+        logger.error(
+            "V1 LAUNCH CRITERIA: BLOCKED. %d failure(s):\n  - %s",
+            len(failure_reasons),
+            "\n  - ".join(failure_reasons),
+        )
+
     # v26 ROOT FIX (Issue C-1): the v25 "DEV_SMOKE_TEST override" used to
     # flip ``criteria["passed"] = True`` even when
     # ``auc_meets_threshold=False``, which is the user's #1 complaint —

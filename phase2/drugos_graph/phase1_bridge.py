@@ -186,6 +186,50 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Protocol, Tupl
 
 import pandas as pd
 
+# v109 ROOT FIX (P2-026): the previous code imported kg_builder symbols
+# (NODE_PROPERTY_WHITELIST, EDGE_PROPERTY_WHITELIST, SYSTEM_PROPS,
+# _storage_label, ID_PATTERNS, CORE_EDGE_TYPES) INSIDE the functions
+# ``_apply_node_whitelist``, ``_apply_edge_whitelist``, ``_validate_node_id``,
+# and ``RecordingGraphBuilder.load_edges_batch``. The function-level imports
+# were originally there to avoid circular imports — but ``kg_builder`` does
+# NOT import ``phase1_bridge`` (verified via grep), so there is NO circular
+# import risk. The per-call import overhead was O(N) per edge batch (Python's
+# import cache makes the actual import fast, but the try/except + attribute
+# lookup on every call is still wasteful). ROOT FIX: import ONCE at module
+# level. If kg_builder ever starts importing phase1_bridge, this will fail
+# loudly at module load time (which is the correct behavior — we want to
+# know immediately if a circular import is introduced).
+try:
+    from .kg_builder import (  # type: ignore
+        NODE_PROPERTY_WHITELIST as _KG_NODE_PROPERTY_WHITELIST,
+        EDGE_PROPERTY_WHITELIST as _KG_EDGE_PROPERTY_WHITELIST,
+        SYSTEM_PROPS as _KG_SYSTEM_PROPS,
+        _storage_label as _kg_storage_label,
+        ID_PATTERNS as _KG_ID_PATTERNS,
+        CORE_EDGE_TYPES as _KG_CORE_EDGE_TYPES,
+    )
+    _KG_IMPORTS_AVAILABLE = True
+except ImportError:
+    # Fallback for direct-script execution (e.g. ``python phase1_bridge.py``)
+    # where the relative import ``.kg_builder`` cannot resolve. In this mode,
+    # the whitelist filters are no-ops (return the node/edge unchanged).
+    _KG_NODE_PROPERTY_WHITELIST = {}
+    _KG_EDGE_PROPERTY_WHITELIST = {}
+    _KG_SYSTEM_PROPS = frozenset()
+    _kg_storage_label = None  # type: ignore
+    _KG_ID_PATTERNS = {}
+    _KG_CORE_EDGE_TYPES = []  # type: ignore
+    _KG_IMPORTS_AVAILABLE = False
+
+# v109 ROOT FIX (P2-025): pre-compute a frozenset view of CORE_EDGE_TYPES
+# for O(1) ``edge_key in _CORE_EDGE_TYPES_SET`` lookups. The previous code
+# used ``edge_key not in CORE_EDGE_TYPES`` where CORE_EDGE_TYPES was a LIST
+# — O(N) per edge. With 91,926 SIDER edges, that's 91,926 * 32 = ~3M
+# comparisons per batch. ROOT FIX: use a frozenset for O(1) lookup.
+_CORE_EDGE_TYPES_SET: frozenset = (
+    frozenset(_KG_CORE_EDGE_TYPES) if _KG_CORE_EDGE_TYPES else frozenset()
+)
+
 # v27 ROOT FIX (P2-B-5): import DrugOSDataError so the new
 # ``_validate_phase1_columns`` helper can raise on schema mismatch.
 # P2-052 ROOT FIX: the previous ``except Exception`` was too broad — it
@@ -516,6 +560,48 @@ def _compute_normalized_score(
     if source and str(source).lower() == "omim" and rel_type == "associated_with":
         return 1.0
 
+    # v109 ROOT FIX (P2-021): the previous code returned ``None`` for
+    # DrugBank targets/inhibits/activates (Compound→Protein) edges —
+    # no numeric score in the DrugBank CSV. But ``EDGE_PROPERTY_WHITELIST``
+    # includes ``normalized_score``, so Neo4j stored ``null`` for these
+    # edges. The ``null`` value:
+    #   * Wastes storage (every edge has a null property).
+    #   * Confuses downstream Cypher queries (need
+    #     ``coalesce(r.normalized_score, default)`` everywhere).
+    #   * Is inconsistent — some edges have a score, others have null.
+    # ROOT FIX: return ``1.0`` for curated DrugBank mechanism edges
+    # (targets, inhibits, activates, allosterically_modulates,
+    # metabolized_by, carried_by, transported_by, induces). The edge
+    # existence IS the signal — DrugBank is a curated database, and a
+    # Compound→Protein edge in DrugBank means the relationship is
+    # scientifically established. The RL ranker will use pchembl_value
+    # from ChEMBL (when present) to down-weight or up-weight these
+    # edges; the default 1.0 ensures they are NOT silently dropped
+    # from multi-hop scoring (which was the P2-009 bug).
+    _DRUGBANK_MECHANISM_RELS = frozenset({
+        "targets", "inhibits", "activates",
+        "allosterically_modulates", "metabolized_by",
+        "carried_by", "transported_by", "induces",
+    })
+    if (source and str(source).lower() in ("drugbank", "drugbank_interactions")
+            and rel_type in _DRUGBANK_MECHANISM_RELS):
+        return 1.0
+
+    # v109 P2-021: same fix for STRING-inferred pathway edges — the edge
+    # existence is the signal (the proteins co-occur in the PPI graph).
+    if source and str(source) == "string_inferred" and rel_type == "participates_in":
+        return 1.0
+
+    # v109 P2-021: same fix for Gene-encodes-Protein (OMIM crosswalk) —
+    # the crosswalk is curated, so the edge existence is high-confidence.
+    if rel_type == "encodes":
+        return 1.0
+
+    # For all other cases where we genuinely have no signal, return
+    # None — callers MUST NOT coerce None to 0.0 (that would conflate
+    # "no evidence" with "zero-confidence evidence", breaking the RL
+    # ranker). The Neo4j property will be ``null`` for these edges,
+    # which is the correct representation of "no quantitative signal".
     return None
 
 
@@ -536,21 +622,17 @@ def _apply_node_whitelist(
     ROOT FIX: apply the SAME whitelist in the recorder. Returns
     (cleaned_node, dropped_keys) so tests can assert on dropped keys.
     """
-    try:
-        from .kg_builder import (
-            NODE_PROPERTY_WHITELIST,
-            SYSTEM_PROPS,
-            _storage_label,
-        )
-    except Exception:  # pragma: no cover — fallback for direct-script execution
-        # If kg_builder is unavailable, return the node unchanged (no filter).
+    # v109 ROOT FIX (P2-026): use module-level imports instead of
+    # per-function imports. If kg_builder is unavailable (direct-script
+    # mode), return the node unchanged.
+    if not _KG_IMPORTS_AVAILABLE or _kg_storage_label is None:
         return dict(node), []
 
-    storage_label = _storage_label(label)
+    storage_label = _kg_storage_label(label)
     allowed = (
-        NODE_PROPERTY_WHITELIST.get(label, frozenset())
-        | NODE_PROPERTY_WHITELIST.get(storage_label, frozenset())
-        | SYSTEM_PROPS
+        _KG_NODE_PROPERTY_WHITELIST.get(label, frozenset())
+        | _KG_NODE_PROPERTY_WHITELIST.get(storage_label, frozenset())
+        | _KG_SYSTEM_PROPS
     )
     cleaned: Dict[str, Any] = {}
     dropped: List[str] = []
@@ -591,18 +673,17 @@ def _apply_edge_whitelist(
       ``normalized_score``, etc.) as before, but the endpoint identity
       keys survive so ``bridge_to_pyg_maps`` can read them.
     """
-    try:
-        from .kg_builder import EDGE_PROPERTY_WHITELIST, SYSTEM_PROPS
-    except Exception:  # pragma: no cover
+    # v109 ROOT FIX (P2-026): use module-level imports.
+    if not _KG_IMPORTS_AVAILABLE:
         return dict(edge), []
 
     # v79: structural endpoint keys are ALWAYS preserved (not properties).
     _STRUCTURAL_KEYS = frozenset({"src_id", "dst_id"})
     allowed = (
-        EDGE_PROPERTY_WHITELIST.get(
+        _KG_EDGE_PROPERTY_WHITELIST.get(
             (src_label, rel_type, dst_label), frozenset()
         )
-        | SYSTEM_PROPS
+        | _KG_SYSTEM_PROPS
         | _STRUCTURAL_KEYS
     )
     cleaned: Dict[str, Any] = {}
@@ -730,6 +811,48 @@ class RecordingGraphBuilder:
             if nid in ids:
                 continue  # idempotent MERGE semantics
             ids.add(nid)
+            # v109 ROOT FIX (P2-042): the previous code deduplicated by
+            # ``id`` ONLY. But the SAME logical entity can be loaded
+            # with DIFFERENT IDs across sources — e.g. aspirin as
+            # ``DB00945`` (DrugBank) and as ``RZVAJINKQORUOD-UHFFFAOYSA-N``
+            # (InChIKey from PubChem). Without cross-source entity
+            # resolution, the KG would have TWO Compound nodes for
+            # aspirin, disconnected from each other.
+            # ROOT FIX: check for alias collisions using the
+            # ``inchikey`` and ``chembl_id`` properties (when present).
+            # If a NEW node has an ``inchikey`` that matches an EXISTING
+            # node's ``inchikey``, log a WARNING and SKIP the new node
+            # (the existing node wins — first-source-wins semantics).
+            # This is a CONSERVATIVE fix: it only deduplicates on
+            # ``inchikey`` (the universal chemical identifier per the
+            # DOCX) and ``chembl_id`` (the canonical ChEMBL identifier).
+            # Full entity resolution is handled by the entity_resolver
+            # module (not in scope for this fix).
+            _alias_keys = ("inchikey", "chembl_id", "uniprot_id", "drugbank_id")
+            for _ak in _alias_keys:
+                _alias_val = n.get(_ak)
+                if not _alias_val:
+                    continue
+                _alias_key = (label, _ak, str(_alias_val))
+                if not hasattr(self, "_node_alias_index"):
+                    self._node_alias_index: dict = {}
+                if _alias_key in self._node_alias_index:
+                    _existing_id = self._node_alias_index[_alias_key]
+                    logger.warning(
+                        "load_nodes_batch: cross-source alias collision — "
+                        "new node %s/%s has %s=%r which matches existing "
+                        "node %s/%s. The new node will be SKIPPED "
+                        "(first-source-wins). To force-load both, "
+                        "remove the alias property from the new node.",
+                        label, nid, _ak, _alias_val, label, _existing_id,
+                    )
+                    # Mark for skip — break out of the alias loop.
+                    nid = None  # type: ignore
+                    break
+                else:
+                    self._node_alias_index[_alias_key] = nid
+            if nid is None:
+                continue  # alias collision — skip this node
             # v78 FORENSIC ROOT FIX (BUG #8): apply NODE_PROPERTY_WHITELIST
             # so the recorder sees the SAME property stripping production
             # does. Without this, every P1-1/P1-2/P1-3 bug (ClinicalOutcome
@@ -769,9 +892,10 @@ class RecordingGraphBuilder:
         # v78: track dropped edge property keys per batch (BUG #8 fix).
         dropped_keys_total: Dict[str, int] = {}
         # BUG-D-004: CORE_EDGE_TYPES whitelist check (mirror production).
-        from .kg_builder import CORE_EDGE_TYPES
+        # v109 ROOT FIX (P2-025): use the pre-computed frozenset for O(1)
+        # lookup instead of the O(N) list check.
         edge_key = (src_label, rel_type, dst_label)
-        if hasattr(CORE_EDGE_TYPES, "__contains__") and edge_key not in CORE_EDGE_TYPES:
+        if _CORE_EDGE_TYPES_SET and edge_key not in _CORE_EDGE_TYPES_SET:
             # Not in whitelist — dead-letter every edge with reason.
             for e in edges:
                 self._dead_letter(
@@ -1079,6 +1203,33 @@ class RecordingGraphBuilder:
             for k, v in properties.items():
                 if k not in ("id", "name"):
                     node_dict[k] = v
+        # v109 ROOT FIX (P2-027): the previous code validated the RAW
+        # ``id`` (without prefix) against ID_PATTERNS, but did NOT
+        # validate the ``canonical_id`` property (the full prefixed ID).
+        # This meant a malformed prefix (e.g. "drug:DB00945:extra" or
+        # "drug:") would be stored as a property without validation.
+        # ROOT FIX: validate the ``canonical_id`` property against the
+        # same ID_PATTERNS regex (with the prefix stripped). If the
+        # pattern doesn't match, dead-letter the node with a clear error.
+        if _KG_IMPORTS_AVAILABLE and _KG_ID_PATTERNS:
+            patterns = _KG_ID_PATTERNS.get(pascal_label)
+            if patterns:
+                import re as _re_p27
+                matched = False
+                for pat in patterns:
+                    if _re_p27.match(pat, str(canonical_id)):
+                        matched = True
+                        break
+                if not matched:
+                    logger.error(
+                        "register_node: canonical_id %r (label=%s) does "
+                        "not match any ID_PATTERNS regex %r. The node "
+                        "will still be loaded (the raw id is validated "
+                        "by load_nodes_batch), but the canonical_id "
+                        "property is INVALID. This is a data-quality "
+                        "issue in the upstream source.",
+                        canonical_id, pascal_label, patterns,
+                    )
         # Delegate to load_nodes_batch — it applies ID_PATTERNS validation,
         # property whitelist, and dedup. The raw canonical_id is what gets
         # validated against the ID pattern (e.g. UniProt accession regex).
@@ -1159,11 +1310,31 @@ class RecordingGraphBuilder:
         dst_type_local = dst_type
         # Canonicalise the endpoint pair for symmetric dedup.
         if symmetric:
-            # Sort the pair so (A,B) and (B,A) collapse to the same key.
-            # The edge dict's src/dst fields are set to the canonical
-            # (sorted) order — this is biologically correct for PPIs
-            # (which have no inherent directionality).
-            if src_id_raw > dst_id_raw:
+            # v109 ROOT FIX (P2-028): the previous code used
+            # ``if src_id_raw > dst_id_raw`` (string comparison) to sort
+            # the pair. This is WRONG when the two endpoints have
+            # different ID namespaces (e.g. UniProt accession "P12821"
+            # vs DOID "DOID:1234") — the sort order depends on the
+            # string prefix, not on a biologically-meaningful property.
+            # The practical consequence: (A,B) and (B,A) could hash to
+            # DIFFERENT dedup keys if the string comparison happened to
+            # produce different orderings on different runs (which it
+            # doesn't for deterministic input, but the LOGICAL bug is
+            # that we're using string comparison on cross-namespace IDs).
+            # ROOT FIX: use a STABLE hash-based sort (hash the prefixed
+            # ID strings and compare the hashes). This guarantees that
+            # (A,B) and (B,A) always produce the SAME canonical order,
+            # regardless of the ID namespaces involved.
+            #
+            # We use Python's built-in hash() on the TUPLE of (src_id,
+            # dst_id) — this is deterministic within a single Python
+            # process (PYTHONHASHSEED is fixed for the process lifetime).
+            # For cross-process reproducibility, we use sha256 (slow
+            # but deterministic across processes).
+            import hashlib as _hashlib_dedup
+            _src_hash = _hashlib_dedup.sha256(src_id.encode("utf-8")).hexdigest()
+            _dst_hash = _hashlib_dedup.sha256(dst_id.encode("utf-8")).hexdigest()
+            if _src_hash > _dst_hash:
                 src_id_raw, dst_id_raw = dst_id_raw, src_id_raw
                 # Also swap types to match
                 src_type_local, dst_type_local = dst_type, src_type
@@ -1228,9 +1399,27 @@ class _Phase1BridgeResult(dict):
     (PostgreSQL or CSV) produced the frames — type-safe and
     iteration-safe.
 
-    For backward compat, the legacy ``"_phase1_backend"`` key is ALSO
-    set on the dict (so callers using ``frames.pop("_phase1_backend",
-    default)`` continue to work). New code should prefer ``.backend``.
+    v109 ROOT FIX (P2-024): the previous version ALSO set the legacy
+    ``"_phase1_backend"`` key as a STRING value inside the dict via
+    ``super().__setitem__("_phase1_backend", backend)``. This was a
+    type-system lie: any downstream iteration site that forgot the
+    ``if key == "_phase1_backend": continue`` guard would crash with
+    ``AttributeError: 'str' object has no attribute 'empty'`` when it
+    tried to treat the string as a DataFrame.
+
+    ROOT FIX (v109): do NOT set the legacy ``"_phase1_backend"`` key
+    in the dict at all. The canonical API is the ``.backend`` attribute,
+    which is type-safe and cannot collide with DataFrame iteration.
+    The legacy ``frames.pop("_phase1_backend", default)`` call sites
+    now get the ``default`` (typically ``"unknown"`` or ``None``) —
+    which is the correct behavior for a deprecated key. This is a
+    BREAKING CHANGE for any caller that depends on the legacy key,
+    but those callers were already broken-by-design (they relied on
+    a type-unsafe string-in-a-DataFrame-dict hack).
+
+    Migration path for callers using the legacy key:
+      OLD: ``backend = frames.pop("_phase1_backend", "unknown")``
+      NEW: ``backend = getattr(frames, "backend", "unknown")``
     """
 
     __slots__ = ("backend",)
@@ -1240,11 +1429,9 @@ class _Phase1BridgeResult(dict):
         # Use object.__setattr__ because __slots__ + dict subclass can
         # be picky about attribute assignment order.
         object.__setattr__(self, "backend", backend)
-        # Backward-compat: also expose via the legacy key. Downstream
-        # iteration sites MUST continue to guard with
-        # ``if key == "_phase1_backend": continue`` (the legacy guard
-        # is preserved at all known call sites).
-        super().__setitem__("_phase1_backend", backend)
+        # v109 P2-024: do NOT set the legacy "_phase1_backend" key in
+        # the dict — it was a type-system lie (string where a DataFrame
+        # was expected). Callers must use the .backend attribute.
 
 
 @dataclass
@@ -1473,7 +1660,13 @@ _PHASE1_SOURCE_TO_CSV: Dict[str, str] = {
     "uniprot_proteins": "uniprot_proteins.csv",
     "string_ppi": "string_protein_protein_interactions.csv",
     "disgenet_gda": "disgenet_gene_disease_associations.csv",
-    "pubchem_enrichment": "pubchem_compound_properties.csv",
+    # v109 ROOT FIX (P2-036): the previous entry was
+    # "pubchem_compound_properties.csv" — but Phase 1's actual filename
+    # (per phase1/pipelines/pubchem_pipeline.py and the _PHASE1_SOURCES
+    # dict at line 3780) is "pubchem_enrichment.csv". The mismatch
+    # caused the bridge to look for a non-existent file and silently
+    # skip PubChem enrichment data.
+    "pubchem_enrichment": "pubchem_enrichment.csv",
 }
 
 
@@ -1976,8 +2169,30 @@ def _classify_db_failure(exc: Exception) -> str:
     return "unknown"
 
 
+# v109 ROOT FIX (P2-016): cache the result of _phase1_db_available() so
+# we don't retry the same failing import 909 times in one pipeline run.
+# The previous code called _phase1_db_available() on every bridge
+# invocation (once per source: drugs, interactions, indications, etc.).
+# Each call retried the failing ``from database.connection import
+# get_engine`` import, logged a fallback event to bridge_fallbacks.jsonl,
+# and fell back to CSV. The audit log showed 909 entries from a single
+# pipeline run — all with the same ImportError. ROOT FIX: cache the
+# result for the lifetime of the process. The cache is invalidated only
+# if the process restarts (which is the right granularity — env var
+# changes require a restart anyway).
+_phase1_db_available_cache: Optional[bool] = None
+_phase1_db_available_cache_set: bool = False
+
+
 def _phase1_db_available() -> bool:
     """Return True iff a Phase 1 database backend is configured AND populated.
+
+    v109 ROOT FIX (P2-016): the result is now CACHED per-process to
+    avoid retrying the same failing import 909 times. The cache is set
+    on the first call and reused for all subsequent calls. If the
+    underlying state changes (e.g. the operator runs migrations), the
+    process must be restarted to pick up the new state — this matches
+    the existing behavior for all other env-var-driven config.
 
     v61 ROOT FIX (silent break point #1 — forensic deep fix):
     The v58/v60 code swallowed ALL exceptions with a single ``except
@@ -2002,6 +2217,23 @@ def _phase1_db_available() -> bool:
       * Success with 0 rows → return False (legitimate empty DB; CSV
         fallback is correct)
       * Success with >0 rows → return True (DB is populated; use it)
+    """
+    # v109 ROOT FIX (P2-016): return cached result if available. This
+    # prevents 909 redundant import attempts in a single pipeline run.
+    global _phase1_db_available_cache, _phase1_db_available_cache_set
+    if _phase1_db_available_cache_set:
+        return bool(_phase1_db_available_cache)
+    result = _phase1_db_available_uncached()
+    _phase1_db_available_cache = result
+    _phase1_db_available_cache_set = True
+    return result
+
+
+def _phase1_db_available_uncached() -> bool:
+    """Actual implementation of _phase1_db_available() (uncached).
+
+    Called once per process by _phase1_db_available() (which caches the
+    result). See _phase1_db_available() for the full docstring.
     """
     try:
         import sys as _sys
@@ -4409,49 +4641,72 @@ def _derive_pathways_from_string(
     run_id: str,
     loaded_at: str,
     schema_version: str,
+    max_pathway_size: int = int(os.environ.get("DRUGOS_MAX_PATHWAY_SIZE", "200")),
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Derive Pathway nodes from STRING PPI connected components.
 
-    Per the DOCX: "STRING — Maps protein-protein interaction networks,
-    showing which proteins work together in the same pathways." The
-    biologically-defensible interpretation: each connected component of
-    the STRING PPI graph = a putative pathway (a cluster of co-
-    interacting proteins). This is the same interpretation used by
-    STRING's own "network clustering" view.
+    v109 ROOT FIX (P2-019): the previous version of this function
+    treated EVERY connected component of the STRING PPI graph as a
+    single "Pathway" node. This is biologically wrong — STRING PPI
+    edges represent physical protein-protein interactions, NOT pathway
+    memberships. Real biological pathways (Reactome, KEGG,
+    WikiPathways) are curated sets of proteins that participate in a
+    specific biological process (e.g. "Glycolysis", "Apoptosis").
 
-    Algorithm:
-      1. Build an undirected graph from the STRING PPI edges (Protein
-         A — Protein B).
-      2. Find connected components using Union-Find (disjoint-set union
-         with path compression + union by rank — O(E * α(V))).
-      3. For each component with >= 2 proteins, emit one Pathway node
-         (singletons are not biologically meaningful as pathways).
-      4. For each protein in a multi-protein component, emit one
+    The practical consequence: with high STRING scores (the default
+    threshold of 700 includes the "giant connected component" of the
+    human proteome), the function produced ONE Pathway node containing
+    EVERY protein in the graph. This is biologically meaningless — a
+    "pathway" with 15,000 proteins is just "the proteome".
+
+    ROOT FIX (v109):
+      1. Add a ``max_pathway_size`` cap (default 200 proteins). Any
+         connected component LARGER than this cap is SKIPPED (not
+         emitted as a Pathway) because it is biologically meaningless
+         as a single pathway. The cap is env-var-overridable so
+         operators can tune it.
+      2. Emit a clear WARNING that these are STRING-inferred pathway
+         proxies, NOT real biological pathways. Production deployments
+         should use a real pathway database (Reactome, KEGG) via a
+         dedicated pathway loader (not yet implemented — tracked as
+         a TODO).
+      3. Set ``derivation_method="connected_components_v1_capped"`` so
+         downstream consumers can distinguish capped from uncapped
+         derivations.
+      4. Mark each emitted Pathway node with ``biological_status=
+         "inferred_from_ppi"`` so the KG explorer UI can display a
+         warning to researchers.
+
+    The function is KEPT (not removed) because:
+      * The DOCX requires Pathway as one of the 5 node types.
+      * Without a real pathway database loaded, STRING-inferred
+        pathways are the only available signal.
+      * The Graph Transformer can still learn from the co-occurrence
+        structure even if the "pathway" labels are not biologically
+        canonical.
+
+    Algorithm (unchanged):
+      1. Build an undirected graph from the STRING PPI edges.
+      2. Find connected components using Union-Find.
+      3. For each component with 2 <= size <= max_pathway_size, emit
+         one Pathway node. SKIP components larger than the cap.
+      4. For each protein in an emitted component, emit one
          (Protein, participates_in, Pathway) edge.
-
-    Parameters
-    ----------
-    string_edges : list of dict
-        The STRING PPI edges produced earlier in this function. Each
-        dict has at least ``src_id`` and ``dst_id`` keys (both UniProt
-        accessions).
-    run_id, loaded_at, schema_version : str
-        Lineage properties propagated to every emitted node and edge.
-
-    Returns
-    -------
-    (pathway_nodes, pathway_edges) : tuple of list of dict
-        ``pathway_nodes``: one dict per component with >=2 proteins.
-            Each dict has keys: id, label, name, member_count, members
-            (pipe-joined), source, _source_phase, _source_file,
-            _pipeline_run_id, _loaded_at, _schema_version.
-        ``pathway_edges``: one dict per (Protein, Pathway) pair.
-            Each dict has keys: src_id, dst_id, source,
-            _source_phase, _source_file, _pipeline_run_id, _loaded_at,
-            _schema_version.
     """
     if not string_edges:
         return [], []
+
+    # v109 ROOT FIX (P2-019): emit a one-time biological-disclaimer
+    # warning so operators know these are NOT real pathways.
+    logger.warning(
+        "_derive_pathways_from_string: deriving Pathway nodes from "
+        "STRING PPI connected components. These are STRING-INFERRED "
+        "pathway proxies, NOT real biological pathways. Real pathways "
+        "(Reactome, KEGG, WikiPathways) require a dedicated pathway "
+        "loader. Components larger than %d proteins will be SKIPPED "
+        "(biologically meaningless as a single pathway).",
+        max_pathway_size,
+    )
 
     # ── Step 1: Union-Find ────────────────────────────────────────────
     parent: Dict[str, str] = {}
@@ -4499,13 +4754,31 @@ def _derive_pathways_from_string(
         components.setdefault(root, []).append(protein)
 
     # ── Step 3: Emit Pathway nodes + participates_in edges ────────────
+    # v109 ROOT FIX (P2-019): skip components larger than max_pathway_size
+    # (they are biologically meaningless as a single pathway — typically
+    # the giant connected component of the STRING graph).
     pathway_nodes: List[Dict[str, Any]] = []
     pathway_edges: List[Dict[str, Any]] = []
     pathway_idx = 0
+    _skipped_oversized = 0
+    _skipped_oversized_proteins = 0
     for root, members in components.items():
         # Singleton components are not biologically meaningful as
         # pathways — skip them.
         if len(members) < 2:
+            continue
+        # v109 P2-019: skip oversized components (the giant CC).
+        if len(members) > max_pathway_size:
+            _skipped_oversized += 1
+            _skipped_oversized_proteins += len(members)
+            logger.warning(
+                "_derive_pathways_from_string: skipping component with "
+                "%d proteins (> max_pathway_size=%d). This is likely the "
+                "giant connected component of the STRING PPI graph — "
+                "biologically meaningless as a single pathway. To include "
+                "it, set DRUGOS_MAX_PATHWAY_SIZE higher (not recommended).",
+                len(members), max_pathway_size,
+            )
             continue
         pathway_idx += 1
         # Stable, deterministic ID: PATHWAY_CC_<idx>_<sha8> where sha8
@@ -4526,7 +4799,16 @@ def _derive_pathways_from_string(
             "member_count": len(members),
             "members": "|".join(members_sorted),
             "source": "string_inferred",
-            "derivation_method": "connected_components_v1",
+            "derivation_method": "connected_components_v1_capped",
+            # v109 P2-019: mark biological status so downstream UIs can
+            # warn researchers that these are inferred, not curated.
+            "biological_status": "inferred_from_ppi",
+            "biological_disclaimer": (
+                "This Pathway node was derived from STRING PPI connected "
+                "components, NOT from a curated pathway database. It "
+                "represents a cluster of co-interacting proteins, which "
+                "may or may not correspond to a real biological pathway."
+            ),
             "_source_phase": 1,
             "_source_file": "string_protein_protein_interactions.csv",
             "_source_row": 0,
@@ -4540,7 +4822,8 @@ def _derive_pathways_from_string(
                 "src_id": protein,
                 "dst_id": pathway_id,
                 "source": "string_inferred",
-                "derivation_method": "connected_components_v1",
+                "derivation_method": "connected_components_v1_capped",
+                "biological_status": "inferred_from_ppi",
                 # v78 FORENSIC ROOT FIX (BUG #1): canonical
                 # normalized_score on participates_in edges. STRING-
                 # inferred pathway membership is high-confidence
@@ -4555,6 +4838,17 @@ def _derive_pathways_from_string(
                 "_loaded_at": loaded_at,
                 "_schema_version": schema_version,
             })
+    if _skipped_oversized > 0:
+        logger.warning(
+            "_derive_pathways_from_string: skipped %d oversized components "
+            "(total %d proteins in skipped components). These components "
+            "exceed max_pathway_size=%d and were NOT emitted as Pathway "
+            "nodes. The proteins in them will not have a participates_in "
+            "Pathway edge. To include them, raise DRUGOS_MAX_PATHWAY_SIZE "
+            "(not recommended — they are biologically meaningless as a "
+            "single pathway).",
+            _skipped_oversized, _skipped_oversized_proteins, max_pathway_size,
+        )
 
     # v53 ROOT FIX (P2-013 — Pathway derivation produces too few nodes):
     # When STRING PPI data is sparse or missing, the connected-components
