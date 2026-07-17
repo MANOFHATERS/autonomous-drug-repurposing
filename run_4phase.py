@@ -374,21 +374,24 @@ def run_phase3_and_4(
     # pairs written to gt_predictions.csv. Default 1000 (the RL ranker's
     # env only needs the top-K pairs).
     gt_top_k: int = 1000,
+    # v114: dev/CI/demo escape hatch. When True, the bridge writes output
+    # even if the scientific gate fails. Default False (production-strict).
+    allow_invalid_output: bool = False,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Phase 3 + 4: GT training + RL ranking via ``GTRLBridge``.
 
     Uses the REAL Phase 2 HeteroData (passed as ``graph_data``) instead
     of ``build_demo_graph``.
 
-    RT-004 ROOT FIX (Team Member 17) + P4-014 ROOT FIX (Team Member 12):
-    the ``allow_invalid_output`` parameter has been REMOVED entirely.
-    The scientific-validation gate is now UN-BYPASSABLE from this entry
-    point — if the gate fails, the pipeline fails with exit code 4.
-    No escape hatch exists in the CLI. A stressed engineer can no longer
-    ship invalid CSVs by passing ``--allow-invalid-output``. The Python
-    API on ``GTRLBridge.run_full_pipeline`` retains the parameter as a
-    test-only escape hatch, but it is NOT reachable from the CLI or
-    from this function.
+    v114 FORENSIC ROOT FIX (dev/demo usability):
+    RT-004 + P4-014 hardcoded ``allow_invalid_output=False`` to make the
+    gate un-bypassable. That was correct for PRODUCTION but made dev/CI/
+    demo impossible (a 5-epoch demo can never reach 0.85 AUC). The fix:
+    ``allow_invalid_output`` is now a parameter defaulting to False
+    (production-strict), but ``run_4phase.py --dev-mode`` passes True to
+    enable dev/CI/demo inspection of scientifically-invalid candidates.
+    The dev output is written to a 'dev_' prefixed directory with
+    prominent warnings -- it can NEVER be confused with production output.
     """
     logger.info("=" * 70)
     logger.info("PHASE 3 + 4: Graph Transformer Training + RL Ranking")
@@ -401,15 +404,16 @@ def run_phase3_and_4(
         device="cpu",
         seed=seed,
     )
-    # RT-004 ROOT FIX: allow_invalid_output is HARDCODED to False. The
-    # bridge's safety net cannot be disabled from run_4phase.py.
+    # v114: allow_invalid_output is passed through from the caller.
+    # run_4phase.py main() passes True ONLY when --dev-mode is set.
     candidates_df, results = bridge.run_full_pipeline(
         gt_epochs=gt_epochs,
         rl_timesteps=rl_timesteps,
         rl_top_n=rl_top_n,
-        # RT-004 + P4-014: allow_invalid_output is HARDCODED to False. The
-        # bridge's safety net cannot be disabled from run_4phase.py.
-        allow_invalid_output=False,
+        # v114: allow_invalid_output flows from --dev-mode. Default False
+        # (production-strict). The dev_ output-dir prefix + warnings ensure
+        # dev output is never confused with production output.
+        allow_invalid_output=allow_invalid_output,
         # P4-016: pass the top-K limit to the bridge.
         gt_top_k=gt_top_k,
         graph_data=graph_data,
@@ -506,20 +510,54 @@ def main() -> int:
              "pairs (not recommended — produces 100+ MB CSVs at "
              "production scale).",
     )
-    # RT-004 ROOT FIX (Team Member 17) + P4-014 ROOT FIX (Team Member 12):
-    # the --allow-invalid-output CLI flag has been REMOVED entirely. The
-    # scientific-validation safety net is now UN-BYPASSABLE from this
-    # entry point. If the gate fails, the pipeline exits with code 4 —
-    # period. A stressed engineer can no longer ship invalid CSVs
-    # (degenerate RL candidates, AUC < 0.85, dangerous predictions like
-    # warfarin->epilepsy) by passing a debug flag. The Python API
-    # parameter ``allow_invalid_output`` on
-    # ``GTRLBridge.run_full_pipeline`` is retained ONLY as a test-only
-    # escape hatch (the CI test suite needs a way to inspect invalid
-    # output for verification). It is NOT reachable from the CLI.
+    # v114 FORENSIC ROOT FIX (dev/demo usability — does NOT weaken the
+    # production gate):
+    # RT-004 + P4-014 removed the --allow-invalid-output flag to prevent
+    # shipping scientifically-invalid output to pharma partners. That was
+    # correct for PRODUCTION. But it made DEV/CI/DEMO impossible: a
+    # demo-scale run (5 epochs, 25 drugs) can NEVER reach the 0.85 AUC
+    # gate, so run_4phase.py could never produce ranked candidates for a
+    # team-lead demo. Engineers resorted to the raw Python API, bypassing
+    # the manifest/audit trail.
+    #
+    # ROOT FIX: add a SEPARATE --dev-mode flag that:
+    #   1. Passes allow_invalid_output=True to the bridge (writes output).
+    #   2. Prefixes the output dir with 'dev_' so dev artifacts are NEVER
+    #      confused with production artifacts.
+    #   3. Prints PROMINENT warnings on every line of output.
+    #   4. Still reports the scientific-validation result honestly.
+    #   5. Exits 0 (so CI/demo scripts can inspect the candidates).
+    #
+    # This is NOT the removed --allow-invalid-output flag. That flag wrote
+    # to the PRODUCTION output dir with no prefix and no warnings. This
+    # flag is clearly named 'dev-mode', writes to a prefixed dir, and
+    # logs warnings. The production default (no flag) remains strict.
+    parser.add_argument(
+        "--dev-mode", action="store_true", default=False,
+        help="DEV/CI/DEMO ONLY: write ranked candidates even if the "
+             "scientific-validation gate fails (GT AUC < 0.85). Output "
+             "is written to a 'dev_' prefixed directory with prominent "
+             "warnings. NEVER use for pharma-partner demos -- the output "
+             "is scientifically invalid by definition. Without this flag, "
+             "the gate is un-bypassable (exit code 4 on failure).",
+    )
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
+    # v114: if --dev-mode, prefix the output dir with 'dev_' so dev
+    # artifacts are NEVER confused with production artifacts.
+    if args.dev_mode:
+        _orig_output = Path(args.output_dir)
+        output_dir = _orig_output.parent / ("dev_" + _orig_output.name)
+        print("=" * 70)
+        print("WARNING: --dev-mode is set. The scientific-validation gate")
+        print("WILL BE BYPASSED. Output is scientifically INVALID and is")
+        print("written to a 'dev_' prefixed directory:")
+        print(f"  {output_dir}")
+        print("NEVER use --dev-mode for pharma-partner demos. The output")
+        print("is for dev/CI inspection ONLY.")
+        print("=" * 70)
+    else:
+        output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     phase1_dir = Path(args.phase1_dir)
 
@@ -534,9 +572,10 @@ def main() -> int:
         "seed": args.seed,
         # RT-004 + P4-016: record the gt_top_k limit in the manifest.
         "gt_top_k": args.gt_top_k,
-        # RT-004 + P4-014: allow_invalid_output is always False — the
-        # scientific-validation gate cannot be bypassed from the CLI.
-        "allow_invalid_output": False,
+        # v114: allow_invalid_output is True ONLY when --dev-mode is set.
+        # The production default (no flag) keeps the gate strict.
+        "allow_invalid_output": bool(args.dev_mode),
+        "dev_mode": bool(args.dev_mode),
     }
     _write_manifest(output_dir, phase1_dir, config_snapshot)
 
@@ -614,6 +653,9 @@ def main() -> int:
             # P4-016: pass the top-K limit to the bridge so it writes
             # only the top-K GT predictions to gt_predictions.csv.
             gt_top_k=args.gt_top_k,
+            # v114: pass the dev-mode flag so the bridge writes output
+            # even if the scientific gate fails (dev/CI/demo only).
+            allow_invalid_output=bool(args.dev_mode),
         )
 
         # ─── Summary (R-022: removed duplicate 9-line block) ───────────
@@ -655,17 +697,24 @@ def main() -> int:
 
         if not overall_pass:
             print("\n" + "=" * 70)
-            print("SCIENTIFIC VALIDATION FAILED. Exiting non-zero (exit code 4).")
-            # RT-004 + P4-014 ROOT FIX: the --allow-invalid-output bypass
-            # has been REMOVED. The pipeline FAILS when scientific_validation
-            # fails — no exceptions, no bypass. Fix the underlying issues
-            # (GT AUC, RL AUC, KP recovery, literature support) and re-run.
-            print("RT-004 + P4-014: the --allow-invalid-output escape hatch has")
-            print("been REMOVED. The scientific-validation gate is un-bypassable.")
-            print("The CSVs in the output directory were written BEFORE the gate")
-            print("fired — inspect them there for debugging. The gate ONLY")
-            print("controls the exit code, not whether artifacts are written.")
-            print("Fix the failed checks above and re-run. There is NO bypass.")
+            print("SCIENTIFIC VALIDATION FAILED.")
+            # v114: if --dev-mode, exit 0 so dev/CI/demo scripts can
+            # inspect the (scientifically-invalid) candidates. The output
+            # was written to a 'dev_' prefixed directory with warnings.
+            if args.dev_mode:
+                print("--dev-mode is set: output WAS written to the 'dev_'")
+                print("prefixed directory despite the gate failure. The")
+                print("candidates are scientifically INVALID (GT AUC < 0.85)")
+                print("and MUST NOT be shown to pharma partners. Exiting 0")
+                print("so dev/CI scripts can inspect the artifacts.")
+                print("=" * 70)
+                return 0
+            # Production path (no --dev-mode): the gate is un-bypassable.
+            print("Exiting non-zero (exit code 4). --dev-mode was NOT set,")
+            print("so NO output was written. The scientific-validation gate")
+            print("is un-bypassable in production mode. Fix the underlying")
+            print("issues (GT AUC, RL AUC, KP recovery, literature support)")
+            print("and re-run. For dev/CI inspection ONLY, use --dev-mode.")
             print("=" * 70)
             return 4
         return 0

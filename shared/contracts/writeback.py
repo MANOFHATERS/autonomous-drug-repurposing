@@ -235,6 +235,66 @@ NEO4J_DRUG_NAME_PROP: Final[str] = "name"      # Current KG identifier
 NEO4J_DISEASE_ID_PROP: Final[str] = "disease_id"
 NEO4J_DISEASE_NAME_PROP: Final[str] = "name"
 
+# ---------------------------------------------------------------------------
+# P4-025 / P4-050 v114 FORENSIC ROOT FIX: Cypher injection guard.
+# ---------------------------------------------------------------------------
+# phase4/writeback.py builds its MERGE Cypher query via string concatenation
+# of the label/property constants above (Neo4j does not support parameterized
+# labels). If any of these constants ever contained a backtick, semicolon, or
+# other Cypher metacharacter, the query would be vulnerable to injection.
+# The constants are currently hardcoded to safe values ("Drug", "Compound",
+# "Disease", "name", "drug_id", "VALIDATED_TREATS", etc.), but a future
+# edit could introduce a dangerous value silently.
+#
+# ROOT FIX: validate EVERY label/property/edge-label constant against
+# ^[A-Za-z0-9_]+$ at import time. If any value fails validation, the
+# module raises ValueError at import -- fail-closed, before any Cypher
+# query is ever built. This is defense-in-depth: the drug/disease NAMES
+# are already parameterized ($drug_lower, etc.); this guard protects the
+# LABEL/PROPERTY identifiers that cannot be parameterized.
+import re as _re_p4025
+
+_CYPHER_LABEL_RE = _re_p4025.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _validate_cypher_identifier(value: str, name: str) -> None:
+    """Assert a Cypher label/property/edge-label is alphanumeric+underscore only.
+
+    Neo4j labels and property names used in string-concatenated Cypher MUST
+    match ``^[A-Za-z0-9_]+$`` to prevent Cypher injection. Backticks,
+    semicolons, spaces, and other metacharacters are REJECTED.
+
+    Raises ValueError at import time if validation fails (fail-closed).
+    """
+    if not isinstance(value, str) or not _CYPHER_LABEL_RE.match(value):
+        raise ValueError(
+            f"P4-025/P4-050 v114 GUARD: Cypher identifier {name!r} has an "
+            f"unsafe value {value!r}. Neo4j labels and property names used "
+            f"in string-concatenated Cypher MUST match ^[A-Za-z0-9_]+$ to "
+            f"prevent Cypher injection. Fix the constant in "
+            f"shared/contracts/writeback.py."
+        )
+
+
+# Validate all label/property/edge-label constants at import time.
+# Edge labels (VALIDATED_TREATS, VALIDATED_TOXIC_FOR, etc.) are validated
+# via edge_label_for_outcome() at call time -- but the _EDGE_LABEL_MAP keys
+# are validated here too.
+for _id_name, _id_val in (
+    ("NEO4J_DRUG_LABEL_PREFERRED", NEO4J_DRUG_LABEL_PREFERRED),
+    ("NEO4J_DRUG_LABEL_LEGACY", NEO4J_DRUG_LABEL_LEGACY),
+    ("NEO4J_DISEASE_LABEL", NEO4J_DISEASE_LABEL),
+    ("NEO4J_DRUG_ID_PROP", NEO4J_DRUG_ID_PROP),
+    ("NEO4J_DRUG_NAME_PROP", NEO4J_DRUG_NAME_PROP),
+    ("NEO4J_DISEASE_ID_PROP", NEO4J_DISEASE_ID_PROP),
+    ("NEO4J_DISEASE_NAME_PROP", NEO4J_DISEASE_NAME_PROP),
+    ("EDGE_VALIDATED_TREATS", EDGE_VALIDATED_TREATS),
+    ("EDGE_VALIDATED_TOXIC_FOR", EDGE_VALIDATED_TOXIC_FOR),
+    ("EDGE_VALIDATED_NEGATIVE_FOR", EDGE_VALIDATED_NEGATIVE_FOR),
+):
+    _validate_cypher_identifier(_id_val, _id_name)
+del _id_name, _id_val, _re_p4025
+
 
 # ---------------------------------------------------------------------------
 # ATOMIC WRITE PROFILE (issue #351)
