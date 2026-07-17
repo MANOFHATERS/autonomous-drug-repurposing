@@ -286,7 +286,22 @@ def test_p1_015_drugbank_regex_accepts_future_5x_releases():
     """
     # Import the dag module functions directly (no airflow needed for
     # the helper functions).
-    sys.path.insert(0, str(_REPO_ROOT / "phase1"))
+    # v114 round 5 FORENSIC ROOT FIX (sys.path pollution bug):
+    # The previous code did `sys.path.insert(0, ...)` then `sys.path.pop(0)`
+    # in a finally block. But `pop(0)` removes WHATEVER is at index 0 at
+    # the time of the pop — NOT necessarily the path we inserted. If another
+    # test/conftest inserted a different path at index 0 during the try
+    # block, `pop(0)` removes THAT path, corrupting sys.path for all
+    # subsequent tests. This caused 10 phase1/tests/ files to fail with
+    # `ModuleNotFoundError: No module named 'config.settings'` when
+    # collected together with root tests/ (the conftest's phase1/ path
+    # was popped off, so `from config.settings import ...` broke).
+    # ROOT FIX: insert ONLY if not already present, and remove ONLY the
+    # exact path we inserted (not pop(0)).
+    _phase1_path = str(_REPO_ROOT / "phase1")
+    _added_by_us = _phase1_path not in sys.path
+    if _added_by_us:
+        sys.path.insert(0, _phase1_path)
     try:
         # The dag module imports airflow at top level, which may not be
         # installed in the test env. We exec ONLY the helper functions
@@ -314,7 +329,12 @@ def test_p1_015_drugbank_regex_accepts_future_5x_releases():
         assert not SUPPORTED_DRUGBANK_SCHEMA_REGEX.match("badversion")
         assert not SUPPORTED_DRUGBANK_SCHEMA_REGEX.match("")
     finally:
-        sys.path.pop(0)
+        # v114 round 5: remove ONLY the path we inserted (not pop(0)).
+        if _added_by_us:
+            try:
+                sys.path.remove(_phase1_path)
+            except ValueError:
+                pass  # already removed (defensive)
 
 
 def test_p1_015_drugbank_dag_has_regex_and_warn_path():

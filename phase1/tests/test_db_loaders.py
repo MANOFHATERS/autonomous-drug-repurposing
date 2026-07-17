@@ -44,7 +44,7 @@ from database.models import (
 )
 
 # Import SQLite-compatible helpers
-from tests.db_helpers import (
+from db_helpers import (
     get_inchikey_to_drug_id_map,
     get_uniprot_to_protein_id_map,
     sqlite_bulk_update_drugs_from_pubchem,

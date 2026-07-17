@@ -26,7 +26,7 @@ from database.models import (
     Protein,
     ProteinProteinInteraction,
 )
-from tests.db_helpers import (
+from db_helpers import (
     sqlite_bulk_upsert_drugs,
     sqlite_bulk_upsert_dpi,
     sqlite_bulk_upsert_entity_mapping,

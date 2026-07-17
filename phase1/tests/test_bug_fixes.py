@@ -52,7 +52,7 @@ from database.models import (
     PipelineRun,
     Protein,
 )
-from tests.db_helpers import (
+from db_helpers import (
     sqlite_bulk_upsert_drugs,
     sqlite_bulk_upsert_gda,
     sqlite_bulk_upsert_proteins,

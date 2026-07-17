@@ -21,11 +21,60 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 # ---------------------------------------------------------------------------
-# Ensure project root is importable
+# Ensure project root AND phase1/ are importable
 # ---------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+# v114 round 5 FORENSIC ROOT FIX: the previous code added only the REPO
+# ROOT (PROJECT_ROOT). But phase1 test files do `from config.settings
+# import ...` and `import pipelines.omim_pipeline` — both require
+# phase1/ itself on sys.path (config/ and pipelines/ live inside phase1/).
+# The root conftest.py adds phase1/ early, but some root test files
+# manipulate sys.path (insert/remove) during collection, which can push
+# phase1/ off or remove it entirely. By the time phase1/tests/ files are
+# imported, `from config.settings` fails with ModuleNotFoundError.
+# ROOT FIX: add phase1/ HERE too (defense-in-depth). This conftest runs
+# right before phase1/tests/ collection, re-asserting phase1/ on sys.path
+# even if a root test removed it. Idempotent (checks before inserting).
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # repo root
+PHASE1_ROOT = Path(__file__).resolve().parent.parent          # phase1/ dir
+for _p in (PROJECT_ROOT, PHASE1_ROOT):
+    _p_str = str(_p)
+    if _p_str not in sys.path:
+        sys.path.insert(0, _p_str)
+
+# v114 round 5 FORENSIC ROOT FIX (module-name collision):
+# There are TWO packages named `config` in the repo:
+#   1. phase1/config/        (has settings.py — the Phase 1 config)
+#   2. graph_transformer/config/  (has only __init__.py — GT config)
+# When root tests/ import graph_transformer modules, Python registers
+# `config` in sys.modules pointing to graph_transformer/config/ (which
+# has NO settings submodule). Then phase1/tests/ files that do
+# `from config.settings import ...` fail with ModuleNotFoundError because
+# `config` in sys.modules is the WRONG package.
+# ROOT FIX: explicitly import phase1/config/ and register it as `config`
+# in sys.modules BEFORE any phase1 test runs. This ensures
+# `from config.settings import` resolves to phase1/config/settings.py.
+# This is safe because graph_transformer uses RELATIVE imports
+# (`from .config import ...`) — it never does bare `import config`.
+import importlib as _importlib_p1cfg
+_p1_config_path = PHASE1_ROOT / "config"
+if _p1_config_path.exists():
+    # Insert phase1/ at position 0 so `import config` finds phase1/config/ first.
+    _p1_str = str(PHASE1_ROOT)
+    if _p1_str in sys.path:
+        sys.path.remove(_p1_str)
+    sys.path.insert(0, _p1_str)
+    # Force (re)import of config as phase1/config/.
+    if "config" in sys.modules:
+        # The existing `config` module is likely graph_transformer/config.
+        # Save it under its qualified name so graph_transformer's relative
+        # imports still work, then replace `config` with phase1's.
+        _gt_config = sys.modules.pop("config")
+        sys.modules["graph_transformer.config"] = _gt_config
+    try:
+        _p1_config = _importlib_p1cfg.import_module("config")
+        sys.modules["config"] = _p1_config
+    except ImportError:
+        pass  # phase1/config/ not importable — skip (defensive)
 
 
 # ---------------------------------------------------------------------------
