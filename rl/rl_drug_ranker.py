@@ -855,7 +855,13 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if repo_root not in sys.path:
             sys.path.insert(0, repo_root)
-        from common.validated_hypotheses_schema import (
+        # v114 FORENSIC ROOT FIX (BUG #6 from Task 3-b audit): import
+        # DIRECTLY from shared.contracts.writeback (the canonical source
+        # of truth) instead of the DEPRECATED common.validated_hypotheses_schema
+        # shim. The shim's docstring says "New code should import directly
+        # from there" -- these two loaders were not updated. ROOT FIX:
+        # eliminate the shim dependency to prevent future schema drift.
+        from shared.contracts.writeback import (
             get_validated_csv_path,
             OUTCOME_COL,
             OUTCOME_VALIDATED_POSITIVE,
@@ -863,7 +869,7 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
         )
         canonical_path = get_validated_csv_path()  # respects env var at call time
     except Exception:
-        # Fallback if schema module not available (should never happen).
+        # Fallback if shared.contracts.writeback is not available (rare).
         module_dir = os.path.dirname(os.path.abspath(__file__))
         canonical_path = os.environ.get(
             "VALIDATED_HYPOTHESES_CSV",
@@ -998,7 +1004,10 @@ def _load_validated_toxic_hypotheses() -> List[Tuple[str, str]]:
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if repo_root not in sys.path:
             sys.path.insert(0, repo_root)
-        from common.validated_hypotheses_schema import (
+        # v114 FORENSIC ROOT FIX (BUG #6 from Task 3-b audit): import
+        # DIRECTLY from shared.contracts.writeback (canonical source)
+        # instead of the DEPRECATED common.validated_hypotheses_schema shim.
+        from shared.contracts.writeback import (
             get_validated_csv_path,
             OUTCOME_COL,
             OUTCOME_VALIDATED_TOXIC,
@@ -5937,7 +5946,12 @@ def train_agent(
         max_retries: Number of retry attempts on failure.
 
     Returns:
-        Tuple of (model, checkpoint_path). checkpoint_path is None if save failed.
+        Tuple of (model, checkpoint_path, vec_normalize). checkpoint_path
+        is None if save failed. vec_normalize is the VecNormalize wrapper
+        used during training (or None if VecNormalize was unavailable) --
+        callers MUST pass it to evaluate_agent/compute_auc so obs is
+        normalized before the policy network (silent train/inference
+        distribution shift otherwise).
 
     Raises:
         RuntimeError: If all training attempts fail.

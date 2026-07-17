@@ -4980,20 +4980,27 @@ def update_validated_edges(
     # (phase1/processed_data/validated_hypotheses.csv) — falling back to
     # the legacy rl/ path for backward compatibility.
     try:
-        # Import lazily so kg_builder does not hard-depend on common/.
-        import importlib
-        _schema = importlib.import_module("common.validated_hypotheses_schema")
-        _CANONICAL_CSV_PATH = _schema.get_validated_csv_path()
-        _CANONICAL_REQUIRED_COLS = list(_schema.REQUIRED_COLUMNS)  # [drug, disease, outcome, validated_at]
-        _CANONICAL_POSITIVE_OUTCOMES = list(_schema.POSITIVE_OUTCOMES)  # ["validated_positive"]
-        _CANONICAL_VALID_OUTCOMES = list(_schema.VALID_OUTCOMES)
-        _CANONICAL_OUTCOME_COL = _schema.OUTCOME_COL  # "outcome"
-        _CANONICAL_DRUG_COL = _schema.DRUG_COL  # "drug"
-        _CANONICAL_DISEASE_COL = _schema.DISEASE_COL  # "disease"
+        # v114 FORENSIC ROOT FIX (BUG #5 from Task 3-b audit): import
+        # DIRECTLY from shared.contracts.writeback (the canonical source
+        # of truth) instead of the DEPRECATED common.validated_hypotheses_schema
+        # shim. The shim's own docstring says "New code should import
+        # directly from there" -- kg_builder was not updated. If the shim
+        # is removed (planned), the import falls into the except branch
+        # which uses HARDCODED fallback values that may drift from the
+        # canonical schema. ROOT FIX: eliminate the shim dependency.
+        import importlib as _importlib_bug5
+        _wb = _importlib_bug5.import_module("shared.contracts.writeback")
+        _CANONICAL_CSV_PATH = _wb.get_validated_csv_path()
+        _CANONICAL_REQUIRED_COLS = list(_wb.REQUIRED_COLUMNS)  # [drug, disease, outcome, validated_at]
+        _CANONICAL_POSITIVE_OUTCOMES = list(_wb.POSITIVE_OUTCOMES)  # ["validated_positive"]
+        _CANONICAL_VALID_OUTCOMES = list(_wb.VALID_OUTCOMES)
+        _CANONICAL_OUTCOME_COL = _wb.OUTCOME_COL  # "outcome"
+        _CANONICAL_DRUG_COL = _wb.DRUG_COL  # "drug"
+        _CANONICAL_DISEASE_COL = _wb.DISEASE_COL  # "disease"
     except Exception:
-        # Fallback if common/ is not on sys.path (e.g. running kg_builder
-        # as a standalone module). Use the same constants inline so the
-        # behavior matches the canonical schema.
+        # Fallback if shared.contracts.writeback is not on sys.path
+        # (extremely rare -- shared/ is a top-level package). Use the
+        # same constants inline so the behavior matches the canonical schema.
         _CANONICAL_CSV_PATH = None  # will use legacy rl/ path below
         _CANONICAL_REQUIRED_COLS = ["drug", "disease", "outcome", "validated_at"]
         _CANONICAL_POSITIVE_OUTCOMES = ["validated_positive"]
@@ -5195,6 +5202,10 @@ def update_validated_edges(
 
     edges_added = 0
     edges_already_present = 0
+    # v114 BUG #4: track edges skipped due to has_edge_fn failure (dedup
+    # check could not run). Reported in the result so operators can see
+    # how many validated pairs were deferred to the next KG build cycle.
+    edges_skipped_dedup_failure = 0
     errors: List[str] = []
 
     # The 'validated_treats' edge type connects Drug -> Disease.
@@ -5229,8 +5240,40 @@ def update_validated_edges(
                                    src_id=drug, dst_id=disease):
                         edges_already_present += 1
                         continue
-                except Exception:
-                    pass  # has_edge failed — proceed to add (may dedup downstream)
+                except Exception as _has_edge_exc:
+                    # v114 FORENSIC ROOT FIX (BUG #4 from Task 3-b audit):
+                    # the previous code did `except Exception: pass` which
+                    # SILENTLY swallowed ALL errors from has_edge_fn --
+                    # Neo4j connection failures, query timeouts, schema
+                    # mismatches, etc. The code then proceeded to call
+                    # add_edge_fn, which could CREATE A DUPLICATE edge
+                    # (because the dedup check was skipped). The comment
+                    # "may dedup downstream" assumed add_edge_fn has its
+                    # own dedup, but for DrugOSGraphBuilder (Neo4j MERGE),
+                    # the MERGE pattern may not match exactly if the
+                    # has_edge_fn failure was due to a transient Neo4j
+                    # error (e.g., the node exists but the MERGE's
+                    # property constraints don't match).
+                    #
+                    # ROOT FIX: LOG the failure (WARNING, not silent) and
+                    # SKIP this edge. Skipping is safer than adding a
+                    # potential duplicate -- the next KG build cycle will
+                    # retry. The operator sees the warning and can
+                    # investigate the has_edge_fn failure (Neo4j health,
+                    # query syntax, schema drift). This prevents KG
+                    # fragmentation from duplicate VALIDATED_TREATS edges.
+                    import logging as _logging_bug4
+                    _logging_bug4.getLogger(__name__).warning(
+                        "BUG #4 v114: has_edge_fn failed for "
+                        "(Compound=%r, validated_treats, Disease=%r): %s. "
+                        "SKIPPING this edge to prevent duplicate "
+                        "VALIDATED_TREATS in the KG. The next KG build "
+                        "cycle will retry. Investigate the has_edge_fn "
+                        "failure (Neo4j health, query syntax, schema drift).",
+                        drug, disease, _has_edge_exc,
+                    )
+                    edges_skipped_dedup_failure += 1
+                    continue
 
             if add_edge_fn is not None:
                 add_edge_fn(
@@ -5272,6 +5315,9 @@ def update_validated_edges(
     return {
         "edges_added": edges_added,
         "edges_already_present": edges_already_present,
+        # v114 BUG #4: surface skipped-dedup-failure count so operators
+        # can detect has_edge_fn failures (Neo4j health, schema drift).
+        "edges_skipped_dedup_failure": edges_skipped_dedup_failure,
         "total_validated_pairs": len(validated_pairs),
         "errors": errors,
     }
