@@ -58,11 +58,19 @@ def test_p3_002_service_imports_and_has_endpoints():
 def test_p3_003_confidence_formula_correct():
     """P3-003: confidence is 0.0 at prob=0.5 (least confident), 1.0 at 0.0/1.0."""
     from graph_transformer.service import _compute_confidence
+    # P3-010 ROOT FIX: confidence uses binary-entropy (1 - H(p)/log(2)),
+    # NOT the old linear heuristic 2.0*abs(prob-0.5). The audit (P3-010)
+    # explicitly condemns 2.0*abs(prob-0.5) as "NOT a statistical confidence
+    # measure". H(0.7) = -0.7*ln(0.7) - 0.3*ln(0.3) = 0.6109; log(2)=0.6931;
+    # confidence = 1 - 0.6109/0.6931 = 0.1187. The old 0.4 value came from
+    # 2.0*abs(0.7-0.5) which is the WRONG formula the audit removed.
     assert _compute_confidence(0.5) == 0.0, "prob=0.5 (least confident) -> 0.0"
-    assert _compute_confidence(0.0) == 1.0, "prob=0.0 (most confident) -> 1.0"
-    assert _compute_confidence(1.0) == 1.0, "prob=1.0 (most confident) -> 1.0"
-    assert abs(_compute_confidence(0.7) - 0.4) < 0.01, "prob=0.7 -> 0.4"
-    assert abs(_compute_confidence(0.3) - 0.4) < 0.01, "prob=0.3 -> 0.4"
+    # p=0.0/1.0 are clipped to a tiny epsilon internally (to avoid log(0)),
+    # so confidence is ~1.0 but not bit-exact. Use approximate equality.
+    assert abs(_compute_confidence(0.0) - 1.0) < 1e-4, "prob=0.0 (most confident) -> ~1.0"
+    assert abs(_compute_confidence(1.0) - 1.0) < 1e-4, "prob=1.0 (most confident) -> ~1.0"
+    assert abs(_compute_confidence(0.7) - 0.1187) < 0.01, "prob=0.7 -> ~0.12 (binary-entropy, NOT 0.4)"
+    assert abs(_compute_confidence(0.3) - 0.1187) < 0.01, "prob=0.3 -> ~0.12 (binary-entropy, NOT 0.4)"
 
 
 # ============================================================================

@@ -400,9 +400,18 @@ def test_p3_036_streaming_excludes_treats_edges_behavioral():
         out_csv = os.path.join(tmpdir, "streaming.csv")
         bridge.save_rl_input_streaming(out_csv, batch_size_drugs=4)
         df = pd.read_csv(out_csv)
-        # The CSV must have the calibrated column (P3-047) and the right shape
+        # The CSV must have the calibrated column (P3-047) and the right shape.
+        # build_demo_graph uses a HARDCODED demo drug/disease set (28 drugs,
+        # 20 diseases) regardless of the num_drugs/num_diseases kwargs (they
+        # are minimums, not hard limits). The streaming CSV must cover EVERY
+        # drug-disease pair in the actually-built graph.
         assert "gnn_score_calibrated" in df.columns
-        assert len(df) == 8 * 6  # 48 pairs
+        n_drugs = len(bridge.node_maps.get("drug", {}))
+        n_diseases = len(bridge.node_maps.get("disease", {}))
+        assert len(df) == n_drugs * n_diseases, (
+            f"streaming CSV must cover all {n_drugs}*{n_diseases}="
+            f"{n_drugs * n_diseases} drug-disease pairs, got {len(df)}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────
