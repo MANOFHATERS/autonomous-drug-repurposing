@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # =============================================================================
-# airflow-entrypoint.sh — IN-077 ROOT FIX: Fernet key validation entrypoint.
+# airflow-entrypoint.sh — Fernet key validation entrypoint (IN-077 + v116).
 # =============================================================================
-# The docker-compose.yml passes
-# ``AIRFLOW__CORE__FERNET_KEY: "dev_fernet_key_replace_in_production"``
-# which is NOT a valid Fernet key. Airflow would crash at startup with
-# ``cryptography.fernet.InvalidToken`` (good — visible failure) OR silently
-# fall back to plaintext Connection storage (bad — invisible failure where
-# every Airflow Connection password is stored unencrypted in the metadata
-# DB — a FDA 21 CFR Part 11 finding for a pharma platform).
+# Validates AIRFLOW__CORE__FERNET_KEY BEFORE starting the scheduler.
 #
-# This entrypoint validates the Fernet key BEFORE starting the scheduler
-# and fails fast with a clear error message including the command to
-# generate a valid key.
+# A valid Fernet key is a 32-byte URL-safe base64-encoded string (44 chars
+# total including the trailing '='). The old placeholder
+# "dev_fernet_key_replace_in_production" is 36 chars of ASCII — NOT a valid
+# Fernet key. Airflow would crash at startup with
+# `cryptography.fernet.InvalidToken` (visible failure) OR silently fall back
+# to plaintext Connection storage (invisible failure where every Airflow
+# Connection password is stored unencrypted — a FDA 21 CFR Part 11 finding).
 #
-# Usage (from Dockerfile):
-#   ENTRYPOINT ["/opt/airflow/airflow-entrypoint.sh"]
-#   CMD ["airflow", "scheduler"]
+# v116: docker-compose.yml now sources the key from
+#   ${AIRFLOW_FERNET_KEY:?ERROR: ...}
+# so compose fails BEFORE the container starts if the var is unset. This
+# entrypoint is the SECOND line of defense — it catches operators who set
+# the var to an INVALID value in .env.
 # =============================================================================
 set -euo pipefail
 
@@ -27,9 +27,6 @@ if [ -z "${AIRFLOW__CORE__FERNET_KEY:-}" ]; then
 fi
 
 # Validate the Fernet key by attempting to construct a Fernet instance.
-# A valid Fernet key is a 32-byte base64-encoded string (44 chars total
-# including the trailing '='). This catches both malformed keys (wrong
-# length, non-base64) and keys that decode but aren't 32 bytes.
 if ! python3 -c "
 import os, sys
 from cryptography.fernet import Fernet
@@ -42,15 +39,6 @@ except Exception as exc:
     sys.exit(1)
 "; then
     exit 1
-fi
-
-# Warn if the key is the well-known dev placeholder. This is NOT fatal —
-# the key IS technically valid (it's a real Fernet key from the Airflow
-# docs) but it's publicly known and MUST be rotated for production.
-if [ "${AIRFLOW__CORE__FERNET_KEY}" = "dev_fernet_key_replace_in_production" ]; then
-    echo "WARNING: AIRFLOW__CORE__FERNET_KEY is the dev placeholder." >&2
-    echo "WARNING: Replace it with a real Fernet key before production deployment." >&2
-    echo 'WARNING: Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"' >&2
 fi
 
 # Hand off to the original command (e.g., "airflow scheduler").
