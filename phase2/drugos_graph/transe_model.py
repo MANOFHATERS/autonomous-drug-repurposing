@@ -2707,8 +2707,29 @@ def train_transe(
                 # first epoch). Log at DEBUG level (not WARNING) to
                 # avoid audit-log spam on every epoch.
                 try:
-                    # Get the total entity count from the negative sampler.
-                    _n_entities = getattr(negative_sampler, "n_entities", 0) or 0
+                    # v2 FORENSIC ROOT FIX (P2-034): the previous code read
+                    # ``getattr(negative_sampler, "n_entities", 0)`` — but
+                    # KGNegativeSampler exposes ``self.num_entities`` (set at
+                    # negative_sampling.py:2257), NOT ``n_entities``. No class
+                    # in the codebase sets ``n_entities``. The result:
+                    # ``_n_entities`` was ALWAYS 0, the ``if _n_entities > 0``
+                    # branch was DEAD CODE, and the code always fell through to
+                    # the ``elif rel_idx in per_relation_neg_pools`` branch —
+                    # which COPIES THE PREVIOUS EPOCH'S POOL VERBATIM. Stale
+                    # negatives from epoch 1 persisted for the entire run for
+                    # every relation that ever failed type-constrained sampling.
+                    # The model memorized stale negatives instead of learning.
+                    #
+                    # ROOT FIX: read the CORRECT attribute name ``num_entities``
+                    # (with fallbacks for robustness: legacy ``n_entities``,
+                    # then ``model.num_entities`` which is ALWAYS available
+                    # because TransEModel.__init__ saves it at line 551).
+                    _n_entities = (
+                        getattr(negative_sampler, "num_entities", None)
+                        or getattr(negative_sampler, "n_entities", None)
+                        or getattr(model, "num_entities", 0)
+                        or 0
+                    )
                     if _n_entities > 0:
                         import random as _random_p34
                         _heads = [_random_p34.randrange(_n_entities) for _ in range(pool_size)]

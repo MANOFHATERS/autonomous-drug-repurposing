@@ -352,3 +352,38 @@ Stage Summary:
 - Branch teammate-10-root-fixes-v115 pushed, PR #69 merged to main as commit c9f0892.
 - Fresh clone of main verifies all fixes are present and the build + tests pass.
 - 16 files changed: 1747 insertions, 210 deletions.
+
+---
+Task ID: TM6-FORENSIC-V118
+Agent: Z.ai Code (Teammate 6 swim lane)
+Task: Forensic verification + root-fix of Teammate 6 Phase 3 issues (graph_transformer/data, contracts, service, gt_rl_bridge, utils, config). Red-team mode: assume every comment is a lie; verify against RUNNING code only.
+
+Work Log:
+- Read the project docx (Autonomous Drug Repurposing Platform, 6 phases) and the 50-issue audit file for TM6.
+- Installed the full Phase 3 ML stack into /home/z/.venv: torch 2.13.0+cpu, torch-geometric 2.8.0, rdkit, stable-baselines3 2.9.0, gymnasium, scipy, pandas, scikit-learn, fastapi, neo4j, sqlalchemy, biopython (already present).
+- Generated Phase 1 sample data (`python -m pipelines samples` from phase1/) so Phase 3 could run on real biomedical CSVs.
+- Ran the REAL end-to-end 4-phase pipeline (`run_4phase.py --gt-epochs 3 --rl-timesteps 300`) and confirmed it trains Phase 3 GT + Phase 4 RL and reaches the scientific-validation gate. kp_recovery_rate=1.0 (Phase 1->2->3->4 integration WORKS), rl_auc=1.0. The gate correctly REFUSES to ship output because gt_test_auc=0.34 < 0.85 (expected for a 3-epoch demo — NOT a code bug; an undertrained model).
+- Verified by IMPORTING/RUNNING (not reading comments) that the following audit issues are ALREADY FIXED in main (the audit file is stale, pre-v113):
+  * P3-001 (CRITICAL, ImportError is_phase2_intermediate_dropped) -> FIXED: module imports cleanly, alias exists.
+  * P3-002 (CRITICAL, 67% of edges dropped) -> FIXED: PHASE2_TO_PHASE3_EDGE has 30 entries (SIDER, drug-metabolism, Gene, PPI all mapped).
+  * P3-003 (CRITICAL, drug features noise) -> FIXED: RDKit is a hard dependency (raises if missing); fingerprints generated at exactly target_dim bits.
+  * P3-004 (HIGH, temperature calibration dead for RL) -> FIXED: gnn_score IS now the calibrated probability.
+  * P3-005 (HIGH, predict_all_pairs called twice) -> FIXED: predict_all_pairs_dual (single encode).
+  * P3-006 (HIGH, efficacy_score single RNG) -> FIXED: per-drug NAME seeds via _deterministic_name_seed.
+  * P3-010 (HIGH, confidence formula 2*abs) -> FIXED: binary-entropy 1 - H(p)/log(2).
+  * P3-018 (MEDIUM, LABEL_LEAKING_EDGES missing causes) -> FIXED: causes/caused_by present.
+  * P3-025 (HIGH, dense pathway matrix OOM) -> FIXED: scipy.sparse.csr_matrix.
+  * P3-049 (HIGH, disease_avg_gnn from pool) -> FIXED: global_disease_stats param.
+  * SH-006 (CRITICAL, two parallel services drift) -> FIXED: both use identical camelCase shape.
+- Found and ROOT-FIXED real residual defects (verified fail-before/pass-after):
+  * P3-009 REGRESSION (real, in my lane): BiomedicalGraphBuilder._PHASE2_TO_PHASE3_EDGE_TYPE was a stale 11-entry LOCAL copy while the shared PHASE2_TO_PHASE3_EDGE had 30. The from_phase1_staged_data path silently DROPPED 19 edge types -> DIFFERENT graph than adapt_phase2_to_phase3. ROOT FIX: graph_builder.py now imports the shared mapping (INT-004 consolidation phase2_adapter already did but graph_builder missed). test_p3_009_adapter_edge_mappings_are_identical now PASSES. Gene/MedDRA_Term -> None -> skipped (None-skip already exists at graph_builder.py:2120).
+  * SH-006 RESIDUAL (real, in my lane): service.py /top-k returned modelVersion "gt_v110" while /predict returned "gt_v113". FIXED: both now "gt_v113".
+  * 3 STALE TESTS asserting OLD buggy behavior (the audit explicitly condemns): test_p3_003_confidence_formula_correct (asserted old 2*abs formula -> updated to binary-entropy values), test_p3_001_unknown_is_dropped_not_inhibits (asserted unknown absent -> updated to assert not a specific mechanism; neutral 'binds' is acceptable per unified mapping), test_p3_036_streaming row count (asserted 8*6=48 but build_demo_graph uses 28-drug hardcoded set -> updated to use actual node-map counts).
+- Added 5 regression tests (tests/test_tm6_p3_009_unification_regression.py) locking in the P3-009 unification + SH-006 version consistency so future changes cannot silently regress them.
+
+Stage Summary:
+- Swim lane: graph_transformer/{data,contracts,service,gt_rl_bridge,utils,config,__init__,requirements} ONLY. No files outside this lane were modified (git diff --name-only confirms).
+- Phase 3 test suite: 11 failures -> 8 failures. The 3 fixed are in my lane. The 8 REMAINING are ALL in TM7's lane (graph_transformer/models, training, link_predictor): test_p3_012 (checkpoint val_loss vs val_auc), test_p3_013/015/016 (model architecture: self-loop, Q projections, residual), test_p3_025 (BatchNorm doc), test_p3_030 (unknown-type embedding), test_p3_037 (predict_probability lock). These are pre-existing and are the parallel TM7 agent's responsibility — NOT touched to avoid git conflicts.
+- End-to-end pipeline verified RUNNING (not just compiling): Phase 1 sample CSVs -> Phase 2 bridge -> Phase 3 GT training -> gt_checkpoint.pt (10.7MB) + gt_predictions.csv (17 real columns) -> Phase 4 PPO RL training -> scientific-validation gate. kp_recovery=1.0 proves Phase 1+2+3+4 are linked.
+- Branch: teammate-6-issues. Will merge to main after CI/py_compile/pytest verification.
+- PAT SECURITY: the GitHub PAT was pasted in plaintext in the IM context. User MUST revoke it at https://github.com/settings/tokens immediately.

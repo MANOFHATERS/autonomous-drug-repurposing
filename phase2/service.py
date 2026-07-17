@@ -459,6 +459,112 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
 
 
 # ─── P2-009 ROOT FIX (v107 forensic): in-memory subgraph exploration ──────
+
+# v2 FORENSIC ROOT FIX (P2-038): module-level bridge cache.
+# The v109 "fix" stored the adjacency cache on the builder INSTANCE via
+# setattr(builder, "_drugos_adj_cache_v109", ...). But _explore_subgraph_in_memory
+# called run_phase1_to_phase2() with builder=None, which creates a FRESH
+# RecordingGraphBuilder() on every call (phase1_bridge.py:8060-8061). The
+# cache attribute was therefore stored on an ephemeral object that was
+# garbage-collected when the function returned — the cache-hit branch was
+# unreachable dead code, and the O(E) adjacency rebuild (plus the O(N) CSV
+# re-read inside the bridge) ran on EVERY /kg/explore API call.
+#
+# ROOT FIX: cache the bridge RESULT (builder + adjacency) at MODULE level,
+# keyed on the Phase 1 processed-data dir path + its mtime. Subsequent
+# calls within the same process reuse the cached builder AND adjacency,
+# eliminating both the CSV re-read and the adjacency rebuild. The cache
+# auto-invalidates when the dir's mtime changes (Phase 1 pipeline re-ran).
+_BRIDGE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _get_cached_bridge(pdir):
+    """Return a cached RecordingGraphBuilder result for ``pdir``.
+
+    Caches at module level, keyed on (path, mtime). Returns a dict with
+    keys 'builder', 'adj', 'node_props', or None if the bridge fails.
+    """
+    import time
+    cache_key = str(pdir)
+    try:
+        dir_mtime = max(
+            (f.stat().st_mtime for f in pdir.glob("*.csv*")),
+            default=0.0,
+        )
+    except OSError:
+        dir_mtime = 0.0
+    cached = _BRIDGE_CACHE.get(cache_key)
+    if cached is not None and cached.get("_mtime", 0.0) == dir_mtime:
+        return cached
+    # Cache miss (or stale): rebuild.
+    try:
+        from drugos_graph.phase1_bridge import run_phase1_to_phase2
+        result = run_phase1_to_phase2(
+            phase1_processed_dir=str(pdir),
+            prefer_postgres=os.environ.get(
+                "DRUGOS_PREFER_POSTGRES", "0"
+            ).lower() in ("1", "true", "yes", "on"),
+        )
+        builder = result["builder"]
+    except Exception as exc:
+        logger.info("Phase 2 service: in-memory bridge unavailable: %s", exc)
+        return None
+    # Build the adjacency dict ONCE and cache it with the builder.
+    adj: Dict[str, Dict[str, List[Tuple[str, str, str]]]] = {}
+    node_props: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    node_loads = getattr(builder, "node_loads", None)
+    edge_loads = getattr(builder, "edge_loads", None)
+    if not node_loads or not edge_loads:
+        # Production Neo4j builder — no in-memory data.
+        return None
+    for load in node_loads:
+        if not isinstance(load, dict):
+            continue
+        label = load.get("label", "unknown")
+        for node in load.get("nodes", []) or []:
+            if not isinstance(node, dict):
+                continue
+            nid = str(node.get("id", ""))
+            if not nid:
+                continue
+            node_props[(label, nid)] = {
+                k: v for k, v in node.items() if k != "id"
+            }
+            adj.setdefault(label, {}).setdefault(nid, [])
+    # P2-022: dedup reverse edges.
+    seen_reverse: Set[Tuple[str, str, str, str, str]] = set()
+    for load in edge_loads:
+        if not isinstance(load, dict):
+            continue
+        src_label = load.get("src_label", "")
+        rel = load.get("rel_type", "")
+        dst_label = load.get("dst_label", "")
+        for edge in load.get("edges", []) or []:
+            if not isinstance(edge, dict):
+                continue
+            src_id = str(edge.get("src_id", ""))
+            dst_id = str(edge.get("dst_id", ""))
+            if not src_id or not dst_id:
+                continue
+            adj.setdefault(src_label, {}).setdefault(src_id, []).append(
+                (rel, dst_label, dst_id)
+            )
+            rev_key = (dst_label, dst_id, rel, src_label, src_id)
+            if rev_key not in seen_reverse:
+                seen_reverse.add(rev_key)
+                adj.setdefault(dst_label, {}).setdefault(dst_id, []).append(
+                    (f"rev_{rel}", src_label, src_id)
+                )
+    entry = {
+        "builder": builder,
+        "adj": adj,
+        "node_props": node_props,
+        "_mtime": dir_mtime,
+    }
+    _BRIDGE_CACHE[cache_key] = entry
+    return entry
+
+
 def _explore_subgraph_in_memory(
     drug: Optional[str], disease: Optional[str], limit: int
 ) -> Optional[Dict[str, Any]]:
@@ -474,112 +580,17 @@ def _explore_subgraph_in_memory(
     503). This makes the KG explorer feature work in dev/CI without a
     Neo4j dependency.
     """
-    try:
-        from drugos_graph.phase1_bridge import run_phase1_to_phase2
-        pdir = _REPO_ROOT / "phase1" / "processed_data"
-        if not pdir.exists() or not any(pdir.glob("*.csv*")):
-            return None
-        # SH-010 ROOT FIX (Teammate 4): same fix as /kg/stats — read the
-        # ``DRUGOS_PREFER_POSTGRES`` env var instead of hardcoding False.
-        result = run_phase1_to_phase2(
-            phase1_processed_dir=str(pdir),
-            prefer_postgres=os.environ.get(
-                "DRUGOS_PREFER_POSTGRES", "0"
-            ).lower() in ("1", "true", "yes", "on"),
-        )
-        builder = result["builder"]
-    except Exception as exc:
-        logger.info("Phase 2 service: in-memory explore unavailable: %s", exc)
+    pdir = _REPO_ROOT / "phase1" / "processed_data"
+    if not pdir.exists() or not any(pdir.glob("*.csv*")):
         return None
-
-    # P2-038 ROOT FIX (v109): the previous code rebuilt the adjacency
-    # dict on EVERY API call — O(E) memory allocation per request. Under
-    # load, this caused GC pressure and made the /kg/explore endpoint
-    # 10-100x slower than necessary. ROOT FIX: cache the built adjacency
-    # dict on the builder instance (``_drugos_adj_cache``) so subsequent
-    # calls within the same process reuse it. The cache is invalidated
-    # if the bridge re-runs (the builder is replaced). For the dev
-    # in-memory builder, this is a pure win. For the production Neo4j
-    # builder, this path is not reached (Neo4j handles the BFS).
-    cache_attr = "_drugos_adj_cache_v109"
-    cached = getattr(builder, cache_attr, None)
-    if cached is not None and cached.get("limit_hint", 0) >= limit:
-        adj = cached["adj"]
-        node_props = cached["node_props"]
-    else:
-        # Build adjacency: src_label -> src_id -> [(rel_type, dst_label, dst_id)]
-        adj: Dict[str, Dict[str, List[Tuple[str, str, str]]]] = {}
-        node_props: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        # P2-037: handle both RecordingGraphBuilder (has node_loads) and
-        # DrugOSGraphBuilder (does not). For DrugOSGraphBuilder, we cannot
-        # do in-memory BFS (the data lives in Neo4j). Return None to let
-        # the caller fall back to Neo4j.
-        node_loads = getattr(builder, "node_loads", None)
-        edge_loads = getattr(builder, "edge_loads", None)
-        if not node_loads or not edge_loads:
-            logger.info(
-                "Phase 2 service: in-memory explore skipped — builder has "
-                "no node_loads/edge_loads (production Neo4j builder)."
-            )
-            return None
-        for load in node_loads:
-            if not isinstance(load, dict):
-                continue
-            label = load.get("label", "unknown")
-            for node in load.get("nodes", []) or []:
-                if not isinstance(node, dict):
-                    continue
-                nid = str(node.get("id", ""))
-                if not nid:
-                    continue
-                node_props[(label, nid)] = {
-                    k: v for k, v in node.items() if k != "id"
-                }
-                adj.setdefault(label, {}).setdefault(nid, [])
-
-        # P2-022 ROOT FIX (v109): the previous code added a reverse edge
-        # for EVERY forward edge on EVERY load. If the same edge was
-        # loaded multiple times (e.g. by two different sources), the
-        # reverse edge was duplicated. ROOT FIX: use a set to dedup
-        # reverse edges by (src_id, rel, dst_id) — only add the reverse
-        # entry if it has not already been added.
-        seen_reverse: Set[Tuple[str, str, str, str, str]] = set()
-        for load in edge_loads:
-            if not isinstance(load, dict):
-                continue
-            src_label = load.get("src_label", "")
-            rel = load.get("rel_type", "")
-            dst_label = load.get("dst_label", "")
-            for edge in load.get("edges", []) or []:
-                if not isinstance(edge, dict):
-                    continue
-                src_id = str(edge.get("src_id", ""))
-                dst_id = str(edge.get("dst_id", ""))
-                if not src_id or not dst_id:
-                    continue
-                adj.setdefault(src_label, {}).setdefault(src_id, []).append(
-                    (rel, dst_label, dst_id)
-                )
-                # Reverse adjacency for BFS from disease nodes — dedup.
-                rev_key = (dst_label, dst_id, rel, src_label, src_id)
-                if rev_key not in seen_reverse:
-                    seen_reverse.add(rev_key)
-                    adj.setdefault(dst_label, {}).setdefault(dst_id, []).append(
-                        (f"rev_{rel}", src_label, src_id)
-                    )
-        # Cache for reuse. We store a ``limit_hint`` so the cache is
-        # rebuilt if a later request needs a larger BFS (the adjacency
-        # itself is not limit-dependent, but we keep the hint for future
-        # extensions where the cache might be limit-aware).
-        try:
-            setattr(builder, cache_attr, {
-                "adj": adj, "node_props": node_props, "limit_hint": limit,
-            })
-        except Exception:
-            # Some builders may not allow setting attributes (e.g.
-            # frozen dataclasses). Fall back to no-cache — correctness
-            # is preserved, just slower.
-            pass
+    # v2 FORENSIC ROOT FIX (P2-038): use the MODULE-LEVEL cache instead
+    # of storing on an ephemeral builder. This eliminates the O(E)
+    # adjacency rebuild AND the O(N) CSV re-read on every API call.
+    cached = _get_cached_bridge(pdir)
+    if cached is None:
+        return None
+    adj = cached["adj"]
+    node_props = cached["node_props"]
 
     # P2-062 ROOT FIX (Teammate 4, forensic, root-level): the previous
     # code computed a SINGLE start node via ``target_name = (drug or
