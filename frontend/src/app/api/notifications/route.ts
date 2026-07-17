@@ -25,11 +25,18 @@ import { NotificationsQuery } from "@/lib/zod-schemas";
  *   - limit: max rows to return (default 50, capped at 100).
  *   - offset: pagination offset (default 0).
  *
- * BE-065: Single round-trip for both total and unread counts using
- * Prisma groupBy. The groupBy aggregates readAt into two buckets:
- *   - readAt = null  → unread notifications
- *   - readAt != null → read notifications
- * Total is the sum of both bucket counts.
+ * BE-042 ROOT FIX (v115, LOW): the previous code used a single
+ * `groupBy` on `readAt` to compute total + unread counts. Prisma's
+ * `groupBy` on a nullable DateTime field produces ONE bucket per
+ * distinct timestamp value — for a user with 10K read notifications,
+ * that's 10K buckets returned from the DB. The query was O(N) in
+ * distinct timestamps, defeating the "single round-trip" goal.
+ *
+ * ROOT FIX: replace the groupBy with TWO count queries — one for
+ * the total count and one for the unread count (readAt IS NULL).
+ * Two round-trips, but each is O(1) (PostgreSQL COUNT(*) uses an
+ * index-only scan). This is dramatically cheaper than groupBy for
+ * power users with many read notifications.
  */
 export async function GET(req: NextRequest) {
   const auth = await requireAuth();
@@ -61,30 +68,20 @@ export async function GET(req: NextRequest) {
   const where = { userId: auth.user.userId };
 
   try {
-    const [items, readBuckets] = await Promise.all([
+    // BE-042 ROOT FIX: two count queries instead of groupBy. Each
+    // count is O(1) at the DB (index-only scan on userId) — much
+    // cheaper than the previous groupBy which was O(N) in distinct
+    // readAt timestamps.
+    const [items, total, unread] = await Promise.all([
       db.notification.findMany({
         where,
         orderBy: { createdAt: "desc" },
         take: page.limit,
         skip: page.offset,
       }),
-      db.notification.groupBy({
-        by: ["readAt"],
-        where,
-        _count: { id: true },
-      }),
+      db.notification.count({ where }),
+      db.notification.count({ where: { ...where, readAt: null } }),
     ]);
-
-    // Compute total and unread from the grouped buckets.
-    let total = 0;
-    let unread = 0;
-    for (const bucket of readBuckets) {
-      const count = bucket._count.id;
-      total += count;
-      if (bucket.readAt === null) {
-        unread += count;
-      }
-    }
 
     return NextResponse.json({ ...buildPaginatedResponse(items, total, page), unread });
   } catch (e) {

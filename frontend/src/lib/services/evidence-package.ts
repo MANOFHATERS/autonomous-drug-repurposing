@@ -63,19 +63,111 @@ export async function buildEvidencePackage(input: BuildEvidencePackageInput): Pr
     throw new Error("Both drug and disease must be provided to build an evidence package.");
   }
 
+  // BE-052 ROOT FIX (v115, LOW): PubMed query injection. The previous
+  // code interpolated `${drug} AND ${disease}` directly into the
+  // PubMed query string. PubMed's query syntax supports boolean
+  // operators (AND, OR, NOT), field qualifiers ([Title], [MeSH]), and
+  // parentheses. An attacker (or careless researcher) passing
+  // drug="aspirin OR cancer" would craft the query
+  // "aspirin OR cancer AND <disease>" — PubMed would interpret this
+  // as (aspirin) OR (cancer AND <disease>), returning all aspirin-
+  // related articles PLUS all cancer-and-disease articles. The
+  // evidence package would contain irrelevant articles, inflating
+  // the "literature support" metric and potentially making a weak
+  // hypothesis look well-supported.
+  //
+  // ROOT FIX: validate drug and disease against the biomedical-name
+  // whitelist before interpolation. The whitelist allows alphanumerics,
+  // spaces, hyphens, and apostrophes (e.g. "St John's Wort") — these
+  // are the only characters in legitimate drug/disease names. Any
+  // input that doesn't match is rejected up-front with a clear error
+  // message. This is the same whitelist used by openfda.ts and the
+  // /api/safety / /api/drugs/search routes.
+  const BIOMEDICAL_NAME_WHITELIST = /^[A-Za-z0-9 \-']{2,128}$/;
+  if (!BIOMEDICAL_NAME_WHITELIST.test(drug)) {
+    throw new Error(
+      `Invalid drug name "${drug.slice(0, 64)}": only alphanumerics, spaces, hyphens, and apostrophes are allowed (BE-052 root fix: prevents PubMed query injection).`
+    );
+  }
+  if (!BIOMEDICAL_NAME_WHITELIST.test(disease)) {
+    throw new Error(
+      `Invalid disease name "${disease.slice(0, 64)}": only alphanumerics, spaces, hyphens, and apostrophes are allowed (BE-052 root fix: prevents PubMed query injection).`
+    );
+  }
+
+  // BE-051 ROOT FIX (v115, MEDIUM): per-call timeout.
+  //
+  // ROOT CAUSE: the previous code used Promise.allSettled without a
+  // timeout. If PubMed was slow (10s) but CT.gov and openFDA returned
+  // in 1s, the overall request took 10s. Under V1's 100-concurrent-
+  // request load, 100 evidence-package builds each taking 10s = 1000s
+  // of accumulated external API time → external API rate limits
+  // exceeded (NCBI: 3 req/sec without key) → all subsequent requests
+  // failed.
+  //
+  // ROOT FIX: wrap each external call in a per-call 5s timeout via
+  // Promise.race with a timeout promise. If a call exceeds 5s, it
+  // rejects with a timeout error — Promise.allSettled captures the
+  // rejection as "failed" status, and the evidence package is built
+  // with whatever data DID come back. The UI shows a "FAILED" badge
+  // for the timed-out source so the researcher knows the data is
+  // incomplete.
+  //
+  // We don't need a separate overall timeout because each per-call
+  // timeout caps the worst case at 5s — Promise.allSettled waits for
+  // all three to settle, which is at most 5s.
+  const PER_CALL_TIMEOUT_MS = 5_000;
+
+  // Helper: wrap a promise with a timeout. Returns the original
+  // promise's result if it resolves before the timeout, else rejects
+  // with a timeout error. The timeout timer is cleared on settlement
+  // to avoid leaking a long-lived timer handle.
+  function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`${label} timed out after ${ms}ms`));
+      }, ms);
+      p.then(
+        (val) => {
+          clearTimeout(timer);
+          resolve(val);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        }
+      );
+    });
+  }
+
   // Run all three lookups concurrently — they are independent.
+  // Each is wrapped in a per-call 5s timeout. The overall
+  // Promise.allSettled therefore completes in at most 5s (not the
+  // sum of all three call times).
   const [literature, clinicalTrials, safety] = await Promise.allSettled([
-    searchPubMed({
-      query: `${drug} AND ${disease}`,
-      limit: input.literatureLimit ?? 15,
-      sort: "relevance",
-    }),
-    searchClinicalTrials({
-      condition: disease,
-      intervention: drug,
-      limit: input.trialsLimit ?? 10,
-    }),
-    getDrugSafetySummary(drug),
+    withTimeout(
+      searchPubMed({
+        query: `${drug} AND ${disease}`,
+        limit: input.literatureLimit ?? 15,
+        sort: "relevance",
+      }),
+      PER_CALL_TIMEOUT_MS,
+      "PubMed search"
+    ),
+    withTimeout(
+      searchClinicalTrials({
+        condition: disease,
+        intervention: drug,
+        limit: input.trialsLimit ?? 10,
+      }),
+      PER_CALL_TIMEOUT_MS,
+      "ClinicalTrials.gov search"
+    ),
+    withTimeout(
+      getDrugSafetySummary(drug),
+      PER_CALL_TIMEOUT_MS,
+      "openFDA safety summary"
+    ),
   ]);
 
   // BE-018 ROOT FIX: capture per-service status. A "rejected" promise means
@@ -156,7 +248,15 @@ export function evidencePackageToMarkdown(pkg: EvidencePackage): string {
   // BE-018: Data Completeness section — surfaces per-service status so a
   // pharma partner reading the PDF knows whether "0 trials" means "no
   // trials registered" or "CT.gov was down when this was generated".
-  lines.push(`## 0. Data Completeness`);
+  //
+  // BE-070 ROOT FIX (v115, LOW): the previous code numbered this section
+  // "## 0. Data Completeness" — but PDF renderers (and most markdown
+  // TOC generators) start at 1, not 0. The "Section 0" header broke
+  // the PDF's table of contents (the section appeared before the TOC
+  // start, or was skipped entirely). The fix renumbers to a
+  // non-numeric heading so it doesn't interfere with the numbered
+  // sections that follow (PubMed = 1, Clinical Trials = 2, Safety = 3).
+  lines.push(`## Data Completeness`);
   lines.push(``);
   const status = pkg.serviceStatus ?? { literature: "ok", clinicalTrials: "ok", safety: "ok" };
   const anyFailed = status.literature === "failed" || status.clinicalTrials === "failed" || status.safety === "failed";

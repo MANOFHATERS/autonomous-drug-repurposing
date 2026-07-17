@@ -71,11 +71,19 @@ export const offTargetPredictions: OffTargetPrediction[] = [];
 export const drugInteractions: DrugInteraction[] = [];
 export const pathwayData: PathwayData = { nodes: [], edges: [] };
 
+// BE-075 ROOT FIX (v115, LOW): the previous type used `price: string`
+// but billing.ts `Plan` uses `priceCents: number`. The type mismatch
+// meant any code that consumed subscription plans from empty-defaults
+// would crash at runtime if it tried to do arithmetic on the price.
+// The fix aligns the type with billing.ts — `priceCents: number` and
+// `currency: string`. The array is still empty (per the file's
+// contract: NO real data lives here), but the TYPE is now correct.
 export const subscriptionPlans: Array<{
   id: string;
   name: string;
-  price: string;
-  period: string;
+  priceCents: number;
+  currency: string;
+  interval: string;
   features: string[];
 }> = [];
 

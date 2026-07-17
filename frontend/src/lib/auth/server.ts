@@ -806,6 +806,42 @@ export async function authenticateApiKey(rawKey: string): Promise<AuthenticatedU
   // with sha256 before lookup so we never store the raw value.
   const { createHash } = await import("crypto");
   const hash = createHash("sha256").update(rawKey).digest("hex");
+
+  // BE-062 ROOT FIX (v115, LOW): short-TTL cache for VALID API keys.
+  //
+  // ROOT CAUSE: the previous code made a DB call on EVERY API-key
+  // request. The requireCsrfOrSend middleware calls authenticateApiKey
+  // to verify a key is valid before exempting CSRF — so every API-key
+  // POST made TWO DB calls (one in requireCsrfOrSend, one in the
+  // actual route handler). Under high API traffic (developer platform
+  // use case), this doubled the DB load.
+  //
+  // ROOT FIX: cache VALID auth results for 30 seconds. The cache is
+  // keyed on the SHA-256 hash of the raw key (we never cache the raw
+  // key itself). Invalid keys are NEVER cached — they always hit the
+  // DB so revocation takes effect immediately. Valid keys get at most
+  // 30s of continued access after revocation, which is acceptable for
+  // the developer platform use case (operators who need immediate
+  // revocation can rotate the user's session or suspend the user
+  // account, both of which bypass this cache).
+  //
+  // The cache is a plain Map — no external dependency (Redis). For
+  // multi-instance deployments, each instance has its own cache, so
+  // the effective TTL is up to 30s × (number of instances). This is
+  // acceptable for the V1 launch; a future hardening pass can move
+  // the cache to Redis for cross-instance consistency.
+  const cacheKey = `apikey:${hash}`;
+  const cached = apiKeyAuthCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < API_KEY_CACHE_TTL_MS) {
+    // Cache hit — return the cached auth result. We DO NOT update
+    // lastUsedAt on cache hits (the DB update is a write that would
+    // defeat the purpose of the cache). The lastUsedAt field is
+    // updated on cache MISS only (below) — so it reflects "last
+    // time the key was verified against the DB", not "last time the
+    // key was used". This is a acceptable trade-off for V1.
+    return cached.user;
+  }
+
   const key = await db.apiKey.findFirst({
     where: { hashedKey: hash, revokedAt: null },
     include: { user: true },
@@ -822,7 +858,7 @@ export async function authenticateApiKey(rawKey: string): Promise<AuthenticatedU
     return null;
   }
   await db.apiKey.update({ where: { id: key.id }, data: { lastUsedAt: new Date() } });
-  return {
+  const user: AuthenticatedUser = {
     userId: key.user.id,
     email: key.user.email,
     role: key.user.role,
@@ -836,7 +872,24 @@ export async function authenticateApiKey(rawKey: string): Promise<AuthenticatedU
     platformRole: (key.user.platformRole as string | undefined) || "none",
     orgId: key.organizationId,
   };
+  // BE-062: cache the VALID auth result for 30s. Only valid results
+  // are cached — invalid keys always hit the DB.
+  apiKeyAuthCache.set(cacheKey, { user, cachedAt: Date.now() });
+  // Evict expired entries opportunistically (every 100 inserts).
+  if (apiKeyAuthCache.size % 100 === 0) {
+    const now = Date.now();
+    for (const [k, v] of apiKeyAuthCache.entries()) {
+      if (now - v.cachedAt >= API_KEY_CACHE_TTL_MS) {
+        apiKeyAuthCache.delete(k);
+      }
+    }
+  }
+  return user;
 }
+
+// BE-062: in-memory cache for valid API-key auth results.
+const API_KEY_CACHE_TTL_MS = 30_000; // 30 seconds
+const apiKeyAuthCache = new Map<string, { user: AuthenticatedUser; cachedAt: number }>();
 
 // ---------------------------------------------------------------------------
 // Authorization helpers

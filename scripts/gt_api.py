@@ -25,10 +25,18 @@ Endpoints
         pairs. Body: ``{"pairs": [{"drug":"aspirin","disease":"migraine"}]}``.
         Returns: ``{"predictions":[{"drug":...,"disease":...,"score":0.87}]}``.
 
-    POST /top-k
-        Rank the top-K drug-disease pairs by predicted score. Body:
-        ``{"top_k": 50, "drug_filter": null}``. Returns the K highest-
-        scoring pairs the model has not seen during training.
+    GET  /top-k?k=<int>&drug_filter=<csv>
+        Rank the top-K drug-disease pairs by predicted score. Returns the
+        K highest-scoring pairs the model has not seen during training.
+        SH-007 v115 ROOT FIX (CRITICAL): the shared contract
+        (shared/contracts/urls.py line 25) declares ``/top-k`` as GET,
+        ``graph_transformer/service.py`` registers it as GET, and the
+        frontend's ``gt-inference.ts`` calls it as GET. The previous
+        version of THIS file registered it as POST — causing contract
+        drift: requests from the frontend would hit this service with
+        GET, receive a 405 Method Not Allowed, and the dashboard's
+        "top novel predictions" panel would silently fail. The fix
+        aligns this service with the contract (GET, query params).
 
 Environment
 -----------
@@ -351,9 +359,40 @@ def predict(req: PredictRequest) -> PredictResponse:
     )
 
 
-@app.post("/top-k", response_model=TopKResponse, tags=["inference"])
-def top_k(req: TopKRequest) -> TopKResponse:
-    """Return the top-K highest-scoring drug-disease pairs."""
+@app.get("/top-k", response_model=TopKResponse, tags=["inference"])
+def top_k(k: int = 10, drug_filter: Optional[str] = None) -> TopKResponse:
+    """Return the top-K highest-scoring drug-disease pairs.
+
+    SH-007 v115 ROOT FIX (CRITICAL): aligned with the shared contract
+    (shared/contracts/urls.py) and with graph_transformer/service.py.
+    The endpoint is now GET (not POST) and reads ``k`` and
+    ``drug_filter`` from query parameters. ``drug_filter`` is a
+    comma-separated list of drug names (case-insensitive) — pass
+    ``?drug_filter=aspirin,ibuprofen`` to restrict results to those
+    drugs. Pass no ``drug_filter`` to get the global top-K.
+    """
+    # Validate k against the same bounds as the Pydantic model did
+    # (1 <= k <= 500). Returning 422 (FastAPI's default for invalid
+    # query params) is preferable to silently clamping — the frontend's
+    # mlFetch treats 422 as a non-retryable client error.
+    if k < 1 or k > 500:
+        raise HTTPException(
+            status_code=400,
+            detail="k must be in [1, 500]",
+        )
+
+    # Parse drug_filter CSV into a list. Empty string / missing param
+    # → None (no filter). Whitespace-only entries are dropped.
+    drug_filter_list: Optional[List[str]] = None
+    if drug_filter is not None and drug_filter.strip():
+        drug_filter_list = [
+            d.strip()
+            for d in drug_filter.split(",")
+            if d.strip()
+        ]
+        if not drug_filter_list:
+            drug_filter_list = None
+
     model = _load_model()
     if not model:
         raise HTTPException(status_code=503, detail=getattr(app.state, "gt_error", "model not loaded"))
@@ -369,13 +408,13 @@ def top_k(req: TopKRequest) -> TopKResponse:
             model["drug_names"],
             model["disease_names"],
             model["known_pairs"],
-            req.top_k,
+            k,
         )
         # Apply optional drug filter (case-insensitive) — the underlying
         # helper does not natively filter, so we slice after ranking.
-        if req.drug_filter:
-            allowed = {d.lower() for d in req.drug_filter}
-            preds = [p for p in preds if p["drug"].lower() in allowed][: req.top_k]
+        if drug_filter_list:
+            allowed = {d.lower() for d in drug_filter_list}
+            preds = [p for p in preds if p["drug"].lower() in allowed][:k]
     except Exception as exc:  # noqa: BLE001
         logger.exception("top_k failed")
         raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc

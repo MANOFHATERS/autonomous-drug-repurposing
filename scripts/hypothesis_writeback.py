@@ -1,6 +1,30 @@
 #!/usr/bin/env python3
 """Hypothesis writeback helper for /api/hypothesis/validate route.
 
+SH-022 v115 ROOT FIX (LOW — Dead Code):
+    DEPRECATED. The frontend's /api/hypothesis/validate route was
+    migrated to an HTTP proxy (RL_SERVICE_URL/validate) per Issue 227.
+    The route NO LONGER spawns this script as a subprocess — the
+    HTTP path goes through the shared mlFetch client with timeout,
+    retry, and structured error normalization.
+
+    This script is kept ONLY as a developer-facing CLI tool for
+    manual testing of the writeback pipeline (run it directly with
+    `python3 scripts/hypothesis_writeback.py <req_path> <resp_path>`
+    to test phase4.writeback.write_validated_hypothesis() without
+    standing up the full RL service). It is NOT called from any
+    production code path.
+
+    DO NOT add new production callers. If you need to trigger
+    writeback programmatically, call RL_SERVICE_URL/validate via
+    HTTP (see frontend/src/lib/services/rl-ranker.ts for the
+    client-side pattern, or rl/service.py for the server-side
+    pattern).
+
+    A future hardening pass should DELETE this script entirely
+    once the test suite that references it is updated to call
+    the HTTP endpoint instead.
+
 RT-010 ROOT FIX (Team Member 17): shells out from the Next.js route
 to the phase4.writeback module. The route cannot import Python directly,
 so it spawns this script via child_process.spawn.

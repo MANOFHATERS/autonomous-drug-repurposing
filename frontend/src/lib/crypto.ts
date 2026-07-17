@@ -20,10 +20,33 @@ const PREFIX = "v1";
 function getKey(): Buffer {
   const raw = process.env[KEY_ENV_VAR];
   if (!raw) {
-    if (process.env.NODE_ENV === "production") {
+    // BE-063 ROOT FIX (v115, MEDIUM): fail-closed for missing key.
+    //
+    // ROOT CAUSE: the previous code only threw when
+    // `NODE_ENV === "production"`. If NODE_ENV was unset (a common
+    // misconfiguration in staging / preview environments), the code
+    // fell back to a HARDCODED dev key derived from a publicly-known
+    // string. Anyone with repo access could decrypt any secret
+    // encrypted with this key. The pattern was a landmine: a future
+    // developer importing `encryptSecret` for a new feature in a
+    // misconfigured environment would silently encrypt secrets with
+    // a publicly-known key.
+    //
+    // ROOT FIX: invert the check. Instead of "throw only if
+    // production", we "throw UNLESS explicitly in development or
+    // test". This means:
+    //   - NODE_ENV=production → throw (correct)
+    //   - NODE_ENV=staging → throw (correct — staging needs a real key)
+    //   - NODE_ENV=preview → throw (correct — preview needs a real key)
+    //   - NODE_ENV=development → dev key (acceptable for local dev)
+    //   - NODE_ENV=test → dev key (acceptable for unit tests)
+    //   - NODE_ENV unset → throw (correct — fail-closed)
+    const isDev = process.env.NODE_ENV === "development" || process.env.NODE_ENV === "test";
+    if (!isDev) {
       throw new Error(
-        `${KEY_ENV_VAR} must be set in production. Generate one with: ` +
-        `openssl rand -base64 32`
+        `${KEY_ENV_VAR} must be set when NODE_ENV is not "development" or "test" ` +
+        `(current NODE_ENV=${JSON.stringify(process.env.NODE_ENV)}). ` +
+        `Generate a 32-byte key with: openssl rand -base64 32`
       );
     }
     // Dev-only deterministic key so the app doesn't crash during local dev.
