@@ -31,7 +31,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "phase1"))
 import pytest
 import pandas as pd
 
-from pipelines._embedded_samples import (
+# v114 round 4 FORENSIC ROOT FIX (test/production module-name drift):
+# The test imported from `pipelines._embedded_samples` but the module is
+# actually named `pipelines._dev_samples`. The `_embedded_samples` module
+# NEVER EXISTED — this test file could never be collected (ModuleNotFoundError
+# at import time), so the ENTIRE P1-v108 forensic test suite was silently
+# SKIPPED. ROOT FIX: import from the correct module name.
+from pipelines._dev_samples import (
     embedded_chembl_molecules,
     embedded_chembl_activities,
     embedded_drugbank_drugs,

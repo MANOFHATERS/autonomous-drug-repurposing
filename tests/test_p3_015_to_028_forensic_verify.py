@@ -31,7 +31,18 @@ from graph_transformer.models.link_predictor import DrugDiseaseLinkPredictor
 from graph_transformer.models.graph_transformer import (
     DrugRepurposingGraphTransformer,
 )
-from graph_transformer.models.embeddings import NodeTypeProjection, _SafeBatchNorm1d
+# v114 round 4 FORENSIC ROOT FIX (test/production drift):
+# P3-029 v107 REMOVED _SafeBatchNorm1d from embeddings.py (it was 100+
+# lines of dead code — no caller passed feature_norm="batch"). The
+# production code now raises ValueError on feature_norm="batch". This
+# test file still imported _SafeBatchNorm1d, causing ImportError at
+# collection time → the ENTIRE P3-015-to-028 test suite was silently
+# SKIPPED (pytest reported "error during collection" and moved on).
+# None of the 24 P3 forensic tests ever ran. ROOT FIX: import only
+# NodeTypeProjection (which still exists); update TestP3_025 below to
+# verify the REMOVAL (feature_norm="batch" raises ValueError) instead
+# of the old "class exists with docstring" assertion.
+from graph_transformer.models.embeddings import NodeTypeProjection
 from graph_transformer.training.trainer import GraphTransformerTrainer
 from graph_transformer.data.graph_builder import BiomedicalGraphBuilder
 from graph_transformer.data import V1_AUC_THRESHOLD_DEMO
@@ -404,54 +415,70 @@ class TestP3_024(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# P3-025: _SafeBatchNorm1d must be either removed OR explicitly documented
-# as reachable only via feature_norm="batch" (which is not the default).
+# P3-025: _SafeBatchNorm1d was REMOVED in P3-029 v107 (dead code).
+# v114 round 4 FORENSIC ROOT FIX: the old test expected the class to
+# exist with documentation. The production code removed it (correctly --
+# it was 100+ lines of dead code, no caller passed feature_norm="batch").
+# The test was never updated, causing ImportError at collection time.
+# ROOT FIX: verify the REMOVAL instead -- feature_norm="batch" must raise
+# ValueError, and the default NodeTypeProjection must not contain any
+# BatchNorm1d module.
 # ---------------------------------------------------------------------------
 class TestP3_025(unittest.TestCase):
-    def test_safe_batchnorm_documented_as_non_default(self):
-        """_SafeBatchNorm1d must have a docstring explaining it's only
-        reached when feature_norm='batch' (not the default)."""
-        doc = _SafeBatchNorm1d.__doc__ or ""
-        self.assertIn("feature_norm", doc,
-                      "P3-025: _SafeBatchNorm1d docstring must mention feature_norm.")
-        # Must mention it's not the default path.
-        self.assertTrue(
-            "none" in doc.lower() or "default" in doc.lower(),
-            "P3-025: docstring must state feature_norm='none' is the default.",
-        )
+    def test_feature_norm_batch_raises_value_error(self):
+        """P3-029 v107 + v114 round 4: feature_norm='batch' must raise
+        ValueError (the _SafeBatchNorm1d wrapper was REMOVED as dead code).
+        A caller who relied on the dead API gets a clear error instead of
+        silent acceptance followed by an untrained-BatchNorm fallback."""
+        with self.assertRaises(ValueError) as ctx:
+            NodeTypeProjection(
+                feature_dims={"drug": 16, "protein": 16, "pathway": 16,
+                              "disease": 16, "outcome": 16},
+                embedding_dim=32,
+                feature_norm="batch",
+            )
+        self.assertIn("batch", str(ctx.exception).lower(),
+                      "P3-025: ValueError must explain feature_norm='batch' is removed.")
 
     def test_default_node_projection_does_not_use_batchnorm(self):
         """NodeTypeProjection with default feature_norm='none' must NOT
-        instantiate _SafeBatchNorm1d."""
-        # NodeTypeProjection takes feature_dims (Dict[str, int]), not a
-        # single node_type/feature_dim pair.
+        instantiate any BatchNorm1d module (the _SafeBatchNorm1d wrapper
+        is removed)."""
+        import torch.nn as nn
         proj = NodeTypeProjection(
             feature_dims={"drug": 16, "protein": 16, "pathway": 16,
                           "disease": 16, "outcome": 16},
             embedding_dim=32,
             feature_norm="none",
         )
-        # Walk the module tree — no _SafeBatchNorm1d should be present.
+        # Walk the module tree — no BatchNorm1d should be present.
         for name, mod in proj.named_modules():
             self.assertNotIsInstance(
-                mod, _SafeBatchNorm1d,
+                mod, nn.BatchNorm1d,
                 f"P3-025: default NodeTypeProjection must not instantiate "
-                f"_SafeBatchNorm1d (found in submodule '{name}').",
+                f"BatchNorm1d (found in submodule '{name}').",
             )
 
 
 # ---------------------------------------------------------------------------
-# P3-026: V1_AUC_THRESHOLD_DEMO must be 0.65 (raised from 0.55).
+# P3-026: V1_AUC_THRESHOLD_DEMO must be 0.85 (v114 round 1 ROOT FIX).
+# The audit mandate: "Use 0.85 for ALL scales. If the demo can't reach
+# 0.85, document the gap and fix the model, not the threshold." The old
+# test expected 0.65 (lowering the bar to make a broken model pass).
+# v114 round 1 changed it to 0.85; this test was never updated.
 # ---------------------------------------------------------------------------
 class TestP3_026(unittest.TestCase):
-    def test_threshold_is_0_65(self):
-        """V1_AUC_THRESHOLD_DEMO must be 0.65, not 0.55."""
+    def test_threshold_is_0_85(self):
+        """V1_AUC_THRESHOLD_DEMO must be 0.85 (v114 round 1 ROOT FIX),
+        not 0.65 or 0.55. Lowering the bar to make a broken model pass
+        is forbidden per the audit mandate."""
         self.assertEqual(
-            V1_AUC_THRESHOLD_DEMO, 0.65,
-            f"P3-026: V1_AUC_THRESHOLD_DEMO must be 0.65, got {V1_AUC_THRESHOLD_DEMO}.",
+            V1_AUC_THRESHOLD_DEMO, 0.85,
+            f"P3-026: V1_AUC_THRESHOLD_DEMO must be 0.85 (v114 round 1), "
+            f"got {V1_AUC_THRESHOLD_DEMO}.",
         )
-        self.assertGreater(V1_AUC_THRESHOLD_DEMO, 0.55,
-                           "P3-026: threshold must be raised above 0.55.")
+        self.assertGreater(V1_AUC_THRESHOLD_DEMO, 0.65,
+                           "P3-026: threshold must be 0.85, not the old 0.65.")
 
 
 # ---------------------------------------------------------------------------
