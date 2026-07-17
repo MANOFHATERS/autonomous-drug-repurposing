@@ -213,6 +213,22 @@ def is_intermediate_node_type(node_type: str) -> bool:
 # projection, NOT silently coerced to a wrong type.
 PHASE2_TO_PHASE3_NODE: Dict[str, Optional[str]] = {
     "Compound": "drug",
+    # v2 FORENSIC ROOT FIX (P2-006): "Drug" was MISSING from this mapping.
+    # "Drug" is a CORE_NODE_TYPE (added in the P2-004 fix for the data
+    # flywheel's "validated_treats" edges). Without this entry, the
+    # pyg_builder (which uses this mapping via the alias
+    # _PHASE2_TO_GT_NODE_TYPE) treated "Drug" as a GENUINELY UNKNOWN label
+    # and SILENTLY DROPPED every Drug node — including all literature-
+    # validated treatment records from pharma partners. This broke the
+    # Phase 1→2→3→4 chain at the 2→3 boundary: the data flywheel's
+    # proprietary validated data (the project's competitive moat per the
+    # DOCX §10) was silently discarded before reaching the Graph
+    # Transformer. ROOT FIX: map "Drug" → "drug" (same Phase 3 type as
+    # "Compound" — they are the same biological entity, distinguished
+    # only by provenance: Compound = structural DBs, Drug = literature
+    # validation). The Neo4j label is preserved in Phase 2; only the
+    # Phase 3 projection collapses them.
+    "Drug": "drug",
     "Protein": "protein",
     "Pathway": "pathway",
     "Disease": "disease",
