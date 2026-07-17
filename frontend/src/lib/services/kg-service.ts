@@ -200,11 +200,32 @@ export async function getKnowledgeGraphStats(): Promise<KgStatsResponse> {
     loaded: true,
   }));
 
-  // If the Python service returned a `backend` field, use it as the
-  // `source` field in the frontend contract.
-  const backend =
-    typeof raw.backend === "string" ? raw.backend :
-    typeof raw.source === "string" ? raw.source : "kg_service";
+  // SH-026 ROOT FIX (Teammate 4, forensic, root-level): the previous
+  // code mapped ``source`` to ALWAYS ``"kg_service"`` regardless of the
+  // backend — the line was literally
+  //   ``source: backend === "in_memory_bridge" ? "kg_service" : "kg_service"``
+  // which is a tautology. This SILENTLY DROPPED the contract's
+  // ``"neo4j" | "in_memory"`` enum: a researcher could not tell whether
+  // the stats came from the live Neo4j graph or the dev/CI in-memory
+  // fallback. The Python service emits ``source`` as ``"neo4j"`` or
+  // ``"in_memory"`` (and now ALSO emits the camelCase canonical fields
+  // ``nodeCount``/``generatedAt``/``sources`` directly, see
+  // phase2/service.py). ROOT FIX: preserve the enum from ``raw.source``
+  // when it is one of the canonical values; otherwise derive it from
+  // ``raw.backend`` (``"neo4j"`` → ``"neo4j"``, anything else →
+  // ``"in_memory"``). Never collapse to ``"kg_service"``.
+  const rawSource =
+    typeof raw.source === "string" ? raw.source : "";
+  const rawBackend =
+    typeof raw.backend === "string" ? raw.backend : "";
+  const source: string =
+    rawSource === "neo4j" || rawSource === "in_memory"
+      ? rawSource
+      : rawBackend === "neo4j"
+        ? "neo4j"
+        : "in_memory";
+  // ``backend`` kept for the note (backward-compat diagnostic label).
+  const backend = rawBackend || rawSource || "kg_service";
 
   const transformed: KgStatsResponse = {
     sources,
@@ -213,11 +234,17 @@ export async function getKnowledgeGraphStats(): Promise<KgStatsResponse> {
     nodeTypeCounts: canonicalNodeTypeCounts,
     edgeTypeCounts: edgeTypes,
     nonCanonicalNodeCounts,
-    source: backend === "in_memory_bridge" ? "kg_service" : "kg_service",
+    source,
+    // SH-026: prefer the server-authoritative timestamp. The Python
+    // service now emits ``generatedAt`` (camelCase) directly; fall back
+    // to the legacy ``last_updated`` (snake_case) for older deployments,
+    // then to the browser clock only as a last resort.
     generatedAt:
       typeof raw.generatedAt === "string"
         ? raw.generatedAt
-        : new Date().toISOString(),
+        : typeof raw.last_updated === "string"
+          ? raw.last_updated
+          : new Date().toISOString(),
     note:
       typeof raw.note === "string"
         ? raw.note
