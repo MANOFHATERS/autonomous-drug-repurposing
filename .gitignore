@@ -15,6 +15,12 @@ frontend/db/
 frontend/dev.log
 frontend/server.log
 .env.local
+# v116 IN-001/BE-004/P1-001 ROOT FIX: root .env holds REAL secrets (Fernet
+# key, DB passwords, API keys). It MUST NOT be committed. .env.example is
+# the committed template with placeholders only.
+.env
+.env.*
+!.env.example
 # Pipeline-trained model checkpoints (regenerable, do not commit)
 checkpoints/
 output_v100/

@@ -1,13 +1,17 @@
 'use client';
 
-import { useState, useMemo, useRef } from 'react';
+import { useState, useRef } from 'react';
 import { Search, X, Clock, ArrowRight } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-// FE-034 ROOT FIX: `mock-data.ts` deleted (dangerous name). Empty default
-// now imported from `@/lib/empty-defaults`. For real disease search, use
-// the useDiseaseSearch() hook in use-api-data.tsx (backed by /api/diseases/search).
-import { diseases } from '@/lib/empty-defaults';
+// FE-021 ROOT FIX: previously this component imported `diseases` from
+// `@/lib/empty-defaults` (an empty array) and filtered it for autocomplete
+// suggestions — so suggestions were ALWAYS empty and the autocomplete did
+// nothing. The real disease search lives at /api/diseases/search (backed by
+// NLM MeSH via lib/services/mesh.ts). We now call it via the
+// useDiseaseSearch() hook (debounced 300ms, typed against the real
+// DiseaseSearchResult shape).
+import { useDiseaseSearch } from '@/components/drugos/use-api-data';
 
 interface DiseaseSearchBarProps {
   onSearch?: (query: string) => void;
@@ -15,13 +19,6 @@ interface DiseaseSearchBarProps {
   placeholder?: string;
   className?: string;
 }
-
-const recentSearches = [
-  "Huntington's Disease",
-  "Alzheimer's Disease",
-  'ALS',
-  'Cystic Fibrosis',
-];
 
 export function DiseaseSearchBar({
   onSearch,
@@ -33,21 +30,13 @@ export function DiseaseSearchBar({
   const [isFocused, setIsFocused] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const suggestions = useMemo(() => {
-    if (query.length < 2) return [];
-    const lower = query.toLowerCase();
-    return diseases
-      .filter(
-        (d) =>
-          d.name.toLowerCase().includes(lower) ||
-          (d.synonyms || []).some((s) => s.toLowerCase().includes(lower)) ||
-          (d.category || '').toLowerCase().includes(lower)
-      )
-      .slice(0, 6);
-  }, [query]);
+  // FE-021: real MeSH-backed disease search (debounced 300ms). Returns
+  // { data: { items: DiseaseSearchResult[] } | null, loading, error }.
+  const { data: searchResult, loading, error } = useDiseaseSearch(query);
+  const suggestions = searchResult?.items ?? [];
 
-  const handleSelect = (diseaseId: string) => {
-    setQuery('');
+  const handleSelect = (diseaseId: string, diseaseName: string) => {
+    setQuery(diseaseName);
     setIsFocused(false);
     onDiseaseSelect?.(diseaseId);
   };
@@ -60,7 +49,7 @@ export function DiseaseSearchBar({
     }
   };
 
-  const showDropdown = isFocused && (suggestions.length > 0 || (query.length === 0 && recentSearches.length > 0));
+  const showDropdown = isFocused && (query.length >= 2 || suggestions.length > 0 || loading || !!error);
 
   return (
     <div className={`relative ${className}`}>
@@ -88,45 +77,43 @@ export function DiseaseSearchBar({
 
       {showDropdown && (
         <div className="absolute z-50 w-full mt-1 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
-          {query.length === 0 && recentSearches.length > 0 && (
-            <div className="p-3">
-              <p className="text-xs font-medium text-muted-foreground mb-2">Recent Searches</p>
-              <div className="space-y-1">
-                {recentSearches.map((search) => (
-                  <button
-                    key={search}
-                    onClick={() => {
-                      setQuery(search);
-                      onSearch?.(search);
-                      setIsFocused(false);
-                    }}
-                    className="flex items-center gap-2 w-full px-2 py-1.5 text-sm rounded-md hover:bg-accent text-left"
-                  >
-                    <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                    <span>{search}</span>
-                  </button>
-                ))}
-              </div>
+          {loading && (
+            <div className="p-3 text-sm text-muted-foreground flex items-center gap-2">
+              <Clock className="h-3.5 w-3.5 animate-spin" />
+              Searching MeSH...
             </div>
           )}
-
-          {suggestions.length > 0 && (
-            <div className="border-t border-border p-2">
-              <p className="text-xs font-medium text-muted-foreground px-2 mb-1">Diseases</p>
+          {error && (
+            <div className="p-3 text-sm text-red-600">
+              Search failed: {error.message || error.error}
+            </div>
+          )}
+          {!loading && !error && suggestions.length === 0 && query.length >= 2 && (
+            <div className="p-3 text-sm text-muted-foreground">
+              No MeSH descriptors matched &ldquo;{query}&rdquo;.
+            </div>
+          )}
+          {!loading && !error && suggestions.length > 0 && (
+            <div className="p-2">
+              <p className="text-xs font-medium text-muted-foreground px-2 mb-1">Diseases (MeSH)</p>
               {suggestions.map((disease) => (
                 <button
-                  key={disease.id}
-                  onClick={() => handleSelect(disease.id)}
+                  key={disease.descriptorUi}
+                  onClick={() => handleSelect(disease.descriptorUi, disease.name)}
                   className="flex items-center justify-between w-full px-2 py-2 text-sm rounded-md hover:bg-accent text-left"
                 >
                   <div className="flex-1 min-w-0">
                     <div className="font-medium truncate">{disease.name}</div>
-                    <div className="text-xs text-muted-foreground">{disease.category} · {disease.candidateCount} candidates</div>
+                    {disease.scopeNote && (
+                      <div className="text-xs text-muted-foreground line-clamp-1">{disease.scopeNote}</div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 ml-2">
-                    <Badge variant="secondary" className="text-xs shrink-0">
-                      {disease.icd10}
-                    </Badge>
+                    {disease.treeNumber && disease.treeNumber.length > 0 && (
+                      <Badge variant="secondary" className="text-xs shrink-0">
+                        {disease.treeNumber[0]}
+                      </Badge>
+                    )}
                     <ArrowRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                   </div>
                 </button>

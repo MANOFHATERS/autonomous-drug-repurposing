@@ -4012,9 +4012,33 @@ def build_pyg_hetero_data(
     drug_idx_to_id = {v: k for k, v in drug_id_map.items()}
     disease_idx_to_id = {v: k for k, v in disease_id_map.items()}
 
+    # P2-060 ROOT FIX (Teammate 4, forensic, root-level): the previous
+    # code matched ONLY ``edge_key[1] == "treats"``. But the canonical
+    # Phase 3 edge schema (phase2/contracts/phase2_schema.py:EDGE_TYPES)
+    # defines TWO drug->disease therapeutic edges:
+    #   ("drug", "treats", "disease")       — approved/known treatments
+    #   ("drug", "tested_for", "disease")   — clinical-trial candidates
+    # Plus the data-flywheel edge ``("drug", "validated_treats", "disease")``
+    # (mapped from Phase 2's validated_treats via PHASE2_TO_PHASE3_EDGE).
+    #
+    # Silently dropping ``tested_for`` meant every drug-disease pair that
+    # was ONLY a clinical-trial candidate (not yet approved) was missing
+    # from ``known_pairs``. Downstream, the GNN's link-predictor trained
+    # on a label set that EXCLUDED the entire "tested_for" class — the
+    # model could never learn to rank clinical-trial candidates, which
+    # is the platform's core repurposing use case. This is a silent
+    # scientific-output corruptor.
+    #
+    # ROOT FIX: match ALL drug->disease therapeutic edge types. The
+    # condition is now ``edge_key[0] in ("drug","compound") AND
+    # edge_key[2] == "disease" AND edge_key[1] in THERAPEUTIC_RELS``.
+    # This is robust to future additions of new drug->disease edge
+    # types: they are added to THERAPEUTIC_RELS once, here.
+    _THERAPEUTIC_RELS = ("treats", "tested_for", "validated_treats")
     for edge_key in edge_maps:
-        if edge_key[1] == "treats" and edge_key[0] in ("drug", "compound") \
-                and edge_key[2] in ("disease",):
+        if edge_key[0] in ("drug", "compound") \
+                and edge_key[2] == "disease" \
+                and edge_key[1] in _THERAPEUTIC_RELS:
             src_indices, dst_indices = edge_maps[edge_key]
             for si, di in zip(src_indices, dst_indices):
                 drug_id = drug_idx_to_id.get(si)
@@ -4025,8 +4049,12 @@ def build_pyg_hetero_data(
                         known_pairs.append(pair)
 
     logger.info(
-        "build_pyg_hetero_data: %d known drug-treats-disease pairs",
+        "build_pyg_hetero_data: %d known drug->disease pairs "
+        "(edge types: %s)",
         len(known_pairs),
+        [k for k in edge_maps
+         if k[0] in ("drug", "compound") and k[2] == "disease"
+         and k[1] in _THERAPEUTIC_RELS],
     )
 
     node_maps = entity_maps

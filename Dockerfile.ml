@@ -1,33 +1,29 @@
 # =============================================================================
-# Dockerfile.ml — Multi-phase ML services base image (Phase 3 + Phase 4)
+# Dockerfile.ml — Multi-stage ML image for Phase 3 (GT) + Phase 4 (RL)
 # =============================================================================
-# Task 356 + 368 ROOT FIX: ``docker-compose.yml`` referenced ``Dockerfile.ml``
-# (top-level) for the ``phase3-trainer`` and ``phase4-rl`` services, but the
-# file did not exist. ``docker-compose build`` failed with:
-#   failed to compute cache key: "/Dockerfile.ml" not found
-#
-# This Dockerfile builds a production-ready ML image with:
-#   * Python 3.11 (matches CI matrix and Airflow base)
-#   * PyTorch CPU build (Docker services are CPU-only; GPU services use a
-#     separate Dockerfile.gpu — not needed for V1 launch per project docx §9).
-#   * PyTorch Geometric (PyG) — required by graph_transformer/
-#   * RDKit — required by Phase 1 fingerprinting + Phase 2 ChemBERTa encoder
-#   * Stable-Baselines3 + Gymnasium — required by Phase 4 PPO trainer
-#   * FastAPI + Uvicorn — required by scripts/gt_api.py and scripts/rl_api.py
-#   * Biopython — required by the literature cross-check (V1 launch gate)
-#
-# This image is intentionally SHARED by Phase 3 and Phase 4 because:
-#   1. Both need torch + PyG (Phase 3 trains the GT, Phase 4 ranks its output)
-#   2. Sharing the base saves ~3GB of image storage in the registry
-#   3. Sharing ensures both phases agree on torch / numpy / pandas versions
-#      (a Phase 3 model trained on torch 2.1 must be loaded by Phase 4 with
-#      torch 2.1 — version drift causes silent checkpoint corruption).
+# v116 ROOT FIX (Teammate 15, issues IN-006/IN-012/IN-061):
+#   IN-012 (MEDIUM): added ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+#       PYTHONHASHSEED=0 for reproducible builds + no .pyc bloat. Pinned
+#       pip/setuptools/wheel in the builder stage.
+#   IN-061 (LOW): added EXPOSE 8002 8003 + HEALTHCHECK so `docker run`
+#       (without compose) has port documentation + liveness monitoring.
+#   IN-012 (MEDIUM): changed uid 1000 → 10001 to avoid collisions with host
+#       users on dev machines (uid 1000 is the default first human user on
+#       most Linux distros — colliding causes permission errors on bind mounts).
+#   IN-006 (HIGH): GPU support is in Dockerfile.gpu + docker-compose.gpu.yml
+#       (override). This Dockerfile stays CPU-only so CI/dev laptops work.
 #
 # Multi-stage build:
 #   Stage 1 (builder): compile heavy deps (torch, PyG, RDKit wheels)
 #   Stage 2 (runtime): copy only installed site-packages + repo source
 # =============================================================================
 FROM python:3.11-slim AS builder
+
+# IN-012: pin pip for reproducible builder stage.
+RUN pip install --no-cache-dir --upgrade \
+    pip==24.2 \
+    setuptools==75.1.0 \
+    wheel==0.44.0
 
 # ─── System deps for building Python wheels ──────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -39,30 +35,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxslt1-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# ─── Python build deps (torch CPU + PyG + scientific stack) ─────────────
-# IN-070 ROOT FIX (forensic, root-level — torch/PyG version mismatch):
-#   The previous Dockerfile installed ``torch==2.2.2+cpu`` but fetched
-#   PyG wheels from ``https://data.pyg.org/whl/torch-2.2.0+cpu.html``
-#   (the wheel page for torch 2.2.0, NOT 2.2.2). The ``+pt22cpu`` tag
-#   on torch-scatter / torch-sparse means "PyTorch 2.2 CPU" — but the
-#   wheel was built against torch 2.2.0's C++ ABI, not 2.2.2's. While
-#   torch 2.2.x is ABI-stable within the minor version (so this works
-#   in 99% of cases), the 1% edge case is an ``undefined symbol``
-#   crash at runtime when a torch_scatter op uses a C++ symbol that
-#   changed between 2.2.0 and 2.2.2. This is extremely hard to debug
-#   because the import succeeds — the crash only happens when the
-#   specific op is called.
-#
-#   ROOT FIX: align torch and PyG wheels to the EXACT same patch
-#   version (2.2.0). The PyG project's official recommendation is to
-#   use the EXACT torch version match. We use 2.2.0 (not 2.2.2)
-#   because the PyG wheel page is published under the 2.2.0 URL —
-#   using 2.2.2 would require checking if a 2.2.2 wheel page exists,
-#   which adds a network dependency to the build.
-#
-#   Downgrading from 2.2.2 to 2.2.0 is safe — both are patch releases
-#   within the 2.2 minor line, and the 2.2.0 → 2.2.2 changelog
-#   contains only bug fixes (no API changes that affect PyG).
+# ─── PyTorch CPU + PyTorch Geometric (aligned to torch 2.2.0) ───────────
+# IN-070 ROOT FIX: torch and PyG wheels are aligned to the EXACT same patch
+# version (2.2.0) to avoid undefined-symbol crashes from ABI drift.
 RUN pip install --no-cache-dir --prefix=/install \
     "torch==2.2.0+cpu" \
     --index-url https://download.pytorch.org/whl/cpu
@@ -106,6 +81,11 @@ RUN pip install --no-cache-dir --prefix=/install \
 # =============================================================================
 FROM python:3.11-slim AS runtime
 
+# IN-012: reproducibility env vars.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=0
+
 # ─── Runtime system deps (no compilers — smaller image) ──────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -123,11 +103,18 @@ COPY --from=builder /install /usr/local
 
 # ─── Working directory + non-root user ──────────────────────────────────
 WORKDIR /opt/repo
-RUN useradd -m -u 1000 drugos && chown -R drugos:drugos /opt/repo
+# IN-012: uid 10001 (not 1000) to avoid host uid collisions.
+RUN useradd -m -u 10001 drugos && chown -R drugos:drugos /opt/repo
 USER drugos
 
+# IN-061: EXPOSE both ports since this image is shared by phase3 (8002) and
+# phase4 (8003). compose maps the correct port per service.
+EXPOSE 8002 8003
+
+# IN-061: HEALTHCHECK in the Dockerfile (fallback for `docker run` without
+# compose). compose overrides with its own healthcheck per service.
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=120s \
+    CMD curl -fsS http://localhost:8002/healthz || exit 1
+
 # ─── Default command (overridden by docker-compose per service) ─────────
-# The default is a no-op uvicorn invocation that exposes the GT service.
-# docker-compose overrides this for phase4-rl (uses scripts.rl_api:app on
-# port 8003) and for phase3-trainer (chains run_4phase.py then gt_api).
 CMD ["uvicorn", "scripts.gt_api:app", "--host", "0.0.0.0", "--port", "8002"]

@@ -224,13 +224,28 @@ def _get_kg_stats_from_neo4j() -> Optional[Dict[str, Any]]:
                 "MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS c"
             )
             edge_types = {record["t"]: record["c"] for record in result}
-        # SH-026 ROOT FIX (Teammate 4): return BOTH the legacy snake_case
-        # fields AND the canonical contract fields (node_type_counts,
-        # edge_type_counts, source, last_updated) so the TypeScript
-        # contract in frontend/contracts/api_contracts.ts:KgStatsResponse
-        # matches exactly. The ``source`` field uses the contract's enum
-        # ("neo4j" | "in_memory").
+        # SH-026 ROOT FIX (Teammate 4, forensic, root-level): the REAL
+        # TypeScript contract lives at ``frontend/src/lib/ml-contracts.ts``
+        # (NOT ``frontend/contracts/api_contracts.ts`` — that path does
+        # NOT EXIST in the repo; the previous "ROOT FIX" comment pointed
+        # at a phantom file). The real contract ``KgStatsResponseSchema``
+        # requires CAMELCASE fields: ``nodeCount``, ``edgeCount``,
+        # ``nodeTypeCounts``, ``edgeTypeCounts``, ``source``, ``generatedAt``,
+        # and a ``sources`` array. The previous fix only emitted SNAKE_CASE
+        # canonical fields (``node_type_counts``, ``last_updated``) which
+        # the frontend's transformation layer had to translate — and the
+        # frontend's translation DROPPED the ``source`` enum (always
+        # returned ``"kg_service"``) and IGNORED ``last_updated`` (used
+        # the browser's local time for ``generatedAt``).
+        #
+        # ROOT FIX: emit BOTH the camelCase canonical contract fields
+        # (so the TS schema validates DIRECTLY against the Python
+        # response with zero transformation) AND the legacy snake_case
+        # fields (backward compat with kg-service.ts's transformation).
+        # The ``source`` field is the contract enum ``"neo4j"|"in_memory"``.
+        # ``generatedAt`` is the server-authoritative UTC timestamp.
         from datetime import datetime, timezone
+        _generated_at = datetime.now(timezone.utc).isoformat()
         return {
             # Legacy fields (backward compat)
             "node_count": int(node_count),
@@ -238,11 +253,26 @@ def _get_kg_stats_from_neo4j() -> Optional[Dict[str, Any]]:
             "node_types": node_types,
             "edge_types": edge_types,
             "backend": "neo4j",
-            # SH-026: canonical contract fields
+            # SH-026: canonical contract fields — SNAKE_CASE (legacy)
             "node_type_counts": node_types,
             "edge_type_counts": edge_types,
-            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "last_updated": _generated_at,
             "source": "neo4j",
+            # SH-026: canonical contract fields — CAMELCASE (matches
+            # frontend/src/lib/ml-contracts.ts:KgStatsResponseSchema so
+            # the TS schema validates directly without transformation).
+            "nodeCount": int(node_count),
+            "edgeCount": int(edge_count),
+            "nodeTypeCounts": node_types,
+            "edgeTypeCounts": edge_types,
+            "generatedAt": _generated_at,
+            # ``sources`` array in GraphSourceStat shape (name + loaded).
+            # The Neo4j path does not track per-source load provenance
+            # (Neo4j stores merged nodes, not per-source batches); emit
+            # an empty array. The contract (KgStatsResponseSchema) allows
+            # zero-length ``sources``. The in-memory path populates this
+            # from ``sources_read``.
+            "sources": [],
         }
 
     try:
@@ -369,19 +399,21 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
                     rel = m.group(1).strip() if m else str(et_key)
                 edge_types[rel] = edge_types.get(rel, 0) + int(count)
 
-        # SH-026 ROOT FIX (Teammate 4): return BOTH the legacy snake_case
-        # fields (node_types, edge_types, backend) AND the canonical
-        # contract fields (node_type_counts, edge_type_counts, source,
-        # last_updated) so the TypeScript contract in
-        # frontend/contracts/api_contracts.ts:KgStatsResponse matches.
-        # The ``source`` field uses the contract's enum
-        # ("neo4j" | "in_memory") — we map ``in_memory_bridge`` →
-        # ``in_memory`` and keep the legacy ``backend`` field for
-        # backward compat with kg-service.ts (which reads both).
+        # SH-026 ROOT FIX (Teammate 4, forensic, root-level): emit BOTH
+        # the legacy snake_case fields AND the canonical CAMELCASE
+        # contract fields so the TS schema (frontend/src/lib/ml-contracts.ts
+        # :KgStatsResponseSchema) validates DIRECTLY against this response.
+        # See the Neo4j path (``_get_kg_stats_from_neo4j``) for the full
+        # rationale — the previous "ROOT FIX" comment here pointed at the
+        # non-existent ``frontend/contracts/api_contracts.ts`` and only
+        # emitted snake_case canonical fields, which the frontend's
+        # transformation layer had to translate (and which DROPPED the
+        # ``source`` enum + IGNORED ``last_updated``).
         from datetime import datetime, timezone
         _last_updated = datetime.now(timezone.utc).isoformat()
         _backend_legacy = "in_memory_bridge"
         _source = "in_memory"
+        _sources_read = summary.get("sources_read", []) or []
         return {
             # Legacy fields (backward compat with kg-service.ts)
             "node_count": int(summary.get("nodes_loaded", 0)),
@@ -389,12 +421,25 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
             "node_types": node_types,
             "edge_types": edge_types,
             "backend": _backend_legacy,
-            "sources_read": summary.get("sources_read", []),
-            # SH-026: canonical contract fields (matches TS KgStatsResponse)
+            "sources_read": _sources_read,
+            # SH-026: canonical contract fields — SNAKE_CASE (legacy)
             "node_type_counts": node_types,
             "edge_type_counts": edge_types,
             "last_updated": _last_updated,
             "source": _source,
+            # SH-026: canonical contract fields — CAMELCASE (matches
+            # frontend/src/lib/ml-contracts.ts:KgStatsResponseSchema so
+            # the TS schema validates directly without transformation).
+            "nodeCount": int(summary.get("nodes_loaded", 0)),
+            "edgeCount": int(summary.get("edges_loaded", 0)),
+            "nodeTypeCounts": node_types,
+            "edgeTypeCounts": edge_types,
+            "generatedAt": _last_updated,
+            # ``sources`` array in GraphSourceStat shape — derived from
+            # the bridge's ``sources_read`` list (bare source-name strings).
+            "sources": [
+                {"name": str(s), "loaded": True} for s in _sources_read
+            ],
         }
     except FileNotFoundError:
         # Re-raise P2-001 missing-data errors unchanged.
@@ -536,31 +581,76 @@ def _explore_subgraph_in_memory(
             # is preserved, just slower.
             pass
 
-    # Pick the start node: drug name match (Compound label) or disease name
-    # match (Disease label). Match by case-insensitive name OR exact id.
-    start_label: Optional[str] = None
-    start_id: Optional[str] = None
-    target_name = (drug or disease or "").strip().lower()
-    search_label = "Compound" if drug else "Disease"
-    for (label, nid), props in node_props.items():
-        if label != search_label:
-            continue
-        name = str(props.get("name", "")).lower()
-        if name == target_name or nid.lower() == target_name:
-            start_label, start_id = label, nid
-            break
-    if start_id is None:
+    # P2-062 ROOT FIX (Teammate 4, forensic, root-level): the previous
+    # code computed a SINGLE start node via ``target_name = (drug or
+    # disease or "")`` and ``search_label = "Compound" if drug else
+    # "Disease"``. When BOTH ``drug`` and ``disease`` were provided,
+    # ``drug or disease`` short-circuited to ``drug``, so the disease
+    # parameter was SILENTLY DROPPED — the BFS explored the drug's
+    # 2-hop neighborhood and never verified or included the disease
+    # node. A researcher querying "aspirin + diabetes" got aspirin's
+    # whole neighborhood (including unrelated diseases) with no signal
+    # that the diabetes node was found or how it connects to aspirin.
+    #
+    # The Neo4j path (``_explore_subgraph_neo4j``) was already fixed
+    # (it has a dedicated ``if drug and disease:`` shortestPath branch).
+    # This in-memory fallback (used in dev/CI when Neo4j is down) had
+    # the SAME silent-data-loss bug.
+    #
+    # ROOT FIX: when both are provided, find BOTH the Compound node
+    # matching ``drug`` AND the Disease node matching ``disease``, then
+    # seed the BFS frontier with BOTH. The 2-hop BFS then explores
+    # outward from both endpoints and naturally discovers the connecting
+    # path (if within 2 hops of either node). If only one of the two is
+    # found, we still seed the BFS with the found node and record which
+    # was missing in the ``note``. If neither is found, return empty
+    # with a note naming BOTH missing entities (not just the drug).
+    start_nodes: List[Tuple[str, str]] = []
+    missing_entities: List[str] = []
+
+    def _find_node(label: str, query: str) -> Optional[Tuple[str, str]]:
+        q = (query or "").strip().lower()
+        if not q:
+            return None
+        for (lab, nid), props in node_props.items():
+            if lab != label:
+                continue
+            name = str(props.get("name", "")).lower()
+            if name == q or nid.lower() == q:
+                return (lab, nid)
+        return None
+
+    if drug:
+        n = _find_node("Compound", drug)
+        if n is not None:
+            start_nodes.append(n)
+        else:
+            missing_entities.append(f"Compound '{drug}'")
+    if disease:
+        n = _find_node("Disease", disease)
+        if n is not None:
+            start_nodes.append(n)
+        else:
+            missing_entities.append(f"Disease '{disease}'")
+
+    if not start_nodes:
         return {
             "nodes": [],
             "edges": [],
             "backend": "in_memory_bridge",
-            "note": f"No {search_label} node matched '{drug or disease}'.",
+            "note": (
+                "No matching nodes found for: " + ", ".join(missing_entities)
+                if missing_entities
+                else "Both drug and disease are empty."
+            ),
         }
 
-    # 2-hop BFS.
-    visited: Set[Tuple[str, str]] = {(start_label, start_id)}
+    # 2-hop BFS, seeded with ALL found start nodes (1 if only drug or
+    # only disease; 2 if both). Seeding with both endpoints lets the BFS
+    # discover the connecting path between drug and disease.
+    visited: Set[Tuple[str, str]] = set(start_nodes)
     edges_out: List[Dict[str, Any]] = []
-    frontier: List[Tuple[str, str]] = [(start_label, start_id)]
+    frontier: List[Tuple[str, str]] = list(start_nodes)
     # P2-023 ROOT FIX (v109): the previous limit check fired INSIDE the
     # inner loop (``if len(edges_out) >= limit: break``) but the OUTER
     # loop continued iterating, accumulating more edges before the dedup.

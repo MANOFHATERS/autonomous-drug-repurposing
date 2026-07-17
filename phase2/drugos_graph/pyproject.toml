@@ -114,7 +114,12 @@ drugos_graph = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+# P2-065 ROOT FIX (Teammate 4): align with requires-python = ">=3.11,<3.13".
+# The previous ``target-version = "py310"`` allowed ruff to emit 3.10-
+# compatible fixes (e.g. ``typing.Optional`` instead of ``X | None``)
+# that are valid but inconsistent with the actual runtime floor (3.11).
+# Bumping to py311 makes ruff's suggestions match the supported runtime.
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
@@ -122,7 +127,11 @@ ignore = ["E501"]
 
 [tool.mypy]
 # Fixes audit issue 14.2 — PEP 484 strict types enforced.
-python_version = "3.10"
+# P2-065 ROOT FIX (Teammate 4): align with requires-python = ">=3.11,<3.13".
+# The previous ``python_version = "3.10"`` let mypy type-check against
+# 3.10 stdlib stubs (missing ``tomllib``, older ``typing``), masking
+# 3.11+ only usages. Pin to 3.11 (the lowest supported runtime).
+python_version = "3.11"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
@@ -144,9 +153,28 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 # Fixes audit issue 13.7 — doctest support.
+# IN-056 ROOT FIX (Teammate 4): the previous config set
+# ``addopts = "--strict-markers"`` but declared NO markers. Running
+# ``pytest`` from inside ``phase2/drugos_graph/`` (rootdir = this dir)
+# would FAIL on any test using ``@pytest.mark.live_api`` / ``live_model``
+# / ``slow`` / ``network`` / ``gpu`` / ``integration`` / ``forensic``
+# with ``Unknown marker``. The root ``pytest.ini`` already declares
+# these markers, but pytest only reads ONE config (the one nearest the
+# rootdir), so this pyproject section MUST declare the same markers to
+# be self-consistent. ROOT FIX: mirror the root pytest.ini marker list
+# here so pytest behaves identically regardless of CWD.
 addopts = "--strict-markers"
 doctest_optionflags = ["NORMALIZE_WHITESPACE", "ELLIPSIS"]
 testpaths = ["."]
+markers = [
+    "slow: marks tests as slow (deselect with -m \"not slow\")",
+    "network: marks tests that require network access",
+    "gpu: marks tests that require a GPU",
+    "integration: marks integration tests",
+    "forensic: marks forensic verification tests",
+    "live_api: marks tests that issue real HTTPS API calls (deselect with -m \"not live_api\")",
+    "live_model: marks tests that download real model weights (deselect with -m \"not live_model\")",
+]
 
 [tool.mutmut]
 # Fixes audit issue 10.9 — mutation testing configuration.
