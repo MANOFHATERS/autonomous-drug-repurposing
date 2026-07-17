@@ -277,22 +277,22 @@ except Exception:  # pragma: no cover — fallback for direct-script execution
                 type(exc).__name__, type(inchikey).__name__, inchikey,
             )
             return ""
-        # P2-053 ROOT FIX (Teammate 4): the previous code treated "NA"
-        # (case-insensitive) as an empty/null marker. But "NA" is a
-        # LEGITIMATE InChIKey fragment in rare cases — the second block
-        # of an InChIKey can contain the letter 'N' followed by 'A'
-        # (e.g. the stereo/protonation block is 10 chars from
-        # [A-Z]{10}, and "NA" can appear as a substring). However, a
-        # STANDALONE "NA" (the whole string) is NOT a valid InChIKey —
-        # InChIKey is 27 chars (14-10-1). So the fix is to treat
-        # "nan"/"none"/"null" as empty (these are pandas/JSON null
-        # markers) but NOT "na" (which is ambiguous — keep it and let
-        # the InChIKey regex validator reject it if it's truly invalid).
-        if not ik or ik.lower() in ("nan", "none", "null"):
-            return ""
-        # If the string is "na" (case-insensitive) AND it's clearly NOT
-        # a 27-char InChIKey, treat as empty. Otherwise keep it.
-        if ik.lower() == "na" and len(ik) != 27:
+        # P2-053 ROOT FIX (Teammate 4, forensic, root-level): the
+        # previous comment CLAIMED "NA is a LEGITIMATE InChIKey
+        # fragment" and added a dead ``len(ik) != 27`` branch — but the
+        # code STILL treated standalone "na" as empty (because "na" is
+        # 2 chars, never 27, so the branch always fired). The comment
+        # lied about the code's behavior. The scientific reality: a
+        # STANDALONE 2-char "na" is NEVER a valid InChIKey (the IUPAC
+        # format is 27 chars: 14-10-1, see ``_INCHIKEY_PATTERN`` in
+        # utils.py). "na" is a common pandas/CSV null marker and MUST
+        # be treated as empty. The live code path (utils.normalize_inchikey,
+        # line 1329) correctly treats ``("nan","none","null","na")`` as
+        # empty. ROOT FIX: make this fallback IDENTICAL to the live
+        # path so the two can never drift, and replace the misleading
+        # comment with an honest one. Callers that need true InChIKey
+        # validation use ``_INCHIKEY_PATTERN`` (not this normalizer).
+        if not ik or ik.lower() in ("nan", "none", "null", "na"):
             return ""
         return ik.upper()
 
@@ -2387,12 +2387,27 @@ def _phase1_db_available_uncached() -> bool:
             # confusing error log).
             inspector = _sa_inspect(conn)
             existing_tables = set(inspector.get_table_names())
-            # P2-057: the canonical list of tables _read_phase1_from_postgres
-            # reads. If any is missing, the DB is not ready — fall back to CSV.
+            # P2-057 ROOT FIX (Teammate 4, forensic, root-level): the
+            # previous list contained ONLY 3 tables (drugs, proteins,
+            # drug_protein_interactions). But ``_read_phase1_from_postgres``
+            # ALSO reads ``gene_disease_associations`` (DisGeNET/OMIM GDAs,
+            # used to derive pathway->disease edges) and
+            # ``protein_protein_interactions`` (STRING PPIs). When those
+            # tables were missing (partial migration), the DB-availability
+            # check returned True, the bridge committed to the Postgres
+            # path, then CRASHED mid-read with an ``UndefinedTable`` error
+            # when it hit the missing table. The crash was caught by the
+            # outer try/except and fell back to CSV, but with a confusing
+            # error log and wasted I/O — and if the outer handler ever
+            # regressed, it would corrupt the KG (partial graph from DB
+            # + partial from CSV). ROOT FIX: list EVERY table the reader
+            # actually touches, so the availability check is honest.
             _required_tables = (
                 "drugs",
                 "proteins",
                 "drug_protein_interactions",
+                "protein_protein_interactions",
+                "gene_disease_associations",
             )
             _missing_tables = [
                 t for t in _required_tables if t not in existing_tables
