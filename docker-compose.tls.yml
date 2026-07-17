@@ -1,0 +1,108 @@
+# =============================================================================
+# Autonomous Drug Repurposing Platform — docker-compose.tls.yml
+# Production transport-encryption override (IN-073 ROOT FIX).
+# =============================================================================
+# PURPOSE:
+#   The base docker-compose.yml uses `sslmode=prefer` for Postgres and
+#   `bolt://` (plaintext) for Neo4j. The data network is `internal: true`
+#   (no outbound internet) which contains the blast radius, but the traffic
+#   on the wire is still plaintext. For FDA 21 CFR Part 11 / GxP production
+#   deployments, encryption-in-transit is a hard requirement.
+#
+#   This override layers TLS on top of the base compose. Apply with:
+#     docker-compose -f docker-compose.yml -f docker-compose.tls.yml --profile full-stack up -d
+#
+# WHAT THIS OVERRIDE DOES:
+#   1. Postgres: switches to the Debian image (has openssl), generates a
+#      self-signed cert on first start, and enables `ssl=on` via server
+#      command flags. All Postgres URIs upgrade `sslmode=prefer` ->
+#      `sslmode=require` (refuse plaintext). For CA-verified TLS, mount a
+#      CA-signed cert and switch to `sslmode=verify-full`.
+#   2. Neo4j: enables Bolt TLS (`NEO4J_server_ssl_bolt_enabled=true`).
+#      Neo4j auto-generates a self-signed Bolt cert on first start. All
+#      Neo4j URIs upgrade `bolt://` -> `bolt+ssc://` (TLS, accept
+#      self-signed — appropriate for an internal Docker network). For
+#      CA-verified TLS, mount a CA-signed cert and use `bolt+s://`.
+#   3. MLflow: the internal `http://mlflow:5000` is kept (MLflow does not
+#      support native TLS). For production, put a TLS-terminating reverse
+#      proxy (Caddy/Envoy) in front of MLflow — see
+#      TRANSPORT_TLS_HARDENING.md § MLflow.
+#
+# WHY AN OVERRIDE (not the default):
+#   The base compose is optimized for dev/CI (fast startup, no cert
+#   management). TLS hardening is a PRODUCTION deployment concern —
+#   forcing it by default would break dev/CI loops. The override is the
+#   standard Docker Compose production-hardening pattern: opt-in via
+#   `-f docker-compose.tls.yml`.
+#
+# VERIFICATION:
+#   `python -c "import yaml; yaml.safe_load(open('docker-compose.tls.yml'))"`
+#   (runs in CI — see tests/test_tm1_audit_lockin.py::test_in073_tls_override.)
+# =============================================================================
+---
+services:
+  postgres:
+    # IN-073: switch to Debian image (has openssl for self-signed cert gen).
+    # The alpine image lacks openssl by default; generating a cert requires
+    # `apk add openssl` which is fragile in an entrypoint. The Debian image
+    # is ~80MB larger but guarantees openssl availability.
+    image: postgres:16
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        CERT=/var/lib/postgresql/server.crt
+        KEY=/var/lib/postgresql/server.key
+        if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
+          echo "IN-073: generating self-signed TLS cert for Postgres (internal network)"
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout "$KEY" -out "$CERT" \
+            -days 3650 -subj "/CN=postgres" 2>/dev/null
+        fi
+        chmod 600 "$KEY"
+        chown postgres:postgres "$CERT" "$KEY"
+        exec docker-entrypoint.sh postgres \
+          -c ssl=on \
+          -c ssl_cert_file="$CERT" \
+          -c ssl_key_file="$KEY" \
+          -c ssl_min_protocol_version=TLSv1.2
+    deploy:
+      resources:
+        limits: { memory: 2g, cpus: '2' }
+        reservations: { memory: 512m }
+
+  neo4j:
+    environment:
+      # IN-073: enable Bolt TLS. Neo4j 5.x auto-generates a self-signed
+      # cert for Bolt on first start if none is mounted. For CA-verified
+      # TLS, mount a CA-signed cert at /var/lib/neo4j/certificates/bolt/
+      # and use bolt+s:// (instead of bolt+ssc://) in the URIs below.
+      NEO4J_server_ssl_bolt_enabled: "true"
+      NEO4J_server_ssl_bolt_policy: REQUIRED
+
+  # All services that connect to Postgres upgrade sslmode prefer -> require.
+  mlflow:
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?sslmode=require
+  phase1-airflow:
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?sslmode=require
+  phase2-kg-builder:
+    environment:
+      # bolt+ssc = TLS with self-signed cert accepted (internal network).
+      DRUGOS_NEO4J_URI: bolt+ssc://neo4j:7687
+  phase2-kg-api:
+    environment:
+      DRUGOS_NEO4J_URI: bolt+ssc://neo4j:7687
+  phase4-rl:
+    environment:
+      # phase4-rl connects to MLflow (http, kept) — no Postgres direct.
+      {}
+  frontend:
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?schema=public&sslmode=require
+      DRUGOS_NEO4J_URI: bolt+ssc://neo4j:7687
+  pg-backup:
+    environment:
+      # pg_dump respects PGSSLMODE env var; sslmode=require in the conn str.
+      PGSSLMODE: require
