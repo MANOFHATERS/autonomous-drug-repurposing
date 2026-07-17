@@ -18,13 +18,17 @@ Validation checks per source CSV
 --------------------------------
 1. File existence: at least one candidate (filename OR alias) must exist.
 2. Required columns: every ``required_columns`` entry must be present.
-3. Any-of groups: for each ``any_of_groups`` entry, at least one column
+3. Extra columns (P1-050 v117): columns in the CSV that are NOT declared
+   in the contract (``required_columns`` + ``optional_columns`` +
+   ``any_of_groups`` flattened) emit a WARNING. Catches typo'd column
+   names, debug columns, and stale columns the pipeline forgot to drop.
+4. Any-of groups: for each ``any_of_groups`` entry, at least one column
    in the group must be present.
-4. Dtype compatibility: each present column is checked against its
+5. Dtype compatibility: each present column is checked against its
    declared dtype (a soft warning if mismatched — pandas will coerce).
-5. Row count: if the CSV has fewer than ``min_rows`` data rows, the
+6. Row count: if the CSV has fewer than ``min_rows`` data rows, the
    source is flagged as ``below_min_rows`` (error if min_rows > 0).
-6. NULL check: for non-nullable required columns, every row must have
+7. NULL check: for non-nullable required columns, every row must have
    a non-null value.
 """
 from __future__ import annotations
@@ -137,6 +141,52 @@ def _validate_source(
                     f"{path.name}. Description: {col_spec.description}"
                 ),
             ))
+
+    # --- Check 1.5: extra columns not declared in contract (P1-050 v117) --
+    # P1-050 v117 ROOT FIX (forensic -- validator silently accepted extra
+    # columns):
+    #   The previous validator only checked that REQUIRED columns were
+    #   PRESENT -- it did NOT check for EXTRA columns. A pipeline that
+    #   accidentally wrote a typo'd column name (e.g. "inchikey_typo")
+    #   or a debug column (e.g. "_internal_score") would silently pass
+    #   validation. Phase 2's bridge imports this contract and would
+    #   not know about the extra column -- it would be silently ignored
+    #   at the KG-build stage, but the extra column would accumulate in
+    #   the CSV, wasting disk and confusing operators who see two
+    #   similar column names. Worse, a future contract change might
+    #   repurpose the typo'd name for a different semantic, and the
+    #   stale data would leak through.
+    #
+    #   ROOT FIX (v117): compute the set of columns DECLARED in the
+    #   contract (required_columns + optional_columns + any_of_groups
+    #   flattened -- any_of_groups columns ARE declared, just in a
+    #   different field) and compare against the CSV's actual columns.
+    #   Extra columns emit a WARNING (not error) so existing pipelines
+    #   don't break, but the issue is surfaced for the operator to
+    #   investigate. The warning includes the sorted list of extra
+    #   column names so the operator can quickly decide whether to
+    #   update the contract or remove the columns from the pipeline
+    #   output.
+    _declared_columns: set[str] = set()
+    for _col_spec in spec.required_columns:
+        _declared_columns.add(_col_spec.name)
+    for _col_spec in spec.optional_columns:
+        _declared_columns.add(_col_spec.name)
+    for _group in spec.any_of_groups:
+        for _col_name in _group:
+            _declared_columns.add(_col_name)
+    _extra_columns = actual_columns - _declared_columns
+    if _extra_columns:
+        issues.append(ValidationIssue(
+            source=spec.key,
+            severity="warning",
+            code="extra_columns_not_in_contract",
+            message=(
+                f"Source {spec.key}: CSV has extra columns not declared "
+                f"in contract: {sorted(_extra_columns)}. Update the "
+                f"contract or remove the columns from the pipeline output."
+            ),
+        ))
 
     # --- Check 2: any-of groups satisfied --------------------------------
     for group in spec.any_of_groups:

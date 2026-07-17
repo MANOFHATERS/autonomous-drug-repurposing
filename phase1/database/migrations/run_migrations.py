@@ -1488,6 +1488,17 @@ def validate_scientific_constraints(engine) -> list[str]:
                 logger.warning("Could not check molecular_weight precision: %s", exc)
 
             # BUG-SCI-01: InChIKey format check
+            # v117 ROOT FIX (P1-047): wire _INCHIKEY_STANDARD_RE into the
+            # scientific-constraints validator. The regex was compiled at
+            # module level (line 433) but NEVER used — dead code that
+            # misled readers into believing the migration runner validated
+            # InChIKey format. The SQL LENGTH/LIKE check below catches
+            # length violations and SYNTH-prefix exceptions, but does NOT
+            # verify the canonical regex structure (14 uppercase letters,
+            # hyphen, 10 uppercase letters, hyphen, 1 uppercase letter).
+            # The Python-side regex check below catches malformed InChIKeys
+            # that have the right LENGTH but wrong character composition
+            # (e.g., lowercase letters, digits in block 2, missing hyphens).
             if _column_exists(inspector, "drugs", "inchikey"):
                 try:
                     r = conn.execute(
@@ -1515,6 +1526,33 @@ def validate_scientific_constraints(engine) -> list[str]:
                         logger.warning(msg)
                 except (OperationalError, ProgrammingError) as exc:
                     logger.warning("Could not check InChIKey format: %s", exc)
+
+                # v117 P1-047: strict Python-side regex check (catches
+                # right-length-but-wrong-composition InChIKeys that the
+                # SQL LENGTH check misses).
+                try:
+                    r = conn.execute(
+                        text("SELECT inchikey FROM drugs WHERE inchikey IS NOT NULL")
+                    )
+                    bad_regex_keys: list[str] = []
+                    for (inchikey,) in r.fetchall():
+                        if inchikey.startswith(SYNTHETIC_INCHIKEY_PREFIX):
+                            continue  # SYNTH-prefixed surrogate keys bypass the canonical regex
+                        if not _INCHIKEY_STANDARD_RE.match(inchikey):
+                            bad_regex_keys.append(inchikey)
+                    if bad_regex_keys:
+                        msg = (
+                            f"SCI-MIG-07a: {len(bad_regex_keys)} drug(s) have "
+                            f"InChIKey(s) that fail the canonical regex "
+                            f"^[A-Z]{{14}}-[A-Z]{{10}}-[A-Z]$ (right length but "
+                            f"wrong character composition). First few: "
+                            f"{bad_regex_keys[:5]}. These will be rejected by "
+                            f"downstream validation (normalizer.is_canonical_inchikey)."
+                        )
+                        warnings_list.append(msg)
+                        logger.warning(msg)
+                except (OperationalError, ProgrammingError) as exc:
+                    logger.warning("Could not run strict InChIKey regex check: %s", exc)
 
             # BUG-SCI-01: molecular_weight > 0 check
             try:

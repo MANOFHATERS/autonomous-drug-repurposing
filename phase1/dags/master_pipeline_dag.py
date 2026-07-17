@@ -261,8 +261,33 @@ DEFAULT_ARGS = {
 #   ``master_pipeline``) that the TaskFlow-generated task_id of
 #   ``download_drugbank`` matches the constant. The assertion catches
 #   any rename at DAG PARSE time instead of at runtime.
-_DRUGBANK_DOWNLOAD_TASK_ID: str = "download_drugbank"
+#
+# P1-036 v117 ROOT FIX (forensic -- _DRUGBANK_DOWNLOAD_TASK_ID was still a
+# hardcoded string "download_drugbank"):
+#   The v89 fix introduced the constant but assigned it a HARDCODED string
+#   literal ``"download_drugbank"``. If the ``download_drugbank`` function
+#   was renamed (e.g. to ``download_drugbank_v2``), the constant would NOT
+#   track the rename -- the branch would return the stale string, and the
+#   parse-time assertion would catch the mismatch ONLY at DAG parse time
+#   (not at code-edit time). The hardcode defeated the purpose of having a
+#   "single source of truth" constant.
+#
+#   ROOT FIX (v117): derive ``_DRUGBANK_DOWNLOAD_TASK_ID`` from the
+#   ``download_drugbank`` function's ``__name__`` -- the SAME attribute
+#   Airflow's TaskFlow API uses to auto-generate the task_id. The constant
+#   is now defined AFTER ``download_drugbank`` (see line ~360 below) so
+#   the function is in scope at the derivation point. ``_check_drugbank_xml``
+#   and the ``master_pipeline`` parse-time assertion both reference the
+#   constant at CALL time (Python late-binds module-level names inside
+#   function bodies), so moving the definition below the function does NOT
+#   break them.
+#
+#   ``_DRUGBANK_SKIP_TASK_ID`` remains a hardcoded string because it is
+#   the task_id of an ``EmptyOperator`` (NOT a function-derived TaskFlow
+#   task) -- there is no function to derive it from.
 _DRUGBANK_SKIP_TASK_ID: str = "skip_drugbank"
+# ``_DRUGBANK_DOWNLOAD_TASK_ID`` is derived AFTER ``download_drugbank`` is
+# defined (see P1-036 v117 ROOT FIX block below).
 
 
 def _check_drugbank_xml(**context) -> str:
@@ -344,6 +369,46 @@ def download_drugbank() -> None:
     from pipelines.drugbank_pipeline import DrugBankPipeline
     # v40: was .run() (full run including LOAD) — now download+clean only.
     DrugBankPipeline().run_download_and_clean_only()
+
+
+# P1-036 v117 ROOT FIX: derive _DRUGBANK_DOWNLOAD_TASK_ID from the
+# ``download_drugbank`` function's __name__ instead of a hardcoded string.
+# Airflow's TaskFlow API auto-generates the task_id from the function's
+# __name__ (default), so deriving the constant from the SAME attribute
+# keeps them in lockstep across renames.
+#
+# The ``@task()`` decorator wraps the function in a ``_TaskDecorator``
+# class instance (NOT a bare function), so ``download_drugbank.__name__``
+# does NOT exist directly. We resolve the underlying function via a
+# fallback chain:
+#   1. ``.function``  -- Airflow ``_TaskDecorator.function`` (the wrapped
+#      callable, which is the ``@fail_fast_on_http_4xx`` wrapper).
+#   2. ``.__wrapped__`` -- if ``functools.wraps`` was used by an
+#      intermediate decorator (the ``@fail_fast_on_http_4xx`` wrapper
+#      DOES use ``@wraps(func)``, so this points to the original
+#      ``download_drugbank`` function).
+#   3. The callable itself -- bare-function fallback (works if no
+#      decorator was applied).
+# The ``@fail_fast_on_http_4xx`` decorator uses ``@wraps(func)`` (see
+# ``dags/_retry_policy.py``), so the wrapper's ``__name__`` is already
+# ``"download_drugbank"`` -- but we still go through the fallback chain
+# to be robust against future decorator stack changes.
+_underlying_drugbank_func = (
+    getattr(download_drugbank, "function", None)        # Airflow _TaskDecorator.function
+    or getattr(download_drugbank, "__wrapped__", None)  # functools.wraps chain
+    or download_drugbank                                 # bare-function fallback
+)
+_DRUGBANK_DOWNLOAD_TASK_ID: str = getattr(
+    _underlying_drugbank_func, "__name__", "download_drugbank"
+)
+# Defense-in-depth: if the derivation somehow produced a different value
+# than the function's __name__, the parse-time assertion in
+# ``master_pipeline`` (below) will catch it at DAG parse time.
+logger.debug(
+    "P1-036 v117: _DRUGBANK_DOWNLOAD_TASK_ID derived as %r from "
+    "download_drugbank (underlying func __name__).",
+    _DRUGBANK_DOWNLOAD_TASK_ID,
+)
 
 
 @task()  # v41: retries+timeout inherited from DEFAULT_ARGS
