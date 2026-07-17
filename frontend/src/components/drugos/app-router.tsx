@@ -290,14 +290,36 @@ function PublicHeader() {
   const { user, loading } = useSession()
   const [mobileOpen, setMobileOpen] = useState(false)
 
-  const navItems = [
-    { label: 'Features', action: () => navigate({ page: 'features', slug: 'disease-search' }) },
-    { label: 'Pricing', action: () => navigate({ page: 'pricing' }) },
-    { label: 'About', action: () => navigate({ page: 'about' }) },
-    { label: 'Security', action: () => navigate({ page: 'security' }) },
-    { label: 'Blog', action: () => navigate({ page: 'blog' }) },
-    { label: 'Careers', action: () => navigate({ page: 'careers' }) },
-  ]
+  // FE-059 ROOT FIX (Teammate 13, LOW): the previous PublicHeader showed the
+  // SAME public marketing nav (Features/Pricing/About/Security/Blog/Careers)
+  // to EVERYONE — including authenticated researchers who had already signed
+  // in and wanted app navigation, not marketing. It also did not gate admin-
+  // only destinations by role. Root fix: when the user is authenticated, show
+  // app-focused nav (Dashboard, Search, Knowledge Graph, Reports) so a logged-
+  // in researcher reaches their workspace in one click instead of wading
+  // through landing-page marketing. When the user is an admin/superadmin, an
+  // "Admin" item is appended (role-gated). Unauthenticated visitors still see
+  // the marketing nav. This is auth-state + role gating, as the audit asked.
+  const isLoggedIn = !loading && !!user
+  const isAdmin = isLoggedIn && (user?.role === 'admin' || user?.role === 'superadmin')
+  const navItems = isLoggedIn
+    ? [
+        { label: 'Dashboard', action: () => navigate({ page: 'app', section: 'dashboard' }) },
+        { label: 'Search', action: () => navigate({ page: 'app', section: 'search' }) },
+        { label: 'Knowledge Graph', action: () => navigate({ page: 'app', section: 'knowledge-graph' }) },
+        { label: 'Reports', action: () => navigate({ page: 'app', section: 'reports' }) },
+        ...(isAdmin
+          ? [{ label: 'Admin', action: () => navigate({ page: 'app', section: 'users' }) }]
+          : []),
+      ]
+    : [
+        { label: 'Features', action: () => navigate({ page: 'features', slug: 'disease-search' }) },
+        { label: 'Pricing', action: () => navigate({ page: 'pricing' }) },
+        { label: 'About', action: () => navigate({ page: 'about' }) },
+        { label: 'Security', action: () => navigate({ page: 'security' }) },
+        { label: 'Blog', action: () => navigate({ page: 'blog' }) },
+        { label: 'Careers', action: () => navigate({ page: 'careers' }) },
+      ]
 
   return (
     <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-border/50">

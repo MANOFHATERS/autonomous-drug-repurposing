@@ -378,12 +378,22 @@ export function CandidateTable({
                     <ScoreBar
                       score={candidate.compositeScore}
                       size="sm"
-                      // FE-036: pass through confidence bounds + AUC when available.
-                      // The candidate type doesn't currently carry these — when the
-                      // backend adds them, they'll surface automatically.
-                      confidenceLower={undefined}
-                      confidenceUpper={undefined}
-                      auc={undefined}
+                      // FE-052 ROOT FIX (Teammate 13, MEDIUM): the previous
+                      // version passed `confidenceLower={undefined}` etc.
+                      // explicitly, which SEVERED the wiring between the
+                      // candidate object and ScoreBar — even if the backend
+                      // populated these fields, the UI never showed them.
+                      // Root fix: pass the candidate's own CI bounds + AUC
+                      // through to ScoreBar. They are optional; when absent,
+                      // ScoreBar renders its existing "model AUC: not
+                      // reported" tooltip (unchanged behavior). When the
+                      // Graph Transformer / RL ranker populate them, the CI
+                      // band + AUC tooltip surface automatically — which is
+                      // exactly what the V1 launch transparency criteria
+                      // (project doc §6 Layer 1) require.
+                      confidenceLower={candidate.confidenceLower}
+                      confidenceUpper={candidate.confidenceUpper}
+                      auc={candidate.auc}
                     />
                   </TableCell>
                   <TableCell>

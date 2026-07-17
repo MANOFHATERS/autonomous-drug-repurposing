@@ -1,38 +1,74 @@
-# v29 ROOT FIX (audit O-6 — Dockerfile.airflow can't build):
-# The forensic audit found that ``apache/airflow:2.8.1`` ships Python 3.8,
-# but ``phase1/requirements.txt`` requires ``pandas>=2.1.4`` /
-# ``numpy>=1.26.3`` which require Python >= 3.9. The build failed
-# unresolvably. ROOT FIX: pin to ``apache/airflow:2.9.3-python3.11``
-# which ships Python 3.11 — compatible with all our requirements AND
-# with the latest Airflow 2.9.x security patches.
+# =============================================================================
+# phase1/docker/Dockerfile.airflow — Apache Airflow 2.10.5 for the Phase 1
+# dev-only docker-compose (phase1/docker-compose.yml).
+# =============================================================================
+# IN-081 ROOT FIX (Teammate 13, MEDIUM): the audit found this Dockerfile and
+# the root-level Dockerfile.airflow were NEAR-DUPLICATES with divergent
+# content — a bug fix applied to one was NOT applied to the other:
+#   - the root Dockerfile installed `curl`; this one did NOT (so any
+#     healthcheck / diagnostic using curl failed in the phase1 stack);
+#   - the root Dockerfile COPYed phase1/requirements.txt + phase1/ source;
+#     this one COPYed requirements.txt relative to its own (phase1/) context;
+#   - the root Dockerfile set ENV vars + a CMD + a Fernet-validation
+#     entrypoint; this one had none.
+# The divergence meant the two stacks drifted silently. (The compound
+# effect — the phase1 webserver healthcheck failing because curl was
+# missing — was already mitigated separately in P1-040 v113 by switching
+# the healthcheck to `python -c urllib...`. But the structural divergence
+# remained a maintenance hazard.)
 #
-# P1-050 ROOT FIX (v110): the audit's specific recommendation is to pin
-# Airflow to 2.10.5 (the latest stable 2.10.x release at audit time).
-# Airflow 2.10.x brings:
-#   - BranchPythonOperator moved to airflow.operators.python (the v89
-#     compatibility shim in master_pipeline_dag.py handles both paths,
-#     but 2.10+ is the native path).
-#   - Improved LocalExecutor stability under high concurrency.
-#   - CVE-2024-39214 fix (Airflow < 2.10.3 stored sensitive values in
-#     the audit log without redaction).
-#   - Improved TaskFlow decorator performance.
-# ROOT FIX: bump the base image to apache/airflow:2.10.5-python3.11.
-# Python 3.11 is retained (compatible with all phase1/requirements.txt
-# pins). The 2.10.5 tag is a multi-arch build (amd64 + arm64) so the
-# same image works on x86_64 cloud instances and Apple Silicon dev
-# machines.
+# ROOT FIX: this Dockerfile is now structurally CONSISTENT with the root
+# Dockerfile.airflow:
+#   1. Same base image pin: apache/airflow:2.10.5-python3.11 (matches
+#      requirements.txt; multi-arch amd64+arm64; CVE-2024-39214 fixed).
+#   2. Same system deps, INCLUDING `curl` (parity with the root image so
+#      operators can use curl for debugging / future healthchecks in
+#      EITHER stack without surprise "command not found").
+#   3. Same requirements install (phase1/requirements.txt — the Airflow
+#      scheduler only orchestrates Phase 1 ETL; the heavy ML deps pinned
+#      in the top-level requirements.txt are NOT needed here).
+#
+# BUILD CONTEXT: phase1/ (this Dockerfile lives in phase1/docker/, and
+# phase1/docker-compose.yml builds with `context: .` == phase1/). So
+# `COPY requirements.txt` resolves to phase1/requirements.txt. The root
+# Dockerfile.airflow COPYs `phase1/requirements.txt` because ITS context
+# is the repo root. Both install the SAME requirements file.
+#
+# SYNC CONTRACT: if you change system deps / base image / requirements
+# here, make the SAME change in the root Dockerfile.airflow (and vice
+# versa). The two files are intentionally kept separate because the two
+# compose files use different build contexts (root context vs phase1
+# context) and different entrypoint strategies (root has the Fernet
+# entrypoint; phase1 compose overrides entrypoint per-service). Do NOT
+# let them drift again.
+# =============================================================================
 FROM apache/airflow:2.10.5-python3.11
+
 USER root
-# SCI-FIX: Install postgresql-client (provides psql) which is needed by the
-# airflow-init entrypoint in docker-compose.yml to create the airflow database.
-# Previously only libpq-dev (headers) was installed, but psql binary was
-# missing, causing airflow-init to fail with "psql: command not found".
-# libpq-dev is kept for any source-build compatibility, though psycopg2-binary
-# (in requirements.txt) is a pre-built wheel and doesn't need it.
+
+# System deps — MIRRORED from the root Dockerfile.airflow (IN-081).
+# libpq-dev: headers for psycopg2 source build (binary wheel works on
+#   x86_64 but not always on arm64).
+# postgresql-client: provides `psql`, needed by the airflow-init
+#   entrypoint (phase1/docker/airflow-init.sh) to create the airflow DB.
+# curl: IN-081 — present in the root image but previously MISSING here.
+#   Added for parity so debugging / healthchecks work identically in
+#   both stacks.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     postgresql-client \
+    curl \
     && rm -rf /var/lib/apt/lists/*
+
 USER airflow
+
+# Install Phase 1 requirements. Build context is phase1/, so
+# `requirements.txt` == phase1/requirements.txt (same file the root
+# Dockerfile COPYs as `phase1/requirements.txt`).
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# NOTE: no ENTRYPOINT / CMD / ENV set here — the phase1 docker-compose
+# sets per-service `command:` (webserver / scheduler) and `entrypoint:`
+# (airflow-init). The base apache/airflow image's own entrypoint handles
+# `airflow <command>` resolution.

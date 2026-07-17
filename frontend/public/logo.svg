@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px"
-	 viewBox="0 0 30 30" style="enable-background:new 0 0 30 30;" xml:space="preserve">
+         viewBox="0 0 30 30" style="enable-background:new 0 0 30 30;" xml:space="preserve">
 <defs>
   <style type="text/css">
     .st194{fill:#2D2D2D;stroke:#FFFFFF;stroke-width:0.6317;stroke-miterlimit:10;}
@@ -13,6 +13,21 @@
     @keyframes breathe {
       0%, 100% { opacity: 0.7; }
       50% { opacity: 1; }
+    }
+
+    /* FE-032 ROOT FIX (Teammate 13, LOW): respect prefers-reduced-motion.
+       The breathing animation is decorative. Users with vestibular
+       disorders or motion sensitivity (who set the OS-level "reduce
+       motion" preference) must NOT be subjected to infinite looping
+       animation — it can cause nausea / dizziness. WCAG 2.1 SC 2.3.3
+       (Animation from Interactions) and the CSS Media Queries Level 5
+       spec both require honoring this preference. Root fix: disable the
+       animation entirely when the user has requested reduced motion. */
+    @media (prefers-reduced-motion: reduce) {
+      .z-breathe {
+        animation: none;
+        opacity: 1;
+      }
     }
   </style>
 </defs>

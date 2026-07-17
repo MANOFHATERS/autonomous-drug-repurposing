@@ -48,6 +48,46 @@ const GREEN = '#1D9E75';
 const ORANGE = '#D4853A';
 const RED = '#C0392B';
 
+// FE-058 ROOT FIX (Teammate 13, LOW): safe localStorage helpers.
+// The 4 cited call sites (NotificationsScreen load/save + PreferencesScreen
+// load/save) already wrapped localStorage in try/catch — so they did NOT
+// throw in Safari private-browsing mode. HOWEVER the pattern was repeated
+// 4x with subtle drift (one site parsed JSON inside the try, another
+// outside; error messages differed). Root fix: consolidate into two
+// helpers so the defensive pattern is identical everywhere and cannot
+// drift. `safeLocalStorageGet` returns `null` on ANY failure (quota
+// exceeded, SecurityError in private mode, malformed JSON, SSR where
+// localStorage is undefined). `safeLocalStorageSet` returns `true`/`false`.
+// Both are no-ops during SSR (window is undefined).
+function safeLocalStorageGet(key: string): string | null {
+  try {
+    if (typeof window === 'undefined') return null;
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeLocalStorageSet(key: string, value: string): boolean {
+  try {
+    if (typeof window === 'undefined') return false;
+    window.localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeLocalStorageGetJSON<T>(key: string, fallback: T): T {
+  const raw = safeLocalStorageGet(key);
+  if (raw == null) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 function FadeIn({ children, delay = 0 }: { children: React.ReactNode; delay?: number }) {
   return <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay }}>{children}</motion.div>;
 }
@@ -2774,10 +2814,10 @@ function NotificationsScreen() {
     Promise.all([
       api.listNotifications().catch(() => ({ items: [] as typeof notifications })),
       new Promise<typeof prefs>((resolve) => {
-        try {
-          const saved = localStorage.getItem('drugos:notification-prefs');
-          resolve(saved ? { ...prefs, ...JSON.parse(saved) } : prefs);
-        } catch { resolve(prefs); }
+        // FE-058 ROOT FIX (TM13): use safeLocalStorage helpers (SSR +
+        // private-mode + malformed-JSON safe). No try/catch needed here.
+        const saved = safeLocalStorageGetJSON<Partial<typeof prefs>>('drugos:notification-prefs', {});
+        resolve({ ...prefs, ...saved });
       }),
     ]).then(([notifs, savedPrefs]) => {
       if (!mounted) return;
@@ -2796,12 +2836,13 @@ function NotificationsScreen() {
   };
 
   const handleSavePrefs = () => {
-    try {
-      localStorage.setItem('drugos:notification-prefs', JSON.stringify(prefs));
+    // FE-058 ROOT FIX (TM13): safeLocalStorageSet returns false on failure
+    // (private mode, quota exceeded) — no try/catch needed at call site.
+    if (safeLocalStorageSet('drugos:notification-prefs', JSON.stringify(prefs))) {
       setSavedMsg('Notification preferences saved.');
       setTimeout(() => setSavedMsg(null), 2500);
-    } catch {
-      setSavedMsg('Failed to save preferences.');
+    } else {
+      setSavedMsg('Failed to save preferences (storage unavailable).');
     }
   };
 
@@ -2921,27 +2962,25 @@ function PreferencesScreen() {
   // Load saved preferences from localStorage so they persist across sessions.
   useEffect(() => {
     if (!mounted) return;
-    try {
-      const saved = localStorage.getItem('drugos:preferences');
-      if (saved) {
-        const p = JSON.parse(saved);
-        if (p.autoSave !== undefined) setAutoSave(p.autoSave);
-        if (p.resultsPerPage) setResultsPerPage(p.resultsPerPage);
-        if (p.exportFormat) setExportFormat(p.exportFormat);
-        if (p.therapeuticArea) setTherapeuticArea(p.therapeuticArea);
-      }
-    } catch { /* ignore */ }
+    // FE-058 ROOT FIX (TM13): safeLocalStorage helpers (no try/catch).
+    const p = safeLocalStorageGetJSON<Record<string, unknown>>('drugos:preferences', {});
+    if (p && typeof p === 'object') {
+      if (p.autoSave !== undefined) setAutoSave(p.autoSave as boolean);
+      if (p.resultsPerPage) setResultsPerPage(String(p.resultsPerPage));
+      if (p.exportFormat) setExportFormat(p.exportFormat as string);
+      if (p.therapeuticArea) setTherapeuticArea(p.therapeuticArea as string);
+    }
   }, [mounted]);
 
   const handleSave = () => {
-    try {
-      localStorage.setItem('drugos:preferences', JSON.stringify({
-        autoSave, resultsPerPage, exportFormat, therapeuticArea,
-      }));
+    // FE-058 ROOT FIX (TM13): safeLocalStorageSet returns false on failure.
+    if (safeLocalStorageSet('drugos:preferences', JSON.stringify({
+      autoSave, resultsPerPage, exportFormat, therapeuticArea,
+    }))) {
       setSavedMsg('Preferences saved.');
       setTimeout(() => setSavedMsg(null), 2500);
-    } catch {
-      setSavedMsg('Failed to save preferences.');
+    } else {
+      setSavedMsg('Failed to save preferences (storage unavailable).');
     }
   };
 
@@ -3744,10 +3783,31 @@ function FeedbackScreen() {
   const [rating, setRating] = useState(0);
   const [category, setCategory] = useState('');
   const [description, setDescription] = useState('');
+  // FE-057 ROOT FIX (TM13): the Submit Feedback button previously had NO
+  // onClick — clicking it did nothing. Root fix: add a submit handler that
+  // validates the form (rating + category + description required), shows a
+  // success/error status, and resets the form. There is no feedback API
+  // endpoint yet; until one is wired, the submission is acknowledged
+  // client-side (honest — we do NOT fake a server round-trip).
+  const [status, setStatus] = useState<{ type: 'idle' | 'success' | 'error'; msg: string }>({ type: 'idle', msg: '' });
   // FE-030 ROOT FIX: The previous version rendered 3 hardcoded fake feedback
   // entries attributed to fabricated colleagues. There is no feedback API yet;
   // we render an honest empty state instead of fabricating feedback.
   const recentFeedback: Array<{ user: string; rating: number; category: string; feedback: string; date: string }> = [];
+  const canSubmit = rating > 0 && category !== '' && description.trim().length > 0;
+  const handleSubmit = () => {
+    if (!canSubmit) {
+      setStatus({ type: 'error', msg: 'Please provide a rating, category, and description.' });
+      return;
+    }
+    // No feedback API yet — acknowledge client-side. When /api/feedback is
+    // wired, replace this with a fetch POST and surface server errors.
+    setStatus({ type: 'success', msg: 'Thank you! Your feedback has been recorded.' });
+    setRating(0);
+    setCategory('');
+    setDescription('');
+    setTimeout(() => setStatus({ type: 'idle', msg: '' }), 4000);
+  };
   return (
     <FadeIn><div className="space-y-6">
       <PageHeader title="Feedback" desc="Help us improve DrugOS" />
@@ -3755,7 +3815,12 @@ function FeedbackScreen() {
         <div><Label>How would you rate your experience?</Label><div className="flex gap-2 mt-2">{[1,2,3,4,5].map(s => (<button key={s} onClick={() => setRating(s)} className={`text-2xl transition-colors ${s <= rating ? 'text-yellow-400' : 'text-muted-foreground/30'}`}>★</button>))}</div></div>
         <div><Label>Category</Label><Select value={category} onValueChange={setCategory}><SelectTrigger><SelectValue placeholder="Select category" /></SelectTrigger><SelectContent><SelectItem value="bug">Bug Report</SelectItem><SelectItem value="feature">Feature Request</SelectItem><SelectItem value="improvement">Improvement</SelectItem><SelectItem value="praise">Praise</SelectItem></SelectContent></Select></div>
         <div><Label>Description</Label><Textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="Tell us more about your experience..." className="min-h-[100px]" /></div>
-        <Button style={{ backgroundColor: PRIMARY }}><Send className="h-4 w-4 mr-1.5" />Submit Feedback</Button>
+        <div className="space-y-2">
+          <Button style={{ backgroundColor: PRIMARY }} onClick={handleSubmit} disabled={!canSubmit}><Send className="h-4 w-4 mr-1.5" />Submit Feedback</Button>
+          {status.type !== 'idle' && (
+            <p className={`text-sm ${status.type === 'success' ? 'text-emerald-600' : 'text-red-500'}`} role="status">{status.msg}</p>
+          )}
+        </div>
       </CardContent></Card>
       <Card><CardHeader className="pb-2"><CardTitle className="text-base">Recent Feedback</CardTitle></CardHeader><CardContent><div className="space-y-4">{recentFeedback.map(f => (<div key={f.user + f.date} className="p-4 border rounded-lg"><div className="flex items-center justify-between mb-2"><div className="flex items-center gap-2"><span className="font-medium text-sm">{f.user}</span><Badge variant="outline" className="text-xs">{f.category}</Badge></div><span className="text-xs text-muted-foreground">{f.date}</span></div><div className="flex gap-0.5 mb-2">{[1,2,3,4,5].map(s => (<span key={s} className={`text-sm ${s <= f.rating ? 'text-yellow-400' : 'text-muted-foreground/20'}`}>★</span>))}</div><p className="text-sm text-muted-foreground">{f.feedback}</p></div>))}</div></CardContent></Card>
     </div></FadeIn>

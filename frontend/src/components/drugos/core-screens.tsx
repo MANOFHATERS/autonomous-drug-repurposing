@@ -88,6 +88,39 @@ function scoreColor(s: number) {
   return ACCENT_RED;
 }
 
+// ═══════════════════════════════════════════
+// FE-051 / FE-053 / FE-054 / FE-055 / FE-056 ROOT FIX HELPERS (TM13)
+// ═══════════════════════════════════════════
+// These helpers fix the cluster of broken-empty-state + fragile-matching
+// bugs the audit found across core-screens.tsx. They are used by multiple
+// screens below.
+
+// FE-051 ROOT FIX: parsePrevalence + FDA orphan-drug threshold logic lives
+// in @/lib/orphan-drug so it can be unit-tested directly (importing this
+// component file in Jest is expensive — it pulls in recharts + framer-motion).
+import { parsePrevalence } from '@/lib/orphan-drug';
+
+/**
+ * Shared empty-state for screens that have no data yet. Per the project
+ * doc (Team_Cosmic_Build_Process_Updated.docx) and the FE-034 root fix,
+ * production code must NEVER fabricate sample data — it must show an
+ * honest empty state that tells the researcher the data is not loaded
+ * (and, where relevant, how to load it). This replaces the previous
+ * pattern of `.map()` over an empty array rendering nothing (leaving
+ * the researcher staring at a blank table with no explanation).
+ */
+function EmptyDataState({ title, hint }: { title: string; hint?: string }) {
+  return (
+    <Card>
+      <CardContent className="p-8 text-center">
+        <Database className="h-10 w-10 mx-auto text-muted-foreground/50 mb-3" aria-hidden />
+        <p className="font-medium text-foreground">{title}</p>
+        {hint && <p className="text-sm text-muted-foreground mt-1 max-w-md mx-auto">{hint}</p>}
+      </CardContent>
+    </Card>
+  );
+}
+
 
 function StatCard({ icon: Icon, value, label, color = PRIMARY }: { icon: React.ElementType; value: string | number; label: string; color?: string }) {
   return (
@@ -2192,7 +2225,15 @@ function EvidenceBuilderScreen() {
 
 function ReportGenerationScreen() {
   const [template, setTemplate] = useState('standard');
-  const [selectedDisease, setSelectedDisease] = useState('D001');
+  // FE-053 ROOT FIX (TM13): 'D001' was a MOCK ID that does not exist
+  // in diseases[] (empty until real data loads). The Select showed
+  // nothing or rendered the raw 'D001'. Root fix: default to '' and
+  // derive the effective disease from the actual diseases list.
+  const [selectedDisease, setSelectedDisease] = useState('');
+  const effectiveDiseaseId =
+    selectedDisease && diseases.some(d => d.id === selectedDisease)
+      ? selectedDisease
+      : (diseases[0]?.id ?? '');
   const [generating, setGenerating] = useState(false);
 
   const templates = [
@@ -2202,7 +2243,7 @@ function ReportGenerationScreen() {
     { id: 'custom', name: 'Custom Report', desc: 'Configure your own sections', icon: Settings },
   ];
 
-  const candidates = drugCandidates.filter(c => c.diseaseId === selectedDisease);
+  const candidates = drugCandidates.filter(c => c.diseaseId === effectiveDiseaseId);
 
   const handleGenerate = () => {
     setGenerating(true);
@@ -2265,8 +2306,8 @@ function ReportGenerationScreen() {
             <CardContent className="space-y-4">
               <div>
                 <label className="text-sm font-medium mb-1.5 block">Disease</label>
-                <Select value={selectedDisease} onValueChange={setSelectedDisease}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+                <Select value={effectiveDiseaseId} onValueChange={setSelectedDisease} disabled={diseases.length === 0}>
+                  <SelectTrigger><SelectValue placeholder={diseases.length === 0 ? 'No diseases loaded' : 'Select a disease'} /></SelectTrigger>
                   <SelectContent>{diseases.map(d => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
@@ -2420,11 +2461,19 @@ function DrugComparisonScreen() {
       <Card className="mb-6">
         <CardContent className="p-4">
           <p className="text-sm font-medium mb-2">Select drugs to compare ({selectedIds.length}/4):</p>
-          <div className="flex flex-wrap gap-2">
-            {drugCandidates.slice(0, 13).map(c => (
-              <Badge key={c.id} variant={selectedIds.includes(c.id) ? 'default' : 'outline'} className="cursor-pointer" onClick={() => toggleDrug(c.id)}>{c.drugName}</Badge>
-            ))}
-          </div>
+          {drugCandidates.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No drug candidates loaded. Run a search to populate candidates.</p>
+          ) : (
+            // FE-055 ROOT FIX (TM13): removed the arbitrary `slice(0, 13)`
+            // magic number. All candidates are shown in a scrollable
+            // container so none are silently hidden; the compare limit
+            // (4) is enforced by toggleDrug() above.
+            <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto">
+              {drugCandidates.map(c => (
+                <Badge key={c.id} variant={selectedIds.includes(c.id) ? 'default' : 'outline'} className="cursor-pointer" onClick={() => toggleDrug(c.id)}>{c.drugName}</Badge>
+              ))}
+            </div>
+          )}
         </CardContent>
       </Card>
       {compared.length > 1 && (
@@ -2564,8 +2613,19 @@ function MolecularSimilarityScreen() {
 }
 
 function ScoreBreakdownScreen() {
-  const [selectedId, setSelectedId] = useState('DC001');
+  // FE-055 ROOT FIX (TM13): 'DC001' was a MOCK ID. Default to '' and
+  // resolve to the first real candidate. Guard against empty list so
+  // the screen doesn't crash on `candidate.kgScore`.
+  const [selectedId, setSelectedId] = useState('');
   const candidate = drugCandidates.find(c => c.id === selectedId) || drugCandidates[0];
+  if (!candidate) {
+    return (
+      <FadeIn>
+        <PageHeader title="Composite Score Breakdown" description="Detailed score decomposition for drug candidates" />
+        <EmptyDataState title="No drug candidates loaded" hint="Run a disease search to generate scored candidates." />
+      </FadeIn>
+    );
+  }
 
   const chartData = [
     { name: 'KG Score', value: candidate.kgScore, fill: PRIMARY },
@@ -2578,9 +2638,9 @@ function ScoreBreakdownScreen() {
     <FadeIn>
       <PageHeader title="Composite Score Breakdown" description="Detailed score decomposition for drug candidates" />
       <div className="mb-4">
-        <Select value={selectedId} onValueChange={setSelectedId}>
-          <SelectTrigger className="w-64"><SelectValue /></SelectTrigger>
-          <SelectContent>{drugCandidates.slice(0, 13).map(c => <SelectItem key={c.id} value={c.id}>{c.drugName}</SelectItem>)}</SelectContent>
+        <Select value={selectedId} onValueChange={setSelectedId} disabled={drugCandidates.length === 0}>
+          <SelectTrigger className="w-64"><SelectValue placeholder={drugCandidates.length === 0 ? 'No candidates loaded' : 'Select a candidate'} /></SelectTrigger>
+          <SelectContent className="max-h-72 overflow-y-auto">{drugCandidates.map(c => <SelectItem key={c.id} value={c.id}>{c.drugName}</SelectItem>)}</SelectContent>
         </Select>
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -2650,12 +2710,20 @@ function DiseaseDetailScreen() {
 }
 
 function ShortlistsScreen() {
-  const [shortlists, setShortlists] = useState([
-    { id: 'SL1', name: 'HD Top Picks', drugs: ['Memantine', 'Riluzole', 'Metformin'], created: '2026-06-09' },
-    { id: 'SL2', name: 'AD Safe Options', drugs: ['Donepezil', 'Memantine'], created: '2026-06-07' },
-    { id: 'SL3', name: 'Novel IP Opportunities', drugs: ['Cannabidiol', 'Fingolimod'], created: '2026-06-05' },
-  ]);
+  // FE-054 ROOT FIX (TM13): removed 3 hardcoded FAKE shortlists (mock
+  // data in a production path — a researcher would mistake fabricated
+  // collections for real saved work). Shortlists should come from a
+  // user-state API (not yet wired); until then, honest empty state.
+  const [shortlists, setShortlists] = useState<Array<{ id: string; name: string; drugs: string[]; created: string }>>([]);
   const { navigate } = useDrugOSNav();
+  if (shortlists.length === 0) {
+    return (
+      <FadeIn>
+        <PageHeader title="Shortlists & Collections" description="Manage your candidate shortlists" actions={<Button style={{ backgroundColor: PRIMARY }}><Plus className="h-4 w-4 mr-2" />New Shortlist</Button>} />
+        <EmptyDataState title="No shortlists yet" hint="Create a shortlist from the search results to save and compare candidate collections." />
+      </FadeIn>
+    );
+  }
   return (
     <FadeIn>
       <PageHeader title="Shortlists & Collections" description="Manage your candidate shortlists" actions={<Button style={{ backgroundColor: PRIMARY }}><Plus className="h-4 w-4 mr-2" />New Shortlist</Button>} />
@@ -2684,6 +2752,16 @@ function ShortlistsScreen() {
 
 function QueryHistoryScreen() {
   const { navigate } = useDrugOSNav();
+  // FE-054 ROOT FIX (TM13): recentQueries is empty until a query-history
+  // API is wired. Show an honest empty state instead of a blank table.
+  if (recentQueries.length === 0) {
+    return (
+      <FadeIn>
+        <PageHeader title="Query History" description="Your past search history" />
+        <EmptyDataState title="No queries yet" hint="Your past disease searches will appear here so you can re-run them." />
+      </FadeIn>
+    );
+  }
   return (
     <FadeIn>
       <PageHeader title="Query History" description="Your past search history" />
@@ -2826,9 +2904,22 @@ function EvidenceTimelineScreen() {
 }
 
 function MechanismOfActionScreen() {
-  const [selectedDrug, setSelectedDrug] = useState(drugCandidates[0].drugName);
+  // FE-056 ROOT FIX (TM13): guard against empty drugCandidates (was
+  // `drugCandidates[0].drugName` — TypeError on empty array) and
+  // undefined disease (was passed to PathwayDiagram as `disease ||
+  // diseases[0]` which is undefined when both are missing → TypeError
+  // inside PathwayDiagram accessing disease.name).
+  const [selectedDrug, setSelectedDrug] = useState(drugCandidates[0]?.drugName ?? '');
   const candidate = drugCandidates.find(c => c.drugName === selectedDrug) || drugCandidates[0];
-  const disease = diseases.find(d => d.id === candidate.diseaseId);
+  const disease = diseases.find(d => d.id === candidate?.diseaseId);
+  if (!candidate) {
+    return (
+      <FadeIn>
+        <PageHeader title="Mechanism of Action" description="Detailed MoA view for drug candidates" />
+        <EmptyDataState title="No drug candidates loaded" hint="Run a disease search to populate candidates with mechanism data." />
+      </FadeIn>
+    );
+  }
 
   return (
     <FadeIn>
@@ -2852,7 +2943,7 @@ function MechanismOfActionScreen() {
         </Card>
         <Card>
           <CardHeader className="pb-3"><CardTitle className="text-base">Pathway Diagram</CardTitle></CardHeader>
-          <CardContent><PathwayDiagram candidate={candidate} disease={disease || diseases[0]} /></CardContent>
+          <CardContent>{disease ? <PathwayDiagram candidate={candidate} disease={disease} /> : <p className="text-sm text-muted-foreground p-4">No disease linked to this candidate — pathway diagram unavailable.</p>}</CardContent>
         </Card>
       </div>
     </FadeIn>
@@ -2860,8 +2951,26 @@ function MechanismOfActionScreen() {
 }
 
 function RegulatoryPathwayScreen() {
-  const [selectedDrug, setSelectedDrug] = useState(drugCandidates[0].drugName);
+  // FE-051 ROOT FIX (TM13): guard against empty drugCandidates (was
+  // `drugCandidates[0].drugName` — TypeError on empty array). Also
+  // replaces the fragile `prevalence?.includes('per 100,000')` string
+  // match with a real prevalence parser + FDA orphan-drug threshold.
+  const [selectedDrug, setSelectedDrug] = useState(drugCandidates[0]?.drugName ?? '');
   const candidate = drugCandidates.find(c => c.drugName === selectedDrug) || drugCandidates[0];
+  if (!candidate) {
+    return (
+      <FadeIn>
+        <PageHeader title="Regulatory Pathway Assessment" description="Assess regulatory requirements for drug repurposing" />
+        <EmptyDataState title="No drug candidates loaded" hint="Load candidates to assess their regulatory pathway." />
+      </FadeIn>
+    );
+  }
+  const orphanEligibility = parsePrevalence(diseases.find(d => d.id === candidate.diseaseId)?.prevalence);
+  const orphanText = orphanEligibility.eligible === null
+    ? orphanEligibility.note
+    : orphanEligibility.eligible
+      ? `May qualify for orphan drug designation. ${orphanEligibility.note}`
+      : `Prevalence may not meet orphan drug criteria. ${orphanEligibility.note}`;
 
   return (
     <FadeIn>
@@ -2902,7 +3011,7 @@ function RegulatoryPathwayScreen() {
             </div>
             <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg">
               <h4 className="font-medium text-sm mb-1">Orphan Drug Status</h4>
-              <p className="text-xs text-muted-foreground">{diseases.find(d => d.id === candidate.diseaseId)?.prevalence?.includes('per 100,000') ? 'May qualify for orphan drug designation' : 'Prevalence may not meet orphan drug criteria'}</p>
+              <p className="text-xs text-muted-foreground">{orphanText}</p>
             </div>
           </CardContent>
         </Card>
