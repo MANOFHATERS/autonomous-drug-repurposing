@@ -640,6 +640,22 @@ def normalize_omim_id(value: object) -> "str | None":
         pass  # _pd.isna raises on list-like inputs; ignore
 
     # Coerce to string and strip whitespace + normalize case for prefix check.
+    # v114 round 8 FORENSIC ROOT FIX (float OMIM ID crash):
+    # When pandas reads a CSV column containing OMIM IDs with NaN values,
+    # the column dtype becomes float64 (NaN is a float). Valid IDs become
+    # floats like 100800.0. str(100800.0) = "100800.0" which fails the
+    # s.isdigit() check below (the "." is not a digit) → ValueError.
+    # This crashed the entire OMIM pipeline whenever the source CSV had
+    # any missing MIM numbers (common in real OMIM data).
+    # ROOT FIX: if the value is a float that represents a whole number,
+    # convert it to int first so str() produces a clean digit string.
+    # Floats with fractional parts (e.g. 100800.5) are genuinely invalid
+    # and still raise ValueError below.
+    if isinstance(value, float):
+        if value.is_integer():
+            value = int(value)
+        # else: leave as float — str() will include ".5" and fail isdigit()
+        # below, correctly raising ValueError for genuinely invalid input.
     s = str(value).strip()
 
     # Strip ALL known prefixes (handle "MIM:MIM:100678" double-prefix case
