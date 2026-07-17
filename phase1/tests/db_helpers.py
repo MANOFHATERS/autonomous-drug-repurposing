@@ -184,9 +184,29 @@ def sqlite_bulk_upsert_gda(session: Session, df: pd.DataFrame, batch_size: int =
     index renders. The production loader (``database/loaders.py::
     bulk_upsert_gdas``) uses a different PostgreSQL-specific path; this
     helper is for SQLite tests only.
+
+    v114 round 9 FORENSIC ROOT FIX (silent column drop regression):
+    The round-6 fix used bulk_insert_mappings which SILENTLY DROPS unknown
+    columns (e.g. 'protein_id'). The test_bulk_upsert_gda_rejects_protein_id_column
+    test expects an exception — bulk_insert_mappings didn't raise. ROOT FIX:
+    validate that all DataFrame columns exist in the GDA table before insert.
+    Raise ValueError on unknown columns (fail-loud, not silent-drop).
     """
     if df.empty:
         return 0
+    # v114 round 9: validate columns — fail-loud on unknown columns.
+    _table = GeneDiseaseAssociation.__table__
+    _valid_cols = set(_table.columns.keys()) | {"created_at", "updated_at"}  # timestamps added by _add_timestamps
+    _df_cols = set(df.columns)
+    _unknown = _df_cols - _valid_cols
+    if _unknown:
+        raise ValueError(
+            f"sqlite_bulk_upsert_gda: DataFrame contains columns not in "
+            f"gene_disease_associations table: {sorted(_unknown)}. Valid "
+            f"columns: {sorted(_valid_cols)}. This is a data-corruption "
+            f"signal — the caller is producing invalid columns (e.g. "
+            f"'protein_id' which is not a GDA column)."
+        )
     records = _df_to_dicts(df)
     total = 0
     for chunk in _chunked(records, batch_size):

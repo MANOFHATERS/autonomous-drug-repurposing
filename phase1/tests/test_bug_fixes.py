@@ -538,10 +538,32 @@ class TestFix3b_DrugBankColumns:
             )
 
     def test_parse_drug_element_has_correct_keys(self):
-        """_parse_drug_element must produce is_fda_approved."""
+        """_parse_drug_element must produce is_fda_approved.
+
+        v114 round 9 FORENSIC ROOT FIX (test/production design drift):
+        The previous test asserted '"is_fda_approved": is_approved' in src,
+        expecting the DrugBank parser to set is_fda_approved directly from
+        the <groups> 'approved' tag. But the production code INTENTIONALLY
+        sets is_fda_approved = None (line 2224) because DrugBank's 'approved'
+        tag is any-regulator (EMA, FDA, etc.), not FDA-specific. Setting
+        is_fda_approved = is_approved would mark EMA-only drugs as
+        FDA-approved — a patient-safety bug. The is_fda_approved flag is
+        populated by a LATER FDA Orange Book join. ROOT FIX: assert the
+        production-correct behavior (is_fda_approved = None, is_globally_approved
+        = is_approved).
+        """
         src = self._read_src()
-        assert '"is_fda_approved": is_approved' in src, (
-            "FIX INCOMPLETE: is_fda_approved not set in _parse_drug_element"
+        # The parser MUST emit is_fda_approved (as None, populated later).
+        assert '"is_fda_approved": is_fda_approved' in src or \
+               '"is_fda_approved": None' in src, (
+            "FIX INCOMPLETE: is_fda_approved not emitted in _parse_drug_element"
+        )
+        # The parser MUST NOT set is_fda_approved = is_approved (would
+        # conflate any-regulator approval with FDA approval).
+        assert '"is_fda_approved": is_approved' not in src, (
+            "REGRESSION: is_fda_approved set directly from is_approved "
+            "(DrugBank 'approved' tag is any-regulator, not FDA-specific). "
+            "This would mark EMA-only drugs as FDA-approved."
         )
 
     def test_ensure_drug_columns_no_forbidden_defaults(self):
@@ -1100,7 +1122,23 @@ class TestFix5_DrugBankGzip:
         assert drug_rec is not None
         assert drug_rec["drugbank_id"] == "DB00945"
         assert drug_rec["name"] == "Aspirin"
-        assert drug_rec["is_fda_approved"] is True
+        # v114 round 9: is_fda_approved is None from DrugBank (populated
+        # by FDA Orange Book join downstream). DrugBank's 'approved' tag
+        # is any-regulator, not FDA-specific. Aspirin IS FDA-approved but
+        # the DrugBank parser cannot confirm that — it defers to the
+        # Orange Book join. Assert is_fda_approved is None (the
+        # production-correct value), not True.
+        assert drug_rec["is_fda_approved"] is None, (
+            f"REGRESSION: is_fda_approved should be None from DrugBank "
+            f"(populated by Orange Book join), got {drug_rec['is_fda_approved']}"
+        )
+        # The any-regulator approval flag IS available (aspirin is 'approved'
+        # in DrugBank <groups>). This is the correct field to check for
+        # global approval status.
+        assert drug_rec.get("is_globally_approved") is True or \
+               drug_rec.get("clinical_status") == "approved", (
+            f"Aspirin should be globally approved (DrugBank <groups>approved</groups>)"
+        )
         assert "is_approved" not in drug_rec, (
             "REGRESSION: old 'is_approved' key in drug_rec"
         )
