@@ -11581,10 +11581,62 @@ def retrain_on_validated(
     import os as _os
     from pathlib import Path as _Path
 
-    # Default CSV path: <repo>/rl/validated_hypotheses.csv
+    # P4-011 v114 FORENSIC ROOT FIX (CRITICAL — data flywheel path drift):
+    # The previous code defaulted to <repo>/rl/validated_hypotheses.csv --
+    # the LEGACY path that shared/contracts/writeback.py explicitly says is
+    # "REMOVED" in favour of the canonical
+    # phase1/processed_data/validated_hypotheses.csv. The legacy file is a
+    # 5-column STUB (missing 5 of 10 canonical WRITEBACK_CSV_COLUMNS) with
+    # FAKE demo data (placeholder validators pharma_partner_alpha/beta/gamma).
+    # The data flywheel (DOCX §10) was reading a fake file at the wrong path
+    # -- pharma-partner validations were NEVER fed back to the RL ranker.
+    #
+    # ROOT FIX: default to the CANONICAL path via get_validated_csv_path()
+    # (which respects the VALIDATED_HYPOTHESES_CSV env override and returns
+    # phase1/processed_data/validated_hypotheses.csv by default). The legacy
+    # path is searched ONLY as a backward-compat fallback if the canonical
+    # file does not exist (for old deployments that haven't migrated).
+    try:
+        import sys as _sys_p4011
+        _repo_root_p4011 = _Path(__file__).resolve().parents[1]
+        if str(_repo_root_p4011) not in _sys_p4011.path:
+            _sys_p4011.path.insert(0, str(_repo_root_p4011))
+        from shared.contracts.writeback import (
+            get_validated_csv_path as _get_canonical_validated_csv_path,
+            LEGACY_RL_VALIDATED_CSV as _LEGACY_RL_VALIDATED_CSV,
+        )
+        _canonical_path = _get_canonical_validated_csv_path()
+    except Exception:
+        # Fallback: compute the canonical path directly (matches the contract).
+        _canonical_path = str(
+            _Path(__file__).resolve().parents[1]
+            / "phase1" / "processed_data" / "validated_hypotheses.csv"
+        )
+        _LEGACY_RL_VALIDATED_CSV = str(
+            _Path(__file__).resolve().parents[1]
+            / "rl" / "validated_hypotheses.csv"
+        )
+
     if validated_csv_path is None:
-        _repo_root = _Path(__file__).resolve().parents[1]
-        validated_csv_path = str(_repo_root / "rl" / "validated_hypotheses.csv")
+        # Use the canonical path. Fall back to the legacy path ONLY if the
+        # canonical file does not exist (backward compat for pre-v114
+        # deployments that only have rl/validated_hypotheses.csv).
+        if _os.path.exists(_canonical_path):
+            validated_csv_path = _canonical_path
+        elif _os.path.exists(_LEGACY_RL_VALIDATED_CSV):
+            logger.warning(
+                "P4-011 v114: canonical validated_hypotheses.csv not found at "
+                "%s -- falling back to LEGACY path %s. This legacy file is a "
+                "5-column stub with fake demo data. Run the v114 migration "
+                "(creates the canonical 10-column file) to fix the data "
+                "flywheel. The legacy path will be REMOVED in v115.",
+                _canonical_path, _LEGACY_RL_VALIDATED_CSV,
+            )
+            validated_csv_path = _LEGACY_RL_VALIDATED_CSV
+        else:
+            # Neither exists -- use the canonical path (will be created on
+            # writeback). This is the correct behaviour for a fresh deploy.
+            validated_csv_path = _canonical_path
 
     # P4-001 + P4-033 ROOT FIX (CRITICAL — Team Cosmic / Phase 4):
     # The previous code read the WRONG column ("validated") and tested

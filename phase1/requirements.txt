@@ -86,6 +86,24 @@ rapidfuzz>=3.6.1
 
 # Utils
 python-dotenv>=1.0.0
+
+# P1-003 v114 FORENSIC ROOT FIX: fastapi + uvicorn were missing from
+# phase1/requirements.txt. phase1/service.py (the Phase 1 Dataset HTTP
+# Service) does `from fastapi import FastAPI, HTTPException` and
+# `from fastapi.middleware.cors import CORSMiddleware` at module top.
+# Without these deps, `python phase1/service.py` raises
+# ModuleNotFoundError: No module named 'fastapi' inside the Airflow
+# container (Dockerfile.airflow line 44 installs ONLY
+# phase1/requirements.txt). The Makefile's run-airflow target and
+# docker-compose up phase1-airflow both failed to provide a working
+# /datasets endpoint, and the frontend's DATASET_SERVICE_URL proxy 404'd.
+# ROOT FIX: declare fastapi + uvicorn here so the Phase 1 service can
+# run in its own container. These are also in the top-level
+# requirements.txt (RT-014), but the Phase 1 Docker image does NOT
+# install the top-level file -- it installs ONLY phase1/requirements.txt.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
 # v39 ROOT FIX (P1 #66): added filelock and pyarrow. base_pipeline.py
 # imports filelock with a try/except fallback, but the fallback sets
 # filelock=None and _count_parquet_records would fail if a .parquet

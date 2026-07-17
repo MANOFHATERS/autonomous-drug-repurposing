@@ -418,6 +418,20 @@ PHASE2_TO_PHASE3_EDGE_DROPPED: Tuple[Tuple[str, str, str], ...] = (
     # here, the GT model would learn a shortcut that bypasses the
     # multi-hop reasoning the architecture is designed for).
     ("Protein", "associated_with", "Disease"),
+    # v114 FORENSIC ROOT FIX (P3-002 completeness): the "Gene encodes
+    # Protein" edge is a Phase 2 DERIVATION edge. It is consumed by the
+    # adapter's _derive_protein_pathway step to bridge Gene-side data
+    # (DRKG, OMIM) to Protein-side data (UniProt, STRING), but it is
+    # NOT written to the Phase 3 graph directly (there is no "gene" node
+    # type in Phase 3). Previously this edge was NEITHER mapped NOR
+    # explicitly dropped -- map_phase2_edge_to_phase3() would raise
+    # KeyError if called on it, and the adapter's edge loop would
+    # silently drop it (counted but unlogged). ROOT FIX: list it here
+    # explicitly so the handling is VISIBLE (logged with a count) rather
+    # than silent. The adapter's derivation logic handles it BEFORE the
+    # mapping lookup, so adding it here does not change runtime behavior
+    # -- it only makes the contract complete and fail-closed.
+    ("Gene", "encodes", "Protein"),
 )
 
 # Reverse lookup.
