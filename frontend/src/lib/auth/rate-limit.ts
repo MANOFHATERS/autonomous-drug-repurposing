@@ -253,33 +253,79 @@ function ipInTrustedSet(ip: string): boolean {
  * Exported so `api-proxy-guard.ts` can use the SAME logic (the audit
  * specifically called out that file as trusting XFF unconditionally).
  *
+ * BE-046 ROOT FIX: `cf-connecting-ip` and `true-client-ip` are now gated
+ * behind explicit env-var flags (`TRUST_CLOUDFLARE_HEADERS`,
+ * `TRUST_AKAMAI_HEADERS`). The previous code trusted these headers
+ * UNCONDITIONALLY with a comment claiming they are "safe to trust
+ * unconditionally (the proxy overwrites any client-supplied value)".
+ * That is ONLY true if the deployment is actually behind Cloudflare
+ * (for `cf-connecting-ip`) or Akamai (for `true-client-ip`). If the
+ * Next.js server is directly internet-facing (no Cloudflare/Akamai), an
+ * attacker can set `cf-connecting-ip: 1.2.3.4` in their request headers
+ * and the rate limiter will use `1.2.3.4` as the client IP — bypassing
+ * IP-based rate limits (rotate the spoofed IP each request → fresh
+ * bucket each time). The fix requires operators to explicitly opt in
+ * to trusting these headers by setting the corresponding env var. The
+ * default (unset) is fail-closed — direct-to-internet deploys are safe
+ * by default. `x-real-ip` is still trusted unconditionally because it's
+ * set by the operator's own nginx/HAProxy (which the operator knows is
+ * in front). Operators who don't have nginx in front should not set
+ * `x-real-ip` either, but that's their own misconfiguration — we can't
+ * detect it from the application layer.
+ *
  * Logic:
- *   1. Try `x-real-ip`, `cf-connecting-ip`, `true-client-ip` in order.
- *      These are set by the proxy itself, not the client, so they're safe
- *      to trust unconditionally (the proxy overwrites any client-supplied
- *      value).
- *   2. If none of those are present, try `x-forwarded-for`:
+ *   1. Try `x-real-ip` (set by nginx/HAProxy — operator's own proxy).
+ *   2. If `TRUST_CLOUDFLARE_HEADERS=true`, try `cf-connecting-ip`.
+ *   3. If `TRUST_AKAMAI_HEADERS=true`, try `true-client-ip`.
+ *   4. If none of those are present (or trusted), try `x-forwarded-for`:
  *      a. If `TRUSTED_PROXY_CIDR` is set, parse XFF right-to-left,
  *         skipping IPs in the trusted set. The first untrusted IP is the
  *         client. This is the standard nginx `real_ip_recursive` logic.
  *      b. If `TRUSTED_PROXY_CIDR` is NOT set, IGNORE XFF entirely.
  *         A client-supplied XFF is NOT trustworthy without a trusted
  *         proxy chain.
- *   3. If nothing matches, return "unknown".
+ *   5. If nothing matches, return "unknown".
  */
 export function getClientIpFromHeaders(headers: {
   get(name: string): string | null;
 }): string {
-  // Step 1: proxy-set headers (safe to trust unconditionally).
-  const safeHeaders = ["x-real-ip", "cf-connecting-ip", "true-client-ip"];
-  for (const h of safeHeaders) {
-    const v = headers.get(h);
-    if (!v) continue;
-    const first = v.split(",")[0].trim();
+  // Step 1: x-real-ip is set by the operator's own proxy (nginx/HAProxy).
+  // The operator knows whether they have a proxy in front; if they don't,
+  // they shouldn't set this header on incoming requests. We trust it
+  // unconditionally because configuring nginx to set x-real-ip is an
+  // explicit operator decision (it requires `proxy_set_header X-Real-IP
+  // $remote_addr;` in the nginx config).
+  const xRealIp = headers.get("x-real-ip");
+  if (xRealIp) {
+    const first = xRealIp.split(",")[0].trim();
     if (first && isValidIp(first)) return first;
   }
 
-  // Step 2: X-Forwarded-For (only safe with a trusted-proxy chain).
+  // Step 2: cf-connecting-ip — ONLY trust if the operator explicitly opts in.
+  // BE-046: default is fail-closed (don't trust). This header is set by
+  // Cloudflare's edge network; if the deployment isn't behind Cloudflare,
+  // an attacker can forge it to bypass IP rate limits.
+  if (process.env.TRUST_CLOUDFLARE_HEADERS === "true") {
+    const cfIp = headers.get("cf-connecting-ip");
+    if (cfIp) {
+      const first = cfIp.split(",")[0].trim();
+      if (first && isValidIp(first)) return first;
+    }
+  }
+
+  // Step 3: true-client-ip — ONLY trust if the operator explicitly opts in.
+  // BE-046: default is fail-closed (don't trust). This header is set by
+  // Akamai's edge network; if the deployment isn't behind Akamai, an
+  // attacker can forge it to bypass IP rate limits.
+  if (process.env.TRUST_AKAMAI_HEADERS === "true") {
+    const akIp = headers.get("true-client-ip");
+    if (akIp) {
+      const first = akIp.split(",")[0].trim();
+      if (first && isValidIp(first)) return first;
+    }
+  }
+
+  // Step 4: X-Forwarded-For (only safe with a trusted-proxy chain).
   const xff = headers.get("x-forwarded-for");
   if (xff) {
     const cidrs = getTrustedProxyCidrs();

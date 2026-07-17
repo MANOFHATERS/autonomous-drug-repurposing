@@ -2,6 +2,20 @@ import { NextResponse } from "next/server";
 import { requireAuth, internalError, writeAuditLog } from "@/lib/api-helpers";
 import { getDatasetStats } from "@/lib/services/dataset-stats";
 import { getKnowledgeGraphStats } from "@/lib/services/knowledge-graph-stats";
+// BE-039 ROOT FIX: import CANONICAL_NODE_TYPES from lib/ml-contracts.ts
+// so there is a SINGLE source of truth for the canonical node type list.
+// The previous code redefined the list inline and included "Drug" —
+// which is NOT a canonical Phase 2 KG type (it's a legacy synonym for
+// "Compound" used in some loaders). The KG will never have a "Drug"
+// node type, so canonicalNodeCoverage always reported "Drug" as not
+// present. canonicalCoveragePct was thus capped at 5/6 = 83.3% — it could
+// NEVER reach 100%, even when all real canonical types were present.
+// The quality dashboard always showed "83% canonical coverage" which
+// looked like a quality gap when there wasn't one. Using the shared
+// CANONICAL_NODE_TYPES constant (which has exactly 5 entries: Compound,
+// Protein, Pathway, Disease, ClinicalOutcomes) makes the metric
+// correctly reach 100% when all canonical types are present.
+import { CANONICAL_NODE_TYPES } from "@/lib/ml-contracts";
 
 /**
  * GET /api/dataset/quality
@@ -71,15 +85,15 @@ export async function GET() {
     const nodeEdgeRatio =
       edgesLoaded === 0 ? 0 : Math.round((nodesLoaded / edgesLoaded) * 100) / 100;
 
-    // Canonical node types per the Phase 2 KG schema.
-    const canonicalTypes = [
-      "Compound",
-      "Drug",
-      "Protein",
-      "Pathway",
-      "Disease",
-      "ClinicalOutcomes",
-    ];
+    // BE-039 ROOT FIX: use the SHARED CANONICAL_NODE_TYPES constant from
+    // lib/ml-contracts.ts. The previous code defined an inline list that
+    // incorrectly included "Drug" (a legacy synonym for "Compound"),
+    // which meant canonicalCoveragePct could never reach 100% — the
+    // quality dashboard always showed 83% coverage, looking like a
+    // quality gap when there wasn't one. The shared constant has exactly
+    // the 5 Phase 2 KG canonical types: Compound, Protein, Pathway,
+    // Disease, ClinicalOutcomes.
+    const canonicalTypes = CANONICAL_NODE_TYPES;
     const nodeTypeCounts = kgStats?.nodeTypeCounts || {};
     const canonicalNodeCoverage = canonicalTypes.map((type) => ({
       type,

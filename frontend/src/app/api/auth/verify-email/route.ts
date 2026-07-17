@@ -11,6 +11,26 @@ import { validateBody, VerifyEmailBody } from "@/lib/zod-schemas";
 // recommendation). We reuse the existing per-IP rate-limit primitives
 // from the login flow — `checkIpRateLimit` + `recordIpAttempt`.
 import { checkIpRateLimit, recordIpAttempt } from "@/lib/auth/rate-limit";
+// BE-020 ROOT FIX: use the SHARED `resolveJwtSecret()` from lib/auth/server.ts
+// instead of re-implementing the secret-resolution logic here. The shared
+// resolver:
+//   - throws in production if JWT_SECRET is missing or <32 chars (fail-closed);
+//   - returns the loudly-logged dev-only fallback ONLY when NODE_ENV is
+//     explicitly "development" or "test" (or unset, but NOT "production");
+//   - is the SINGLE source of truth used by signAccessToken / signMfaChallengeToken /
+//     signMfaTicket, so email-verify tokens are signed with the SAME secret
+//     as access tokens (which they must be — the verify-email flow issues
+//     a 24h token at registration that THIS route verifies).
+//
+// The previous implementation inlined a divergent resolver that only
+// checked `process.env.NODE_ENV === "production"`. If NODE_ENV was UNSET
+// (which is the default in many deploy environments — e.g. `node server.js`
+// without NODE_ENV=production), the verify-email route fell back to the
+// publicly-known dev secret. An attacker who reads the repo could forge
+// email-verification tokens for ANY userId — verifying any email without
+// access to the inbox — leading to account takeover via email-verification
+// bypass. Using the shared resolver closes this hole.
+import { resolveJwtSecret, resolvePreviousJwtSecret } from "@/lib/auth/server";
 import jwt from "jsonwebtoken";
 
 /**
@@ -79,24 +99,35 @@ export async function POST(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const token = parsed.data.token;
 
-  const secret = process.env.JWT_SECRET;
-  if (!secret || secret.length < 32) {
-    if (process.env.NODE_ENV === "production") {
-      return internalError("JWT_SECRET not configured.");
-    }
-    // Dev fallback — same secret as auth/server.ts.
-  }
-  const actualSecret = secret && secret.length >= 32
-    ? secret
-    : "dev-only-insecure-secret-change-me-MINIMUM-32-CHARS-FOR-HS256!!";
+  // BE-020 ROOT FIX: use the SHARED `resolveJwtSecret()` so the secret-resolution
+  // logic is identical to every other JWT path. The shared resolver throws in
+  // production if JWT_SECRET is missing or too short (fail-closed), and only
+  // returns the dev-only fallback when NODE_ENV is explicitly NOT "production"
+  // (i.e. "development", "test", or unset). The previous implementation here
+  // only checked `process.env.NODE_ENV === "production"`, which meant a deploy
+  // with NODE_ENV unset fell back to the publicly-known dev secret — letting
+  // attackers forge email-verification tokens. Using the shared resolver also
+  // supports hot-rotation via JWT_SECRET_PREVIOUS (zero-downtime rotation).
+  //
+  // We try both the current AND previous secrets so a token signed just
+  // before a rotation remains valid during the 24h email-verify TTL.
+  const secretCandidates = [resolveJwtSecret(), resolvePreviousJwtSecret()].filter(
+    (s): s is string => !!s
+  );
 
-  let decoded: { sub: string; email: string; type: string };
-  try {
-    decoded = jwt.verify(token, actualSecret, {
-      issuer: "drugos",
-      algorithms: ["HS256"],
-    }) as { sub: string; email: string; type: string };
-  } catch {
+  let decoded: { sub: string; email: string; type: string } | null = null;
+  for (const secret of secretCandidates) {
+    try {
+      decoded = jwt.verify(token, secret, {
+        issuer: "drugos",
+        algorithms: ["HS256"],
+      }) as { sub: string; email: string; type: string };
+      break;
+    } catch {
+      // try next candidate (rotation window)
+    }
+  }
+  if (!decoded) {
     return NextResponse.json(
       { error: "invalid_or_expired_token", message: "The verification link is invalid or has expired. Please request a new one." },
       { status: 400 }
