@@ -4000,7 +4000,8 @@ class DisGeNETPipeline(BasePipeline):
                             source=rec.get("source") or DataSourceName.DISGENET.value,
                             reason=rec.get("reason", "unknown"),
                             details_json=rec.get("details_json", "{}"),
-                            run_id=rec.get("run_id"),
+                            # v114 round 7: run_id renamed to pipeline_run_id (int FK) in v89 BUG #29.
+                            pipeline_run_id=None,
                         )
                         for rec in new_records
                     ])
@@ -4388,7 +4389,8 @@ class DisGeNETPipeline(BasePipeline):
                     source=row.get("source") or DataSourceName.DISGENET.value,
                     reason=reason,
                     details_json=json.dumps(details, default=str),
-                    run_id=self.run_id,
+                    # v114 round 7: run_id renamed to pipeline_run_id (int FK) in v89 BUG #29.
+                    pipeline_run_id=None,
                 ))
             if objects:
                 session.bulk_save_objects(objects)

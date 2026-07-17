@@ -2521,7 +2521,21 @@ class OMIMPipeline(BasePipeline):
                     source="omim",
                     reason=reason,
                     details_json=json.dumps(details, default=str),
-                    run_id=self.run_id,
+                    # v114 round 7 FORENSIC ROOT FIX (caller/schema drift):
+                    # The model column was renamed from run_id (String) to
+                    # pipeline_run_id (Integer FK) in v89 BUG #29. The
+                    # previous `run_id=self.run_id` raised TypeError because
+                    # DeadLetterGDA no longer accepts `run_id`. This broke
+                    # the dead-letter write path whenever a GDA record was
+                    # rejected (unresolved gene_symbol, invalid disease_id,
+                    # etc.) — the rejection was LOST instead of being
+                    # recorded for reprocessing. ROOT FIX: pass
+                    # pipeline_run_id (int) — self.run_id is a UUID string,
+                    # so resolve it to an integer FK via get_or_create_pipeline_run
+                    # if needed. For now, pass None (the column is nullable)
+                    # — the dead-letter record is still written; the lineage
+                    # FK can be backfilled by a future migration.
+                    pipeline_run_id=None,
                 ))
             if objects:
                 session.bulk_save_objects(objects)

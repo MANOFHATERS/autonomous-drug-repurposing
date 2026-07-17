@@ -123,8 +123,37 @@ def _reset_namespace_logger_levels():
         if logger.level != _saved_levels[ns]:
             logger.setLevel(_saved_levels[ns])
 
-from database.base import Base
-from database.models import (
+# v114 round 7 FORENSIC ROOT FIX (Base class dual-import — tables missing):
+# The models in database/models.py import Base via the QUALIFIED path
+# `from phase1.database.base import Base` (line 68). But this conftest
+# imported via the BARE path `from database.base import Base`. Even
+# though both resolve to the same FILE, Python's import system treats
+# `database.base` and `phase1.database.base` as DIFFERENT modules
+# (different __name__) — so they create DIFFERENT DeclarativeBase
+# subclasses with DIFFERENT metadata. The models register their tables
+# on `phase1.database.base.Base.metadata`, but the conftest's
+# `Base.metadata.create_all(engine)` used `database.base.Base.metadata`
+# which had ZERO tables. Result: every db_engine fixture created an
+# empty SQLite DB → "no such table: drugs/proteins/pipeline_runs" in
+# 34+ tests.
+#
+# Teammate-3's v117 fix (00a164e) made the two Base.metadata objects
+# the SAME, but the models still register on a separate Base — the
+# dual-import was NOT fully resolved for the test path.
+#
+# ROOT FIX: import Base via the SAME qualified path the models use:
+# `from phase1.database.base import Base`. This ensures the conftest's
+# Base.metadata is the SAME object the models registered their tables
+# on. create_all() will then create all tables correctly.
+from phase1.database.base import Base
+# v114 round 7: import models via the SAME qualified path (phase1.database.models)
+# that the models themselves use internally. Importing via the bare
+# `database.models` path causes Python to execute the module TWICE (once as
+# `phase1.database.models` via internal imports, once as `database.models`
+# via this conftest import) — every class gets defined twice on Base,
+# causing "Multiple classes found for path" errors and "index already
+# exists" errors during create_all.
+from phase1.database.models import (
     Drug,
     DrugProteinInteraction,
     EntityMapping,
@@ -133,6 +162,27 @@ from database.models import (
     Protein,
     ProteinProteinInteraction,
 )
+# v114 round 7 FORENSIC ROOT FIX (sys.modules alias for dual-import):
+# Test files (test_bug_fixes, test_db_loaders, test_omim_pipeline, db_helpers)
+# import via the BARE path `from database.models import ...`. Python treats
+# `database.models` and `phase1.database.models` as DIFFERENT modules —
+# executing the file twice, defining every ORM class twice on Base. This
+# causes "Multiple classes found for path DrugProteinInteraction" and
+# "index uq_drugs_chembl_id already exists" during create_all.
+#
+# ROOT FIX: alias `database` -> `phase1.database` in sys.modules so both
+# import paths resolve to the SAME module object. This is the standard
+# Python pattern for packages that need to work under two names. The alias
+# is set AFTER phase1.database is imported (above), so it points to the
+# already-loaded module. Test files' `from database.models import ...` will
+# then hit the cached `phase1.database.models` instead of re-executing.
+import sys as _sys_alias
+if "phase1.database" in _sys_alias.modules and "database" not in _sys_alias.modules:
+    _sys_alias.modules["database"] = _sys_alias.modules["phase1.database"]
+if "phase1.database.models" in _sys_alias.modules and "database.models" not in _sys_alias.modules:
+    _sys_alias.modules["database.models"] = _sys_alias.modules["phase1.database.models"]
+if "phase1.database.base" in _sys_alias.modules and "database.base" not in _sys_alias.modules:
+    _sys_alias.modules["database.base"] = _sys_alias.modules["phase1.database.base"]
 
 # v90 ROOT FIX (BUG #10): _get_environment() now defaults to "production"
 # (fail-closed) when DRUGOS_ENVIRONMENT / ENVIRONMENT / ENV is unset. Tests
