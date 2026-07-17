@@ -330,7 +330,23 @@ def check_checkpoint_health(
         )
 
     try:
-        bundle = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        # v114 FORENSIC ROOT FIX (BUG #3 from Task 3-b audit): the previous
+        # code used weights_only=False, which allows ARBITRARY CODE
+        # EXECUTION from a malicious checkpoint (pickle deserialization).
+        # The P3-020 security fix (weights_only=True) was applied to
+        # trainer.py and service.py but MISSED this file. A malicious
+        # checkpoint placed on the Airflow worker's disk could execute
+        # arbitrary code when the flywheel monitor inspects it.
+        #
+        # ROOT FIX: use weights_only=True. The flywheel monitor only
+        # reads the bundle's metadata (dict keys, model_config, etc.) --
+        # it does NOT need to deserialize arbitrary Python objects. If
+        # the checkpoint contains non-standard objects that
+        # weights_only=True cannot handle, torch.load will raise and the
+        # except block will (correctly) report the checkpoint as corrupt.
+        # This is fail-closed: a checkpoint that can't be loaded safely
+        # is treated as corrupt, not executed.
+        bundle = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     except Exception as exc:
         return FlywheelStepStatus(
             step="checkpoint",
