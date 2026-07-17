@@ -97,6 +97,58 @@ def _count_csv_rows(path: Path) -> int:
         return 0
 
 
+def _count_unique_string_proteins(path: Path) -> int:
+    """Count UNIQUE protein IDs from BOTH columns of a STRING PPI CSV.
+
+    P1-029 v117 ROOT FIX: STRING's protein-protein interaction CSV has
+    two protein ID columns (column 0 and column 1). The previous v113
+    "fix" for P1-029 only fired when ``total_proteins == 0`` (i.e. the
+    uniprot_proteins.csv was COMPLETELY ABSENT) -- and even then it
+    used the interaction ROW count as a proxy for the protein count,
+    which both OVERCOUNTS (one protein appears in many interactions)
+    and does not address the COMMON case where both CSVs exist.
+
+    ROOT FIX (v117): parse the STRING PPI CSV with ``csv.reader``
+    (correctly handling multi-line quoted fields), skip the header row,
+    and collect the set of unique protein IDs from BOTH column 0 and
+    column 1. Returns 0 if the file is missing, empty, or unparseable
+    so the caller can fall back gracefully.
+
+    The downstream canonical count remains ``SELECT COUNT(*) FROM
+    proteins`` (the DB query) -- this CSV-derived count is the best
+    pre-DB estimate available to the /datasets endpoint.
+    """
+    if not path.exists():
+        return 0
+    try:
+        import csv as _csv
+        unique_ids: set = set()
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+            reader = _csv.reader(f)
+            try:
+                next(reader)  # skip header row (string_protein_protein_interactions.csv ships with one)
+            except StopIteration:
+                return 0
+            for row in reader:
+                if not row:
+                    continue
+                # Column 0 = protein1, column 1 = protein2 (STRING convention).
+                # Both are typically "<taxid>.<ENSP>" e.g. "9606.ENSP00000000233".
+                if len(row) > 0 and row[0]:
+                    unique_ids.add(row[0])
+                if len(row) > 1 and row[1]:
+                    unique_ids.add(row[1])
+        return len(unique_ids)
+    except Exception as exc:
+        logger.warning(
+            "Phase 1 service: failed to parse STRING PPI CSV %s for unique "
+            "protein count (P1-029 v117). Falling back to uniprot-only count. "
+            "Error: %s",
+            path, exc,
+        )
+        return 0
+
+
 def _processed_data_dir() -> Path:
     """Return the Phase 1 processed_data directory."""
     return _HERE / "processed_data"
@@ -170,14 +222,72 @@ def _load_dataset_stats() -> Dict[str, Any]:
             if total_drugs > 0:
                 break
 
-    # P1-029 v113 ROOT FIX: total_proteins should account for STRING
-    # proteins that may not be in UniProt (STRING's alias mapping is
-    # imperfect). Use the max of uniprot_rows and string_unique_protein_count.
-    # For now, we use the interaction count as a lower bound (each
-    # interaction has 2 proteins, but they may overlap). The DB query
-    # `SELECT COUNT(*) FROM proteins` is the canonical count.
-    if total_proteins == 0 and total_interactions > 0:
+    # P1-029 v117 ROOT FIX: total_proteins must account for STRING proteins
+    # that may not be in UniProt (STRING's alias mapping is imperfect -- a
+    # protein in STRING's graph may not yet be in the UniProt snapshot, and
+    # vice versa). The previous v113 "fix" only handled the rare edge case
+    # where uniprot_proteins.csv was COMPLETELY ABSENT (total_proteins==0);
+    # the COMMON case (both CSVs exist) was unaddressed, so total_proteins
+    # stayed at the uniprot row count and silently undercounted STRING-only
+    # proteins. Worse, the v113 fallback used interaction ROW count (each
+    # PPI row = 1 interaction, not 1 protein), which OVERCOUNTED because
+    # one protein appears in many interactions.
+    #
+    # ROOT FIX (v117): parse string_protein_protein_interactions.csv with
+    # csv.reader, count UNIQUE protein IDs from BOTH interaction columns
+    # (column 0 and column 1), then set
+    #     total_proteins = max(uniprot_rows, string_unique_protein_count)
+    # The max() accounts for both directions of imperfect overlap:
+    #   - UniProt-only proteins (no STRING entry): counted by uniprot_rows.
+    #   - STRING-only proteins (no UniProt entry): counted by string_unique.
+    # The DB query ``SELECT COUNT(*) FROM proteins`` remains the canonical
+    # count for downstream consumers (Phase 2 KG builder).
+    _string_ppi_path = pdir / "string_protein_protein_interactions.csv"
+    _string_unique_protein_count = _count_unique_string_proteins(_string_ppi_path)
+    _uniprot_rows = total_proteins  # snapshot before we possibly overwrite
+
+    if _string_unique_protein_count > 0 and _uniprot_rows > 0:
+        # COMMON CASE: both CSVs exist. Take the max to avoid undercounting
+        # in either direction.
+        total_proteins = max(_uniprot_rows, _string_unique_protein_count)
+        logger.info(
+            "Phase 1 service /datasets: total_proteins = "
+            "max(uniprot_rows=%d, string_unique_proteins=%d) = %d "
+            "(P1-029 v117 ROOT FIX -- both CSVs exist, taking the max to "
+            "account for STRING-only proteins not in UniProt and vice versa).",
+            _uniprot_rows, _string_unique_protein_count, total_proteins,
+        )
+    elif _string_unique_protein_count > 0 and _uniprot_rows == 0:
+        # uniprot_proteins.csv absent/empty -- use STRING unique count directly.
+        total_proteins = _string_unique_protein_count
+        logger.info(
+            "Phase 1 service /datasets: total_proteins = %d from STRING "
+            "unique protein IDs (uniprot_proteins.csv absent/empty; "
+            "P1-029 v117 ROOT FIX).",
+            total_proteins,
+        )
+    elif _string_unique_protein_count == 0 and _uniprot_rows == 0 and total_interactions > 0:
+        # Legacy fallback: STRING CSV exists but we couldn't extract unique
+        # proteins from it (e.g. parse failure or unexpected column layout).
+        # Use the interaction count as a conservative lower bound (each
+        # interaction has 2 proteins, but they may overlap). The DB query
+        # is the canonical count.
         total_proteins = total_interactions  # conservative lower bound
+        logger.info(
+            "Phase 1 service /datasets: total_proteins = %d (STRING "
+            "interaction count as conservative lower bound; could not "
+            "extract unique proteins from STRING CSV; P1-029 v117 legacy "
+            "fallback).",
+            total_proteins,
+        )
+    elif _uniprot_rows > 0:
+        # Only uniprot_proteins.csv exists. No STRING PPI data.
+        logger.info(
+            "Phase 1 service /datasets: total_proteins = %d from "
+            "uniprot_proteins.csv (STRING PPI CSV absent; P1-029 v117).",
+            total_proteins,
+        )
+    # else: both are 0 -- total_proteins stays 0 (data_status=empty).
 
     return {
         "sources": sources,

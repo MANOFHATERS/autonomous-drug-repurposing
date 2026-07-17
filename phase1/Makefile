@@ -163,18 +163,20 @@ run-airflow:
 	@test -n "$(AIRFLOW_HOME)" || export AIRFLOW_HOME="$(CURDIR)/.airflow_home"; \
 	test -n "$$AIRFLOW_ADMIN_USER" || { echo "ERROR: AIRFLOW_ADMIN_USER env var must be set (v49 security fix — admin/admin default removed)"; exit 2; }; \
 	test -n "$$AIRFLOW_ADMIN_PASSWORD" || { echo "ERROR: AIRFLOW_ADMIN_PASSWORD env var must be set (v49 security fix — admin/admin default removed)"; exit 2; }; \
-	mkdir -p $$AIRFLOW_HOME/dags; \
-	ln -sfn $(CURDIR)/dags/master_pipeline_dag.py $$AIRFLOW_HOME/dags/master_pipeline_dag.py; \
-	ln -sfn $(CURDIR)/dags/chembl_dag.py $$AIRFLOW_HOME/dags/chembl_dag.py; \
-	ln -sfn $(CURDIR)/dags/drugbank_dag.py $$AIRFLOW_HOME/dags/drugbank_dag.py; \
-	ln -sfn $(CURDIR)/dags/uniprot_dag.py $$AIRFLOW_HOME/dags/uniprot_dag.py; \
-	ln -sfn $(CURDIR)/dags/string_dag.py $$AIRFLOW_HOME/dags/string_dag.py; \
-	ln -sfn $(CURDIR)/dags/disgenet_dag.py $$AIRFLOW_HOME/dags/disgenet_dag.py; \
-	ln -sfn $(CURDIR)/dags/omim_dag.py $$AIRFLOW_HOME/dags/omim_dag.py; \
-	ln -sfn $(CURDIR)/dags/pubchem_dag.py $$AIRFLOW_HOME/dags/pubchem_dag.py; \
+	# v117 ROOT FIX (P1-035): use AIRFLOW__CORE__DAGS_FOLDER instead of
+	# symlinking 8 DAG files into AIRFLOW_HOME/dags/. The symlink approach
+	# caused duplicate DAG IDs (Airflow parsed each DAG twice — once from
+	# the symlink, once from the real file), stale symlinks when DAGs were
+	# renamed, and new DAGs not being discovered without manual Makefile
+	# edits. The DagsFolder approach auto-discovers all DAGs in the source
+	# directory and aligns the Makefile path with the docker-compose path
+	# (which already uses AIRFLOW__CORE__DAGS_FOLDER).
+	mkdir -p $$AIRFLOW_HOME; \
+	export AIRFLOW__CORE__DAGS_FOLDER="$(CURDIR)/dags"; \
 	export PYTHONPATH="$(CURDIR):$$PYTHONPATH"; \
 	export DATABASE_URL="$${DATABASE_URL:-sqlite:///$$AIRFLOW_HOME/airflow.db}"; \
 	echo "AIRFLOW_HOME=$$AIRFLOW_HOME"; \
+	echo "AIRFLOW__CORE__DAGS_FOLDER=$$AIRFLOW__CORE__DAGS_FOLDER"; \
 	echo "PYTHONPATH=$$PYTHONPATH"; \
 	echo "Initializing Airflow DB..."; \
 	airflow db migrate || airflow db upgrade; \
