@@ -304,10 +304,17 @@ class TestDomain3ScientificCorrectness:
             assert mk4["score"].iloc[0] == pytest.approx(0.8, abs=0.001)
 
     def test_bug_3_3_confidence_tier_not_high(self, omim_pipeline, morbidmap_fixture):
-        """BUG-3.3: confidence_tier must be weak/moderate/strong -- NEVER 'high'."""
+        """BUG-3.3: confidence_tier must be weak/moderate/strong/very_strong -- NEVER 'high'.
+
+        v114 round 11 FORENSIC ROOT FIX (stale tier set):
+        Team-1 v102 P1-004 extension added 'very_strong' [0.5, 1.0] as a
+        4th tier (splitting the old 'strong' band). The production code
+        now emits 4 tiers: weak, moderate, strong, very_strong. The test
+        still asserted only 3. ROOT FIX: include 'very_strong' in the
+        allowed set."""
         df = omim_pipeline.clean(morbidmap_fixture)
         tiers = set(df["confidence_tier"].dropna().unique())
-        assert tiers.issubset({"weak", "moderate", "strong"}), \
+        assert tiers.issubset({"weak", "moderate", "strong", "very_strong"}), \
             f"Invalid confidence_tier values: {tiers}"
         assert "high" not in tiers, "confidence_tier='high' is forbidden (BUG-3.3)"
 
@@ -945,26 +952,21 @@ class TestDomain4Coding:
             # Must be a DataFrame (not None).
             assert isinstance(load_df, pd.DataFrame)
 
-    def test_bug_4_23_no_url_in_runtime_error(self, omim_pipeline):
+    def test_bug_4_23_no_url_in_runtime_error(self, omim_pipeline, monkeypatch):
         """BUG-4.23: RuntimeError messages must not leak the API key.
 
-        v114 round 9 FORENSIC ROOT FIX: _api_get was removed in P2-2
-        refactor. The pipeline now uses download()/_download_morbidmap()
-        which call requests.get directly. ROOT FIX: test the ACTUAL
-        download path — patch requests.get to fail, call download(),
-        verify the RuntimeError doesn't contain the API key."""
-        # Set a fake API key on the pipeline so the download path is exercised.
-        if hasattr(omim_pipeline, '_api_key'):
-            omim_pipeline._api_key = "SECRET-KEY-VALUE"
-        elif hasattr(omim_pipeline, 'api_key'):
-            omim_pipeline.api_key = "SECRET-KEY-VALUE"
+        v114 round 11 FORENSIC ROOT FIX: download() falls back to an
+        embedded sample when OMIM_API_KEY is missing, so it doesn't raise.
+        ROOT FIX: set OMIM_API_KEY env var so the real download path is
+        exercised, then patch requests.get to fail. The pipeline should
+        raise a RuntimeError that does NOT contain the API key."""
+        # Set OMIM_API_KEY so download() takes the real API path (not the
+        # embedded-sample fallback).
+        monkeypatch.setenv("OMIM_API_KEY", "SECRET-KEY-VALUE")
         with patch("requests.get", side_effect=requests.exceptions.ConnectionError("refused")):
             with patch("time.sleep"):  # no-op sleep -- avoids 65s of backoff
                 with pytest.raises((RuntimeError, Exception)) as exc_info:
-                    try:
-                        omim_pipeline.download()
-                    except Exception:
-                        raise
+                    omim_pipeline.download()
                 err_msg = str(exc_info.value)
                 assert "SECRET-KEY-VALUE" not in err_msg, \
                     f"API key leaked in RuntimeError: {err_msg}"
@@ -1127,12 +1129,18 @@ class TestDomain9Security:
             mock_resp.raise_for_status = lambda: None
             return mock_resp
 
-        # v114 round 6 FORENSIC ROOT FIX: _session was removed in P2-2
-        # refactor. Patch requests.get instead of omim_pipeline._session.get.
+        # v114 round 6+11 FORENSIC ROOT FIX: _session AND _api_get were
+        # removed in P2-2 refactor. The pipeline now uses download() which
+        # calls requests.get directly. Patch requests.get and call download().
+        # Set a fake API key so the Authorization header path is exercised.
+        if hasattr(omim_pipeline, '_api_key'):
+            omim_pipeline._api_key = "TEST-KEY-12345"
+        elif hasattr(omim_pipeline, 'api_key'):
+            omim_pipeline.api_key = "TEST-KEY-12345"
         with patch("requests.get", side_effect=fake_get):
             with patch("time.sleep"):
                 try:
-                    omim_pipeline._api_get("https://api.omim.org/api/geneMap", {"start": 0})
+                    omim_pipeline.download()
                 except Exception:
                     pass
         # Verify apiKey was NOT in params.
@@ -1188,7 +1196,11 @@ class TestDomain10Testing:
                 row = fgfr3.iloc[0]
                 assert row["disease_id"] == "OMIM:100800"
                 assert row["score"] == pytest.approx(0.9, abs=0.001)
-                assert row["confidence_tier"] == "strong"
+                # v114 round 11: score 0.9 falls in [0.5, 1.0] which is now
+                # 'very_strong' (Team-1 v102 P1-004 split the old 'strong'
+                # band into 'strong' [0.3, 0.5) and 'very_strong' [0.5, 1.0]).
+                assert row["confidence_tier"] == "very_strong", \
+                    f"score 0.9 should be 'very_strong', got {row['confidence_tier']}"
                 assert row["source"] == "omim"
                 assert row["schema_version"] == SCHEMA_VERSION_STAMP
 
