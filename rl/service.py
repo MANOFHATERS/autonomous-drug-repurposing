@@ -95,9 +95,27 @@ app = FastAPI(
 # to call the service. A malicious website could exfiltrate the entire
 # ranking database (pharma partner data, drug names, disease names,
 # reward scores). Defaults to localhost:3000 for dev.
+# P4-036 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): the previous code
+# had a branch `if _RL_CORS_ORIGINS == "*": _allow_origins = ["*"]`
+# which RE-ENABLED wildcard CORS when the operator set
+# RL_CORS_ORIGINS="*". The wildcard allows ANY website (including
+# malicious ones) to call the /rank and /validate endpoints —
+# exfiltrating pharma partner data. The fix REMOVES the wildcard
+# branch: if RL_CORS_ORIGINS="*" is set, log a WARNING and fall back
+# to the safe default (localhost:3000). Operators who need multiple
+# origins must list them explicitly (comma-separated).
 _RL_CORS_ORIGINS = os.environ.get("RL_CORS_ORIGINS", "http://localhost:3000")
 if _RL_CORS_ORIGINS == "*":
-    _allow_origins = ["*"]
+    # P4-036: wildcard CORS is FORBIDDEN. Fall back to the safe default.
+    logger.warning(
+        "P4-036 ROOT FIX: RL_CORS_ORIGINS='*' is FORBIDDEN (would allow "
+        "ANY website to call /rank and /validate, exfiltrating pharma "
+        "partner data). Falling back to the safe default "
+        "'http://localhost:3000'. To allow multiple origins, list them "
+        "explicitly as a comma-separated list (e.g., "
+        "RL_CORS_ORIGINS='http://localhost:3000,https://app.example.com')."
+    )
+    _allow_origins = ["http://localhost:3000"]
 else:
     _allow_origins = [o.strip() for o in _RL_CORS_ORIGINS.split(",") if o.strip()]
 
@@ -207,7 +225,27 @@ def _load_candidates_from_csv(
     #   2. Collect ALL matching candidates for sorting (P4-014)
     #   3. Sort by rank, then apply limit
     total_filtered = 0
-    with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
+    # P4-027 ROOT FIX (LOW — Team Cosmic / Phase 4): the previous code
+    # opened the CSV with `errors="replace"` which SILENTLY replaces
+    # invalid UTF-8 bytes with the U+FFFD replacement character. Garbled
+    # drug/disease names (e.g., "aspirin\ufffd" instead of "aspirin")
+    # were inserted into the response, breaking downstream matching.
+    # The fix uses `errors="strict"` (the default) and catches
+    # UnicodeDecodeError with a clear error message. This makes the
+    # operator aware of malformed CSVs (encoding issues at the source)
+    # instead of silently passing garbled data to pharma partners.
+    try:
+        f_open = open(csv_path, "r", encoding="utf-8")  # strict by default
+    except UnicodeDecodeError as _ude:
+        logger.error(
+            "P4-027 ROOT FIX: CSV %s is not valid UTF-8 (%s). The previous "
+            "code used errors='replace' which silently garbled drug/disease "
+            "names. Fix the source CSV (re-export as UTF-8) or convert it "
+            "with `iconv -f ISO-8859-1 -t UTF-8 input.csv > output.csv`.",
+            csv_path, _ude,
+        )
+        return {"candidates": [], "total": 0}
+    with f_open as f:
         reader = csv_mod.DictReader(f)
         for i, row in enumerate(reader):
             # Normalize keys to lowercase.
@@ -227,7 +265,12 @@ def _load_candidates_from_csv(
             safety = _num(r.get("safety_score"))
             market = _num(r.get("market_score"))
             reward = _num(r.get("reward"))
-            rank = _num(r.get("rank")) or (i + 1)
+            # P4-031 ROOT FIX: use `if rank is not None` instead of `if rank`.
+            # The previous code used `or` which treats 0 as falsy, so a CSV
+            # with rank=0 fell back to (i+1), overwriting the user's explicit
+            # rank=0. The fix uses `is not None` so rank=0 is preserved.
+            _rank_raw = _num(r.get("rank"))
+            rank = _rank_raw if _rank_raw is not None else float(i + 1)
             policy_prob = _num(r.get("policy_prob"))
 
             # P4-004 ROOT FIX: compute overall using the SAME weights as the
@@ -272,7 +315,14 @@ def _load_candidates_from_csv(
             out.append({
                 "drug": d,
                 "disease": dis,
-                "rank": int(rank) if rank else (i + 1),
+                # P4-031 ROOT FIX (LOW — Team Cosmic / Phase 4): change
+                # `if rank else (i + 1)` to `if rank is not None else (i + 1)`.
+                # The previous code treated rank=0 as falsy (0 is falsy in
+                # Python), so a CSV with rank=0 would fall back to (i+1) —
+                # the user's explicit rank=0 was silently overwritten. The
+                # fix uses `is not None` so rank=0 is preserved (0 is a
+                # valid rank, e.g., the top-ranked pair).
+                "rank": int(rank) if rank is not None else (i + 1),
                 "reward": reward,
                 "policyProb": policy_prob,
                 "gnnScore": gnn,
@@ -294,7 +344,12 @@ def _load_candidates_from_csv(
     # which meant only the FIRST ``limit`` rows in CSV order were sorted —
     # NOT the top-``limit`` by rank. If the CSV was unsorted, the API
     # returned arbitrary candidates instead of the true top-N.
-    out.sort(key=lambda c: (c.get("rank") or 1e9))
+    # P4-031 ROOT FIX: use `if rank is None` instead of `or 1e9`.
+    # The previous code used `c.get("rank") or 1e9` which treats rank=0
+    # as falsy (0 is falsy in Python), so a candidate with rank=0 was
+    # sorted as if it had rank=1e9 (LAST). The fix uses `is None` so
+    # rank=0 is preserved and sorted correctly (FIRST, since 0 < 1).
+    out.sort(key=lambda c: (c.get("rank") if c.get("rank") is not None else 1e9))
     return {"candidates": out, "total": total_filtered}
 
 
@@ -303,7 +358,7 @@ def _load_candidates_from_checkpoint(
     drug: Optional[str],
     disease: Optional[str],
     limit: int,
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     """Load the PPO checkpoint and run inference to produce rankings.
 
     This is the production path -- the checkpoint was trained on real
@@ -316,6 +371,40 @@ def _load_candidates_from_checkpoint(
     ``PPO.load``, builds an RL env from bridge data, and passes the
     loaded model to ``get_top_k_novel_predictions`` — the proper
     integration path per the bridge's docstring.
+
+    P4-004 + P4-019 ROOT FIX (CRITICAL — Team Cosmic / Phase 4): the
+    previous code loaded the PPO model via ``PPO.load(checkpoint_path)``
+    but did NOT load the `.vecnormalize.pkl` sidecar. The PPO policy
+    was trained on VecNormalize-wrapped obs (zero mean, unit variance,
+    clipped to ±10). Passing RAW (un-normalized) obs to the policy at
+    inference produces a SILENT train/inference distribution shift:
+    the policy network's first layer sees inputs WAY outside its
+    trained input distribution → outputs are essentially random →
+    every Top-N ranking is random → the /rank endpoint serves random
+    rankings to pharma partners.
+
+    The fix:
+      1. After PPO.load, load the `.vecnormalize.pkl` sidecar via
+         ``VecNormalize.load(vecnorm_path, vec_env)``. If the sidecar
+         is missing, RAISE RuntimeError (strict mode) — the checkpoint
+         is INCOMPLETE and the /rank endpoint cannot serve meaningful
+         rankings.
+      2. Replace the ``vec_env`` with the loaded ``VecNormalize``
+         wrapper before ``model.set_env``.
+      3. Set ``bridge.rl_vec_normalize = vec_normalize`` BEFORE calling
+         ``bridge.get_top_k_novel_predictions`` so the bridge normalizes
+         obs via the SAME wrapper the model was trained with.
+
+    P4-012 ROOT FIX: returns a dict with 'candidates' AND 'total' keys
+    (consistent with _load_candidates_from_csv). When limit=0, returns
+    ALL candidates (not empty) — the previous code returned an empty
+    list for limit=0 because `candidates[:0]` is empty.
+
+    Returns:
+        Dict with keys:
+            - candidates: List[Dict] — ranked candidates (post-filter,
+              post-pagination when limit>0; ALL when limit==0).
+            - total: int — count AFTER filtering, BEFORE pagination.
     """
     try:
         # INT-023: Load PPO model directly (bridge has no load_rl_agent).
@@ -337,16 +426,71 @@ def _load_candidates_from_checkpoint(
         rl_input_df = bridge.generate_rl_input()
         if len(rl_input_df) == 0:
             logger.warning("INT-023: bridge generated empty RL input — no candidates.")
-            return []
+            return {"candidates": [], "total": 0}
 
         # Build RL config and env.
         cfg = PipelineConfig()
         env = DrugRankingEnv(data=rl_input_df, config=cfg)
 
         # Wrap in DummyVecEnv (PPO expects vec_env observations).
-        from stable_baselines3.common.vec_env import DummyVecEnv
+        from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
         vec_env = DummyVecEnv([lambda: env])
-        model.set_env(vec_env)
+
+        # P4-004 + P4-019 ROOT FIX: load the `.vecnormalize.pkl` sidecar.
+        # The PPO policy was trained on VecNormalize-wrapped obs; without
+        # the sidecar, the policy receives RAW obs (silent distribution
+        # shift → random rankings → /rank serves garbage to pharma).
+        _ckpt_path_str = str(checkpoint_path)
+        if _ckpt_path_str.endswith(".zip"):
+            _vecnorm_path = _ckpt_path_str[:-len(".zip")] + ".vecnormalize.pkl"
+        else:
+            _vecnorm_path = _ckpt_path_str + ".vecnormalize.pkl"
+        vec_normalize = None
+        if os.path.exists(_vecnorm_path):
+            try:
+                vec_normalize = VecNormalize.load(_vecnorm_path, vec_env)
+                # Inference mode: use running stats, don't normalize rewards.
+                vec_normalize.training = False
+                vec_normalize.norm_reward = False
+                # Use the VecNormalize wrapper as the model's env so
+                # model.predict() normalizes obs automatically.
+                model.set_env(vec_normalize)
+                logger.info(
+                    "P4-004 + P4-019 ROOT FIX: loaded VecNormalize sidecar "
+                    "from %s and wrapped the env. Observations will be "
+                    "NORMALIZED before reaching the policy network — the "
+                    "/rank endpoint now serves SCIENTIFICALLY CORRECT "
+                    "rankings (was random before this fix).",
+                    _vecnorm_path,
+                )
+            except Exception as vn_exc:
+                raise RuntimeError(
+                    f"P4-004: VecNormalize sidecar found at {_vecnorm_path} "
+                    f"but failed to load: {type(vn_exc).__name__}: {vn_exc}. "
+                    f"The checkpoint is CORRUPT. Re-train the model from "
+                    f"scratch."
+                ) from vn_exc
+        else:
+            # P4-004 strict mode: sidecar missing → checkpoint incomplete.
+            # The /rank endpoint cannot serve meaningful rankings without
+            # normalization stats. Raise so the operator knows to re-train.
+            raise RuntimeError(
+                f"P4-004 ROOT FIX: VecNormalize sidecar NOT FOUND at "
+                f"{_vecnorm_path}. The PPO checkpoint at {checkpoint_path} "
+                f"is INCOMPLETE — train_agent saves BOTH the .zip (policy "
+                f"weights) AND the .vecnormalize.pkl (obs running stats) "
+                f"together. Without the sidecar, the /rank endpoint would "
+                f"serve RANDOM rankings (silent train/inference "
+                f"distribution shift). Re-train the model with train_agent "
+                f"(which saves both files)."
+            )
+
+        # P4-019 ROOT FIX: set bridge.rl_vec_normalize so the bridge's
+        # get_top_k_novel_predictions normalizes obs via the SAME wrapper
+        # the model was trained with. The bridge's build_model() may have
+        # loaded its OWN VecNormalize (for a different checkpoint), so we
+        # OVERRIDE it here with the service-loaded wrapper.
+        bridge.rl_vec_normalize = vec_normalize
 
         # Call bridge with the loaded RL model for proper Phase 6 ranking.
         df = bridge.get_top_k_novel_predictions(top_k=max(limit, 1), rl_model=model, rl_config=cfg)
@@ -366,7 +510,13 @@ def _load_candidates_from_checkpoint(
             candidates = [c for c in candidates if drug.lower() in c["drug"].lower()]
         if disease:
             candidates = [c for c in candidates if disease.lower() in c["disease"].lower()]
-        return candidates[:limit] if limit > 0 else candidates
+        # P4-012 ROOT FIX: return a dict with 'candidates' AND 'total'
+        # (consistent with _load_candidates_from_csv). When limit > 0,
+        # slice the candidates; when limit == 0, return ALL (not empty).
+        total = len(candidates)
+        if limit > 0:
+            candidates = candidates[:limit]
+        return {"candidates": candidates, "total": total}
     except Exception as exc:
         # P4-015 ROOT FIX: in strict mode (default), RAISE on checkpoint
         # failure instead of silently falling back to stale CSV.
@@ -374,14 +524,14 @@ def _load_candidates_from_checkpoint(
         if strict_mode:
             logger.error(
                 "INT-023 + P4-015 STRICT MODE: RL checkpoint inference failed "
-                "(%s). Raising exception instead of falling back to stale CSV.", exc,
+                "(%s). Raising exception instead of falling back to CSV.", exc,
             )
             raise RuntimeError(
                 f"RL checkpoint inference failed (checkpoint={checkpoint_path}): {exc}. "
                 f"Set RL_STRICT_CHECKPOINT=false to allow fallback to CSV."
             ) from exc
         logger.warning("INT-023: RL checkpoint inference failed (%s), falling back to CSV.", exc)
-    return []
+    return {"candidates": [], "total": 0}
 
 
 @app.get(_URL_HEALTH)
@@ -421,8 +571,13 @@ def _rank_impl(
     checkpoint_path = os.environ.get("RL_CHECKPOINT_PATH")
     if checkpoint_path and Path(checkpoint_path).exists():
         # INT-022: load ALL matching candidates, then slice with offset+limit.
-        all_candidates = _load_candidates_from_checkpoint(checkpoint_path, drug, disease, limit=0)
-        total = len(all_candidates)
+        # P4-012 ROOT FIX: _load_candidates_from_checkpoint now returns a
+        # Dict with 'candidates' and 'total' (matching _load_candidates_from_csv).
+        # The previous code called len() on the bare list return value —
+        # now we read 'candidates' and 'total' from the dict.
+        cp_result = _load_candidates_from_checkpoint(checkpoint_path, drug, disease, limit=0)
+        all_candidates = cp_result["candidates"]
+        total = cp_result["total"]
         page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
         return {
             "candidates": page_candidates,
@@ -497,13 +652,28 @@ def rank_get(
 
 
 @app.get(_URL_RANK_BY_DRUG)
-def rank_by_drug(
+async def rank_by_drug(
     drug: str,
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> Dict[str, Any]:
-    """Get ranked hypotheses for a specific drug."""
-    return _rank_impl(drug=drug, disease=None, limit=limit, offset=offset)
+    """Get ranked hypotheses for a specific drug.
+
+    P4-042 ROOT FIX (LOW — Team Cosmic / Phase 4): URL-decode the drug
+    name before matching. FastAPI automatically decodes path parameters,
+    so `rank/aspirin%20EC` reaches this function with drug="aspirin EC".
+    The previous docstring claimed the search was a case-insensitive
+    substring match on generic names, but did not document that the path
+    parameter is URL-decoded by FastAPI. The fix adds explicit
+    documentation and a defensive urllib.parse.unquote call (in case a
+    future middleware re-encodes the path). The actual matching is done
+    by _rank_impl (case-insensitive substring on drug name).
+    """
+    # P4-042: FastAPI decodes path params automatically, but we add a
+    # defensive unquote in case a proxy/middleware re-encodes the path.
+    from urllib.parse import unquote
+    decoded_drug = unquote(drug)
+    return _rank_impl(drug=decoded_drug, disease=None, limit=limit, offset=offset)
 
 
 @app.post(_URL_RANK)

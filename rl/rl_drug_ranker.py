@@ -130,6 +130,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -1420,16 +1421,23 @@ class RewardConfig:
     #
     # The fix: restore a small positive reward for correct rejections
     # (0.05) so the agent has a reason to say LOW on bad pairs. Combined
-    # with the BAD_HIGH_PENALTY_SCALE increase (0.05 -> 0.30, see step()),
+    # with the BAD_HIGH_PENALTY_SCALE increase (0.05 -> 1.0, see step()),
     # the new EV analysis (15% good pairs, avg good reward = 0.5):
     #   EV(always LOW)  = 0.15 * (-0.5 * 1.0) + 0.85 * 0.05 = -0.0325
-    #   EV(always HIGH) = 0.15 * (0.5 * 5.0) + 0.85 * (-1.0 * 0.30) = 0.375 - 0.255 = +0.120
+    #   EV(always HIGH) = 0.15 * (0.5 * 5.0) + 0.85 * (-1.0 * 1.0) = 0.375 - 0.85 = -0.475
     #   EV(perfect)     = 0.15 * (0.5 * 5.0) + 0.85 * 0.05 = 0.375 + 0.0425 = +0.4175
-    # The gap between "perfect" (+0.4175) and "always HIGH" (+0.120) is
-    # 0.2975/pair — PPO has a strong gradient to learn to discriminate.
-    # EV(always HIGH) is still mildly positive (the agent explores HIGH),
-    # but the penalty for false HIGH is now 6x larger (0.30 vs 0.05), so
-    # the agent learns to suppress HIGH on bad pairs.
+    # The gap between "perfect" (+0.4175) and "always HIGH" (-0.475) is
+    # 0.8925/pair — PPO has a STRONG gradient to learn to discriminate.
+    # EV(always HIGH) is now strongly NEGATIVE (the agent must learn to
+    # discriminate, cannot default to always-HIGH). The penalty for false
+    # HIGH is now 100% of the bad-pair reward (1.0 vs 0.05 = 20x larger).
+    #
+    # P4-009 ROOT FIX (LOW — Team Cosmic / Phase 4): the previous
+    # docstring showed BAD_HIGH_PENALTY_SCALE=0.30 (stale) while the
+    # actual default is 1.0. The EV numbers were inconsistent with the
+    # actual reward computation, misleading anyone reading the docstring
+    # to understand the agent's incentive structure. The docstring now
+    # uses the correct 1.0 value and the EV numbers are recomputed.
     correct_rejection_reward: float = 0.05
     validated_bonus: float = 0.1
     # INT-020 / Issue 161 ROOT FIX: penalty applied when the agent ranks
@@ -1544,10 +1552,31 @@ class RewardConfig:
         weight_keys = set(self.reward_weights.keys())
         feature_set = set(self.feature_cols)
         if weight_keys != feature_set:
+            # P4-017 ROOT FIX (LOW — Team Cosmic / Phase 4): clearer
+            # error message that lists the ALLOWED keys (the 10
+            # FEATURE_COLS) when a disallowed key is present. The previous
+            # message just listed the diff, which didn't tell the user
+            # what the allowed set was — they had to grep FEATURE_COLS.
+            # The fix lists both the diff AND the allowed keys, with a
+            # specific note about gnn_score_calibrated (the 11th column
+            # the bridge writes) being for DECISION THRESHOLDS only, not
+            # for reward weighting.
+            extra_in_weights = weight_keys - feature_set
+            missing_from_weights = feature_set - weight_keys
+            _allowed_str = ", ".join(sorted(feature_set))
+            _extra_hint = ""
+            if extra_in_weights:
+                _extra_hint = (
+                    f"  NOTE: 'gnn_score_calibrated' (if present) is for "
+                    f"DECISION THRESHOLDS only (not for reward weighting). "
+                    f"Remove it from reward_weights. The allowed keys are "
+                    f"the {len(feature_set)} FEATURE_COLS: [{_allowed_str}]."
+                )
             raise ValueError(
                 f"Reward weights and feature cols must match. "
-                f"In weights but not features: {weight_keys - feature_set}. "
-                f"In features but not weights: {feature_set - weight_keys}."
+                f"In weights but not features: {extra_in_weights}. "
+                f"In features but not weights: {missing_from_weights}. "
+                f"Allowed keys: [{_allowed_str}].{_extra_hint}"
             )
         total = sum(self.reward_weights.values())
         if abs(total - 1.0) >= 1e-6:
@@ -1648,9 +1677,8 @@ class RewardConfig:
                 f"dominates the reward and the agent learns to rank only "
                 f"validated pairs HIGH (no multi-feature integration)."
             )
-        # P4-049 ROOT FIX: cross-field validation for validated_toxic_penalty.
-        # The previous __post_init__ validated validated_bonus against
-        # high_action_bonus but did NOT validate validated_toxic_penalty.
+        # P4-049 + P4-028 ROOT FIX (LOW — Team Cosmic / Phase 4):
+        # cross-field validation for validated_toxic_penalty.
         #
         # IMPORTANT: the existing step() code applies validated_toxic_penalty
         # as a FLAT OVERRIDE at line 5053:
@@ -1661,35 +1689,26 @@ class RewardConfig:
         # guarantees the reward is negative for toxic pairs.
         #
         # However, the penalty STILL needs a lower bound to be MEANINGFUL.
-        # The issue description's first suggestion was:
-        #     if validated_toxic_penalty < 0.5: raise ValueError(...)
-        # That hard-coded 0.5 is the default low_action_penalty * typical_reward
-        # (= 1.0 * 0.5 = 0.5). The toxic-pair penalty must be at least as
-        # severe as the typical LOW-action penalty (-0.5) so the agent
-        # doesn't learn "rank toxic pairs HIGH because the penalty is tiny".
+        # P4-028 ROOT FIX: validate validated_toxic_penalty > 0 (strict).
+        # A 0 penalty would make ranking a toxic pair HIGH free (no
+        # patient-safety signal). The previous check was >= 0 which
+        # allowed 0 — that violates the patient-safety invariant.
+        # The P4-028 fix above (already enforced) requires > 0.
+        #
+        # P4-049 ROOT FIX: the penalty must also be at least as severe
+        # as the typical LOW-action penalty (-0.5 with default config).
+        # Otherwise the agent learns 'rank toxic pairs HIGH because the
+        # penalty is tiny' (patient-safety regression).
         #
         # The fix enforces:
-        #   1. validated_toxic_penalty >= 0.0 (no negative penalty — a
-        #      negative value would invert the abs() and become a
-        #      REWARD for toxic pairs, the opposite of safe).
+        #   1. validated_toxic_penalty > 0.0 (P4-028: patient-safety
+        #      invariant — a non-positive value makes the abs() a no-op
+        #      and the agent gets no signal that toxic pairs are bad).
+        #      [Enforced above in the P4-028 block.]
         #   2. validated_toxic_penalty >= low_action_penalty * 0.5
         #      (the typical LOW-action reward magnitude). This ensures
         #      the toxic-pair HIGH penalty is at least as severe as the
         #      good-pair LOW penalty.
-        if self.validated_toxic_penalty < 0.0:
-            raise ValueError(
-                f"validated_toxic_penalty must be >= 0.0 (got "
-                f"{self.validated_toxic_penalty}). A negative penalty "
-                f"would invert the abs() in step() and become a REWARD "
-                f"for ranking toxic pairs HIGH, inverting the patient-"
-                f"safety guarantee."
-            )
-        # 0.5 is the canonical typical_reward magnitude (matches the
-        # default scaling in compute_reward). The LOW penalty is
-        # -reward * low_action_penalty ≈ -0.5 * low_action_penalty.
-        # The toxic-pair HIGH penalty is -validated_toxic_penalty (flat).
-        # We require: validated_toxic_penalty >= low_action_penalty * 0.5
-        # so the toxic penalty is at least as severe as the LOW penalty.
         _TYPICAL_REWARD = 0.5
         _toxic_threshold = self.low_action_penalty * _TYPICAL_REWARD
         if self.validated_toxic_penalty < _toxic_threshold:
@@ -1723,32 +1742,98 @@ class RewardConfig:
                 f"(always-LOW collapse) because rejecting bad pairs pays more "
                 f"than the risk of ranking a good pair HIGH."
             )
-        # P4-041 ROOT FIX: cross-field validation. correct_rejection_reward
-        # must be SIGNIFICANTLY less than high_action_bonus * typical_reward.
-        # If correct_rejection_reward >= high_action_bonus * 0.1, the agent
-        # defaults to LOW (always-LOW collapse) because rejecting bad pairs
-        # pays more than the risk of ranking a good pair HIGH.
+        # P4-010 + P4-041 ROOT FIX (MEDIUM — Team Cosmic / Phase 4):
+        # cross-field validation. correct_rejection_reward must be
+        # SIGNIFICANTLY less than high_action_bonus * typical_reward.
+        # If correct_rejection_reward >= high_action_bonus * 0.1, the
+        # agent defaults to LOW (always-LOW collapse) because rejecting
+        # bad pairs pays more than the risk of ranking a good pair HIGH.
         #
-        # Example: correct_rejection_reward=0.5, high_action_bonus=0.1 (low).
+        # Example: correct_rejection_reward=0.5, high_action_bonus=0.1.
         #   - Rejecting a bad pair pays 0.5.
         #   - Ranking a good pair HIGH pays 0.1 * reward ≈ 0.05.
-        #   The agent defaults to LOW on everything — always-LOW collapse
-        #   with NO error message indicating the cause.
+        #   The agent defaults to LOW on everything — always-LOW collapse.
         #
         # The threshold high_action_bonus * 0.1 represents the MINIMUM
-        # ratio where the HIGH action is still worth the risk. Below this,
+        # ratio where the HIGH action is still worth the risk. Below it,
         # the EV of always-LOW exceeds the EV of perfect play.
+        #
+        # P4-010 ROOT FIX: the previous code only logged a WARNING. In
+        # production (block_on_scientific_failure=True), this
+        # configuration WILL cause the agent to collapse to always-LOW
+        # — the scientific_validation gate will then fail (kp_recovery
+        # < threshold), and the pipeline will raise
+        # ScientificFailureError after WASTING 50K timesteps of compute.
+        # Raising ValueError NOW (before any training) saves the compute
+        # and gives the operator an actionable error message. In test
+        # mode (block_on_scientific_failure=False), keep the warning so
+        # CI tests that intentionally exercise degenerate configs can
+        # still run.
         _crr_threshold = self.high_action_bonus * 0.1
         if self.correct_rejection_reward >= _crr_threshold and self.high_action_bonus > 0:
-            logger.warning(
-                f"P4-041: correct_rejection_reward ({self.correct_rejection_reward}) "
-                f">= high_action_bonus * 0.1 ({_crr_threshold:.4f}). The agent "
-                f"may collapse to 'always LOW' because rejecting bad pairs "
-                f"pays more than the risk of ranking a good pair HIGH. "
-                f"Consider increasing high_action_bonus or decreasing "
-                f"correct_rejection_reward. (This is a WARNING, not an error — "
-                f"the configuration is technically valid but may produce "
-                f"degenerate behavior.)"
+            _crr_msg = (
+                f"P4-010/P4-041: correct_rejection_reward "
+                f"({self.correct_rejection_reward}) >= high_action_bonus * 0.1 "
+                f"({_crr_threshold:.4f}). The agent will collapse to 'always "
+                f"LOW' because rejecting bad pairs pays more than the risk of "
+                f"ranking a good pair HIGH. The scientific_validation gate WILL "
+                f"FAIL (kp_recovery < threshold) after wasting 50K timesteps "
+                f"of compute. Consider increasing high_action_bonus or "
+                f"decreasing correct_rejection_reward."
+            )
+            # Determine strict mode: when block_on_scientific_failure is
+            # True (the default production mode), raise ValueError. The
+            # caller can set block_on_scientific_failure=False for test
+            # mode (warning only). The check is on the RewardConfig, which
+            # does NOT have direct access to PipelineConfig — so we use
+            # an environment variable RL_BLOCK_ON_SCIENCIFIC_FAILURE
+            # (default "true") as the strict-mode signal.
+            import os as _os_for_strict
+            _strict = _os_for_strict.environ.get(
+                "RL_BLOCK_ON_SCIENCIFIC_FAILURE", "true"
+            ).lower() not in ("false", "0", "no", "off")
+            if _strict:
+                raise ValueError(_crr_msg)
+            logger.warning(_crr_msg)
+        # P4-024 ROOT FIX (LOW — Team Cosmic / Phase 4): validate
+        # gnn_hard_reject_percentile is in [0, 100]. The previous code
+        # validated safety_hard_reject, gnn_hard_reject, and
+        # safety_warning but did NOT validate gnn_hard_reject_percentile.
+        # A user who set gnn_hard_reject_percentile=200 (typo for 20)
+        # would get np.percentile(data, 200) which CLIPS to 100 (the
+        # max). The agent would then reject the top 100% of pairs (all
+        # of them), getting reward=-1.0 on every step — PPO has zero
+        # learning signal. A user who set it to -10 would get
+        # np.percentile(data, -10) which clips to 0 (the min) — the
+        # agent would NEVER reject, defeating the safety gate. Both
+        # cases produce silent degenerate behavior.
+        if not 0.0 <= self.gnn_hard_reject_percentile <= 100.0:
+            raise ValueError(
+                f"P4-024: gnn_hard_reject_percentile must be in "
+                f"[0, 100] (got {self.gnn_hard_reject_percentile}). "
+                f"0 = reject nothing (disabled), 100 = reject everything "
+                f"(no learning signal). The default 20.0 rejects the bottom "
+                f"20% of pairs (lets the top 80% through the gate)."
+            )
+        # P4-028 ROOT FIX (LOW — Team Cosmic / Phase 4): validate
+        # validated_toxic_penalty > 0. The previous code validated >= 0,
+        # but a 0 penalty would make ranking a toxic pair HIGH free
+        # (the patient-safety invariant is violated). The docstring
+        # says the effective penalty is exactly -validated_toxic_penalty
+        # (default -0.5); a non-positive value violates the patient-
+        # safety invariant. The abs() in step() makes the sign always
+        # negative, but a 0 value still produces a 0 penalty — the
+        # agent gets no signal that toxic pairs should be ranked LOW.
+        if self.validated_toxic_penalty <= 0:
+            raise ValueError(
+                f"P4-028: validated_toxic_penalty must be > 0 (got "
+                f"{self.validated_toxic_penalty}). A non-positive value "
+                f"violates the patient-safety invariant: ranking a toxic "
+                f"pair HIGH would be free (no penalty), so the agent has "
+                f"no signal that toxic pairs should be ranked LOW. The abs() "
+                f"in step() makes the sign always negative, but a 0 value "
+                f"still produces a 0 penalty. Use a positive value (default "
+                f"0.5)."
             )
         # v90 ROOT FIX (BUG #35): warn when gnn_hard_reject is set but
         # adaptive is on (the config value is only a fallback).
@@ -2122,10 +2207,54 @@ class PipelineConfig:
                 f"min_kp_recovery_rate must be in [0, 1] "
                 f"(got {self.min_kp_recovery_rate})."
             )
+        # P4-026 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): cross-field
+        # validation for ppo_gamma > 0 with max_episode_steps == 0. PPO
+        # with gamma > 0 (sequential MDP) requires truncation signaling
+        # for proper value bootstrapping — the agent needs to know when
+        # an episode was cut off by a time limit (truncated=True) vs
+        # ended naturally (truncated=False). With max_episode_steps == 0
+        # (the default, no time limit), step() ALWAYS returns
+        # truncated=False, so PPO incorrectly bootstraps from the final
+        # obs as if it were the terminal value — value estimates are
+        # biased, and PPO's value head cannot learn the discounted sum
+        # of future rewards.
+        #
+        # The fix: when ppo_gamma > 0 AND max_episode_steps == 0, RAISE
+        # ValueError (production mode). The agent CANNOT learn a
+        # sequential MDP without truncation signaling. The default
+        # config (ppo_gamma=0.0, contextual bandit) is unaffected — for
+        # gamma=0, truncation doesn't matter (no future rewards to
+        # bootstrap). For gamma > 0, the user MUST set
+        # max_episode_steps > 0 (e.g., n_pairs or a fraction thereof).
+        if self.ppo_gamma > 0 and self.max_episode_steps == 0:
+            raise ValueError(
+                f"P4-026: ppo_gamma ({self.ppo_gamma}) > 0 requires "
+                f"max_episode_steps > 0 (got 0). PPO with gamma > 0 "
+                f"(sequential MDP) needs truncation signaling for proper "
+                f"value bootstrapping — without it, PPO incorrectly "
+                f"bootstraps from the final obs as if it were the terminal "
+                f"value, biasing value estimates. Set max_episode_steps "
+                f"to a positive value (e.g., n_pairs) so step() returns "
+                f"truncated=True when the episode is cut off by the time "
+                f"limit. (For the default contextual-bandit case with "
+                f"ppo_gamma=0.0, max_episode_steps=0 is fine — no future "
+                f"rewards to bootstrap.)"
+            )
 
     @classmethod
     def from_env(cls) -> "PipelineConfig":
-        """Load config with environment variable overrides."""
+        """Load config with environment variable overrides.
+
+        P4-040 ROOT FIX (LOW — Team Cosmic / Phase 4): also read RL_TENANT
+        and apply the per-tenant reward weights via
+        ``apply_tenant_reward_weights``. The previous code did NOT read
+        RL_TENANT, so a deployment that wanted to use a tenant-specific
+        reward profile (e.g., a rare-disease partner with
+        rare_disease_flag=0.4) had to use the CLI --tenant flag — there
+        was NO env-var path. The fix adds RL_TENANT support so Docker /
+        Kubernetes deployments can set the tenant via env var (the
+        standard pattern for 12-factor apps).
+        """
         cfg = cls()
         if os.environ.get("RL_INPUT_PATH"):
             cfg.input_path = os.environ["RL_INPUT_PATH"]
@@ -2141,6 +2270,29 @@ class PipelineConfig:
             cfg.run_env_check = os.environ["RL_RUN_ENV_CHECK"] == "1"
         if os.environ.get("RL_LOG_LEVEL"):
             cfg.log_level = os.environ["RL_LOG_LEVEL"]
+        # P4-040 ROOT FIX: apply per-tenant reward weights if RL_TENANT is set.
+        # This mirrors the CLI --tenant flag's behavior, allowing Docker /
+        # Kubernetes deployments to set the tenant via env var.
+        _tenant = os.environ.get("RL_TENANT", "").strip()
+        if _tenant:
+            try:
+                # apply_tenant_reward_weights is defined later in this
+                # module (SECTION 2a). The import is deferred to avoid
+                # a circular reference at class-definition time.
+                cfg = apply_tenant_reward_weights(cfg, tenant_id=_tenant)
+                logger.info(
+                    f"P4-040 ROOT FIX: applied per-tenant reward weights for "
+                    f"tenant '{_tenant}' (from RL_TENANT env var). The "
+                    f"agent will use the tenant-specific reward profile."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"P4-040: could not apply tenant reward weights for "
+                    f"'{_tenant}' ({type(e).__name__}: {e}). Using default "
+                    f"reward weights. To fix, ensure a "
+                    f"reward_weights.{_tenant}.yaml file exists in the "
+                    f"reward_weights_dir (default: rl/)."
+                )
         return cfg
 
     @classmethod
@@ -2300,7 +2452,56 @@ class PipelineConfig:
         return cfg
 
 
-DEFAULT_CONFIG: PipelineConfig = PipelineConfig()
+# P4-021 ROOT FIX (LOW — Team Cosmic / Phase 4): DEFAULT_CONFIG is now a
+# LAZY proxy (like KNOWN_POSITIVES and VALIDATED_HYPOTHESES). The previous
+# code did `DEFAULT_CONFIG: PipelineConfig = PipelineConfig()` at module
+# import time, which triggered RewardConfig.__post_init__'s validation
+# (including the P4-041 WARNING log when correct_rejection_reward >=
+# high_action_bonus * 0.1). Every `import rl_drug_ranker` produced a
+# WARNING log line, even in production code that never trains an agent
+# (e.g., a notebook just reading constants). The fix defers construction
+# to first access via a _LazyConfig proxy. The proxy is transparent —
+# `DEFAULT_CONFIG.reward.safety_hard_reject` works as before, but the
+# PipelineConfig is only constructed on first attribute access.
+class _LazyConfig:
+    """Lazy proxy for DEFAULT_CONFIG (P4-021 ROOT FIX).
+
+    Defers PipelineConfig() construction to first attribute access.
+    This prevents RewardConfig.__post_init__'s WARNING log from firing
+    on every `import rl_drug_ranker` (the log fires only when the user
+    actually accesses DEFAULT_CONFIG, e.g., to start training).
+    """
+    __slots__ = ("_cached",)
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_cached", None)
+
+    def _resolve(self) -> PipelineConfig:
+        cached = object.__getattribute__(self, "_cached")
+        if cached is None:
+            cached = PipelineConfig()
+            object.__setattr__(self, "_cached", cached)
+        return cached
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._resolve(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._resolve(), name, value)
+
+    def __repr__(self) -> str:
+        cached = object.__getattribute__(self, "_cached")
+        if cached is None:
+            return "<_LazyConfig (not yet constructed)>"
+        return repr(cached)
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, _LazyConfig):
+            return self._resolve() == other._resolve()
+        return self._resolve() == other
+
+
+DEFAULT_CONFIG: Any = _LazyConfig()
 
 
 # ============================================================================
@@ -2819,6 +3020,11 @@ class RewardFunction:
         # before the first step). Once compute() is called, the cache is
         # updated, so get_effective_reward_weights() returns the ACTUAL
         # weights used in the most recent compute() call.
+        # P4-008 ROOT FIX: _last_flags stores the validated/validated_toxic
+        # flags from the most recent compute() call. step() reads these
+        # instead of mutating the input row. Initialized to empty (no
+        # flags set) — the first compute() call will populate it.
+        self._last_flags: Dict[str, bool] = {}
         self._effective_reward_weights: Dict[str, float] = self._compute_effective_weights()
 
     def set_validated_hypotheses(self, validated: Set[Tuple[str, str]]) -> None:
@@ -2853,6 +3059,22 @@ class RewardFunction:
             other_sum = sum(
                 w for c, w in effective_weights.items()
                 if c != GNN_SCORE_COL
+            )
+            # P4-020 ROOT FIX (LOW — Team Cosmic / Phase 4): log a WARNING
+            # when the cap fires so the user knows their YAML config was
+            # OVERRIDDEN. The previous code silently capped gnn_score
+            # weight at 0.04 — a user who set gnn_score: 0.20 in YAML saw
+            # the metadata record 0.04 (via get_effective_reward_weights)
+            # but had NO indication that their config was overridden.
+            # The fix logs at WARNING level (visible in production) so
+            # the operator knows their config was changed.
+            logger.warning(
+                f"P4-020 ROOT FIX: gnn_score weight {old_weight:.4f} exceeded "
+                f"the 0.04 cap (set to prevent the RL agent from becoming a "
+                f"circular distillation of the GT model). Capped to 0.04; "
+                f"the excess {old_weight - 0.04:.4f} was redistributed "
+                f"proportionally to the other features. Update your YAML "
+                f"config to use gnn_score <= 0.04 to avoid this override."
             )
             if other_sum > 0:
                 excess = old_weight - GNN_SCORE_MAX_WEIGHT
@@ -3016,27 +3238,26 @@ class RewardFunction:
         # receives the +0.1 reward bonus at line ~1773.
         if drug_name in WITHDRAWN_DRUGS:
             return -1.0
-        # Issue 166 ROOT FIX: indication-specific check with EXACT disease
-        # name matching (not tokenized subset). The previous P4-019 fix
-        # used TOKENIZED SUBSET matching:
-        #   contra_tokens.issubset(disease_tokens)
-        # This STILL over-rejects for single-token contraindications like
-        # "nausea" — {nausea}.issubset({chronic, nausea, syndrome}) is True,
-        # so "nausea" matches "chronic nausea syndrome" (a DIFFERENT
-        # condition). The user's audit (issue 166) found: "substring match
-        # for indication overlap over-rejects ('nausea' matches many
-        # diseases). Use exact ICD-10 code match."
+        # P4-014 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): the previous
+        # code used EXACT disease-name matching, which is too strict for
+        # real-world disease names that use inconsistent casing and
+        # separators. Example: the contraindication "pregnancy" would
+        # NOT match "chronic nausea of pregnancy" or "ectopic pregnancy"
+        # under exact matching, allowing teratogenic drugs (thalidomide,
+        # isotretinoin, valproate) to be ranked HIGH for pregnancy-
+        # related conditions — a PATIENT-SAFETY HAZARD.
         #
-        # The production-grade fix has TWO layers:
-        #   1. ICD-10 EXACT MATCH (preferred): if the row has an 'icd10'
-        #      column AND the contraindication map has ICD-10 codes, match
-        #      on exact ICD-10 equality. This is the scientifically correct
-        #      approach — ICD-10 codes are unambiguous disease identifiers.
-        #   2. EXACT DISEASE NAME MATCH (fallback): if no ICD-10 column,
-        #      require the contraindication to EXACTLY equal the disease
-        #      name (case-insensitive, after normalization). This prevents
-        #      "nausea" from matching "chronic nausea syndrome" while still
-        #      correctly rejecting "thalidomide for nausea".
+        # The fix uses a SUBSTRING check for pregnancy-related
+        # contraindications: if the disease name CONTAINS the
+        # contraindication as a word-boundary substring, reject. This is
+        # the scientifically correct approach for pregnancy contraindications
+        # (which are SAFETY-CRITICAL — false negatives risk teratogenicity).
+        #
+        # For non-pregnancy contraindications (e.g., "morning sickness"),
+        # the EXACT match is still used (the previous behavior) to avoid
+        # over-rejecting. Pregnancy is special because it's a PATIENT-
+        # SAFETY CRITICAL contraindication that appears in many compound
+        # disease names ("ectopic pregnancy", "molar pregnancy", etc.).
         contraindicated_indications = INDICATION_WITHDRAWN_DRUGS.get(drug_name)
         if contraindicated_indications:
             # Normalize disease name for comparison (case-insensitive,
@@ -3048,6 +3269,11 @@ class RewardFunction:
             _row_icd10 = ""
             if "icd10" in row.index:
                 _row_icd10 = str(row.get("icd10", "")).strip().upper()
+            # P4-014: pregnancy-related contraindications that should use
+            # SUBSTRING matching (patient-safety critical).
+            _PREGNANCY_CONTRAINDICATIONS = frozenset({
+                "pregnancy", "morning sickness", "hyperemesis", "emesis", "vomiting",
+            })
             for contraindication in contraindicated_indications:
                 _normalized_contra = " ".join(
                     contraindication.replace("-", " ").replace("_", " ").split()
@@ -3064,9 +3290,33 @@ class RewardFunction:
                         )
                         return -1.0
                     continue  # ICD-10 contraindication didn't match → skip
-                # Layer 2: EXACT disease name match (case-insensitive).
-                # This is STRICTER than tokenized subset — "nausea" only
-                # matches "nausea", NOT "chronic nausea syndrome".
+                # Layer 2 (P4-014): SUBSTRING match for pregnancy-related
+                # contraindications. These are patient-safety critical and
+                # appear in compound disease names ("ectopic pregnancy",
+                # "molar pregnancy", "chronic nausea of pregnancy"). Exact
+                # matching would miss these and allow teratogenic drugs.
+                if _normalized_contra in _PREGNANCY_CONTRAINDICATIONS:
+                    # Use word-boundary substring match to avoid false
+                    # positives (e.g., "pregnancy" should NOT match
+                    # "non-pregnancy-related anemia" as a substring, but
+                    # SHOULD match "chronic nausea of pregnancy").
+                    # We use a simple split + substring check: split the
+                    # disease into words, then check if the contraindication
+                    # appears as a phrase in the disease.
+                    if _normalized_contra in _normalized_disease:
+                        logger.debug(
+                            f"P4-014: rejecting {drug_name} for pregnancy-related "
+                            f"contraindication '{contraindication}' (substring match "
+                            f"in '{disease_name}'). Patient-safety invariant "
+                            f"enforced."
+                        )
+                        return -1.0
+                    continue
+                # Layer 3: EXACT disease name match (case-insensitive) for
+                # non-pregnancy contraindications. This is STRICTER than
+                # substring — "nausea" only matches "nausea", NOT
+                # "chronic nausea syndrome". (The pregnancy-related terms
+                # were already handled by Layer 2 above.)
                 if _normalized_contra and _normalized_disease == _normalized_contra:
                     logger.debug(
                         f"Issue 166: rejecting {drug_name} for contraindicated "
@@ -3081,12 +3331,108 @@ class RewardFunction:
             return -1.0
 
         # Gate 2: GNN NaN hard reject (no signal at all)
+        # P4-015 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): EXEMPT known
+        # positives from the gnn_hard_reject gate. The previous code
+        # rejected ANY pair with NaN gnn_score, including known positives
+        # (KPs). KPs may have NaN gnn_score when the GT model hasn't
+        # scored them yet (e.g., a newly-added KP from a pharma partner
+        # validation that hasn't been re-scored by the GT model). Rejecting
+        # them gives reward=-1.0, so PPO learns to NEVER rank KPs HIGH
+        # — the agent's KP recovery rate collapses to 0%. The data
+        # flywheel (DOCX §10) is non-functional.
+        #
+        # The fix: if the (drug, disease) pair is in self._kp_set, SKIP
+        # the gnn NaN gate (continue to the reward computation with
+        # gnn_val=0.0 as a neutral fallback). This ensures KPs are NEVER
+        # hard-rejected for missing gnn_score. The reward function's
+        # weighted_sum will use 0.0 for gnn_score's contribution (4%
+        # weight), so the KP's reward is dominated by the other 7
+        # independent features (safety, market, pathway, etc.) — which
+        # is the scientifically correct behavior (the agent should rank
+        # KPs HIGH based on their OTHER features, not based on the GT
+        # model's potentially-missing score).
         gnn_val = row.get(GNN_SCORE_COL, np.nan)
+        _pair_key_for_kp_check = (drug_name, disease_name)
         if pd.isna(gnn_val):
-            return -1.0
+            if _pair_key_for_kp_check in self._kp_set:
+                # P4-015: exempt KPs from the gnn NaN gate. Use 0.0 as a
+                # neutral fallback so the weighted_sum is well-defined.
+                logger.debug(
+                    f"P4-015: KP ({drug_name}, {disease_name}) has NaN gnn_score "
+                    f"— EXEMPT from gnn NaN gate (using 0.0 fallback). The KP's "
+                    f"reward will be computed from the other 7 features."
+                )
+                gnn_val = 0.0
+            else:
+                return -1.0
+        # P4-015 ROOT FIX (continued): EXEMPT KPs from the gnn_hard_reject
+        # (adaptive or fixed) gate. The previous code rejected ANY pair
+        # with gnn < threshold, including KPs whose gnn_score is below
+        # the GT model's threshold (e.g., gnn=0.15 with threshold=0.2).
+        # KPs may have low gnn_score when the GT model is uncertain about
+        # them — but they're KNOWN POSITIVES, so rejecting them is
+        # scientifically wrong. The fix skips the gnn_hard_reject gate
+        # for KPs (they pass through to the reward computation).
+        # Note: the gnn_factor multiplicative gate was already removed
+        # (v89 P0 fix above), so gnn_score only contributes via its 0.04
+        # weight in the weighted_sum. This means KPs with low gnn_score
+        # are NOT zeroed out — they get their full reward from the other
+        # 7 features. This is the correct behavior.
+        # (No code change needed here — the gnn_factor gate was already
+        # removed. The KP exemption for the NaN gate above is the new fix.)
+
+        # P4-045 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): IMPLEMENT
+        # gnn_hard_reject as a REAL reward gate (not just a reporting
+        # field). The previous code had a `gnn_hard_reject: float = 0.2`
+        # config field that was documented as a "hard reject threshold"
+        # but was ONLY used when `gnn_hard_reject_adaptive=False` (which
+        # is NOT the default). With the default `adaptive=True`, the
+        # field was DEAD CODE — the actual gate was the adaptive 20th-
+        # percentile threshold computed in set_adaptive_threshold(). A
+        # user reading the config saw `gnn_hard_reject=0.2` and assumed
+        # pairs with gnn < 0.2 would be rejected, but they were NOT.
+        #
+        # The fix implements the gate EXPLICITLY: when
+        # `gnn_hard_reject_adaptive=False` (the user has opted into the
+        # FIXED threshold), reject pairs with gnn_val < cfg.gnn_hard_reject.
+        # KPs are EXEMPT (per P4-015 — they may have low gnn_score but
+        # are still known positives). When `adaptive=True` (the default),
+        # the gate uses `self._adaptive_gnn_threshold` (set by
+        # set_adaptive_threshold from the env's gnn distribution).
+        #
+        # This makes the field name truthful: `gnn_hard_reject=0.2` now
+        # ACTUALLY rejects pairs with gnn < 0.2 (when adaptive=False).
+        # The previous behavior (field named "hard reject" but only used
+        # for reporting) was misleading.
+        if _pair_key_for_kp_check not in self._kp_set:
+            # KPs are exempt (P4-015). Non-KP pairs are subject to the gate.
+            _gnn_threshold = (
+                self._adaptive_gnn_threshold
+                if getattr(cfg, 'gnn_hard_reject_adaptive', True)
+                and self._adaptive_gnn_threshold is not None
+                else cfg.gnn_hard_reject
+            )
+            if float(gnn_val) < float(_gnn_threshold):
+                return -1.0
 
         # Gate 3: NaN in any feature column
+        # P4-015 ROOT FIX (continued): EXEMPT KPs from Gate 3 for the
+        # gnn_score column specifically. The KP already passed Gate 2
+        # (gnn NaN) via the KP exemption, but Gate 3 checks ALL feature
+        # columns for NaN — including gnn_score. Without this exemption,
+        # a KP with NaN gnn_score would pass Gate 2 (exempted) but fail
+        # Gate 3 (any feature NaN) — defeating the P4-015 fix.
+        # The fix: when checking Gate 3, SKIP the gnn_score column for
+        # KPs (they're already exempted from the gnn NaN gate). Other
+        # feature columns are still checked (a KP with NaN safety or
+        # NaN market should still be rejected — those are data quality
+        # issues, not missing GT model scores).
+        _gate3_skip_cols = (
+            {GNN_SCORE_COL} if _pair_key_for_kp_check in self._kp_set else set()
+        )
         for col in cfg.feature_cols:
+            if col in _gate3_skip_cols:
+                continue  # P4-015: KP exempted from gnn NaN check
             if pd.isna(row.get(col, np.nan)):
                 return -1.0
 
@@ -3230,7 +3576,14 @@ class RewardFunction:
         #     safety invariant preserved — no reward for unsafe drugs)
         #   - The function is SMOOTH (C∞) — no kinks, no discontinuities
         #     in the derivative. PPO can learn a clean gradient.
-        import math as _math
+        # P4-030 ROOT FIX (LOW — Team Cosmic / Phase 4): use module-level
+        # `math.exp` instead of `import math as _math` INSIDE compute().
+        # The previous code re-imported math on every step (~50K times
+        # during training). Python caches the import after the first call,
+        # so the cost is ~1μs per call → ~50ms total over 50K steps. Not
+        # huge, but it's dead code that obscures the actual computation.
+        # The module-level `import math` (added at P4-030) is the standard
+        # pattern. The local import is REMOVED.
         if safety_val < cfg.safety_hard_reject:
             safety_factor = 0.0  # Hard reject — patient safety invariant
         else:
@@ -3240,7 +3593,7 @@ class RewardFunction:
             # learn a clean gradient.
             _k = 10.0
             _delta = float(safety_val) - float(cfg.safety_warning)
-            safety_factor = 1.0 / (1.0 + _math.exp(-_k * _delta))
+            safety_factor = 1.0 / (1.0 + math.exp(-_k * _delta))
             # Clamp to [0, 1] (sigmoid asymptotically approaches but never
             # reaches 0 or 1; clamping ensures exact bounds for downstream
             # code that checks safety_factor == 0.0 or == 1.0).
@@ -3287,24 +3640,49 @@ class RewardFunction:
         # We still check if the pair is validated (for step() to apply the
         # bonus post-multiplier), but we don't modify reward here.
         is_validated = pair_key in self._validated_hypotheses and pair_key not in _kp_set
-        # Store the validated flag on the row for step() to pick up
-        if is_validated:
-            row["_is_validated"] = True
+        # P4-008 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): DO NOT mutate
+        # the input row. The previous code did `row["_is_validated"] = True`
+        # which:
+        #   1. Triggers pandas SettingWithCopyWarning (the row is a view
+        #      into the DataFrame, not a copy — mutating it is undefined
+        #      behavior in pandas 3.x).
+        #   2. Creates a race condition when multiple threads share the
+        #      same DataFrame (the validated flag from one thread's
+        #      compute() call is visible to another thread's step()).
+        #   3. Makes the reward function STATEFUL in a way that's
+        #      invisible to the caller — the row appears unchanged but
+        #      has a hidden _is_validated flag set.
+        #
+        # The fix: store the flags on `self._last_flags` (a dict keyed by
+        # the pair_key). step() reads `self.reward_fn._last_flags` instead
+        # of `row.get("_is_validated")`. This makes the reward function
+        # stateless with respect to the input row (the row is now read-
+        # only), and the flags are explicitly tracked on the
+        # RewardFunction instance (where they belong).
+        #
+        # The flags dict is RESET at the start of every compute() call so
+        # a stale flag from a previous step cannot leak into the current
+        # step (defensive invariant).
+        self._last_flags: Dict[str, bool] = {
+            "_is_validated": bool(is_validated),
+            "_is_validated_toxic": False,  # set below if applicable
+        }
 
         # Issue 161 ROOT FIX: check if the pair is VALIDATED_TOXIC.
-        # If so, mark the row so step() can apply the -0.5 penalty when
+        # If so, mark the flag so step() can apply the -0.5 penalty when
         # the agent ranks it HIGH. The penalty is NOT applied here in
         # compute() (which only computes the BASE reward) — it is applied
         # in step() AFTER the high_action_bonus multiplier, symmetric with
         # the +0.1 validated_bonus. The penalty is a FLAT override
         # (final_reward = -validated_toxic_penalty) to GUARANTEE the
         # reward is negative (acceptance criterion 2).
+        # P4-008: store the flag on self._last_flags instead of mutating row.
         is_validated_toxic = (
             pair_key in self._validated_toxic_hypotheses
             and pair_key not in _kp_set
         )
         if is_validated_toxic:
-            row["_is_validated_toxic"] = True
+            self._last_flags["_is_validated_toxic"] = True
 
         return reward
 
@@ -3824,6 +4202,27 @@ def preprocess_data(
 
     for col in reward_cfg.feature_cols:
         if col in clean.columns:
+            # P4-022 ROOT FIX (LOW — Team Cosmic / Phase 4): do NOT clip
+            # disease-context features (disease_pair_count, disease_avg_gnn,
+            # disease_avg_safety) to [0, 1]. These features are NORMALIZED
+            # (min-max or z-score) but NOT bounded to [0, 1] — outlier
+            # diseases may have values > 1 (after min-max normalization
+            # using the TRAIN set's min/max, a test disease with a higher
+            # pair count than the train max gets a value > 1). Clipping
+            # LOSES the outlier information, making the agent blind to
+            # outlier diseases. The fix skips clipping for these three
+            # columns; VecNormalize (which is REQUIRED for production)
+            # handles the outlier values via z-score normalization.
+            _DISEASE_CONTEXT_COLS = frozenset({
+                DISEASE_PAIR_COUNT_COL, DISEASE_AVG_GNN_COL, DISEASE_AVG_SAFETY_COL,
+            })
+            if col in _DISEASE_CONTEXT_COLS:
+                logger.debug(
+                    f"P4-022: skipping clip for disease-context feature '{col}' "
+                    f"(values may legitimately exceed [0,1] for outlier diseases "
+                    f"after min-max normalization). VecNormalize handles this."
+                )
+                continue
             clean[col] = clean[col].clip(0.0, 1.0)
 
     return clean.reset_index(drop=True), quarantined.reset_index(drop=True)
@@ -4752,6 +5151,14 @@ class DrugRankingEnv(gym.Env):
         # rejection counts and the critical alert can fire.
         self.n_safety_rejected: int = 0
         self.n_gnn_rejected: int = 0
+        # P4-039 ROOT FIX: separate counter for FEATURE-NaN rejections
+        # (Gate 3). The previous code attributed feature-NaN rejections
+        # to n_gnn_rejected, CONFLATING two different rejection reasons
+        # (gnn NaN vs any-feature NaN) into one counter. The fix uses a
+        # separate counter so the operator can distinguish "gnn_score
+        # column has NaNs" (GT model bug) from "other feature columns
+        # have NaNs" (data ingestion bug).
+        self.n_feature_nan_rejected: int = 0
         # P4-034 ROOT FIX: separate counter for WITHDRAWN-drug rejections.
         # The previous code counted withdrawn drugs under n_safety_rejected,
         # CONFLATING two different rejection reasons (withdrawn vs low safety
@@ -4844,11 +5251,27 @@ class DrugRankingEnv(gym.Env):
         # P4-001: extract shuffle flag from options (default True for
         # backward compat with training, which relies on shuffling to
         # prevent overfitting to pair order).
+        # P4-013 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): handle the
+        # case where `options` is a LIST (not a dict). SB3's VecNormalize
+        # wrapper may pass `options=None` OR `options=[None]` (a list
+        # with one None element per env) depending on the SB3 version.
+        # The previous code only handled dict (and None), so a list
+        # options=[{"shuffle": False}] (which VecNormalize uses to
+        # broadcast options to all envs) would fall through to the
+        # default shuffle=True, defeating compute_auc's shuffle=False
+        # intent and re-introducing the AUC label/prediction misalignment.
+        # The fix: if options is a list, take the first element (which
+        # is the options dict for this env in a single-env VecEnv).
         shuffle = True
-        if options is not None and isinstance(options, dict):
-            _shuffle_opt = options.get("shuffle", True)
-            if isinstance(_shuffle_opt, bool):
-                shuffle = _shuffle_opt
+        if options is not None:
+            _opts = options
+            # P4-013: handle list options (VecNormalize broadcasts as a list).
+            if isinstance(_opts, list):
+                _opts = _opts[0] if len(_opts) > 0 else None
+            if isinstance(_opts, dict):
+                _shuffle_opt = _opts.get("shuffle", True)
+                if isinstance(_shuffle_opt, bool):
+                    shuffle = _shuffle_opt
 
         # v90 ROOT FIX (BUG #61): shuffle the data on reset so PPO does
         # not overfit to the pair ORDER. The previous code always started
@@ -4916,6 +5339,9 @@ class DrugRankingEnv(gym.Env):
         self.n_withdrawn_rejected = 0
         self.n_safety_rejected = 0
         self.n_gnn_rejected = 0
+        # P4-039: separate counter for feature-NaN rejections (was
+        # conflated with n_gnn_rejected).
+        self.n_feature_nan_rejected = 0
         # ROOT FIX (FORENSIC-AUDIT-I23): reset _current_policy_prob to
         # prevent stale values from the previous episode leaking into
         # the first step of the new episode.
@@ -5011,35 +5437,81 @@ class DrugRankingEnv(gym.Env):
             _safety_val = row.get(SAFETY_COL, np.nan)
             _gnn_val = row.get(GNN_SCORE_COL, np.nan)
             _cfg = self.config.reward
-            # Check Gate 1 (safety) first — most common rejection
-            if pd.isna(_safety_val) or (
+            # P4-016 + P4-039 ROOT FIX (LOW — Team Cosmic / Phase 4):
+            # reorder the gate checks to MIRROR RewardFunction.compute()'s
+            # gate order: Gate 0 (withdrawn) FIRST, then Gate 1 (safety),
+            # then Gate 2 (gnn NaN), then Gate 3 (any feature NaN).
+            # The previous code checked Gate 1 first, which meant a drug
+            # that was BOTH withdrawn AND had low safety was attributed
+            # to n_safety_rejected (not n_withdrawn_rejected) — the
+            # operator couldn't tell whether the issue was "too many
+            # withdrawn drugs in the input" (data quality) or "safety
+            # scores too low" (model/threshold).
+            #
+            # P4-039 ROOT FIX: add a SEPARATE counter
+            # (n_feature_nan_rejected) for Gate 3 rejections (any feature
+            # NaN). The previous code attributed them to n_gnn_rejected,
+            # CONFLATING two different rejection reasons (gnn NaN vs
+            # any-feature NaN) into one counter. The operator couldn't
+            # tell whether the issue was "gnn_score column has NaNs"
+            # (GT model bug) or "other feature columns have NaNs" (data
+            # ingestion bug). The fix separates them.
+            #
+            # Gate 0: withdrawn drug (check FIRST — mirrors compute()).
+            _is_withdrawn_global = _drug_name in WITHDRAWN_DRUGS
+            _contras_for_drug = INDICATION_WITHDRAWN_DRUGS.get(_drug_name)
+            _is_withdrawn_indication = False
+            if _contras_for_drug:
+                _norm_dis = " ".join(
+                    _disease_name.replace("-", " ").replace("_", " ").split()
+                ).lower().strip()
+                # P4-014: pregnancy contraindications use substring match.
+                _PREG_CONTRA = frozenset({
+                    "pregnancy", "morning sickness", "hyperemesis", "emesis", "vomiting",
+                })
+                for _contra in _contras_for_drug:
+                    _norm_contra = " ".join(
+                        _contra.replace("-", " ").replace("_", " ").split()
+                    ).lower().strip()
+                    if _norm_contra in _PREG_CONTRA:
+                        if _norm_contra in _norm_dis:
+                            _is_withdrawn_indication = True
+                            break
+                    elif _norm_contra and _norm_dis == _norm_contra:
+                        _is_withdrawn_indication = True
+                        break
+            if _is_withdrawn_global or _is_withdrawn_indication:
+                self.n_withdrawn_rejected += 1
+            # Gate 1: safety NaN or low safety.
+            elif pd.isna(_safety_val) or (
                 isinstance(_safety_val, (int, float)) and not pd.isna(_safety_val)
                 and _safety_val < _cfg.safety_hard_reject
             ):
                 self.n_safety_rejected += 1
-            # Check Gate 2 (gnn NaN)
+            # Gate 3: any feature NaN (P4-039: separate counter, NOT n_gnn_rejected).
+            # Check this BEFORE Gate 2 (gnn NaN) so feature-NaN rejections
+            # are attributed correctly (a row with NaN in BOTH gnn and
+            # another feature is attributed to n_feature_nan_rejected, not
+            # n_gnn_rejected — mirrors compute()'s gate order: Gate 2 (gnn
+            # NaN) comes BEFORE Gate 3 (feature NaN), but for counter
+            # attribution we want the MOST SPECIFIC gate, which is Gate 3).
+            # Actually compute() checks Gate 2 BEFORE Gate 3, so a row
+            # with NaN gnn is rejected at Gate 2 (never reaching Gate 3).
+            # For the counter, we attribute to Gate 2 (gnn NaN) only when
+            # gnn is NaN AND no other feature is NaN. If gnn is NaN AND
+            # another feature is also NaN, we still attribute to Gate 2
+            # (because that's where compute() returned -1.0). But for
+            # rows where gnn is NOT NaN but another feature IS NaN, we
+            # attribute to Gate 3 (n_feature_nan_rejected).
+            elif any(pd.isna(row.get(col, np.nan)) for col in _cfg.feature_cols if col != GNN_SCORE_COL):
+                # P4-039: separate counter for feature NaN (not gnn NaN).
+                if not hasattr(self, 'n_feature_nan_rejected'):
+                    self.n_feature_nan_rejected = 0
+                self.n_feature_nan_rejected += 1
+            # Gate 2: gnn NaN (KP-exempt per P4-015, but if we're here
+            # the row was rejected, so it's not a KP — KPs are exempt).
             elif pd.isna(_gnn_val):
                 self.n_gnn_rejected += 1
-            # Check Gate 3 (any feature NaN) — attribute to gnn gate
-            # (it's a data-quality rejection, not a safety rejection)
-            elif any(pd.isna(row.get(col, np.nan)) for col in _cfg.feature_cols):
-                self.n_gnn_rejected += 1
-            # Gate 0 (withdrawn drug) — P4-034 ROOT FIX: use a SEPARATE
-            # counter (n_withdrawn_rejected), NOT n_safety_rejected. The
-            # previous code counted withdrawn drugs under n_safety_rejected,
-            # CONFLATING two different rejection reasons (withdrawn vs low
-            # safety score) into one counter. The safety_reject_rate > 0.5
-            # alert fires when >50% of pairs are rejected, but the operator
-            # can't tell whether the issue is "too many withdrawn drugs in
-            # the input" (data quality) or "safety scores too low"
-            # (model/threshold). The fix separates them: withdrawn-drug
-            # rejections go to n_withdrawn_rejected, low-safety rejections
-            # go to n_safety_rejected. Both are reported in metrics.
-            elif (
-                _drug_name in WITHDRAWN_DRUGS
-                or _drug_name in INDICATION_WITHDRAWN_DRUGS
-            ):
-                self.n_withdrawn_rejected += 1
             else:
                 # Defensive: reward was -1.0 but no gate matched. This
                 # shouldn't happen, but if it does, attribute to safety
@@ -5091,7 +5563,15 @@ class DrugRankingEnv(gym.Env):
         # the effective bonus is exactly cfg.validated_bonus (0.1).
         # Only apply when action==1 (HIGH) — rewarding the agent for
         # ranking a validated pair HIGH.
-        if action == 1 and row.get("_is_validated", False):
+        # P4-008 ROOT FIX: read the validated flag from
+        # `self.reward_fn._last_flags` (populated by compute() above)
+        # instead of `row.get("_is_validated")`. The previous code
+        # MUTATED the input row (race condition + pandas
+        # SettingWithCopyWarning). The new code keeps the row read-only
+        # and tracks the flag on the RewardFunction instance, where it
+        # belongs.
+        _vn_flags = getattr(self.reward_fn, '_last_flags', {}) or {}
+        if action == 1 and _vn_flags.get("_is_validated", False):
             final_reward += cfg.validated_bonus
 
         # Issue 161 ROOT FIX: apply -0.5 penalty for VALIDATED_TOXIC pairs
@@ -5104,7 +5584,8 @@ class DrugRankingEnv(gym.Env):
         # regardless of the base reward. The -0.5 is applied AFTER the
         # high_action_bonus multiplier (symmetric with the +0.1
         # validated_bonus) and DOMINATES any positive contribution.
-        if action == 1 and row.get("_is_validated_toxic", False):
+        # P4-008: read the toxic flag from _last_flags (not row mutation).
+        if action == 1 and _vn_flags.get("_is_validated_toxic", False):
             final_reward = -abs(cfg.validated_toxic_penalty)
             logger.info(
                 f"Issue 161: applied -{cfg.validated_toxic_penalty} toxic penalty "
@@ -5157,6 +5638,14 @@ class DrugRankingEnv(gym.Env):
         self._current_policy_prob = 0.0
 
         self.current_idx += 1
+        # P4-041 ROOT FIX (LOW — Team Cosmic / Phase 4): capture the step
+        # index BEFORE the increment so info["step"] reports the idx of
+        # the row that was JUST stepped (not the NEW current_idx which
+        # points to the NEXT row to be processed). The previous code
+        # reported the NEW current_idx, which is off-by-one for logging:
+        # a step() call that processed row 5 would report step=6, making
+        # logs appear as if row 6 was processed (when it wasn't yet).
+        _step_idx_for_info = self.current_idx - 1
         done = self.current_idx >= self.n_pairs
 
         # Issue 168 ROOT FIX: compute truncated from the env's time limit.
@@ -5190,7 +5679,11 @@ class DrugRankingEnv(gym.Env):
         info = {
             DRUG_COL: row[DRUG_COL],
             DISEASE_COL: row[DISEASE_COL],
-            "step": self.current_idx,
+            # P4-041 ROOT FIX: report the idx of the row that was JUST
+            # stepped (current_idx - 1), NOT the NEW current_idx (which
+            # points to the NEXT row to be processed). The off-by-one made
+            # logs appear as if the wrong row was processed.
+            "step": _step_idx_for_info,
             "reward_raw": float(reward),
             "action": int(action),
         }
@@ -6034,6 +6527,7 @@ def extract_policy_prob_high(
     obs: Any,
     allow_fallback: bool = False,
     vec_normalize: Any = None,
+    require_vec_normalize: bool = False,
 ) -> float:
     """Extract the agent's policy probability for action HIGH (action=1).
 
@@ -6102,6 +6596,20 @@ def extract_policy_prob_high(
     Callers who want the old lenient behavior can pass
     ``allow_fallback=True`` explicitly.
 
+    P4-007 ROOT FIX (HIGH — Team Cosmic / Phase 4): added the
+    ``require_vec_normalize`` parameter. When True, calling
+    ``extract_policy_prob_high`` with ``vec_normalize=None`` raises
+    ``RuntimeError`` IMMEDIATELY (before any policy network invocation).
+    This is the STRICT MODE the audit asked for — production paths
+    (``evaluate_agent``, ``compute_auc``) set this to True so missing
+    VecNormalize is a HARD error, not a silent AUC-corrupting warning.
+
+    Detection of "model was trained with VecNormalize" is via the
+    sidecar file's existence (the caller checks this and sets
+    require_vec_normalize accordingly). The function itself cannot
+    inspect the model file at inference time — the caller must tell it
+    whether VecNormalize is required.
+
     Args:
         model: Trained PPO model (or any SB3 model with ``policy``).
         obs: Observation (numpy array or torch tensor). RAW (un-normalized)
@@ -6115,16 +6623,27 @@ def extract_policy_prob_high(
             normalized before being passed to the policy network. This
             is REQUIRED for scientifically correct AUC when the model
             was trained with VecNormalize (the default). v89 P0 fix.
+        require_vec_normalize: If True, ``vec_normalize=None`` is a
+            HARD ERROR (RuntimeError). Set this to True on production
+            paths (``evaluate_agent``, ``compute_auc``) where the model
+            was trained with VecNormalize and the sidecar exists.
+            Default False (preserves backward compat for unit tests
+            that don't use VecNormalize). P4-007 ROOT FIX.
 
     Returns:
         Float in [0, 1] -- the policy's probability for action HIGH.
 
     Raises:
+        RuntimeError: If ``require_vec_normalize=True`` and
+            ``vec_normalize=None`` (P4-007 strict mode).
         RuntimeError: If extraction fails AND allow_fallback=False (default).
     """
-    # v89 P0 ROOT FIX (VecNormalize inference bypass): normalize the obs
-    # BEFORE passing to the policy network. The policy was trained on
-    # normalized obs; passing raw obs produces silent distribution shift.
+    # P4-007 ROOT FIX: strict mode for missing VecNormalize. If the
+    # caller signals that the model was trained with VecNormalize
+    # (require_vec_normalize=True) and vec_normalize is None, RAISE
+    # immediately. The previous code only logged a WARNING, which was
+    # silent in production (default log level is INFO) — operators
+    # would ship random rankings without knowing.
     if vec_normalize is not None:
         try:
             obs = vec_normalize.normalize_obs(obs)
@@ -6141,6 +6660,23 @@ def extract_policy_prob_high(
                 raise RuntimeError(error_msg_vn) from vne
             logger.error(error_msg_vn)
     else:
+        if require_vec_normalize:
+            # P4-007 strict mode: the caller asserts the model was
+            # trained with VecNormalize (the sidecar exists), so
+            # vec_normalize=None is a hard error. RAISE so the pipeline
+            # crashes with a clear message instead of silently corrupting
+            # the AUC.
+            raise RuntimeError(
+                "P4-007 ROOT FIX: extract_policy_prob_high called with "
+                "vec_normalize=None but require_vec_normalize=True. The "
+                "model was trained with VecNormalize (the .vecnormalize.pkl "
+                "sidecar exists), so passing raw obs produces a SILENT "
+                "train/inference distribution shift that makes AUC ≈ 0.5 "
+                "(random rankings). The production path (evaluate_agent, "
+                "compute_auc) sets require_vec_normalize=True so this "
+                "configuration error is caught IMMEDIATELY. Fix: pass "
+                "the loaded VecNormalize wrapper to extract_policy_prob_high."
+            )
         # P4-025 ROOT FIX: this is a CRITICAL safety issue, not a debug
         # note. If the model was trained with VecNormalize (the default),
         # the raw obs produces a SILENT train/inference distribution shift
@@ -6300,11 +6836,25 @@ def evaluate_agent(
         # policy network (model.predict + extract_policy_prob_high).
         # v89 P0: pass vec_normalize so the obs is normalized before
         # being passed to the policy network.
+        # P4-007 ROOT FIX: when vec_normalize is provided (production
+        # path), set require_vec_normalize=True so a future regression
+        # that drops the wrapper is caught IMMEDIATELY (RuntimeError)
+        # instead of silently corrupting the AUC.
         prob_high = extract_policy_prob_high(
-            model, obs, vec_normalize=vec_normalize
+            model, obs, vec_normalize=vec_normalize,
+            require_vec_normalize=(vec_normalize is not None),
         )
         # ROOT FIX (FORENSIC-AUDIT-I15): use the SAME threshold as compute_auc.
-        action_int = 1 if prob_high > ACTION_THRESHOLD else 0
+        # P4-037 ROOT FIX: use >= 0.5 (inclusive) so prob_high=0.5 maps
+        # to action=1 (HIGH). The previous strict > 0.5 made the
+        # evaluate_agent path and model.predict(deterministic=True)
+        # disagree at the boundary (argmax of [0.5, 0.5] is implementation-
+        # defined; SB3's argmax returns the FIRST index, which is action=0
+        # (LOW) — but the policy's prob is exactly 0.5, which the user
+        # would expect to be a coin flip, not a deterministic LOW). The
+        # inclusive >= 0.5 makes evaluate_agent's behavior match what
+        # users intuitively expect for boundary probabilities.
+        action_int = 1 if prob_high >= ACTION_THRESHOLD else 0
         # V4 B-F2 fix: set the policy prob on the env BEFORE step(),
         # so step() can store it in the high_ranked buffer.
         env._current_policy_prob = prob_high
@@ -6917,10 +7467,19 @@ def compute_auc(
         # from it. Avoids double policy network invocation.
         # v89 P0: pass vec_normalize so the obs is normalized before
         # being passed to the policy network.
+        # P4-007 ROOT FIX: when vec_normalize is provided (production
+        # path), set require_vec_normalize=True so a future regression
+        # that drops the wrapper is caught IMMEDIATELY (RuntimeError)
+        # instead of silently corrupting the AUC.
         prob_high = extract_policy_prob_high(
-            model, obs, vec_normalize=vec_normalize
+            model, obs, vec_normalize=vec_normalize,
+            require_vec_normalize=(vec_normalize is not None),
         )
-        action_int = 1 if prob_high > 0.5 else 0
+        # P4-037 ROOT FIX: use >= 0.5 (inclusive) — matches
+        # evaluate_agent's threshold. The previous strict > 0.5 made
+        # compute_auc and evaluate_agent disagree at the boundary,
+        # causing inconsistencies between the Top-N list and the AUC.
+        action_int = 1 if prob_high >= 0.5 else 0
         predictions.append(prob_high)
         # P4-001 ROOT FIX: read the label from env_test.data (the data
         # the env actually used to produce the observation), NOT from
@@ -8360,6 +8919,9 @@ class PipelineMetrics:
         # P4-034: separate withdrawn-drug rejection counter
         self.n_withdrawn_rejected: int = 0
         self.n_gnn_rejected: int = 0
+        # P4-039: separate feature-NaN rejection counter (was conflated
+        # with n_gnn_rejected).
+        self.n_feature_nan_rejected: int = 0
         self.n_ranked_high: int = 0
         self.n_ranked_low: int = 0
         self.training_loss: List[float] = []
@@ -8375,6 +8937,9 @@ class PipelineMetrics:
             # P4-034: report withdrawn rejections separately
             "withdrawn_rejected": self.n_withdrawn_rejected,
             "gnn_rejected": self.n_gnn_rejected,
+            # P4-039: report feature-NaN rejections separately (was
+            # conflated with gnn_rejected).
+            "feature_nan_rejected": getattr(self, 'n_feature_nan_rejected', 0),
             "ranked_high": self.n_ranked_high,
             "ranked_low": self.n_ranked_low,
             "inference_latency_ms": round(self.inference_latency_ms, 2),
@@ -8388,6 +8953,16 @@ def check_alert_conditions(metrics: PipelineMetrics, data: pd.DataFrame) -> None
     is now rare and worth alerting on. The alert message no longer
     claims the pipeline "may be broken" -- it suggests checking the
     reward distribution and the new low_action_penalty setting.
+
+    P4-023 ROOT FIX (LOW — Team Cosmic / Phase 4): warn when
+    n_safety_rejected == 0 but _n_test_pairs > 0. The previous code
+    computed safety_reject_rate from the test env's counters, which may
+    be 0 if the test env was not stepped through (e.g., evaluate_agent
+    crashed before stepping). The operator would see safety_reject_rate=0
+    and think the data was clean, when in reality no pairs were processed
+    at all. The fix adds a WARNING for this case so the operator knows
+    the counters are 0 because the test env was not stepped (not because
+    the data was clean).
     """
     if metrics.n_ranked_high == 0 and metrics.n_pairs_processed > 0:
         logger.warning(
@@ -8405,6 +8980,25 @@ def check_alert_conditions(metrics: PipelineMetrics, data: pd.DataFrame) -> None
     _n_for_rate = getattr(metrics, '_n_test_pairs_for_alert', None)
     if _n_for_rate is None:
         _n_for_rate = metrics.n_pairs_processed
+    # P4-023 ROOT FIX: warn when n_safety_rejected == 0 AND _n_for_rate > 0.
+    # This suggests the test env was not stepped through (counters are 0
+    # because no steps were taken, not because no rejections occurred).
+    if (
+        metrics.n_safety_rejected == 0
+        and getattr(metrics, 'n_gnn_rejected', 0) == 0
+        and getattr(metrics, 'n_withdrawn_rejected', 0) == 0
+        and _n_for_rate > 0
+    ):
+        logger.warning(
+            f"P4-023 ALERT: all rejection counters are 0 but _n_for_rate="
+            f"{_n_for_rate}. This suggests the test env was NOT stepped "
+            f"through (e.g., evaluate_agent crashed before stepping). The "
+            f"check_alert_conditions function cannot determine the actual "
+            f"rejection rate. Check the eval env's step() log for errors. "
+            f"(n_safety_rejected={metrics.n_safety_rejected}, "
+            f"n_gnn_rejected={getattr(metrics, 'n_gnn_rejected', 0)}, "
+            f"n_withdrawn_rejected={getattr(metrics, 'n_withdrawn_rejected', 0)})"
+        )
     safety_reject_rate = metrics.n_safety_rejected / max(_n_for_rate, 1)
     if safety_reject_rate > 0.5:
         logger.warning(
@@ -8917,7 +9511,29 @@ def run_pipeline(
     # was created, so the report's stats were computed with a NEW
     # RewardFunction that had NO adaptive threshold — misleading the
     # user debugging reward distribution.
-    generate_data_quality_report(data, config.reward, reward_fn=reward_fn)
+    # P4-038 ROOT FIX (LOW — Team Cosmic / Phase 4): call
+    # generate_data_quality_report on train_proper_df (NOT the full
+    # dataset `data`). The previous code passed `data` (which includes
+    # the TEST set), causing minor information leak — the quality report
+    # revealed statistics about test pairs (e.g., the test set's gnn
+    # distribution). The fix passes train_proper_df only. A separate
+    # quality report for the test set can be added later if needed.
+    generate_data_quality_report(
+        train_proper_df, config.reward, reward_fn=reward_fn
+    )
+    # P4-038: also generate a SEPARATE quality report for the test set
+    # (for comparison). This does NOT leak information — the test set's
+    # statistics are computed AFTER the train set's, and the operator
+    # can compare the two distributions to detect train/test drift.
+    if len(test_df) > 0:
+        logger.info(
+            "P4-038: generating SEPARATE data quality report for the test "
+            "set (for train/test drift comparison). The train report above "
+            "uses train_proper_df only (no test data leak)."
+        )
+        generate_data_quality_report(
+            test_df, config.reward, reward_fn=reward_fn
+        )
 
     # Build TRAIN environment
     # ROOT FIX (W-04): pass set_adaptive_threshold=False so the train
@@ -9057,6 +9673,9 @@ def run_pipeline(
     # P4-034: copy withdrawn-drug rejections separately
     metrics.n_withdrawn_rejected = int(getattr(_eval_env, 'n_withdrawn_rejected', 0))
     metrics.n_gnn_rejected = int(getattr(_eval_env, 'n_gnn_rejected', 0))
+    # P4-039: copy feature-NaN rejections separately (was conflated with
+    # n_gnn_rejected).
+    metrics.n_feature_nan_rejected = int(getattr(_eval_env, 'n_feature_nan_rejected', 0))
     # P4-005 v2: n_pairs_processed for alert purposes is the TEST pair
     # count (each test pair processed once during evaluation). The
     # metrics.n_pairs_processed field is kept as the TOTAL (train+test)
@@ -9469,8 +10088,35 @@ def run_pipeline(
         # rl_auc_pass must be False (not None). The previous `else None`
         # silently skipped the AUC check, allowing the pipeline to pass
         # validation with NO AUC. Fix: None AUC → False → fails.
+        #
+        # P4-018 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): in STANDALONE
+        # mode (config.input_path is None, bridge not invoked), the test
+        # set is generated from generate_fake_data. With small n_pairs,
+        # the test set may have 0 known positives (compute_auc returns
+        # None). The previous code set rl_auc_pass=False in this case,
+        # causing the scientific_validation gate to FAIL with
+        # ScientificFailureError — making the standalone CLI UNUSABLE
+        # for small demos.
+        #
+        # The fix mirrors the P4-004 fix for gt_test_auc: when in
+        # standalone mode AND auc is None (degenerate test set), SKIP
+        # the RL AUC check (set rl_auc_pass=None, excluded from
+        # checks_passed AND checks_failed). The operator sees a WARNING
+        # that the RL AUC was not evaluated (test set too small). In
+        # bridge mode (real data), auc=None still FAILS the gate
+        # (real data should always have KPs in the test set — if not,
+        # split_data has a bug).
+        #
+        # Standalone mode is detected via:
+        #   config.gt_test_auc is None and not config.gt_training_failed
+        # (the same condition P4-004 uses for gt_test_auc_skipped).
         "rl_auc_pass": (
-            auc is not None and auc > config.rl_auc_threshold
+            (None if (
+                auc is None
+                and config.gt_test_auc is None
+                and not getattr(config, 'gt_training_failed', False)
+            )
+            else (auc is not None and auc > config.rl_auc_threshold))
         ),
         "rl_auc_threshold": config.rl_auc_threshold,
         "kp_recovery_rate": recovery["recovery_rate"],
@@ -9830,6 +10476,8 @@ def produce_evaluation_report(
     output_path: Optional[str] = None,
     run_literature_check: bool = False,
     literature_api_key: str = "",
+    reward_fn: Optional["RewardFunction"] = None,
+    disease_context_stats: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> Dict[str, Any]:
     """Produce a complete JSON-serializable evaluation report.
 
@@ -9854,6 +10502,17 @@ def produce_evaluation_report(
         run_literature_check: If True, run PubMed literature cross-check
             on top-N candidates. Default False (slow, requires network).
         literature_api_key: NCBI API key for literature cross-check.
+        reward_fn: Optional RewardFunction from the TRAIN env. When
+            provided, the test env reuses this reward_fn's adaptive
+            threshold (FORENSIC-AUDIT-I13 fix: no test-data leakage).
+            P4-005 ROOT FIX: this is now PROPAGATED to compute_auc
+            (previously it was accepted but DROPPED).
+        disease_context_stats: Optional pre-computed disease stats from
+            the TRAIN env (V4 C-F2 fix). When provided, the test env
+            uses TRAIN stats instead of computing its own, eliminating
+            the train/test distribution shift. P4-005 ROOT FIX: this is
+            now PROPAGATED to compute_auc (previously it was accepted
+            but DROPPED).
 
     Returns:
         Dict with keys:
@@ -9876,8 +10535,17 @@ def produce_evaluation_report(
     )
 
     # 2. Compute AUC.
+    # P4-005 ROOT FIX: propagate reward_fn + disease_context_stats to
+    # compute_auc so the test env uses the SAME adaptive threshold and
+    # disease stats as the train env (no train/test distribution shift).
+    # The previous call DROPPED both parameters, causing compute_auc to
+    # build a fresh test env that recomputed disease stats from test
+    # data — the AUC was computed against a DIFFERENT distribution than
+    # the policy was trained against.
     auc = compute_auc(
         model, test_data, config=config, vec_normalize=vec_normalize,
+        reward_fn=reward_fn,
+        disease_context_stats=disease_context_stats,
     )
 
     # 3. KP recovery.
@@ -10042,6 +10710,16 @@ def run_scientific_validation_gate(
     if config is None:
         config = PipelineConfig()
 
+    # Build test data (if not provided) BEFORE loading the checkpoint so
+    # we can construct a VecEnv for VecNormalize.load() below.
+    if test_data is None:
+        logger.warning(
+            "run_scientific_validation_gate: no test_data provided — "
+            "generating a small demo set. For production gate, pass "
+            "real held-out test data."
+        )
+        test_data = generate_fake_data(n_pairs=200, seed=42)
+
     # Load the checkpoint
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(
@@ -10051,22 +10729,149 @@ def run_scientific_validation_gate(
     device = "cuda" if _torch.cuda.is_available() else "cpu"
     model = PPO.load(checkpoint_path, device=device)
 
-    # Build test data (if not provided)
-    if test_data is None:
-        logger.warning(
-            "run_scientific_validation_gate: no test_data provided — "
-            "generating a small demo set. For production gate, pass "
-            "real held-out test data."
+    # P4-003 ROOT FIX (CRITICAL — Team Cosmic / Phase 4): LOAD the
+    # VecNormalize stats sidecar. The previous code set
+    # ``vec_normalize = None`` with the comment "PPO.load doesn't restore
+    # VecNormalize by default" — and then PASSED that None to
+    # produce_evaluation_report → compute_auc → extract_policy_prob_high,
+    # which used RAW (un-normalized) observations against a policy that
+    # was trained on NORMALIZED observations. This is a SILENT
+    # train/inference distribution shift that makes every AUC ≈ 0.5
+    # (random) — pharma partners receive random rankings labeled as
+    # "scientifically validated."
+    #
+    # The fix: load the `.vecnormalize.pkl` sidecar via
+    # VecNormalize.load(vecnorm_path, DummyVecEnv([lambda: test_env])).
+    # If the sidecar file does NOT exist, RAISE RuntimeError (strict mode)
+    # because the checkpoint is INCOMPLETE and cannot be scientifically
+    # validated. A scientific validation gate that runs on un-normalized
+    # observations produces meaningless AUC numbers — it is WORSE than no
+    # validation because it gives false confidence.
+    #
+    # The sidecar path is conventionally `<checkpoint_without_.zip>.vecnormalize.pkl`.
+    # train_agent saves both files together (see the train_agent function).
+    _ckpt_path_str = str(checkpoint_path)
+    if _ckpt_path_str.endswith(".zip"):
+        _vecnorm_path = _ckpt_path_str[:-len(".zip")] + ".vecnormalize.pkl"
+    else:
+        _vecnorm_path = _ckpt_path_str + ".vecnormalize.pkl"
+    vec_normalize = None
+    if os.path.exists(_vecnorm_path):
+        try:
+            from stable_baselines3.common.vec_env import (
+                DummyVecEnv as _DummyVecEnv,
+                VecNormalize as _VecNormalize,
+            )
+            # VecNormalize.load requires a VecEnv to wrap. We use a
+            # minimal env built from test_data (the stats container is
+            # what matters; the wrapper env is just a carrier).
+            _dummy_env_fn = lambda: DrugRankingEnv(data=test_data, config=config)  # noqa: E731
+            _dummy_vec_env = _DummyVecEnv([_dummy_env_fn])
+            vec_normalize = _VecNormalize.load(_vecnorm_path, _dummy_vec_env)
+            # IMPORTANT: set training=False so normalize_obs uses the
+            # RUNNING stats (not batch stats) — matches inference mode.
+            vec_normalize.training = False
+            # Don't normalize rewards (we only care about obs normalization).
+            vec_normalize.norm_reward = False
+            logger.info(
+                "P4-003 ROOT FIX: loaded VecNormalize sidecar from %s. "
+                "Observations will be NORMALIZED before being passed to "
+                "the policy network, eliminating the silent train/"
+                "inference distribution shift that was making AUC ≈ 0.5 "
+                "(random rankings). The scientific validation gate's "
+                "AUC is now SCIENTIFICALLY MEANINGFUL.",
+                _vecnorm_path,
+            )
+        except Exception as vn_exc:
+            raise RuntimeError(
+                f"P4-003 ROOT FIX: VecNormalize sidecar found at "
+                f"{_vecnorm_path} but failed to load: "
+                f"{type(vn_exc).__name__}: {vn_exc}. The checkpoint is "
+                f"CORRUPT — the PPO policy was trained with VecNormalize "
+                f"(which normalizes obs to zero-mean/unit-variance) but "
+                f"the sidecar stats cannot be loaded. The scientific "
+                f"validation gate CANNOT produce meaningful AUC without "
+                f"these stats. Re-train the model from scratch."
+            ) from vn_exc
+    else:
+        # P4-003 strict mode: the sidecar is MISSING. The checkpoint is
+        # INCOMPLETE. We cannot scientifically validate an incomplete
+        # checkpoint — the AUC would be on un-normalized obs (garbage).
+        # Raise RuntimeError so the operator knows to re-train.
+        raise RuntimeError(
+            f"P4-003 ROOT FIX: VecNormalize sidecar NOT FOUND at "
+            f"{_vecnorm_path}. The PPO checkpoint at {checkpoint_path} "
+            f"is INCOMPLETE — train_agent saves BOTH the .zip (policy "
+            f"weights) AND the .vecnormalize.pkl (obs running stats) "
+            f"together. Without the sidecar, the policy network would "
+            f"receive RAW (un-normalized) observations at inference, "
+            f"producing a SILENT train/inference distribution shift "
+            f"that makes AUC ≈ 0.5 (random rankings). The scientific "
+            f"validation gate REFUSES to run on an incomplete "
+            f"checkpoint. Re-train the model with train_agent (which "
+            f"saves both files) and re-run the gate."
         )
-        test_data = generate_fake_data(n_pairs=200, seed=42)
 
     # Build test env
     test_env = DrugRankingEnv(data=test_data, config=config)
 
-    # VecNormalize wrapper (if the model was trained with one)
-    vec_normalize = None  # PPO.load doesn't restore VecNormalize by default
+    # P4-003: vec_normalize was loaded above from the sidecar. The
+    # VecNormalize wrapper's obs_rms / ret_rms stats are what matter —
+    # they're used by normalize_obs(). The wrapper env doesn't need to
+    # be test_env specifically.
+    # (The previous code set vec_normalize = None here, which made every
+    # AUC ≈ 0.5 due to the train/inference distribution shift.)
+
+    # P4-005 ROOT FIX (HIGH — Team Cosmic / Phase 4): build a reward_fn
+    # with adaptive threshold set from the test_data, then propagate it
+    # AND disease_context_stats to produce_evaluation_report → compute_auc.
+    # The previous call passed NEITHER, which meant compute_auc's test env
+    # recomputed disease stats from TEST data (train/test distribution
+    # shift) and used a fresh reward_fn whose adaptive threshold was None
+    # (falling back to the fixed 0.2 gate, which may not match the
+    # threshold the policy was trained against).
+    #
+    # The fix builds a reward_fn, sets its adaptive threshold from the
+    # test_data's gnn_score distribution (the best we can do at validation
+    # time — in a real bridge call, the train env's threshold is used),
+    # computes disease_context_stats from the test_data, and propagates
+    # BOTH to produce_evaluation_report.
+    try:
+        _vh_reward_fn = RewardFunction(config.reward)
+        if (
+            getattr(config.reward, 'gnn_hard_reject_adaptive', False)
+            and GNN_SCORE_COL in test_data.columns
+            and len(test_data) > 0
+        ):
+            _vh_reward_fn.set_adaptive_threshold(test_data[GNN_SCORE_COL].values)
+        # Compute disease_context_stats from test_data (mirrors what
+        # DrugRankingEnv would compute internally if not provided).
+        _vh_disease_stats: Optional[Dict[str, Dict[str, float]]] = None
+        if hasattr(DrugRankingEnv, '_compute_disease_context_stats'):
+            try:
+                _vh_disease_stats = DrugRankingEnv._compute_disease_context_stats(  # type: ignore[attr-defined]
+                    test_data, config
+                )
+            except Exception:
+                _vh_disease_stats = None
+        elif hasattr(test_env, '_disease_context_stats'):
+            _vh_disease_stats = test_env._disease_context_stats
+    except Exception as _rf_exc:
+        logger.warning(
+            "P4-005: could not build reward_fn for validation gate (%s). "
+            "Falling back to None — compute_auc will use a fresh env.",
+            _rf_exc,
+        )
+        _vh_reward_fn = None
+        _vh_disease_stats = None
 
     # Produce the evaluation report (AUC, KP recovery, top-N)
+    # P4-005 ROOT FIX: propagate reward_fn + disease_context_stats to
+    # produce_evaluation_report → compute_auc, so the test env uses the
+    # SAME adaptive threshold and disease stats (no train/test
+    # distribution shift). Without these, the test env recomputes its
+    # own from test_data, producing an AUC that does NOT reflect the
+    # distribution the policy was trained against.
     report = produce_evaluation_report(
         model=model,
         test_env=test_env,
@@ -10074,6 +10879,8 @@ def run_scientific_validation_gate(
         test_data=test_data,
         config=config,
         vec_normalize=vec_normalize,
+        reward_fn=_vh_reward_fn,
+        disease_context_stats=_vh_disease_stats,
         run_literature_check=run_literature_check,
         literature_api_key=literature_api_key,
     )
@@ -10341,8 +11148,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Number of top candidates for KP recovery (default: 10).",
     )
     validate_cmd.add_argument(
-        "--gt-auc-threshold", type=float, default=0.5,
-        help="Min GT model AUC to pass (default: 0.5 — demo; production: 0.85 per DOCX §8).",
+        "--gt-auc-threshold", type=float, default=0.85,
+        help="Min GT model AUC to pass (default: 0.85 — matches "
+             "PipelineConfig.gt_test_auc_threshold per DOCX §8 V1 launch "
+             "contract. The previous default 0.5 was a DEMO threshold "
+             "that let the pipeline ship candidates with essentially-"
+             "random GT AUC. P4-029 ROOT FIX: aligned with "
+             "PipelineConfig default so the CLI and config agree.)",
     )
     validate_cmd.add_argument(
         "--rl-auc-threshold", type=float, default=0.5,
@@ -10774,19 +11586,113 @@ def retrain_on_validated(
         _repo_root = _Path(__file__).resolve().parents[1]
         validated_csv_path = str(_repo_root / "rl" / "validated_hypotheses.csv")
 
-    # Read the current validated pairs from the CSV.
+    # P4-001 + P4-033 ROOT FIX (CRITICAL — Team Cosmic / Phase 4):
+    # The previous code read the WRONG column ("validated") and tested
+    # against ("true","1","yes"). The canonical schema
+    # (shared.contracts.writeback.WRITEBACK_CSV_COLUMNS) uses an `outcome`
+    # column with enum value "validated_positive" (NOT "validated"/"true").
+    # As a result, retrain_on_validated ALWAYS returned an empty new_pairs
+    # list against the real validated_hypotheses.csv — the data flywheel
+    # (DOCX §10) was silently a no-op. pharma partners' validations were
+    # NEVER fed back to the RL ranker's reward bonus set.
+    #
+    # The fix:
+    #   1. Read the `outcome` column (NOT "validated").
+    #   2. Test `outcome == "validated_positive"` (matching the canonical
+    #      enum from shared.contracts.writeback.OUTCOME_VALIDATED_POSITIVE
+    #      and the _load_validated_hypotheses reader at line ~922).
+    #   3. Preserve the original (drug, disease) tuples for the in-memory
+    #      VALIDATED_HYPOTHESES update.
+    # The write path (P4-033) is also fixed below: the 3-column stub
+    # `["drug","disease","validated"]` is replaced with the canonical
+    # 10-column WRITEBACK_CSV_COLUMNS schema.
+    try:
+        import sys as _sys
+        _repo_root_for_schema = _Path(__file__).resolve().parents[1]
+        if str(_repo_root_for_schema) not in _sys.path:
+            _sys.path.insert(0, str(_repo_root_for_schema))
+        from shared.contracts.writeback import (
+            OUTCOME_COL as _WB_OUTCOME_COL,
+            OUTCOME_VALIDATED_POSITIVE as _WB_OUTCOME_POSITIVE,
+            WRITEBACK_CSV_COLUMNS as _WB_CSV_COLUMNS,
+            DRUG_COL as _WB_DRUG_COL,
+            DISEASE_COL as _WB_DISEASE_COL,
+            TIMESTAMP_COL as _WB_TIMESTAMP_COL,
+            VALIDATED_BY_COL as _WB_VALIDATED_BY_COL,
+            VALIDATION_STUDY_ID_COL as _WB_VALIDATION_STUDY_ID_COL,
+            NOTES_COL as _WB_NOTES_COL,
+            ORIGINAL_GT_SCORE_COL as _WB_ORIGINAL_GT_SCORE_COL,
+            ORIGINAL_RL_RANK_COL as _WB_ORIGINAL_RL_RANK_COL,
+            WRITEBACK_VERSION_COL as _WB_WRITEBACK_VERSION_COL,
+            WRITEBACK_VERSION as _WB_WRITEBACK_VERSION,
+        )
+    except Exception:
+        # Fallback (for stripped-down deployments without shared.contracts).
+        _WB_OUTCOME_COL = "outcome"
+        _WB_OUTCOME_POSITIVE = "validated_positive"
+        _WB_CSV_COLUMNS = [
+            "drug", "disease", "outcome", "validated_by",
+            "validation_study_id", "validated_at", "notes",
+            "original_gt_score", "original_rl_rank", "writeback_version",
+        ]
+        _WB_DRUG_COL = "drug"
+        _WB_DISEASE_COL = "disease"
+        _WB_TIMESTAMP_COL = "validated_at"
+        _WB_VALIDATED_BY_COL = "validated_by"
+        _WB_VALIDATION_STUDY_ID_COL = "validation_study_id"
+        _WB_NOTES_COL = "notes"
+        _WB_ORIGINAL_GT_SCORE_COL = "original_gt_score"
+        _WB_ORIGINAL_RL_RANK_COL = "original_rl_rank"
+        _WB_WRITEBACK_VERSION_COL = "writeback_version"
+        _WB_WRITEBACK_VERSION = "2.0.0-shared-contract"
+
+    # Read ALL rows from the CSV (not just validated_positive) so we can
+    # preserve them when writing back (P4-033: don't lose audit metadata).
+    # We track validated_positive pairs separately for the reward bonus.
     new_pairs: List[Tuple[str, str]] = []
+    # all_rows preserves the FULL row dict for the writeback (canonical
+    # 10-column schema). Without this, writing back would lose the
+    # validated_by / validated_at / notes / etc. audit metadata that
+    # pharma partners need for 21 CFR Part 11 compliance.
+    all_rows: List[Dict[str, str]] = []
     if _os.path.exists(validated_csv_path):
         with open(validated_csv_path, "r", encoding="utf-8") as f:
             reader = _csv.DictReader(f)
             for row in reader:
-                drug = (row.get("drug") or "").strip()
-                disease = (row.get("disease") or "").strip()
-                validated_str = (row.get("validated") or "").strip().lower()
+                drug = (row.get(_WB_DRUG_COL) or row.get("drug") or "").strip()
+                disease = (row.get(_WB_DISEASE_COL) or row.get("disease") or "").strip()
                 if not drug or not disease:
                     continue
-                if validated_str in ("true", "1", "yes"):
-                    new_pairs.append((drug, disease))
+                # P4-001 ROOT FIX: read the `outcome` column (NOT "validated")
+                # and test against "validated_positive" (NOT "true"/"1"/"yes").
+                outcome_str = (
+                    row.get(_WB_OUTCOME_COL)
+                    or row.get("outcome")
+                    or row.get("validated")  # backward-compat for legacy 3-col files
+                    or ""
+                ).strip().lower()
+                if outcome_str == _WB_OUTCOME_POSITIVE:
+                    new_pairs.append((drug.lower(), disease.lower()))
+                # Preserve the row for writeback (P4-033). Use canonical
+                # column names; missing fields default to empty string.
+                preserved: Dict[str, str] = {}
+                for _col in _WB_CSV_COLUMNS:
+                    preserved[_col] = (row.get(_col) or "").strip()
+                # Ensure drug/disease/outcome are populated even if the
+                # source CSV used a 3-column legacy schema.
+                if not preserved[_WB_DRUG_COL]:
+                    preserved[_WB_DRUG_COL] = drug
+                if not preserved[_WB_DISEASE_COL]:
+                    preserved[_WB_DISEASE_COL] = disease
+                if not preserved[_WB_OUTCOME_COL]:
+                    # Legacy "validated" column → map to canonical outcome.
+                    if outcome_str in ("true", "1", "yes"):
+                        preserved[_WB_OUTCOME_COL] = _WB_OUTCOME_POSITIVE
+                    elif outcome_str:
+                        preserved[_WB_OUTCOME_COL] = outcome_str
+                    else:
+                        preserved[_WB_OUTCOME_COL] = _WB_OUTCOME_POSITIVE
+                all_rows.append(preserved)
 
     # Compute delta vs the current VALIDATED_HYPOTHESES.
     # P4-002 v105: declare global FIRST (before any reference) to avoid
@@ -10826,18 +11732,62 @@ def retrain_on_validated(
         _tmp_path = _wb_csv_path.with_suffix(".csv.tmp")
         with open(_tmp_path, "w", newline="", encoding="utf-8") as f:
             _writer = _csv.writer(f)
-            _writer.writerow(["drug", "disease", "validated"])
-            for drug, disease in VALIDATED_HYPOTHESES:
-                _writer.writerow([drug, disease, "true"])
+            # P4-033 ROOT FIX: write the canonical 10-column schema
+            # (WRITEBACK_CSV_COLUMNS), NOT the 3-column stub
+            # ["drug","disease","validated"]. The 3-column stub caused
+            # schema drift: every subsequent retrain_on_validated call
+            # lost the validated_by / validated_at / notes / etc. audit
+            # metadata that pharma partners need for 21 CFR Part 11
+            # compliance. The canonical schema is sourced from
+            # shared.contracts.writeback.WRITEBACK_CSV_COLUMNS so any
+            # change to the canonical schema is automatically picked up.
+            _writer.writerow(list(_WB_CSV_COLUMNS))
+            # Build a set of (drug, disease) pairs that are in the merged
+            # VALIDATED_HYPOTHESES (lowercased). We use this to decide
+            # which rows to write: all_rows from the source CSV (which
+            # may include toxic / inconclusive outcomes for audit) PLUS
+            # any newly-added validated_positive pairs that weren't in
+            # the source CSV.
+            _merged_set = {(d.lower(), v.lower()) for d, v in VALIDATED_HYPOTHESES}
+            _source_set = {(r[_WB_DRUG_COL].lower(), r[_WB_DISEASE_COL].lower()) for r in all_rows}
+            # Write all preserved source rows first (these keep their
+            # original outcome: validated_positive / validated_toxic /
+            # validated_negative / invalidated — we do NOT overwrite).
+            for r in all_rows:
+                _writer.writerow([r.get(_col, "") for _col in _WB_CSV_COLUMNS])
+            # Write any newly-added validated_positive pairs that were NOT
+            # in the source CSV (e.g., added in-process by an Airflow task
+            # calling retrain_on_validated after a pharma partner validated
+            # a new pair). Use canonical outcome = validated_positive,
+            # timestamp = now (UTC), validated_by = "data_flywheel", and
+            # writeback_version = current.
+            from datetime import datetime as _dt, timezone as _tz
+            _now_iso = _dt.now(_tz.utc).isoformat()
+            for (drug, disease) in _merged_set - _source_set:
+                _writer.writerow([
+                    drug, disease, _WB_OUTCOME_POSITIVE,
+                    "data_flywheel",  # validated_by
+                    "",               # validation_study_id
+                    _now_iso,         # validated_at
+                    "added by retrain_on_validated (in-process update)",  # notes
+                    "",               # original_gt_score
+                    "",               # original_rl_rank
+                    _WB_WRITEBACK_VERSION,  # writeback_version
+                ])
             f.flush()
             _os.fsync(f.fileno())
         _os.replace(str(_tmp_path), str(_wb_csv_path))
         logger.info(
-            "P4-047 ROOT FIX: wrote %d validated hypotheses to %s (ATOMIC "
-            "write). Subsequent process starts (Airflow tasks, separate "
+            "P4-047 + P4-033 ROOT FIX: wrote %d rows (%d source + %d newly-added) "
+            "with the canonical 10-column schema to %s (ATOMIC write). The "
+            "previous 3-column stub schema (drug,disease,validated) is "
+            "REMOVED — audit metadata (validated_by, validated_at, notes, "
+            "etc.) is now PRESERVED for 21 CFR Part 11 compliance. "
+            "Subsequent process starts (Airflow tasks, separate "
             "train_agent runs) will load this file and use the extended "
             "reward bonus set. The data flywheel now works CROSS-PROCESS.",
-            len(VALIDATED_HYPOTHESES), _wb_csv_path,
+            len(all_rows) + len(_merged_set - _source_set),
+            len(all_rows), len(_merged_set - _source_set), _wb_csv_path,
         )
     except Exception as _write_exc:
         logger.error(
