@@ -1286,7 +1286,23 @@ def reload_validated_toxic_hypotheses() -> List[Tuple[str, str]]:
 
 
 # Validated hypotheses CSV path -- data flywheel.
-VALIDATED_HYPOTHESES_PATH: str = "validated_hypotheses.csv"
+# P4-047 ROOT FIX (Teammate 13, LOW): the previous version used a RELATIVE
+# path ("validated_hypotheses.csv"), which resolves against the process's
+# CURRENT WORKING DIRECTORY. When the ranker was invoked from a different
+# CWD (e.g. `python rl/rl_drug_ranker.py` from repo root, or an Airflow
+# task whose CWD is /opt/airflow), the relative path pointed at the wrong
+# location and `load_validated_hypotheses` silently fell through to its
+# 4-path search fallback — sometimes finding a stale copy, sometimes
+# finding nothing and disabling the data-flywheel reward signal with only
+# a log warning. ROOT FIX: resolve the default path ABSOLUTE relative to
+# THIS file (rl/rl_drug_ranker.py), so the validated_hypotheses.csv that
+# ships next to this module is found regardless of CWD. The explicit
+# `path` arg and the RL_VALIDATED_HYPOTHESES_PATH env override still take
+# precedence for operators who want to point elsewhere.
+VALIDATED_HYPOTHESES_PATH: str = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "validated_hypotheses.csv",
+)
 
 # Default proprietary ID prefixes for redaction (B9 fix -- these are
 # now actually used by save_results).
@@ -9345,10 +9361,29 @@ def run_pipeline(
     # Instead, we compute reward statistics on the TRAIN set only (after
     # the split) for logging purposes. The env computes rewards on-the-fly
     # during step(), which is correct and avoids the leak.
-    train_reward_sample = train_df.apply(lambda r: reward_fn.compute(r), axis=1)
+    # P4-046 ROOT FIX (Teammate 13, LOW): the previous version called
+    # ``train_df.apply(lambda r: reward_fn.compute(r), axis=1)`` over the
+    # ENTIRE train set purely to log min/max reward. ``.apply(axis=1)`` is
+    # a Python-level row-by-row loop — for a 10K-row train set that is
+    # ~10K ``reward_fn.compute`` calls, each of which does several dict
+    # lookups + arithmetic. On the V1-scale dataset (100K+ rows) this log
+    # line alone took minutes and dominated pipeline runtime, for a
+    # statistic that is also computed (on-the-fly, correctly) inside the
+    # env during ``step()``.
+    # ROOT FIX: sample at most 1000 rows for the reward-range log line.
+    # 1000 samples gives a stable min/max estimate (reward is bounded in
+    # [0, 1]) without the O(N) Python loop. The env's own reward stats
+    # (logged during training) remain the authoritative source.
+    reward_sample_size = min(1000, len(train_df))
+    reward_sample_df = (
+        train_df.sample(n=reward_sample_size, random_state=42)
+        if reward_sample_size < len(train_df)
+        else train_df
+    )
+    train_reward_sample = reward_sample_df.apply(lambda r: reward_fn.compute(r), axis=1)
     logger.info(
-        f"Reward range (train only): {train_reward_sample.min():.3f} -> "
-        f"{train_reward_sample.max():.3f}"
+        f"Reward range (train sample of {len(reward_sample_df)}/{len(train_df)}): "
+        f"{train_reward_sample.min():.3f} -> {train_reward_sample.max():.3f}"
     )
 
     # ROOT FIX (W-04): compute the adaptive gnn threshold on a HELD-OUT

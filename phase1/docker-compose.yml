@@ -72,6 +72,23 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.airflow
+    # IN-093 ROOT FIX (Teammate 13, LOW): airflow-init is a one-shot init
+    # container (it runs the entrypoint and exits). It had NO restart
+    # policy, so the default `restart: no` applied. If the entrypoint
+    # failed for a transient reason (e.g. a Postgres connection timeout
+    # during `airflow db migrate`, or a brief DNS hiccup resolving the
+    # `postgres` service), the container exited and was NEVER retried —
+    # and because airflow-webserver / airflow-scheduler depend on
+    # `airflow-init: condition: service_completed_successfully`, the
+    # ENTIRE Airflow stack stayed down permanently until an operator ran
+    # `docker-compose up airflow-init` by hand.
+    # ROOT FIX: `restart: on-failure:3` retries up to 3 times on a non-
+    # zero exit, riding out transient init failures (Postgres not yet
+    # accepting connections, etc.) without masking a permanently broken
+    # init (after 3 failures it stays stopped and the operator sees it).
+    # A successful (exit 0) run is NOT restarted — it stays "completed"
+    # so `service_completed_successfully` dependents proceed normally.
+    restart: "on-failure:3"
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       # FIX-P1-B-15 (audit P1): credentials now come from the same env

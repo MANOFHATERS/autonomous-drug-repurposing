@@ -48,16 +48,52 @@ async function main() {
 
   // ─── 3. Crypto round-trip (FE-017) ───────────────────────────────
   console.log("\n3. Webhook secret encryption (FE-017):");
-  process.env.WEBHOOK_SECRET_KEY = Buffer.alloc(32, 0x42).toString("base64");
-  process.env.NODE_ENV = "development";
-  const { encryptSecret, decryptSecret } = await import("./../src/lib/crypto");
-  const plaintext = "test-webhook-secret-12345";
-  const encrypted = encryptSecret(plaintext);
-  check("encryptSecret returns v1: prefix", encrypted.startsWith("v1:"));
-  check("encrypted != plaintext", encrypted !== plaintext);
-  const decrypted = decryptSecret(encrypted);
-  check("decryptSecret returns original", decrypted === plaintext);
-  check("encryption is non-deterministic (random IV)", encryptSecret(plaintext) !== encrypted);
+  // IN-090 ROOT FIX (Teammate 13, LOW): the previous version set
+  // WEBHOOK_SECRET_KEY to a FIXED value (Buffer.alloc(32, 0x42)) and
+  // NODE_ENV="development" WITHOUT saving/restoring them — unlike the
+  // JWT_SECRET block below which DOES save/restore. If this script were
+  // ever run in a production environment (e.g. as a post-deploy smoke
+  // test), it would OVERWRITE the production WEBHOOK_SECRET_KEY with the
+  // fixed value, breaking decryption of every existing webhook secret.
+  // ROOT FIX:
+  //   1. Refuse to run in production (fail fast, do not mutate prod env).
+  //   2. Save the original WEBHOOK_SECRET_KEY / NODE_ENV and restore them
+  //      in a finally block (same pattern as the JWT_SECRET test below).
+  //   3. Use a RANDOM key for the test (crypto.randomBytes) instead of a
+  //      fixed constant — a fixed key is a latent footgun if anyone ever
+  //      copy-pastes this pattern into production code.
+  if (process.env.NODE_ENV === "production") {
+    console.error("REFUSING to overwrite WEBHOOK_SECRET_KEY in production (IN-090).");
+    process.exit(1);
+  }
+  const oldWebhookKey = process.env.WEBHOOK_SECRET_KEY;
+  const oldNodeEnvForCrypto = process.env.NODE_ENV;
+  try {
+    const crypto = await import("node:crypto");
+    process.env.WEBHOOK_SECRET_KEY = crypto.randomBytes(32).toString("base64");
+    process.env.NODE_ENV = "development";
+    const { encryptSecret, decryptSecret } = await import("./../src/lib/crypto");
+    const plaintext = "test-webhook-secret-12345";
+    const encrypted = encryptSecret(plaintext);
+    check("encryptSecret returns v1: prefix", encrypted.startsWith("v1:"));
+    check("encrypted != plaintext", encrypted !== plaintext);
+    const decrypted = decryptSecret(encrypted);
+    check("decryptSecret returns original", decrypted === plaintext);
+    check("encryption is non-deterministic (random IV)", encryptSecret(plaintext) !== encrypted);
+  } finally {
+    // IN-090: restore the original env so this script never leaks its
+    // test key into the surrounding process (or production).
+    if (oldWebhookKey === undefined) {
+      delete process.env.WEBHOOK_SECRET_KEY;
+    } else {
+      process.env.WEBHOOK_SECRET_KEY = oldWebhookKey;
+    }
+    if (oldNodeEnvForCrypto === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = oldNodeEnvForCrypto;
+    }
+  }
 
   // ─── 4. TOTP (FE-004, FE-005) ────────────────────────────────────
   console.log("\n4. TOTP verification (FE-004, FE-005):");

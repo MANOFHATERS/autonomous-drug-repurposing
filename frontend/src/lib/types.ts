@@ -76,6 +76,24 @@ export interface DrugCandidate {
   targets: string[] | null;
   pathways: string[] | null;
   /**
+   * FE-052 ROOT FIX (Teammate 13, MEDIUM): optional model confidence
+   * interval bounds (0-100, same scale as compositeScore) and model AUC
+   * (0-1). The previous CandidateTable passed `confidenceLower={undefined}`,
+   * `confidenceUpper={undefined}`, `auc={undefined}` EXPLICITLY to ScoreBar
+   * — so even if the backend populated these fields on the candidate
+   * object, they would NEVER surface in the UI (the table hardcoded them
+   * away). The ScoreBar component already supports rendering a CI band +
+   * an AUC tooltip (FE-036), but the wiring was severed at the table.
+   * Root fix: add these as OPTIONAL fields on DrugCandidate so the RL
+   * ranker / Graph Transformer can populate them when available; the
+   * CandidateTable now passes `candidate.confidenceLower` etc. through to
+   * ScoreBar instead of `undefined`. When absent, ScoreBar shows its
+   * "model AUC: not reported" tooltip (unchanged behavior).
+   */
+  confidenceLower?: number;
+  confidenceUpper?: number;
+  auc?: number;
+  /**
    * FE-024: RL debug info — model output that helps ML engineers debug
    * the ranker but is meaningless to a researcher. Surfaced ONLY in a
    * tooltip on the candidate row, NEVER in a table column.
