@@ -70,11 +70,27 @@ export async function createHypothesis(input: CreateHypothesisInput) {
       status: "draft",
     },
   });
+  // BE-050 ROOT FIX (v115, LOW): the previous code wrote `actorName: "system"`
+  // to ProjectActivity — losing audit-trail attribution. For a pharma
+  // platform where hypothesis ownership is a compliance requirement
+  // (FDA 21 CFR Part 11 — "who did what when"), this was an audit trail
+  // gap. The activity feed showed "system created hypothesis X" instead
+  // of "Dr. Smith created hypothesis X".
+  //
+  // ROOT FIX: derive the actorName from the User table (same pattern as
+  // `addComment` below). If the user has a name set, use it. Otherwise
+  // fall back to their email. The fetch is ONE indexed lookup by id —
+  // negligible cost compared to the hypothesis write itself.
+  const creator = await db.user.findUnique({
+    where: { id: input.createdById },
+    select: { name: true, email: true },
+  });
+  const actorName = creator?.name || creator?.email || "unknown";
   await db.projectActivity.create({
     data: {
       projectId: input.projectId,
       type: "hypothesis_created",
-      actorName: "system",
+      actorName,
       summary: `Created hypothesis "${input.title}" (${input.drugName} → ${input.diseaseName})`,
     },
   });

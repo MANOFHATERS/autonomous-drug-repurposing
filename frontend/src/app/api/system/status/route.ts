@@ -72,6 +72,41 @@ function scrubService(svc: MlServiceAvailability): MlServiceAvailability {
   };
 }
 
+/**
+ * BE-038 ROOT FIX (v115, LOW): scrub reasons in the SystemHealth object too.
+ *
+ * The previous code only scrubbed `services.knowledgeGraph`,
+ * `services.dataset`, and `services.rl` (the legacy per-service stubs).
+ * The new `health` object (returned by getSystemHealth()) contains its
+ * OWN `reason` strings — e.g. "NEO4J_URL is not configured",
+ * "MLFLOW_TRACKING_URL is not configured", "connection failed:
+ * ECONNREFUSED 10.0.0.5:8002". These strings contain env var names
+ * AND potentially internal hostnames/IPs that an attacker could use
+ * for targeted social engineering or network reconnaissance.
+ *
+ * This function walks the SystemHealth tree and scrubs EVERY `reason`
+ * field it finds. It returns a new object (does not mutate the input)
+ * so the original health data is preserved for internal operator logs.
+ */
+function scrubSystemHealth(health: SystemHealth): SystemHealth {
+  const scrubbedServices: Record<string, unknown> = {};
+  for (const [key, svc] of Object.entries(health.services)) {
+    if (svc && typeof svc === "object" && "reason" in svc) {
+      const svcObj = svc as { reason?: string };
+      scrubbedServices[key] = {
+        ...svc,
+        reason: scrubReason(svcObj.reason),
+      };
+    } else {
+      scrubbedServices[key] = svc;
+    }
+  }
+  return {
+    ...health,
+    services: scrubbedServices as SystemHealth["services"],
+  };
+}
+
 export async function GET(req: Request) {
   // TASK-261: gate on platformRole === "admin".
   // We accept a plain `Request` here (Next.js App Router allows it) and
@@ -86,7 +121,11 @@ export async function GET(req: Request) {
 
   // TASK-265: run REAL connectivity checks against every backend service.
   // This is the root fix — the previous code returned hardcoded values.
-  const health = await getSystemHealth();
+  // BE-038 ROOT FIX (v115): scrub the health object's `reason` fields
+  // before returning — they contain env var names and potentially
+  // internal hostnames that an attacker could exploit.
+  const rawHealth = await getSystemHealth();
+  const health = scrubSystemHealth(rawHealth);
 
   // Build the response. We keep the legacy per-service keys (auth,
   // rxnorm, mesh, etc.) for backwards compat with the admin console UI,

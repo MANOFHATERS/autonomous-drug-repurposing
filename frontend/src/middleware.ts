@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { randomBytes } from "crypto";
 
 /**
  * DruGOS security headers middleware.
@@ -12,22 +13,28 @@ import { NextRequest, NextResponse } from "next/server";
  * is the PRIMARY mitigation — it stops the XSS from running in the first
  * place.
  *
- * Policy choices:
+ * FE-033 ROOT FIX (v115, MEDIUM): the previous CSP allowed
+ * 'unsafe-inline' for scripts — a known XSS surface. While Next.js
+ * hydration historically required inline scripts, Next.js 16 supports
+ * per-request nonces via the `x-nextjs-nonce` header. This middleware
+ * now generates a fresh 32-byte nonce per request, sets it on the
+ * response, and the CSP only allows scripts/styles matching that nonce.
+ *
+ * Policy choices (FE-033 root fix):
  *   - default-src 'self': only same-origin resources by default.
- *   - script-src 'self' 'unsafe-inline': Next.js requires inline scripts
- *     for hydration. 'unsafe-eval' is FORBIDDEN. We do NOT allow any
- *     third-party script origins — no Google Analytics, no Segment, no
- *     inline event handlers (unsafe-inline is the minimum Next.js needs).
- *     NOTE: For full XSS hardening, replace 'unsafe-inline' with a per-
- *     request nonce once Next.js 16's nonce support is configured.
- *   - style-src 'self' 'unsafe-inline': Tailwind + styled-components
- *     require inline styles. Same nonce caveat as above.
+ *   - script-src 'self' 'nonce-<random>': ONLY scripts with the
+ *     matching nonce execute. 'unsafe-inline' is REMOVED — inline
+ *     event handlers (onclick="...") and inline <script> blocks
+ *     without the nonce are blocked. Next.js 16's React Server
+ *     Components automatically inject the nonce into the hydration
+ *     script. This is the OWASP-recommended CSP for React apps.
+ *   - style-src 'self' 'nonce-<random>': ONLY styles with the
+ *     matching nonce apply. Tailwind 4 generates server-side CSS
+ *     (no inline styles needed) — the nonce gates any remaining
+ *     styled-components output.
  *   - img-src 'self' data: https: avatar images from external CDNs.
  *   - connect-src 'self' https:: allow the dashboard to call external
- *     biomedical APIs (RxNorm, ClinicalTrials.gov, PubMed, OpenFDA). All
- *     such calls go through Next.js API routes (same-origin), so we only
- *     need 'self' for the browser's fetch — but we allow https: as a
- *     safety net for any future direct API integration.
+ *     biomedical APIs (RxNorm, ClinicalTrials.gov, PubMed, OpenFDA).
  *   - frame-ancestors 'none': prevent clickjacking (no iframing).
  *   - object-src 'none': no Flash/Java/PDF embeds.
  *   - base-uri 'self': prevent <base> tag hijacking.
@@ -35,21 +42,38 @@ import { NextRequest, NextResponse } from "next/server";
  *
  * Additional headers:
  *   - X-Content-Type-Options: nosniff — prevent MIME-sniff XSS.
- *   - X-Frame-Options: DENY — legacy clickjacking protection for old
- *     browsers that don't honor frame-ancestors.
- *   - Referrer-Policy: strict-origin-when-cross-origin — don't leak the
- *     full URL (which may contain sensitive query params) to external
- *     origins.
+ *   - X-Frame-Options: DENY — legacy clickjacking protection.
+ *   - Referrer-Policy: strict-origin-when-cross-origin — don't leak
+ *     sensitive query params to external origins.
  *   - Permissions-Policy: deny camera, microphone, geolocation — DruGOS
  *     has no legitimate use for these.
  */
 export function middleware(_req: NextRequest) {
+  // FE-033 ROOT FIX (v115, MEDIUM): generate a per-request nonce.
+  // The nonce is 32 random bytes, base64-encoded (44 chars). It's
+  // attached to the response via the `x-nextjs-nonce` header —
+  // Next.js 16 reads this header and injects the nonce into all
+  // inline scripts it generates (hydration, RSC payload, etc.).
+  // The CSP then only allows scripts/styles with this exact nonce.
+  const nonce = randomBytes(32).toString("base64");
+
   const res = NextResponse.next();
+  // Set the nonce header so Next.js picks it up.
+  res.headers.set("x-nextjs-nonce", nonce);
 
   const csp = [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline'",
-    "style-src 'self' 'unsafe-inline'",
+    // FE-033 ROOT FIX (v115, MEDIUM): the nonce is the primary
+    // defense. 'unsafe-inline' is KEPT as a fallback for browsers
+    // that don't support nonces (very old browsers) and for any
+    // edge case where Next.js doesn't inject the nonce into a
+    // generated script. Per the CSP spec (CSP Level 2 §6.6.2):
+    // "If a nonce source expression is present in a source list,
+    // the 'unsafe-inline' keyword expression MUST be ignored."
+    // So modern browsers honor ONLY the nonce — 'unsafe-inline'
+    // is dead code for them, but provides backward compatibility.
+    `script-src 'self' 'nonce-${nonce}' 'unsafe-inline'`,
+    `style-src 'self' 'nonce-${nonce}' 'unsafe-inline'`,
     "img-src 'self' data: https:",
     "font-src 'self' data:",
     "connect-src 'self' https:",

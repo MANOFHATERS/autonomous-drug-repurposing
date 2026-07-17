@@ -13,23 +13,45 @@
  * We pass NCBI_API_KEY env var when available.
  */
 
+import { monitoredFetch } from "@/lib/external-api-monitor";
+
 const EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils";
 
 /**
  * fetch with retry on 429 (rate limited). NCBI allows 3 req/sec without an
  * API key, 10 req/sec with one. When we hit 429, we retry with exponential
  * backoff honoring the Retry-After header.
+ *
+ * BE-058 ROOT FIX (v115, LOW): the previous code used the raw `fetch()`
+ * instead of `monitoredFetch()`. Every other external API call in the
+ * codebase (PubMed, ClinicalTrials.gov, openFDA, PatentsView, MeSH,
+ * ChEMBL, KG service) uses `monitoredFetch` — which logs URL, duration,
+ * and status to the external-api-monitor for observability. PubMed was
+ * the ONLY service that bypassed monitoring, so operators had NO
+ * visibility into PubMed latency, 429s, or outages.
+ *
+ * ROOT FIX: route ALL PubMed fetches through `monitoredFetch`. The
+ * retry logic is preserved (the `for` loop with exponential backoff
+ * stays the same) — only the underlying fetch call is swapped.
  */
 async function fetchWithRetry(url: URL | string, init?: RequestInit, maxRetries = 3): Promise<Response> {
+  // BE-058: monitoredFetch expects a string URL, but pubmed.ts callers
+  // may pass a URL object (the previous fetchWithRetry signature
+  // accepted URL | string). Convert to string here so the rest of
+  // the function can pass it to monitoredFetch without type errors.
+  const urlStr = typeof url === "string" ? url : url.toString();
   for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const res = await fetch(url, init);
+    // BE-058: monitoredFetch logs every PubMed call to the external-
+    // api-monitor (URL, duration, status). This is the same monitor
+    // used by every other external service in the codebase.
+    const res = await monitoredFetch("pubmed", urlStr, init);
     if (res.status !== 429) return res;
     const retryAfter = res.headers.get("Retry-After");
     const delayMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : Math.pow(2, attempt) * 1000 + 500;
     await new Promise((r) => setTimeout(r, delayMs));
   }
   // Final attempt — return whatever response we get
-  return fetch(url, init);
+  return monitoredFetch("pubmed", urlStr, init);
 }
 
 export interface PubMedArticle {
