@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, createContext, useContext, useMemo } from 'react'
+import React, { useState, useEffect, useCallback, createContext, useContext, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Search, Shield, Database, Users, CreditCard, Settings, HelpCircle, ChevronDown, ChevronRight,
@@ -95,27 +95,11 @@ const diseases: Disease[] = []
 // FE-065: Empty placeholder — replace with useRlCandidates({ disease }) hook.
 const drugCandidates: DrugCandidate[] = []
 
-// FE-065: Empty placeholder — replace with useApiList(() => api.listNotifications()).
-const notifData: AppNotification[] = []
+// FE-028: notifData placeholder removed — AppShell now calls useNotifications()
+// from use-api-data.tsx (real /api/notifications endpoint, 60s polling).
 
-// FE-065: Empty placeholder — replace with useApiResource(() => api.getUsage())
-// when /api/usage is implemented. Fields default to 0/0 so the Usage card
-// renders "0 / 0" instead of crashing on undefined property access.
-const usageMetrics: {
-  apiCalls: { used: number; limit: number }
-  storage: { used: number; limit: number }
-  projects: { used: number; limit: number }
-  hypotheses: { used: number; limit: number }
-  queries: { used: number; limit: number }
-  reports: { used: number; limit: number }
-} = {
-  apiCalls: { used: 0, limit: 0 },
-  storage: { used: 0, limit: 0 },
-  projects: { used: 0, limit: 0 },
-  hypotheses: { used: 0, limit: 0 },
-  queries: { used: 0, limit: 0 },
-  reports: { used: 0, limit: 0 },
-}
+// FE-003: usageMetrics placeholder removed — AppDashboard now calls
+// useUsageMetrics() from use-account-data.tsx.
 
 // FE-065: Empty placeholder — derive from api.getRankedHypotheses() for
 // live trending disease data.
@@ -124,10 +108,8 @@ const trendingDiseases: Array<{
   trend: string; change?: string
 }> = []
 
-// FE-065: Empty placeholder — persist queries via /api/projects (saved queries).
-const recentQueries: Array<{
-  id: string; disease: string; date: string; candidates: number; topScore: number
-}> = []
+// FE-003: recentQueries placeholder removed — AppDashboard now calls
+// useRecentQueries() from use-account-data.tsx (localStorage-persisted).
 
 // FE-065: Empty placeholder — replace with useApiResource(() => api.getSystemStatus()).
 // Note: /api/system/status returns { services: { ... }, generatedAt } which is
@@ -161,37 +143,31 @@ import { DrugOSNavContext } from './nav-context'
 import { useSession } from './session-provider'
 import { api, type ApiError, type TeamMember } from '@/lib/api-client'
 import { canAccessSection, visibleSectionsForRole, roleLabel } from '@/lib/rbac'
+// FE-024: Use canonical ScoreBar (with CI/AUC tooltip) and SafetyBadge (with
+// 'unknown' tier + clinical disclaimer) instead of local bypasses.
+import { ScoreBar } from '@/components/drugos/score-bar'
+import { SafetyBadge } from '@/components/drugos/safety-badge'
+// FE-014/FE-015/FE-028/FE-003: Real data hooks replace empty placeholders.
+import {
+  useDiseaseSearch,
+  useRlCandidates,
+  useNotifications as useNotificationsFeed,
+  LoadingSpinner,
+  ErrorDisplay,
+  EmptyState,
+} from '@/components/drugos/use-api-data'
+import {
+  useUsageMetrics,
+  useRecentQueries,
+} from '@/components/drugos/use-account-data'
 
 // =====================================================================
 // TYPES & ROUTER CONTEXT
 // =====================================================================
 
-type Route =
-  | { page: 'landing' }
-  | { page: 'pricing' }
-  | { page: 'features'; slug: string }
-  | { page: 'about' }
-  | { page: 'security' }
-  | { page: 'status' }
-  | { page: 'blog' }
-  | { page: 'contact' }
-  | { page: 'careers' }
-  | { page: 'case-studies' }
-  | { page: 'login' }
-  | { page: 'register' }
-  | { page: 'forgot-password' }
-  | { page: 'reset-password' }
-  | { page: 'mfa-challenge' }
-  | { page: 'email-verification' }
-  | { page: 'academic-verification' }
-  | { page: 'org-selection' }
-  | { page: 'onboarding-welcome' }
-  | { page: 'onboarding-role' }
-  | { page: 'onboarding-workspace' }
-  | { page: 'onboarding-invite' }
-  | { page: 'admin-approval' }
-  | { page: 'account-locked' }
-  | { page: 'app'; section: string; sub?: string; id?: string }
+// FE-001: Route type + URL codec live in ./url-route (pure functions,
+// unit-tested). The useUrlRoute hook (which uses window/history) stays here.
+import { type Route, routeToUrl, parseUrlToRoute } from './url-route'
 
 interface RouterContextType {
   route: Route
@@ -240,28 +216,6 @@ function DrugOSLogo({ size = 'md' }: { size?: 'sm' | 'md' | 'lg' }) {
       )}
     </div>
   )
-}
-
-function ScoreBar({ score, size = 'md' }: { score: number; size?: 'sm' | 'md' | 'lg' }) {
-  const color = score >= 80 ? 'bg-emerald-500' : score >= 60 ? 'bg-amber-500' : 'bg-red-500'
-  const h = size === 'sm' ? 'h-1.5' : size === 'lg' ? 'h-3' : 'h-2'
-  return (
-    <div className="w-full bg-slate-100 rounded-full overflow-hidden">
-      <div className={`${color} ${h} rounded-full transition-all`} style={{ width: `${score}%` }} />
-    </div>
-  )
-}
-
-function SafetyBadge({ tier }: { tier: 'green' | 'yellow' | 'red' | 'unknown' }) {
-  // FE-023: 'unknown' tier — neutral gray for RL model predictions.
-  const c: Record<string, string> = {
-    green: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-    yellow: 'bg-amber-50 text-amber-700 border-amber-200',
-    red: 'bg-red-50 text-red-700 border-red-200',
-    unknown: 'bg-slate-100 text-slate-600 border-slate-300',
-  };
-  const l: Record<string, string> = { green: 'Safe', yellow: 'Caution', red: 'Risk', unknown: 'Model score only' };
-  return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border ${c[tier] || c.unknown}`} title={tier === 'unknown' ? 'Model-derived safety score — not a substitute for clinical review.' : undefined}>{l[tier] || l.unknown}</span>
 }
 
 function StatusDot({ status }: { status: string }) {
@@ -2380,6 +2334,15 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
   const [showNotifs, setShowNotifs] = useState(false)
   const [headerSearch, setHeaderSearch] = useState('')
 
+  // FE-028: Real notification feed (polls every 60s). Replaces the empty
+  // notifData placeholder so the bell badge and dropdown show real data.
+  const { notifications: notifData, unreadCount: unreadNotifs, refetch: refetchNotifs } = useNotificationsFeed({ pollMs: 60_000 })
+
+  const handleMarkNotifRead = async (id: string) => {
+    try { await api.markNotificationRead(id) } catch { /* surfaced by next poll */ }
+    refetchNotifs()
+  }
+
   // Auth guard: if session resolves and there's no user, bounce to login.
   useEffect(() => {
     if (!loading && !user) {
@@ -2413,7 +2376,6 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
     .join('') || user.email[0]?.toUpperCase()
   const activeOrg = organizations.find(o => o.id === activeOrganizationId) || organizations[0]
 
-  const unreadNotifs = notifData.filter(n => !n.read).length
   const toggleGroup = (label: string) => {
     setExpandedGroups(prev => prev.includes(label) ? prev.filter(g => g !== label) : [...prev, label])
   }
@@ -2551,7 +2513,18 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
             {/* Search */}
             <div className="hidden md:flex items-center relative">
               <Search className="w-4 h-4 absolute left-3 text-muted-foreground" />
-              <Input placeholder="Search diseases..." className="pl-9 w-56 h-8 text-sm" />
+              <Input
+                value={headerSearch}
+                onChange={e => setHeaderSearch(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && headerSearch.trim().length >= 2) {
+                    navigate({ page: 'app', section: 'search', sub: 'results', id: headerSearch.trim() })
+                    setHeaderSearch('')
+                  }
+                }}
+                placeholder="Search diseases..."
+                className="pl-9 w-56 h-8 text-sm"
+              />
             </div>
 
             {/* Notifications */}
@@ -2572,22 +2545,32 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
                   <Badge variant="secondary" className="text-[10px]">{unreadNotifs} new</Badge>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                {notifData.slice(0, 5).map(n => (
-                  <DropdownMenuItem key={n.id} className="flex flex-col items-start gap-1 p-3 cursor-pointer">
-                    <div className="flex items-center gap-2 w-full">
-                      <span className={cn(
-                        'h-2 w-2 rounded-full shrink-0',
-                        n.type === 'success' && 'bg-[#1D9E75]',
-                        n.type === 'warning' && 'bg-[#D4853A]',
-                        n.type === 'error' && 'bg-[#C0392B]',
-                        n.type === 'info' && 'bg-[#5B4FCF]'
-                      )} />
-                      <span className="text-sm font-medium truncate">{n.title}</span>
-                      {!n.read && <Badge className="ml-auto text-[9px] h-4">New</Badge>}
-                    </div>
-                    <span className="text-xs text-muted-foreground line-clamp-1">{n.message}</span>
-                  </DropdownMenuItem>
-                ))}
+                {notifData.length === 0 ? (
+                  <div className="px-4 py-6 text-center text-sm text-muted-foreground">
+                    No notifications yet.
+                  </div>
+                ) : (
+                  notifData.slice(0, 5).map(n => (
+                    <DropdownMenuItem
+                      key={n.id}
+                      className="flex flex-col items-start gap-1 p-3 cursor-pointer"
+                      onClick={() => { if (!n.readAt) handleMarkNotifRead(n.id) }}
+                    >
+                      <div className="flex items-center gap-2 w-full">
+                        <span className={cn(
+                          'h-2 w-2 rounded-full shrink-0',
+                          n.type === 'success' && 'bg-[#1D9E75]',
+                          n.type === 'warning' && 'bg-[#D4853A]',
+                          n.type === 'error' && 'bg-[#C0392B]',
+                          n.type === 'info' && 'bg-[#5B4FCF]'
+                        )} />
+                        <span className="text-sm font-medium truncate">{n.title}</span>
+                        {!n.readAt && <Badge className="ml-auto text-[9px] h-4">New</Badge>}
+                      </div>
+                      <span className="text-xs text-muted-foreground line-clamp-1">{n.body}</span>
+                    </DropdownMenuItem>
+                  ))
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
 
@@ -2644,6 +2627,18 @@ function AppDashboard() {
   const { navigate } = useRouter()
   const { user } = useSession()
 
+  // FE-003: Real usage metrics from useUsageMetrics(). queries/apiCalls/reports
+  // are null until a usage-tracking endpoint exists; we NEVER fabricate numbers.
+  const { data: usage, loading: usageLoading, error: usageError } = useUsageMetrics()
+  const { queries: recentQueriesList } = useRecentQueries()
+
+  const stats = [
+    { title: 'Queries', icon: <Search className="w-5 h-5" />, value: usage?.queries?.used != null && usage?.queries?.limit != null ? `${usage.queries.used} / ${usage.queries.limit}` : null, subtitle: usage?.queries?.used == null ? 'Usage tracking not yet available' : undefined },
+    { title: 'API Calls', icon: <Code className="w-5 h-5" />, value: usage?.apiCalls?.used != null && usage?.apiCalls?.limit != null ? `${usage.apiCalls.used.toLocaleString()} / ${usage.apiCalls.limit.toLocaleString()}` : null, subtitle: usage?.apiCalls?.used == null ? 'Usage tracking not yet available' : undefined },
+    { title: 'Reports', icon: <Download className="w-5 h-5" />, value: usage?.reports?.used != null && usage?.reports?.limit != null ? `${usage.reports.used} / ${usage.reports.limit}` : null, subtitle: usage?.reports?.used == null ? 'Usage tracking not yet available' : undefined },
+    { title: 'Projects', icon: <Star className="w-5 h-5" />, value: usage?.projects?.used != null ? String(usage.projects.used) : null, subtitle: usage?.plan ? `Plan: ${usage.plan}` : undefined },
+  ]
+
   return (
     <div>
       <SectionHeading
@@ -2652,22 +2647,16 @@ function AppDashboard() {
         action={<Button className="bg-[#5B4FCF] hover:bg-[#4B3FBF]" onClick={() => navigate({ page: 'app', section: 'search' })}><Search className="w-4 h-4 mr-1" /> New Search</Button>}
       />
 
-      {/* Stats */}
+      {/* Stats — real values where available, honest "—" otherwise */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        {[
-          { title: 'Queries Today', value: '8/10', subtitle: 'Free tier limit', icon: <Search className="w-5 h-5" /> },
-          { title: 'Saved Candidates', value: '24', trend: '+3 this week', icon: <Star className="w-5 h-5" /> },
-          { title: 'Reports', value: '12', trend: '+2 this week', icon: <Download className="w-5 h-5" /> },
-          { title: 'API Calls', value: '1,247', subtitle: 'of 50K limit', icon: <Code className="w-5 h-5" /> },
-        ].map(stat => (
+        {stats.map(stat => (
           <Card key={stat.title} className="hover:shadow-md transition-shadow">
             <CardContent className="pt-6">
               <div className="flex items-start justify-between">
                 <div>
                   <p className="text-sm text-muted-foreground">{stat.title}</p>
-                  <p className="text-2xl font-bold text-foreground mt-1">{stat.value}</p>
+                  <p className="text-2xl font-bold text-foreground mt-1">{stat.value ?? '—'}</p>
                   {stat.subtitle && <p className="text-xs text-muted-foreground mt-1">{stat.subtitle}</p>}
-                  {stat.trend && <p className="text-xs text-[#1D9E75] mt-1">{stat.trend}</p>}
                 </div>
                 <div className="w-10 h-10 rounded-lg bg-[#5B4FCF]/10 text-[#5B4FCF] flex items-center justify-center">{stat.icon}</div>
               </div>
@@ -2677,49 +2666,77 @@ function AppDashboard() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Recent Queries */}
+        {/* Recent Queries — real, from localStorage via useRecentQueries */}
         <Card>
           <CardHeader>
             <CardTitle className="text-lg">Recent Queries</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="space-y-3">
-              {recentQueries.map(q => (
-                <div key={q.id} className="flex items-center justify-between py-2 border-b border-border last:border-0">
-                  <div>
-                    <p className="font-medium text-foreground text-sm">{q.disease}</p>
-                    <p className="text-xs text-muted-foreground">{q.date}</p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-xs text-muted-foreground">{q.candidates} candidates</span>
-                    <div className="w-16"><ScoreBar score={q.topScore} size="sm" /></div>
-                    <span className="text-sm font-bold text-foreground">{q.topScore}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
+            {recentQueriesList.length === 0 ? (
+              <EmptyState
+                title="No recent queries yet"
+                description="Your search history will appear here once you run your first disease search."
+                action={<Button size="sm" className="bg-[#5B4FCF] hover:bg-[#4B3FBF]" onClick={() => navigate({ page: 'app', section: 'search' })}>Start a search</Button>}
+              />
+            ) : (
+              <div className="space-y-3">
+                {recentQueriesList.slice(0, 8).map(q => (
+                  <button
+                    key={q.id}
+                    onClick={() => navigate({ page: 'app', section: 'search', sub: 'results', id: q.q })}
+                    className="flex items-center justify-between py-2 border-b border-border last:border-0 w-full text-left hover:bg-accent/50 -mx-2 px-2 rounded-md transition-colors"
+                  >
+                    <div>
+                      <p className="font-medium text-foreground text-sm">{q.q}</p>
+                      <p className="text-xs text-muted-foreground">{new Date(q.timestamp).toLocaleString()}</p>
+                    </div>
+                    <Badge variant="outline" className="text-xs capitalize">{q.type}</Badge>
+                  </button>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
 
-        {/* Usage */}
+        {/* Usage — real values where available; honest empty state otherwise */}
         <Card>
           <CardHeader>
             <CardTitle className="text-lg">Usage This Period</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            {[
-              { label: 'Queries', value: usageMetrics.queries.used, max: usageMetrics.queries.limit },
-              { label: 'API Calls', value: usageMetrics.apiCalls.used, max: usageMetrics.apiCalls.limit },
-              { label: 'Reports', value: usageMetrics.reports.used, max: usageMetrics.reports.limit },
-            ].map(item => (
-              <div key={item.label}>
-                <div className="flex justify-between text-sm mb-1">
-                  <span className="text-muted-foreground">{item.label}</span>
-                  <span className="text-foreground font-medium">{item.value.toLocaleString()} / {item.max.toLocaleString()}</span>
-                </div>
-                <Progress value={(item.value / item.max) * 100} className="h-2" />
-              </div>
-            ))}
+            {usageError ? (
+              <ErrorDisplay error={usageError} />
+            ) : usageLoading ? (
+              <LoadingSpinner label="Loading usage…" />
+            ) : !usage ? (
+              <EmptyState title="Usage data unavailable" description="Usage tracking is not yet configured for your organization." />
+            ) : (
+              <>
+                {[
+                  { label: 'API Keys (active)', value: usage.apiKeys?.used, max: usage.apiKeys?.limit },
+                  { label: 'Projects', value: usage.projects?.used, max: usage.projects?.limit },
+                  { label: 'Seats', value: usage.seats?.used, max: usage.seats?.limit },
+                ].map(item => (
+                  <div key={item.label}>
+                    <div className="flex justify-between text-sm mb-1">
+                      <span className="text-muted-foreground">{item.label}</span>
+                      <span className="text-foreground font-medium">
+                        {item.value != null ? item.value.toLocaleString() : '—'}
+                        {item.max != null ? ` / ${item.max.toLocaleString()}` : ''}
+                      </span>
+                    </div>
+                    {item.max != null && item.max > 0 && item.value != null && (
+                      <Progress value={Math.min(100, (item.value / item.max) * 100)} className="h-2" />
+                    )}
+                  </div>
+                ))}
+                {usage.queries == null && usage.apiCalls == null && usage.reports == null && (
+                  <p className="text-xs text-muted-foreground italic">
+                    Queries, API-call, and report quotas require a usage-tracking endpoint that is not yet deployed.
+                  </p>
+                )}
+              </>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -2730,12 +2747,20 @@ function AppDashboard() {
 function AppSearchPage() {
   const { navigate } = useRouter()
   const [query, setQuery] = useState('')
-  const [results, setResults] = useState<typeof diseases>([])
+  // FE-014: Real disease search via useDiseaseSearch (hits /api/diseases/search).
+  const { data: searchResult, loading, error } = useDiseaseSearch(query)
+  const results = searchResult?.items ?? []
+  const { queries: recentQueriesList, addRecentQuery } = useRecentQueries()
 
   const handleSearch = () => {
-    if (query.length >= 2) {
-      setResults(diseases.filter(d => d.name.toLowerCase().includes(query.toLowerCase()) || d.therapeuticArea.toLowerCase().includes(query.toLowerCase())))
+    if (query.trim().length >= 2) {
+      addRecentQuery(query.trim(), 'disease')
     }
+  }
+
+  const handleSelect = (d: { descriptorUi: string; name: string }) => {
+    addRecentQuery(d.name, 'disease')
+    navigate({ page: 'app', section: 'search', sub: 'results', id: d.name })
   }
 
   return (
@@ -2758,55 +2783,70 @@ function AppSearchPage() {
           <Card>
             <CardContent className="pt-4">
               <h4 className="text-sm font-medium text-muted-foreground mb-3">Recent Queries</h4>
-              {recentQueries.slice(0, 3).map(q => (
-                <button key={q.id} onClick={() => { setQuery(q.disease); handleSearch() }} className="block text-sm py-1.5 text-foreground hover:text-[#5B4FCF] cursor-pointer">{q.disease}</button>
-              ))}
+              {recentQueriesList.length === 0 ? (
+                <p className="text-xs text-muted-foreground">Your recent searches will appear here.</p>
+              ) : (
+                recentQueriesList.slice(0, 3).map(q => (
+                  <button key={q.id} onClick={() => { setQuery(q.q); handleSearch() }} className="block text-sm py-1.5 text-foreground hover:text-[#5B4FCF] cursor-pointer">{q.q}</button>
+                ))
+              )}
             </CardContent>
           </Card>
           <Card>
             <CardContent className="pt-4">
               <h4 className="text-sm font-medium text-muted-foreground mb-3">Trending</h4>
-              {trendingDiseases.slice(0, 3).map(d => (
-                <button key={d.name} onClick={() => { setQuery(d.name); handleSearch() }} className="block text-sm py-1.5 text-foreground hover:text-[#5B4FCF] cursor-pointer">{d.name}</button>
-              ))}
+              <p className="text-xs text-muted-foreground">Trending diseases will appear here once search analytics are enabled.</p>
             </CardContent>
           </Card>
           <Card>
             <CardContent className="pt-4">
               <h4 className="text-sm font-medium text-muted-foreground mb-3">Quick Start</h4>
-              {diseases.slice(0, 3).map(d => (
-                <button key={d.id} onClick={() => { setQuery(d.name); handleSearch() }} className="block text-sm py-1.5 text-foreground hover:text-[#5B4FCF] cursor-pointer">{d.name}</button>
-              ))}
+              <p className="text-xs text-muted-foreground">Start typing a disease name above — suggestions will appear as you type.</p>
             </CardContent>
           </Card>
         </div>
 
         {/* Search Results */}
-        {results.length > 0 && (
+        {query.trim().length >= 2 && (
           <div className="mt-8 text-left">
             <Card>
               <CardHeader>
-                <CardTitle className="text-lg">Results ({results.length})</CardTitle>
+                <CardTitle className="text-lg">Results {searchResult ? `(${results.length})` : ''}</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="space-y-3">
-                  {results.map(d => (
-                    <button
-                      key={d.id}
-                      onClick={() => navigate({ page: 'app', section: 'search', sub: 'results', id: d.id })}
-                      className="w-full flex items-center justify-between p-4 rounded-xl border border-border hover:bg-accent transition-colors text-left"
-                    >
-                      <div>
-                        <p className="font-medium text-foreground">{d.name}</p>
-                        <div className="flex items-center gap-2 mt-1">
-                          <Badge variant="outline" className="text-xs">{d.icdCode}</Badge>
-                          <Badge variant="secondary" className="text-xs">{d.therapeuticArea}</Badge>
+                {loading ? (
+                  <LoadingSpinner label="Searching diseases…" />
+                ) : error ? (
+                  <ErrorDisplay error={error} />
+                ) : results.length === 0 ? (
+                  <EmptyState
+                    title="No diseases found"
+                    description={`No MeSH descriptors matched "${query}". Try a different spelling or a broader term.`}
+                  />
+                ) : (
+                  <div className="space-y-3">
+                    {results.map(d => (
+                      <button
+                        key={d.descriptorUi}
+                        onClick={() => handleSelect(d)}
+                        className="w-full flex items-center justify-between p-4 rounded-xl border border-border hover:bg-accent transition-colors text-left"
+                      >
+                        <div>
+                          <p className="font-medium text-foreground">{d.name}</p>
+                          {d.scopeNote && (
+                            <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{d.scopeNote}</p>
+                          )}
+                          {d.treeNumber && d.treeNumber.length > 0 && (
+                            <div className="flex items-center gap-2 mt-1">
+                              <Badge variant="outline" className="text-xs">{d.treeNumber[0]}</Badge>
+                            </div>
+                          )}
                         </div>
-                      </div>
-                      <ArrowRight className="w-4 h-4 text-muted-foreground" />
-                    </button>
-                  ))}
-                </div>
+                        <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                      </button>
+                    ))}
+                  </div>
+                )}
               </CardContent>
             </Card>
           </div>
@@ -2817,54 +2857,74 @@ function AppSearchPage() {
 }
 
 function AppSearchResultsPage({ diseaseId }: { diseaseId?: string }) {
-  const disease = diseases.find(d => d.id === diseaseId) || diseases[0]
-  const candidates = drugCandidates.filter(d => d.diseaseId === disease.id)
+  // FE-015: diseaseId is now a disease NAME. Fetch real candidates via useRlCandidates.
+  const diseaseName = diseaseId || ''
+  const { data: rlData, loading, error } = useRlCandidates({ disease: diseaseName, limit: 50 })
+  const { data: diseaseSearch } = useDiseaseSearch(diseaseName)
+  const diseaseMeta = diseaseSearch?.items?.[0] ?? null
+  const candidates = rlData?.candidates ?? []
+
+  if (!diseaseName) {
+    return (
+      <EmptyState
+        title="No disease selected"
+        description="Use the search box to find a disease and view its drug repurposing candidates."
+      />
+    )
+  }
 
   return (
     <div>
       <SectionHeading
-        title={`${disease.name} — Candidates`}
-        subtitle={`${candidates.length} drug repurposing candidates found`}
-        action={<Button variant="outline"><Download className="w-4 h-4 mr-1" />Export CSV</Button>}
+        title={`${diseaseMeta?.name ?? diseaseName} — Candidates`}
+        subtitle={
+          loading ? 'Loading candidates…'
+            : error ? 'Failed to load candidates'
+              : `${candidates.length} drug repurposing ${candidates.length === 1 ? 'candidate' : 'candidates'} found${rlData?.source === 'local_csv' ? ' (offline model)' : ''}`
+        }
+        action={<Button variant="outline" disabled><Download className="w-4 h-4 mr-1" />Export CSV</Button>}
       />
 
       <Card>
         <CardContent className="pt-6">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border">
-                  {['#', 'Drug Name', 'Composite', 'Safety', 'Mechanism', 'Phase', 'IP'].map(h => (
-                    <th key={h} className="text-left py-3 px-3 font-medium text-muted-foreground text-xs uppercase tracking-wider">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {candidates.map((d, i) => (
-                  <tr key={d.id} className="border-b border-border/50 hover:bg-accent/50 transition-colors">
-                    <td className="py-3 px-3 font-bold text-muted-foreground">{i + 1}</td>
-                    <td className="py-3 px-3">
-                      <div>
-                        <span className="font-semibold text-foreground">{d.drugName}</span>
-                        <br />
-                        <span className="text-xs text-muted-foreground">{d.brandNames.join(', ')}</span>
-                      </div>
-                    </td>
-                    <td className="py-3 px-3">
-                      <div className="w-24">
-                        <div className="flex items-center justify-between text-sm mb-1"><span className="font-bold">{d.compositeScore}</span></div>
-                        <ScoreBar score={d.compositeScore} size="sm" />
-                      </div>
-                    </td>
-                    <td className="py-3 px-3"><SafetyBadge tier={d.safetyTier} /></td>
-                    <td className="py-3 px-3 max-w-[200px]"><span className="text-xs text-muted-foreground line-clamp-2">{d.mechanism}</span></td>
-                    <td className="py-3 px-3"><span className="text-xs font-medium text-foreground">{d.clinicalPhase}</span></td>
-                    <td className="py-3 px-3"><span className="text-xs text-muted-foreground">{d.ipStatus}</span></td>
+          {loading ? (
+            <LoadingSpinner label="Fetching ranked candidates from the RL ranker…" />
+          ) : error ? (
+            <ErrorDisplay error={error} />
+          ) : candidates.length === 0 ? (
+            <EmptyState
+              title="No candidates found"
+              description={`The RL ranker returned no drug candidates for "${diseaseName}". Try a different disease name or check that the RL service is deployed.`}
+            />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border">
+                    {['#', 'Drug Name', 'Composite', 'Safety', 'Mechanism', 'Phase', 'IP'].map(h => (
+                      <th key={h} className="text-left py-3 px-3 font-medium text-muted-foreground text-xs uppercase tracking-wider">{h}</th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {candidates.map((c, i) => {
+                    const reward = typeof c.reward === 'number' ? Math.round(c.reward * 100) : (typeof c.gnnScore === 'number' ? Math.round(c.gnnScore * 100) : 0)
+                    return (
+                      <tr key={`${c.drug}-${i}`} className="border-b border-border/50 hover:bg-accent/50 transition-colors">
+                        <td className="py-3 px-3 font-bold text-muted-foreground">{c.rank ?? i + 1}</td>
+                        <td className="py-3 px-3"><span className="font-semibold text-foreground">{c.drug}</span></td>
+                        <td className="py-3 px-3"><div className="w-24"><ScoreBar score={reward} size="sm" showInfoIcon={false} /></div></td>
+                        <td className="py-3 px-3"><SafetyBadge tier="unknown" /></td>
+                        <td className="py-3 px-3 max-w-[200px]"><span className="text-xs text-muted-foreground line-clamp-2">{c.literatureSupport != null ? `Literature support: ${c.literatureSupport.toFixed(2)}` : 'Mechanism not available'}</span></td>
+                        <td className="py-3 px-3"><span className="text-xs font-medium text-foreground">N/A (RL prediction)</span></td>
+                        <td className="py-3 px-3"><span className="text-xs text-muted-foreground">N/A</span></td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
@@ -2961,16 +3021,41 @@ function AppSectionRenderer({ section, sub, id }: { section: string; sub?: strin
 }
 
 // =====================================================================
+// URL-BASED ROUTING (FE-001)
+// =====================================================================
+// routeToUrl + parseUrlToRoute are imported from ./url-route (pure functions,
+// unit-tested in __tests__/url-route.test.ts). useUrlRoute stays here because
+// it uses window.history / popstate (browser-only APIs).
+
+function useUrlRoute(): [Route, (r: Route) => void] {
+  const [route, setRoute] = useState<Route>(() =>
+    typeof window === 'undefined' ? { page: 'landing' } : parseUrlToRoute(window.location.href)
+  )
+  useEffect(() => {
+    const onPop = () => setRoute(parseUrlToRoute(window.location.href))
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+  const navigate = useCallback((r: Route) => {
+    setRoute(r)
+    if (typeof window !== 'undefined') {
+      window.history.pushState({}, '', routeToUrl(r))
+    }
+  }, [])
+  return [route, navigate]
+}
+
+// =====================================================================
 // MAIN APP ROUTER COMPONENT
 // =====================================================================
 
 export default function DrugOSApp() {
-  const [route, setRoute] = useState<Route>({ page: 'landing' })
+  const [route, navigate] = useUrlRoute()
 
   const routerContext = useMemo(() => ({
     route,
-    navigate: (r: Route) => setRoute(r),
-  }), [route])
+    navigate,
+  }), [route, navigate])
 
   const renderPage = () => {
     // Public pages (with PublicLayout)

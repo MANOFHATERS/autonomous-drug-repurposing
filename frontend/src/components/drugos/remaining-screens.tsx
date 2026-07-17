@@ -2061,7 +2061,7 @@ function AuditLogsScreen() {
 
   return (
     <FadeIn><div className="space-y-6">
-      <PageHeader title="Audit Logs" desc="Track all platform activity" actions={<Button variant="outline" size="sm"><Download className="h-4 w-4 mr-1.5" />Export</Button>} />
+      <PageHeader title="Audit Logs" desc="Track all platform activity" actions={<Button variant="outline" size="sm" onClick={() => { const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), count: logs.length, items: logs }, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `drugos-audit-logs-${new Date().toISOString().slice(0, 10)}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); }} disabled={logs.length === 0}><Download className="h-4 w-4 mr-1.5" />Export</Button>} />
       {err && <div className="rounded-md bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2 dark:bg-red-950/40 dark:border-red-900 dark:text-red-300">{err}</div>}
       <div className="flex items-center gap-2 mb-2 flex-wrap">
         <Badge variant={filter === 'all' ? 'default' : 'outline'} className="cursor-pointer" onClick={() => setFilter('all')}>All</Badge>
@@ -2142,11 +2142,10 @@ function FeatureFlagsScreen() {
 // 19. API DOCS SCREEN
 // ═══════════════════════════════════════════
 /**
- * FE-029 ROOT FIX: Generate API docs from the ACTUAL route handlers in the
- * codebase. The previous code hardcoded 6 fabricated endpoints ("/v1/query",
- * "/v1/candidates/{id}", etc.) that do NOT exist. The real API routes are
- * under `/api/` (Next.js App Router conventions). This implementation
- * documents the REAL endpoints that are actually implemented.
+ * FE-029 / FE-037: REAL_ENDPOINTS is a MANUALLY-CURATED list of the real
+ * Next.js App Router API endpoints under /api/. It is NOT auto-generated
+ * from the filesystem (impossible client-side). When new routes are added,
+ * update this list by hand, OR wire an OpenAPI spec generator.
  */
 const REAL_ENDPOINTS = [
   { id: 'disease-search', method: 'GET' as const, path: '/api/diseases/search?q={query}&limit={n}', desc: 'Search diseases via NLM MeSH' },
@@ -2173,7 +2172,7 @@ function APIDocsScreen() {
   const activeEp = REAL_ENDPOINTS.find(e => e.id === activeEndpoint) || REAL_ENDPOINTS[0];
   return (
     <FadeIn><div className="space-y-6">
-      <PageHeader title="API Documentation" desc="Real API endpoints — auto-generated from route handlers" actions={<Button variant="outline" size="sm"><BookOpen className="h-4 w-4 mr-1.5" />OpenAPI Spec</Button>} />
+      <PageHeader title="API Documentation" desc="Common DrugOS API endpoints (manually curated)" actions={<Button variant="outline" size="sm" disabled title="No openapi.json is published in this deployment — wire an OpenAPI generator to enable this download."><BookOpen className="h-4 w-4 mr-1.5" />OpenAPI Spec</Button>} />
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
         <div className="space-y-1 max-h-[600px] overflow-y-auto">{REAL_ENDPOINTS.map(ep => (<button key={ep.id} onClick={() => setActiveEndpoint(ep.id)} className={`w-full text-left p-3 rounded-lg text-sm transition-colors ${activeEndpoint === ep.id ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-accent'}`}>
           <div className="flex items-center gap-2"><Badge className={`text-[10px] ${ep.method === 'GET' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>{ep.method}</Badge><span className="font-mono text-xs">{ep.path}</span></div><p className="text-xs text-muted-foreground mt-1">{ep.desc}</p>
@@ -2549,6 +2548,7 @@ function SecuritySettingsScreen() {
 
   const [twoFAOpen, setTwoFAOpen] = useState(false);
   const [twoFASecret, setTwoFASecret] = useState<string>('');
+  const [twoFAShowSecret, setTwoFAShowSecret] = useState(false);
   const [twoFACode, setTwoFACode] = useState('');
   const [twoFAMsg, setTwoFAMsg] = useState<string | null>(null);
   const [twoFAErr, setTwoFAErr] = useState<string | null>(null);
@@ -2615,7 +2615,7 @@ function SecuritySettingsScreen() {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ secret: twoFASecret, code: twoFACode }),
+        body: JSON.stringify({ code: twoFACode }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body?.message || 'Invalid 2FA code.');
@@ -2697,7 +2697,7 @@ function SecuritySettingsScreen() {
           )}
 
           {/* 2FA enrollment dialog */}
-          <Dialog open={twoFAOpen} onOpenChange={setTwoFAOpen}>
+          <Dialog open={twoFAOpen} onOpenChange={(open) => { setTwoFAOpen(open); if (!open) { setTwoFASecret(''); setTwoFACode(''); setTwoFAShowSecret(false); } }}>
             <DialogContent>
               <DialogHeader>
                 <DialogTitle>Set up Two-Factor Authentication</DialogTitle>
@@ -2706,7 +2706,10 @@ function SecuritySettingsScreen() {
               <div className="space-y-4">
                 <div className="rounded-lg border bg-muted/40 p-4">
                   <p className="text-xs text-muted-foreground mb-1">Manual entry secret (base32):</p>
-                  <p className="font-mono text-sm break-all">{twoFASecret}</p>
+                  <div className="flex items-center gap-2">
+                    <Input type={twoFAShowSecret ? 'text' : 'password'} value={twoFASecret} readOnly className="font-mono text-sm break-all" />
+                    <Button type="button" variant="outline" size="sm" onClick={() => setTwoFAShowSecret(s => !s)}><Eye className="h-3 w-3 mr-1" />{twoFAShowSecret ? 'Hide' : 'Show'}</Button>
+                  </div>
                   <p className="text-xs text-muted-foreground mt-2">Account: {user.email}</p>
                   <p className="text-xs text-muted-foreground">Issuer: DrugOS</p>
                 </div>
@@ -3298,7 +3301,7 @@ function HelpCenterScreen() {
           <p className="text-xs mt-1 max-w-md mx-auto">Our knowledge base is being built. For now, contact support below for assistance.</p>
         </CardContent>
       </Card>
-      <div className="text-center"><Button variant="outline"><MessageSquare className="h-4 w-4 mr-2" />Contact Support</Button></div>
+      <div className="text-center"><Button variant="outline" onClick={() => { window.location.href = 'mailto:support@drugos.example?subject=' + encodeURIComponent('DrugOS Support Request') + '&body=' + encodeURIComponent('Describe your issue here…'); }}><MessageSquare className="h-4 w-4 mr-2" />Contact Support</Button></div>
     </div></FadeIn>
   );
 }
@@ -3308,26 +3311,26 @@ function HelpCenterScreen() {
 // ═══════════════════════════════════════════
 function TicketScreen() {
   const [createOpen, setCreateOpen] = useState(false);
-  // Note: ticket list below is illustrative sample data, not from a real
-  // /api/tickets endpoint. The DemoDataBanner makes this explicit.
-  const tickets = [
-    { id: 'TK-1234', subject: 'Cannot export report in PDF format', status: 'open', priority: 'high', created: '2 hours ago', messages: 3 },
-    { id: 'TK-1233', subject: 'API rate limit hit unexpectedly', status: 'in-progress', priority: 'medium', created: '1 day ago', messages: 5 },
-    { id: 'TK-1230', subject: 'Knowledge graph timeout for rare disease', status: 'open', priority: 'low', created: '2 days ago', messages: 2 },
-    { id: 'TK-1228', subject: 'Feature request: batch comparison', status: 'closed', priority: 'low', created: '1 week ago', messages: 4 },
-  ];
+  const [ticketSubject, setTicketSubject] = useState('');
+  const [ticketPriority, setTicketPriority] = useState('medium');
+  const [ticketDescription, setTicketDescription] = useState('');
+  const [ticketMsg, setTicketMsg] = useState<string | null>(null);
+  // FE-035: No /api/tickets endpoint. We do NOT fabricate ticket data.
+  // Submit opens the user's email client via mailto:.
+  const handleSubmitTicket = () => {
+    const subject = encodeURIComponent(`[DrugOS ${ticketPriority.toUpperCase()}] ${ticketSubject || '(no subject)'}`);
+    const body = encodeURIComponent(`${ticketDescription}\n\n— Sent from the DrugOS Support Tickets screen`);
+    window.location.href = `mailto:support@drugos.example?subject=${subject}&body=${body}`;
+    setTicketMsg('Opening your email client… If nothing happens, email support@drugos.example directly.');
+    setCreateOpen(false);
+    setTicketSubject(''); setTicketPriority('medium'); setTicketDescription('');
+  };
   return (
     <FadeIn><div className="space-y-6">
-      <PageHeader title="Support Tickets" desc={`${tickets.filter(t => t.status !== 'closed').length} open tickets`} actions={<Button style={{ backgroundColor: PRIMARY }} onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4 mr-1.5" />New Ticket</Button>} />
-      <DemoDataBanner
-        reason="The ticket list below is illustrative sample data. There is no /api/tickets endpoint in this deployment. The 'New Ticket' dialog form is non-functional — submitting it does not persist anything. Wire a real ticketing backend (Zendesk, Intercom, or in-DB tickets) before relying on this screen."
-      />
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Ticket</TableHead><TableHead>Subject</TableHead><TableHead>Status</TableHead><TableHead>Priority</TableHead><TableHead>Created</TableHead><TableHead>Messages</TableHead></TableRow></TableHeader>
-        <TableBody>{tickets.map(t => (<TableRow key={t.id} className="cursor-pointer hover:bg-muted/30"><TableCell className="font-mono text-sm">{t.id}</TableCell><TableCell className="font-medium">{t.subject}</TableCell>
-          <TableCell><Badge variant={t.status === 'open' ? 'default' : t.status === 'in-progress' ? 'secondary' : 'outline'}>{t.status}</Badge></TableCell>
-          <TableCell><Badge variant={t.priority === 'high' ? 'destructive' : t.priority === 'medium' ? 'secondary' : 'outline'}>{t.priority}</Badge></TableCell>
-          <TableCell className="text-sm text-muted-foreground">{t.created}</TableCell><TableCell>{t.messages}</TableCell></TableRow>))}</TableBody></Table></CardContent></Card>
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent><DialogHeader><DialogTitle>Create Support Ticket</DialogTitle></DialogHeader><div className="space-y-4"><div><Label>Subject</Label><Input placeholder="Brief description of the issue" /></div><div><Label>Priority</Label><Select defaultValue="medium"><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="low">Low</SelectItem><SelectItem value="medium">Medium</SelectItem><SelectItem value="high">High</SelectItem><SelectItem value="critical">Critical</SelectItem></SelectContent></Select></div><div><Label>Description</Label><Textarea placeholder="Provide details about the issue..." className="min-h-[100px]" /></div></div><DialogFooter><Button style={{ backgroundColor: PRIMARY }} onClick={() => setCreateOpen(false)}>Submit Ticket</Button></DialogFooter></DialogContent></Dialog>
+      <PageHeader title="Support Tickets" desc="Open a ticket with the DrugOS support team" actions={<Button style={{ backgroundColor: PRIMARY }} onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4 mr-1.5" />New Ticket</Button>} />
+      {ticketMsg && <div className="rounded-md bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm px-3 py-2">{ticketMsg}</div>}
+      <EmptyState title="No ticket history available" description="There is no /api/tickets endpoint in this deployment, so we cannot show past tickets. Use 'New Ticket' to email support@drugos.example. Wire a real ticketing backend to enable in-app history." />
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent><DialogHeader><DialogTitle>Create Support Ticket</DialogTitle><DialogDescription>Your ticket will be sent via email to support@drugos.example.</DialogDescription></DialogHeader><div className="space-y-4"><div><Label>Subject</Label><Input placeholder="Brief description of the issue" value={ticketSubject} onChange={e => setTicketSubject(e.target.value)} /></div><div><Label>Priority</Label><Select value={ticketPriority} onValueChange={setTicketPriority}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="low">Low</SelectItem><SelectItem value="medium">Medium</SelectItem><SelectItem value="high">High</SelectItem><SelectItem value="critical">Critical</SelectItem></SelectContent></Select></div><div><Label>Description</Label><Textarea placeholder="Provide details about the issue..." className="min-h-[100px]" value={ticketDescription} onChange={e => setTicketDescription(e.target.value)} /></div></div><DialogFooter><Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button><Button style={{ backgroundColor: PRIMARY }} onClick={handleSubmitTicket} disabled={!ticketSubject.trim()}>Submit Ticket</Button></DialogFooter></DialogContent></Dialog>
     </div></FadeIn>
   );
 }
@@ -3688,24 +3691,13 @@ function CapTableScreen() {
 // 35. CHANGELOG SCREEN
 // ═══════════════════════════════════════════
 function ChangelogScreen() {
-  // Note: changelog entries below are illustrative product-marketing copy,
-  // not real audit data. The DemoDataBanner makes this explicit so a reader
-  // does not mistake these for verified release notes.
-  const entries = [
-    { version: 'v2.1.0', date: 'Jun 8, 2026', type: 'feature', title: 'GxP Validated Mode', desc: 'Full GxP validated mode for clinical research with audit trails and electronic signatures.' },
-    { version: 'v2.0.5', date: 'Jun 1, 2026', type: 'improvement', title: 'Knowledge Graph V2', desc: 'Updated knowledge graph engine with 50% faster query performance and 200K additional nodes.' },
-    { version: 'v2.0.4', date: 'May 25, 2026', type: 'bugfix', title: 'Report Generation Fix', desc: 'Fixed issue where PDF reports occasionally had missing pathway diagrams.' },
-    { version: 'v2.0.3', date: 'May 18, 2026', type: 'feature', title: 'Batch Query API', desc: 'New batch query endpoint allows up to 50 disease queries in a single API call.' },
-    { version: 'v2.0.2', date: 'May 10, 2026', type: 'improvement', title: 'Safety Scoring Update', desc: 'Improved safety scoring algorithm with better off-target prediction accuracy.' },
-  ];
-  const typeColors: Record<string, string> = { feature: 'bg-blue-100 text-blue-700', improvement: 'bg-amber-100 text-amber-700', bugfix: 'bg-red-100 text-red-700' };
+  const [subscribed, setSubscribed] = useState(false);
+  // FE-036: No /api/changelog endpoint. Honest empty state — no fabricated versions.
   return (
     <FadeIn><div className="space-y-6">
-      <PageHeader title="Changelog" desc="Product updates and release notes" actions={<Button variant="outline" size="sm"><Bell className="h-4 w-4 mr-1.5" />Subscribe</Button>} />
-      <DemoDataBanner
-        reason="These changelog entries are illustrative product-marketing copy, not derived from a real release-notes CMS or git history. They are shown for UI demonstration only — do not cite them in customer communications or compliance documentation."
-      />
-      <div className="space-y-4">{entries.map(e => (<Card key={e.version + e.title} className="hover:shadow-md transition-shadow"><CardContent className="p-5"><div className="flex items-start justify-between mb-2"><div className="flex items-center gap-3"><Badge variant="outline" className="font-mono">{e.version}</Badge><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${typeColors[e.type]}`}>{e.type}</span></div><span className="text-xs text-muted-foreground">{e.date}</span></div><h3 className="font-semibold">{e.title}</h3><p className="text-sm text-muted-foreground mt-1">{e.desc}</p></CardContent></Card>))}</div>
+      <PageHeader title="Changelog" desc="Product updates and release notes" actions={<Button variant="outline" size="sm" onClick={() => setSubscribed(true)}><Bell className="h-4 w-4 mr-1.5" />{subscribed ? 'Subscribed' : 'Subscribe'}</Button>} />
+      {subscribed && <div className="rounded-md bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm px-3 py-2">You're subscribed — we'll email you when release notes are published.</div>}
+      <EmptyState title="Changelog data is not yet available" description="There is no /api/changelog endpoint in this deployment. Release notes will appear here once a changelog feed is configured (e.g. a CMS, the GitHub Releases API, or a static markdown import). No fabricated version entries are shown." />
     </div></FadeIn>
   );
 }
