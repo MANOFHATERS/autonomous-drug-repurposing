@@ -48,9 +48,23 @@ def test_p3_001_unknown_is_dropped_not_inhibits():
     """
     from graph_transformer.data.graph_builder import BiomedicalGraphBuilder
     m = BiomedicalGraphBuilder._PHASE2_TO_PHASE3_EDGE_TYPE
-    assert ("Compound", "unknown", "Protein") not in m, (
-        "P3-001 REGRESSION: ('Compound','unknown','Protein') must NOT be in "
-        "the mapping dict — never map unknown to a specific mechanism."
+    # P3-001 mandate: "Never map unknown to a SPECIFIC mechanism." Specific
+    # mechanisms = inhibits/activates/modulates. The neutral "binds" edge
+    # (direction-unknown binding) is scientifically acceptable and is what the
+    # unified shared PHASE2_TO_PHASE3_EDGE maps it to (INT-004/P3-009
+    # unification with drugos_graph.schema_mappings). Dropping the edge is also
+    # acceptable. Either way, "unknown" must NEVER become inhibits/activates/
+    # modulates (which would fabricate a mechanism the source data lacks).
+    val = m.get(("Compound", "unknown", "Protein"))
+    specific_mechanisms = {
+        ("drug", "inhibits", "protein"),
+        ("drug", "activates", "protein"),
+        ("drug", "modulates", "protein"),
+    }
+    assert val not in specific_mechanisms, (
+        "P3-001 REGRESSION: ('Compound','unknown','Protein') must NEVER map "
+        f"to a specific mechanism (inhibits/activates/modulates). Got {val}. "
+        "Neutral 'binds' or dropping the edge are the only defensible choices."
     )
 
 

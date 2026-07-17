@@ -26,6 +26,28 @@ from . import (
     REVERSE_RELATION_MAP,
 )
 
+# INT-004 / P3-009 ROOT FIX (Team 6): import the SINGLE shared Phase 2 ->
+# Phase 3 schema mapping from drugos_graph.schema_mappings (the SAME source
+# phase2_adapter.py uses). The previous code defined _PHASE2_TO_PHASE3_NODE_TYPE
+# and _PHASE2_TO_PHASE3_EDGE_TYPE as LOCAL hardcoded dicts in the class below.
+# When TM5 expanded the shared PHASE2_TO_PHASE3_EDGE to 30 entries (P3-002:
+# added SIDER adverse events, drug-metabolism, Gene, PPI edges), this local
+# copy was NOT updated -- so `from_phase1_staged_data` silently DROPPED 19 of
+# 30 edge types, producing a DIFFERENT graph than `adapt_phase2_to_phase3`
+# (the P3-009 regression caught by test_p3_009_adapter_edge_mappings_are_identical).
+# Both adapter paths now reference the same shared mapping so they can NEVER
+# drift. This is the INT-004 consolidation that phase2_adapter.py already
+# applied but graph_builder.py had missed.
+import sys as _int004_sys_gb
+from pathlib import Path as _int004_path_gb
+_PHASE2_PKG_GB = str(_int004_path_gb(__file__).resolve().parents[2] / "phase2")
+if _PHASE2_PKG_GB not in _int004_sys_gb.path:
+    _int004_sys_gb.path.insert(0, _PHASE2_PKG_GB)
+from drugos_graph.schema_mappings import (
+    PHASE2_TO_PHASE3_EDGE as _SHARED_PHASE2_TO_PHASE3_EDGE,
+    PHASE2_TO_PHASE3_NODE as _SHARED_PHASE2_TO_PHASE3_NODE,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -1967,58 +1989,21 @@ class BiomedicalGraphBuilder:
     #   Other edges (Gene→Disease raw, Protein→Protein PPI) → skipped (not
     #   in the Phase 3 18-edge-type schema; logged at INFO for auditability)
     # ------------------------------------------------------------------
-    _PHASE2_TO_PHASE3_NODE_TYPE: Dict[str, str] = {
-        "Compound": "drug",
-        "Protein": "protein",
-        "Pathway": "pathway",
-        "Disease": "disease",
-        "ClinicalOutcome": "clinical_outcome",
-    }
-
-    _PHASE2_TO_PHASE3_EDGE_TYPE: Dict[Tuple[str, str, str], Tuple[str, str, str]] = {
-        # ─── Direct drug→protein mechanism edges (scientifically accurate) ──
-        ("Compound", "inhibits", "Protein"): ("drug", "inhibits", "protein"),
-        ("Compound", "activates", "Protein"): ("drug", "activates", "protein"),
-        # P3-001 ROOT FIX (CRITICAL, scientific): "targets" in DrugBank/ChEMBL
-        # means "binds to (direction UNKNOWN)" — NOT inhibition. The previous
-        # mapping ("targets" → "inhibits") taught the GT model that ALL
-        # drug-protein binding is inhibition, corrupting the multi-hop signal.
-        # The scientifically correct neutral edge type is "binds" (added to
-        # EDGE_TYPES in __init__.py via the P3-001/P3-002 schema fix). This
-        # preserves the binding signal AND keeps the drug connected to the
-        # protein→pathway→disease 3-hop pattern (dropping the edge would
-        # disconnect drugs whose only Phase 2 action is "targets").
-        ("Compound", "targets", "Protein"): ("drug", "binds", "protein"),
-        # P3-002 ROOT FIX (CRITICAL, scientific): allosteric modulators
-        # include BOTH PAM (positive, enhances activity) AND NAM (negative,
-        # inhibits). The previous mapping ("allosterically_modulates" →
-        # "activates") labeled ALL allosteric modulators as activators,
-        # which is wrong for NAM drugs (e.g., benzodiazepine inverse
-        # agonists). The scientifically correct neutral edge type is
-        # "modulates" (added to EDGE_TYPES in __init__.py). Future PAM/NAM
-        # disambiguation can split this into "activates"/"inhibits" by
-        # reading ChEMBL standard_type/standard_relation — but until that
-        # data is available in the Phase 2 staged edges, "modulates" is
-        # the honest representation.
-        ("Compound", "allosterically_modulates", "Protein"): ("drug", "modulates", "protein"),
-        # NOTE: ("Compound", "unknown", "Protein") is INTENTIONALLY ABSENT
-        # from this dict. Per the P3-001 issue mandate: "Never map unknown
-        # to a specific mechanism." Unknown-direction edges are DROPPED at
-        # the Phase 2→3 boundary (the lookup returns None and the edge is
-        # skipped with an INFO log). This is the only scientifically
-        # defensible choice — mapping unknown to inhibits/activates/binds
-        # would fabricate a mechanism the source data does not support.
-        ("Compound", "treats", "Disease"): ("drug", "treats", "disease"),
-        ("Compound", "tested_for", "Disease"): ("drug", "tested_for", "disease"),
-        ("Compound", "causes", "ClinicalOutcome"): ("drug", "causes", "clinical_outcome"),
-        # P3-009 ROOT FIX (unification): also accept DrugBank's
-        # has_clinical_outcome relation (the phase2_adapter path uses this
-        # relation name). Both paths now produce identical Phase 3 graphs.
-        ("Compound", "has_clinical_outcome", "ClinicalOutcome"): ("drug", "causes", "clinical_outcome"),
-        ("Protein", "part_of", "Pathway"): ("protein", "part_of", "pathway"),
-        ("Protein", "participates_in", "Pathway"): ("protein", "part_of", "pathway"),
-        ("Pathway", "disrupted_in", "Disease"): ("pathway", "disrupted_in", "disease"),
-    }
+    # INT-004 / P3-009 ROOT FIX (Team 6): these class attributes now
+    # reference the SINGLE shared mapping imported at module top
+    # (_SHARED_PHASE2_TO_PHASE3_NODE / _EDGE from drugos_graph.schema_mappings).
+    # The previous LOCAL hardcoded dicts had only 5 node types and 11 edge
+    # types, while the shared mapping (maintained by TM5) has 7 node types
+    # (adds Gene/MedDRA_Term -> None = dropped) and 30 edge types (adds
+    # SIDER adverse events, drug-metabolism, Gene, PPI edges). The local
+    # copies DIVERGED from the shared mapping, so from_phase1_staged_data
+    # silently DROPPED 19 of 30 edge types -- producing a DIFFERENT graph
+    # than adapt_phase2_to_phase3 (the P3-009 regression). Both adapter
+    # paths must produce IDENTICAL Phase 3 graphs from the same Phase 2
+    # data. dict() shallow-copies (values are immutable tuples/strings)
+    # so the class attribute is independent of the shared mapping object.
+    _PHASE2_TO_PHASE3_NODE_TYPE: Dict[str, str] = dict(_SHARED_PHASE2_TO_PHASE3_NODE)
+    _PHASE2_TO_PHASE3_EDGE_TYPE: Dict[Tuple[str, str, str], Tuple[str, str, str]] = dict(_SHARED_PHASE2_TO_PHASE3_EDGE)
 
     @staticmethod
     def from_phase1_staged_data(

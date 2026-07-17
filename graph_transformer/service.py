@@ -853,7 +853,11 @@ def top_k(k: int = 10) -> Dict[str, Any]:
     return {
         "predictions": predictions,
         "source": "gt_checkpoint",
-        "modelVersion": "gt_v110",
+        # SH-006 ROOT FIX (Team 6): /top-k previously returned "gt_v110" while
+        # /predict returned "gt_v113" — version-string drift between two
+        # endpoints in the same service. Both must report the SAME model
+        # version so frontend contract validation and monitoring are consistent.
+        "modelVersion": "gt_v113",
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "count": len(predictions),
         "checkpointPath": state.get("checkpoint_path"),
