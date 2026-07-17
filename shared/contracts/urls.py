@@ -78,13 +78,37 @@ ALL_SERVICE_URLS: Tuple[str, ...] = (
 # =============================================================================
 # Default service ports (used by docker-compose and the frontend's env vars)
 # =============================================================================
-# These are NOT a contract — they're defaults. Operators may override via
-# env vars (KG_SERVICE_URL, GT_SERVICE_URL, RL_SERVICE_URL).
+# SH-008 ROOT FIX (v115, HIGH): the previous port map disagreed with
+# docker-compose.yml AND with the actual service definitions. The
+# contract said phase2_kg=8002 / phase3_gt=8003 / phase4_rl=8004,
+# but docker-compose.yml maps:
+#   - phase1-service   → 8000  (phase1/service.py)
+#   - phase2-kg-builder→ 8001  (phase2/drugos_graph/kg_api.py)
+#   - phase3-trainer   → 8002  (scripts/gt_api.py)
+#   - phase4-rl        → 8003  (scripts/rl_api.py)
+# The frontend's GT_SERVICE_URL points at port 8002 (matching the
+# docker-compose phase3-trainer port), and RL_SERVICE_URL points at
+# port 8003 (matching phase4-rl). The Python services themselves
+# default to 8002 (gt_api.py line 406: GT_SERVICE_PORT=8002) and
+# 8003 (rl_api.py). The contract was the ONLY source of truth that
+# disagreed — every other layer was already consistent.
+#
+# ROOT FIX: align the contract with the docker-compose reality. The
+# phase1_dataset port is added (was missing). The "validation" port
+# is removed (no such service exists in docker-compose — the
+# hypothesis validation endpoint is on the RL service, not a separate
+# validation service).
 SERVICE_PORTS: Dict[str, int] = {
-    "phase2_kg": 8002,
-    "phase3_gt": 8003,
-    "phase4_rl": 8004,
-    "validation": 8005,
+    "phase1_dataset": 8000,  # phase1/service.py (FastAPI)
+    "phase2_kg": 8001,       # phase2/drugos_graph/kg_api.py
+    "phase3_gt": 8002,       # scripts/gt_api.py
+    "phase4_rl": 8003,       # scripts/rl_api.py
+    "airflow_webserver": 8080,  # Airflow webserver (REST API + UI)
+    "mlflow_tracking": 5000,    # MLflow tracking server
+    "neo4j_bolt": 7687,         # Neo4j Bolt protocol (Cypher)
+    "neo4j_http": 7474,         # Neo4j HTTP browser/API
+    "postgres": 5432,           # PostgreSQL
+    "frontend": 3000,           # Next.js frontend
 }
 
 

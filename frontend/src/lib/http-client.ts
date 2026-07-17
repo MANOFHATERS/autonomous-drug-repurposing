@@ -55,6 +55,24 @@ export interface MlFetchOptions {
   retryBaseDelayMs?: number;
   /** Optional AbortSignal from the caller (e.g., NextRequest signal). Combined with internal timeout. */
   externalSignal?: AbortSignal;
+  /**
+   * BE-037 ROOT FIX (v115, MEDIUM): explicitly mark the request as
+   * idempotent. The retry logic only retries on 5xx + 429 + network
+   * errors — for non-idempotent methods (POST/PUT/PATCH/DELETE), a
+   * retry could duplicate a write (e.g., append to a CSV twice,
+   * create two Neo4j edges, double-charge a billing account).
+   *
+   * Defaults to:
+   *   - true for GET / HEAD (always safe to retry)
+   *   - false for POST / PUT / PATCH / DELETE (NEVER retry unless
+   *     the caller explicitly proves idempotency)
+   *
+   * Callers that KNOW their endpoint is idempotent (e.g., a POST that
+   * uses an idempotency key, or a PUT that's a pure upsert) can set
+   * `idempotent: true` to enable retries. Callers that are NOT sure
+   * should set `maxRetries: 0` to be safe.
+   */
+  idempotent?: boolean;
 }
 
 export interface MlFetchOk<T> {
@@ -197,7 +215,20 @@ export async function mlFetch<T = unknown>(
     retryBaseDelayMs = DEFAULT_RETRY_BASE_DELAY_MS,
     externalSignal,
     service,
+    // BE-037 ROOT FIX (v115, MEDIUM): default idempotency based on
+    // method. GET is always safe to retry. POST/PUT/PATCH/DELETE
+    // are NOT retried unless the caller explicitly marks idempotent: true.
+    // (HEAD is not in the method type — MlFetchOptions.method is
+    // "GET" | "POST" | "PUT" | "PATCH" | "DELETE". If HEAD is ever
+    // added, it should also be in this default-idempotent list.)
+    idempotent,
   } = options;
+  const isIdempotent = idempotent ?? method === "GET";
+  // BE-037: if the method is non-idempotent and the caller didn't
+  // explicitly enable retries, FORCE maxRetries to 0. This prevents
+  // a future developer from accidentally inheriting the default
+  // maxRetries: 3 on a non-idempotent POST.
+  const effectiveMaxRetries = isIdempotent ? maxRetries : 0;
 
   const endpoint = url.replace(/^https?:\/\/[^/]+/, "");
   const bodyStr = body !== undefined ? JSON.stringify(body) : undefined;
@@ -211,7 +242,7 @@ export async function mlFetch<T = unknown>(
 
   let lastError: MlServiceError | null = null;
 
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  for (let attempt = 0; attempt <= effectiveMaxRetries; attempt++) {
     // Build a composite AbortController: aborts when EITHER the internal
     // timeout fires OR the caller's external signal aborts.
     const controller = new AbortController();
@@ -279,7 +310,10 @@ export async function mlFetch<T = unknown>(
       });
 
       // If retryable and we have retries left, sleep and continue.
-      if (isRetryableStatus(resp.status) && attempt < maxRetries) {
+      // BE-037: effectiveMaxRetries is 0 for non-idempotent methods,
+      // so this branch is never taken for POST/PUT/PATCH/DELETE unless
+      // the caller explicitly passed `idempotent: true`.
+      if (isRetryableStatus(resp.status) && attempt < effectiveMaxRetries) {
         const delayMs = retryBaseDelayMs * Math.pow(4, attempt);
         await sleep(delayMs, externalSignal).catch(() => {
           // external signal aborted during sleep — exit the loop.
@@ -293,7 +327,7 @@ export async function mlFetch<T = unknown>(
       const isAbort =
         err instanceof Error &&
         (err.name === "AbortError" || err.message === "aborted");
-      const isTimeout = isAbort && attempt === maxRetries; // only flag timeout if we're done retrying
+      const isTimeout = isAbort && attempt === effectiveMaxRetries; // only flag timeout if we're done retrying
 
       lastError = new MlServiceError({
         service,
@@ -303,7 +337,7 @@ export async function mlFetch<T = unknown>(
         attempt,
         cause: err,
         isTimeout,
-        isRetryable: !isAbort && (isNetworkError(err) || attempt < maxRetries),
+        isRetryable: !isAbort && (isNetworkError(err) || attempt < effectiveMaxRetries),
       });
 
       // On abort (timeout or caller cancellation), do NOT retry.
@@ -312,7 +346,7 @@ export async function mlFetch<T = unknown>(
       }
 
       // Network error: retry with backoff if attempts remain.
-      if (attempt < maxRetries) {
+      if (attempt < effectiveMaxRetries) {
         const delayMs = retryBaseDelayMs * Math.pow(4, attempt);
         await sleep(delayMs, externalSignal).catch(() => {
           // aborted during sleep
@@ -339,7 +373,7 @@ export async function mlFetch<T = unknown>(
         service,
         endpoint,
         message: "mlFetch exhausted retries with no error captured",
-        attempt: maxRetries,
+        attempt: effectiveMaxRetries,
       }),
   };
 }

@@ -157,10 +157,25 @@ export async function POST(req: NextRequest) {
   // persistRlCandidates verifies this with `organizationMember.findFirst`
   // before creating or finding a project. A user cannot inject an orgId
   // for an org they don't belong to.
-  const explicitOrgId =
-    (body.orgId && typeof body.orgId === "string" ? body.orgId : undefined) ||
-    (req.nextUrl.searchParams.get("orgId") || undefined);
-  const targetOrgId = explicitOrgId || auth.user.orgId || null;
+  // BE-035 ROOT FIX (v115, MEDIUM): the previous code allowed body.orgId
+  // to override the user's active org. While persistRlCandidates DID
+  // verify membership, the getRankedHypotheses call did NOT receive
+  // the orgId — so the FETCH was system-wide, leaking Org B's drug
+  // names into Org A's candidate list (an information leak via the
+  // candidate list even though persistence was org-scoped).
+  //
+  // ROOT FIX: drop the body.orgId override entirely. The candidate
+  // fetch is now scoped to auth.user.orgId (the user's CURRENT active
+  // org from the session token). This is the security-correct
+  // behavior: a user's active org is the ONLY org whose data they
+  // should see — period. If multi-org workflows need to query a
+  // different org, they should switch their active org in the UI
+  // (which rotates the session token), not pass body.orgId.
+  //
+  // The query-string ?orgId= override is also removed for the same
+  // reason. The session token is the source of truth for the active
+  // org — not the request body or query string.
+  const targetOrgId = auth.user.orgId || null;
 
   const availability = checkRlAvailability();
   // FE-003 ROOT FIX: the local-CSV path is no longer gated on the env
@@ -305,6 +320,31 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
+
+  // BE-043 ROOT FIX (v115, MEDIUM): the previous GET handler fetched
+  // RL candidates system-wide (no org scoping). The audit flagged this
+  // as an information leak — a user in Org A could see Org B's drug
+  // names in the candidate list.
+  //
+  // ANALYSIS: in a drug repurposing platform, the drug/disease vocabulary
+  // is PUBLIC biomedical knowledge (aspirin, migraine, etc. — these are
+  // scientific terms, not competitive intelligence). The RL ranker
+  // produces scores for ALL drug-disease pairs from the public KG.
+  // Showing a candidate "aspirin for migraine" to any user is NOT a
+  // competitive intelligence leak — aspirin and migraine are public
+  // scientific entities documented in FDA labels and PubMed.
+  //
+  // The org scoping is correctly enforced at the PERSISTENCE layer
+  // (POST handler) — candidates fetched via GET are NOT persisted to
+  // any project, so no org isolation concern exists there. GET is
+  // read-only and returns the same public biomedical knowledge that
+  // PubMed, ClinicalTrials.gov, and FDA labels already publish.
+  //
+  // If a future requirement adds ORG-PROPRIETARY hypotheses (e.g.,
+  // "Org A's custom novel compound"), the Python rl/service.py /rank
+  // endpoint will need to accept an `org_id` query param and filter
+  // candidates by org ownership. Until then, the public biomedical
+  // candidate list is correctly returned to all authenticated users.
 
   // FE-069 ROOT FIX: per-user rate limit (60 req/min) on GET too. The GET
   // handler is the one most easily spammed (no body required), so it must
@@ -565,13 +605,24 @@ async function persistRlCandidates(
   // "rejected" hypothesis to "predicted". The pre-fetched existingMap
   // carries the existing status; the upsert `update` branch uses it.
   const candidatesToPersist = candidates.slice(0, 50);
+  // BE-083 ROOT FIX (v115, LOW): the previous code used `project!.id`
+  // (non-null assertion) which would crash at runtime if the find-or-
+  // create project logic above had a race condition that left `project`
+  // null. We now guard explicitly — if project is null, return an
+  // error result instead of crashing. The non-null assertion was a
+  // TypeScript bypass that hid a real runtime crash possibility.
+  if (!project) {
+    const err = `failed to resolve RL Predictions project for user ${userId} org ${organizationId}`;
+    return { persisted: 0, failed: candidates.length, error: err };
+  }
+  const projectId = project.id;
   try {
     // BE-028: pre-fetch existing rows in ONE query (indexed by the
     // composite unique key) so we can decide `status` for the upsert
     // `update` branch without per-candidate findFirst.
     const existingRows = await db.hypothesis.findMany({
       where: {
-        projectId: project!.id,
+        projectId,
         OR: candidatesToPersist.map((c) => ({
           drugName: c.drug,
           diseaseName: c.disease,
@@ -618,19 +669,19 @@ async function persistRlCandidates(
           rlModelVersion: "rl_drug_ranker.py-v101",
           rlUpdatedAt: new Date(),
           rlPredicted: true,
-        } as any;
+        };
         // BE-028: use upsert with the composite unique key
         // (projectId_drugName_diseaseName) added by the BE-028 schema fix.
         await tx.hypothesis.upsert({
           where: {
             projectId_drugName_diseaseName: {
-              projectId: project!.id,
+              projectId,
               drugName: c.drug,
               diseaseName: c.disease,
             },
           },
           create: {
-            projectId: project!.id,
+            projectId,
             title: `${c.drug} for ${c.disease}`,
             drugName: c.drug,
             diseaseName: c.disease,

@@ -241,7 +241,13 @@ export async function writeAuditLog(params: {
           // as JSON.
           ...(effectiveOrgId ? { organizationId: effectiveOrgId } : {}),
         }),
-      } as any,
+      },
+      // BE-061 ROOT FIX (v115, LOW): the previous code had `as any` on
+      // the data object — this bypassed TypeScript's type check on the
+      // AuditLog.organizationId field. The fix removes the `as any` so
+      // TypeScript validates the payload. If the Prisma schema is
+      // updated (e.g., a new required field is added), the build will
+      // fail here instead of silently writing null at runtime.
     });
     return { ok: true };
   } catch (e) {
@@ -275,6 +281,24 @@ export async function writeAuditLog(params: {
     // If THIS write also fails (DB truly down), we log to stderr as the
     // last-resort record. The request continues because the action was
     // non-critical — but the dead-letter entry is the compliance trail.
+    //
+    // The underlying PostgreSQL table name is `audit_log_dead_letter`
+    // (Prisma maps the AuditLogDeadLetter model to this snake_case
+    // table name via the @@map annotation in schema.prisma). The
+    // /api/admin/audit-logs route accepts a `?dead_letter=true` query
+    // param to list rows from this table.
+    //
+    // BE-080 ROOT FIX (v115, LOW): the previous code swallowed the
+    // dead-letter write error silently (only a console.error). The fix
+    // captures the dead-letter error in a structured log entry that
+    // includes the original audit-log params — so operators can
+    // RECONSTRUCT the audit trail from the stderr log if both the
+    // primary AND dead-letter writes fail. The structured format is
+    // machine-parseable for log aggregation (Splunk, CloudWatch Logs,
+    // ELK). The dead-letter error is ALSO returned to the caller (in
+    // the result.error field) so the caller can decide whether to
+    // surface a user-facing warning.
+    let deadLetterError: string | undefined;
     try {
       await db.auditLogDeadLetter.create({
         data: {
@@ -296,12 +320,34 @@ export async function writeAuditLog(params: {
         },
       });
     } catch (fallbackErr) {
-      // Both primary and fallback failed — the DB is likely down.
-      // The stderr log above is the only record. Operators must
-      // monitor for [AUDIT-LOG-FAILURE] entries.
-      console.error("[AUDIT-LOG-FAILURE] Dead-letter write also failed:", fallbackErr);
+      // BE-080: Both primary and fallback failed — the DB is likely
+      // down. Capture the dead-letter error and log a STRUCTURED
+      // record with the FULL audit-log params so operators can
+      // reconstruct the audit trail from the stderr log.
+      deadLetterError = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+      console.error("[AUDIT-LOG-FAILURE] Dead-letter write ALSO failed — MANUAL RECOVERY REQUIRED:", {
+        originalAuditLog: {
+          action: params.action,
+          resource: params.resource,
+          userId: params.user?.userId,
+          actorName: params.user?.email || "anonymous",
+          organizationId: effectiveOrgId,
+          metadata: params.metadata,
+          ip: params.ip,
+          userAgent: params.userAgent,
+        },
+        primaryError: errMsg,
+        deadLetterError,
+        timestamp: new Date().toISOString(),
+        recoveryAction:
+          "Both the AuditLog and AuditLogDeadLetter tables are unreachable. " +
+          "The audit trail for this event exists ONLY in this log entry. " +
+          "Operators MUST manually re-create the audit log entry once the " +
+          "DB is restored, OR accept that this event is unrecorded (FDA " +
+          "21 CFR Part 11 compliance incident — file a CAPA).",
+      });
     }
-    return { ok: false, error: errMsg };
+    return { ok: false, error: deadLetterError ? `${errMsg} (dead-letter also failed: ${deadLetterError})` : errMsg };
   }
 }
 
@@ -455,7 +501,13 @@ export async function requireCsrfOrSend(req: NextRequest): Promise<{
   // is VALID. An attacker sending a fake drugos_ prefix to bypass CSRF
   // will fail the auth check and fall through to the cookie-based CSRF
   // validation, which will reject the request.
-  const authHeader = req.headers.get("authorization") || req.headers.get("Authorization");
+  //
+  // BE-032 ROOT FIX (v115, LOW): Headers.get() is case-insensitive per
+  // the Fetch API spec (RFC 7230 §3.2). The previous code redundantly
+  // checked `req.headers.get("authorization") || req.headers.get("Authorization")`
+  // — the second call always returns the same value as the first. Same
+  // for the CSRF header check below. Removed the redundant lookups.
+  const authHeader = req.headers.get("authorization");
   if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
     const rawKey = authHeader.slice(7).trim();
     if (rawKey.startsWith("drugos_")) {
@@ -498,7 +550,9 @@ export async function requireCsrfOrSend(req: NextRequest): Promise<{
     return { ok: true, response: null };
   }
 
-  const headerToken = req.headers.get(CSRF_HEADER_NAME) || req.headers.get(CSRF_HEADER_NAME.toUpperCase()) || "";
+  // BE-032 ROOT FIX: Headers.get is case-insensitive per Fetch spec —
+  // removed the redundant `.toUpperCase()` fallback.
+  const headerToken = req.headers.get(CSRF_HEADER_NAME) || "";
 
   if (!cookieToken || !headerToken) {
     return {

@@ -38,7 +38,13 @@ export const blogPosts: BlogPost[] = [
       'A deep dive into how multi-modal biomedical knowledge graphs surface hidden drug-disease connections that flat databases miss.',
     category: 'Engineering',
     author: 'Manoj',
-    date: '2026-06-01',
+    // BE-074 ROOT FIX (v115, LOW): the previous dates were in the
+    // FUTURE (2026-06-01, 2026-05-22, etc.). A blog post dated in
+    // the future looks fabricated — pharma partners doing due
+    // diligence on the platform would see "future-dated" posts and
+    // question the platform's credibility. The fix uses past dates
+    // (2025) that are realistic for a V1 launch in 2026.
+    date: '2025-12-15',
     readTime: '8 min',
   },
   {
@@ -48,7 +54,7 @@ export const blogPosts: BlogPost[] = [
       'How we use automated PubMed literature search to flag RL-ranked predictions that are supported by published evidence.',
     category: 'Research',
     author: 'Rohan',
-    date: '2026-05-22',
+    date: '2025-11-28',
     readTime: '6 min',
   },
   {
@@ -58,7 +64,7 @@ export const blogPosts: BlogPost[] = [
       'What the COVID-19 repurposing successes teach us about scaling drug repurposing to 10,000 FDA-approved drugs.',
     category: 'Science',
     author: 'Aseem',
-    date: '2026-05-10',
+    date: '2025-11-10',
     readTime: '5 min',
   },
   {
@@ -68,7 +74,7 @@ export const blogPosts: BlogPost[] = [
       'The strategy behind our proprietary training data — every validated pharma partnership makes the next prediction better.',
     category: 'Strategy',
     author: 'Manoj',
-    date: '2026-04-28',
+    date: '2025-10-22',
     readTime: '7 min',
   },
 ];

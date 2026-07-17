@@ -96,7 +96,7 @@ interface PingResult {
   reason?: string;
 }
 
-async function pingHttp(url: string, opts: { timeoutMs?: number; method?: string; headers?: Record<string, string> } = {}): Promise<PingResult> {
+async function pingHttp(url: string, opts: { timeoutMs?: number; method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<PingResult> {
   const timeoutMs = opts.timeoutMs ?? 2000;
   const start = Date.now();
   const controller = new AbortController();
@@ -105,16 +105,31 @@ async function pingHttp(url: string, opts: { timeoutMs?: number; method?: string
     const res = await fetch(url, {
       method: opts.method ?? "GET",
       headers: opts.headers,
+      body: opts.body,
       signal: controller.signal,
       // Don't follow redirects — a misconfigured service that 302s to
       // an internal admin page should show as "degraded", not "available".
       redirect: "manual",
     });
     const latencyMs = Date.now() - start;
-    // 2xx and 3xx are "ok" for a ping (401/403 mean the service is up
-    // but requires auth — still "available" for our purposes).
-    const ok = res.status < 500;
-    return { ok, status: res.status, latencyMs, reason: ok ? undefined : `HTTP ${res.status}` };
+    // BE-024 ROOT FIX (v115, MEDIUM): the previous `ok = res.status < 500`
+    // treated 404 (MLflow's missing /health endpoint) and 401 (Airflow's
+    // auth-gated /api/v1/health) as "available". For liveness probes that
+    // hit known-correct endpoints, ONLY 2xx should count as "available".
+    // 3xx (redirect) is "degraded", 4xx is "degraded" (the service is up
+    // but the endpoint is misconfigured), 5xx is "unavailable".
+    //
+    // Callers that intentionally accept 401/404 (e.g. Neo4j auth probe)
+    // can check `result.status` directly. The `ok` flag here is the
+    // strict 2xx-only check.
+    const ok = res.status >= 200 && res.status < 300;
+    const degraded = res.status >= 300 && res.status < 500;
+    return {
+      ok,
+      status: res.status,
+      latencyMs,
+      reason: ok ? undefined : degraded ? `HTTP ${res.status} (degraded)` : `HTTP ${res.status}`,
+    };
   } catch (e) {
     const latencyMs = Date.now() - start;
     const msg = e instanceof Error ? e.message : String(e);
@@ -180,28 +195,140 @@ async function checkPostgres(): Promise<ServiceHealth> {
  * SEE this in the console to know the service isn't wired up yet.
  */
 async function checkNeo4j(): Promise<ServiceHealth> {
-  const url = process.env.NEO4J_URL || process.env.KG_SERVICE_URL;
+  // BE-023 ROOT FIX (v115, HIGH): the previous code fell back to
+  // KG_SERVICE_URL when NEO4J_URL was unset, then pinged the KG
+  // service's root URL — NOT Neo4j itself. The KG service returns 200
+  // on its root endpoint even when Neo4j is down (it has an in-memory
+  // bridge fallback per the Phase 2 audit). So if Neo4j crashed, this
+  // check reported "available: true" — a false negative that hid
+  // outages from operators monitoring /api/system/status.
+  //
+  // ROOT FIX:
+  //   1. NEVER fall back to KG_SERVICE_URL. If NEO4J_URL is unset,
+  //      report `available: false` with a clear reason. The operator
+  //      must explicitly configure the Neo4j endpoint — guessing
+  //      wrong (by pinging the KG service instead) is worse than
+  //      reporting "not configured".
+  //   2. Ping Neo4j's HTTP transaction endpoint
+  //      (/db/neo4j/tx/commit) with a trivial Cypher query
+  //      (RETURN 1). This verifies Neo4j is reachable AND can
+  //      execute queries — not just that the HTTP server is up.
+  //   3. Send basic auth (NEO4J_USERNAME / NEO4J_PASSWORD) since
+  //      /db/neo4j/tx/commit requires authentication.
+  const url = process.env.NEO4J_URL;
   if (!url) {
     return {
       service: "Neo4j (Knowledge Graph — Phase 2)",
       available: false,
       status: "unavailable",
-      reason: "NEO4J_URL is not configured. The knowledge graph service is required for Phase 2 (multi-hop biomedical queries).",
+      reason: "NEO4J_URL is not configured. The Neo4j HTTP endpoint (default http://neo4j:7474) MUST be set explicitly — this check no longer falls back to KG_SERVICE_URL because that would ping the Python KG service, not Neo4j itself (BE-023 root fix).",
       critical: true,
     };
   }
-  // Neo4j's HTTP endpoint responds 200 on GET / with no auth (it just
-  // returns the service banner). For a deeper check, we'd use the
-  // Bolt protocol, but HTTP is sufficient for a health ping.
-  const pingUrl = url.replace(/\/$/, "") + "/";
-  const result = await pingHttp(pingUrl);
+
+  // Build the transaction URL. Neo4j's HTTP API is at /db/{database}/tx/commit.
+  // The default database is "neo4j". We POST a trivial Cypher query
+  // (RETURN 1) and check the response status.
+  const txUrl = url.replace(/\/$/, "") + "/db/neo4j/tx/commit";
+
+  // Basic auth header (Neo4j requires auth on /db/*/tx/commit).
+  const username = process.env.NEO4J_USERNAME || "neo4j";
+  const password = process.env.NEO4J_PASSWORD || "";
+  if (!password) {
+    // Without a password, the auth check will fail with 401. Report
+    // this as a configuration error — the operator needs to set
+    // NEO4J_PASSWORD in the env.
+    return {
+      service: "Neo4j (Knowledge Graph — Phase 2)",
+      available: false,
+      status: "unavailable",
+      reason: "NEO4J_PASSWORD is not configured. Neo4j's /db/neo4j/tx/commit endpoint requires authentication — set NEO4J_USERNAME and NEO4J_PASSWORD.",
+      critical: true,
+    };
+  }
+  const basicAuth = Buffer.from(`${username}:${password}`).toString("base64");
+
+  const result = await pingHttp(txUrl, {
+    method: "POST",
+    timeoutMs: 3000,
+    headers: {
+      Authorization: `Basic ${basicAuth}`,
+      "Content-Type": "application/json",
+    },
+    // Neo4j HTTP transaction endpoint requires a JSON body with a
+    // `statements` array. We send a trivial `RETURN 1` query — the
+    // equivalent of SQL's `SELECT 1`. The response is 200 if Neo4j
+    // is up and the query executes, 401 if auth failed, 5xx if Neo4j
+    // is broken.
+    body: JSON.stringify({
+      statements: [{ statement: "RETURN 1" }],
+    }),
+  });
+
+  // Neo4j's /tx/commit returns:
+  //   - 200 with { results: [...], errors: [] } on a successful query
+  //   - 200 with { errors: [{code, message}] } on a Cypher syntax error
+  //     (still means Neo4j is up)
+  //   - 401 if auth failed
+  //   - 404 if the database doesn't exist
+  //   - 5xx if Neo4j is broken
+  //
+  // For a liveness probe, ANY 2xx response means Neo4j is up and
+  // accepting queries. A 401 means the credentials are wrong —
+  // report as "degraded" (the service is up but we can't use it).
+  // A 404 means the database name is wrong — also "degraded".
+  // A 5xx means Neo4j is broken — "unavailable".
+  const ok = result.status !== undefined && result.status >= 200 && result.status < 300;
+  const degraded = result.status === 401 || result.status === 403 || result.status === 404;
+
   return {
     service: "Neo4j (Knowledge Graph — Phase 2)",
+    available: ok,
+    degraded,
+    status: ok ? "available" : degraded ? "degraded" : "unavailable",
+    reason: ok
+      ? undefined
+      : result.status === 401 || result.status === 403
+        ? `Neo4j auth failed (HTTP ${result.status}) — check NEO4J_USERNAME / NEO4J_PASSWORD.`
+        : result.status === 404
+          ? "Neo4j database 'neo4j' not found — the database may not be initialized."
+          : result.reason,
+    latencyMs: result.latencyMs,
+    critical: true,
+  };
+}
+
+/**
+ * BE-023 ROOT FIX (v115, HIGH): separate health check for the Phase 2
+ * KG service (the Python FastAPI service at KG_SERVICE_URL). This is
+ * DISTINCT from Neo4j — the KG service is a Python wrapper that
+ * queries Neo4j. A healthy KG service + healthy Neo4j = fully
+ * operational Phase 2. A healthy KG service + broken Neo4j = the KG
+ * service falls back to its in-memory bridge (degraded). A broken KG
+ * service = the frontend's /api/knowledge-graph route returns 502.
+ *
+ * This check was previously conflated with checkNeo4j — they are now
+ * separate so operators can see WHICH component is failing.
+ */
+async function checkKgService(): Promise<ServiceHealth> {
+  const url = process.env.KG_SERVICE_URL;
+  if (!url) {
+    return {
+      service: "KG Service (Phase 2 Python wrapper)",
+      available: false,
+      status: "unavailable",
+      reason: "KG_SERVICE_URL is not configured. The Phase 2 Python KG service wraps Neo4j and exposes /kg/stats, /kg/explore.",
+    };
+  }
+  // Ping the /health endpoint (registered by phase2/service.py).
+  const pingUrl = url.replace(/\/$/, "") + "/health";
+  const result = await pingHttp(pingUrl);
+  return {
+    service: "KG Service (Phase 2 Python wrapper)",
     available: result.ok,
     status: result.ok ? "available" : "unavailable",
     reason: result.reason,
     latencyMs: result.latencyMs,
-    critical: true,
   };
 }
 
@@ -224,17 +351,38 @@ async function checkMlflow(): Promise<ServiceHealth> {
       reason: "MLFLOW_TRACKING_URL is not configured. Experiment tracking is offline; predictions still serve from cached models.",
     };
   }
-  const pingUrl = url.replace(/\/$/, "") + "/health";
-  const result = await pingHttp(pingUrl);
-  // `degraded` is true when the ping succeeded but the HTTP status was
-  // 3xx+ (the service is up but not 100% healthy). Use Boolean() to
-  // coerce the `0 | undefined` that the `&&` chain produces.
-  const degraded = Boolean(result.ok && result.status && result.status >= 300);
+  // BE-024 ROOT FIX (v115, MEDIUM): MLflow's tracking server does NOT
+  // expose a /health endpoint by default. The previous code pinged
+  // /health, which returned 404. With the previous `ok = status < 500`
+  // logic, a 404 was treated as "available" — a false positive. With
+  // the new strict 2xx logic, a 404 is "degraded".
+  //
+  // The CORRECT endpoint to ping is the MLflow REST API's
+  // /api/2.0/mlflow/experiments/search endpoint. It returns 200 if
+  // MLflow is up and the API is responding. We send a POST with an
+  // empty body (the API accepts a max_results param but it's optional).
+  //
+  // Reference: https://mlflow.org/docs/latest/rest-api.html
+  const pingUrl = url.replace(/\/$/, "") + "/api/2.0/mlflow/experiments/search";
+  const result = await pingHttp(pingUrl, {
+    method: "POST",
+    timeoutMs: 3000,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ max_results: 1 }),
+  });
+  // MLflow returns 200 on success, 401 if auth is required (the
+  // docker-compose setup uses auth — operators with auth configured
+  // should pass MLFLOW_TRACKING_USERNAME / PASSWORD via env vars,
+  // which we don't here because the healthcheck should work without
+  // auth). A 401 means MLflow is up but auth-gated — degraded.
+  // A 404 means the API version is wrong — degraded. A 5xx means
+  // MLflow is broken — unavailable.
+  const degraded = result.status === 401 || result.status === 403 || result.status === 404;
   return {
     service: "MLflow (Experiment Tracking)",
     available: result.ok,
     degraded,
-    status: result.ok ? (degraded ? "degraded" : "available") : "unavailable",
+    status: result.ok ? "available" : degraded ? "degraded" : "unavailable",
     reason: result.reason,
     latencyMs: result.latencyMs,
   };
@@ -250,23 +398,42 @@ async function checkMlflow(): Promise<ServiceHealth> {
  * queryable. So Airflow is NOT critical (degraded, not down).
  */
 async function checkAirflow(): Promise<ServiceHealth> {
-  const url = process.env.DATASET_SERVICE_URL || process.env.AIRFLOW_URL;
+  const url = process.env.AIRFLOW_URL || process.env.DATASET_SERVICE_URL;
   if (!url) {
     return {
       service: "Apache Airflow (Dataset Pipeline — Phase 1)",
       available: false,
       status: "unavailable",
-      reason: "DATASET_SERVICE_URL is not configured. The dataset pipeline cannot refresh from the 7 biomedical sources.",
+      reason: "AIRFLOW_URL is not configured. The dataset pipeline cannot refresh from the 7 biomedical sources.",
     };
   }
-  // Airflow's REST API responds 200 on GET /api/v1/health with no auth
-  // (if the Airflow deployment follows the default config).
-  const pingUrl = url.replace(/\/$/, "") + "/api/v1/health";
-  const result = await pingHttp(pingUrl);
+  // BE-024 ROOT FIX (v115, MEDIUM): Airflow 2.x+ moved /api/v1/health
+  // behind auth. The previous code pinged /api/v1/health, which returned
+  // 401 (auth required). With the previous `ok = status < 500` logic,
+  // a 401 was treated as "available" — a false positive. With the new
+  // strict 2xx logic, a 401 is "degraded".
+  //
+  // The CORRECT unauthenticated endpoint is /health (no /api/v1/
+  // prefix). Airflow 2.x exposes this on the webserver for container
+  // healthchecks — it does not require auth and returns 200 with a
+  // JSON status. Reference: https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check.html
+  //
+  // NOTE: this is the Airflow webserver URL (default port 8080), NOT
+  // the Phase 1 dataset service URL (port 8000). The env var resolution
+  // order is now AIRFLOW_URL first, DATASET_SERVICE_URL second — the
+  // previous order was reversed (and DATASET_SERVICE_URL points at
+  // phase1/service.py, NOT Airflow).
+  const pingUrl = url.replace(/\/$/, "") + "/health";
+  const result = await pingHttp(pingUrl, { timeoutMs: 3000 });
+  // Airflow /health returns 200 on success, 401 if auth is required
+  // (older config), 404 if the endpoint doesn't exist (very old
+  // Airflow), 5xx if Airflow is broken.
+  const degraded = result.status === 401 || result.status === 403 || result.status === 404;
   return {
     service: "Apache Airflow (Dataset Pipeline — Phase 1)",
     available: result.ok,
-    status: result.ok ? "available" : "unavailable",
+    degraded,
+    status: result.ok ? "available" : degraded ? "degraded" : "unavailable",
     reason: result.reason,
     latencyMs: result.latencyMs,
   };
@@ -361,9 +528,14 @@ async function checkRlAgent(): Promise<ServiceHealth> {
  * WHICH critical service is down.
  */
 export async function getSystemHealth(): Promise<SystemHealth> {
-  const [postgres, neo4j, mlflow, airflow, gt, rl] = await Promise.all([
+  // BE-023 ROOT FIX (v115): checkKgService is now a separate check
+  // (distinct from checkNeo4j). The KG service is the Python wrapper
+  // around Neo4j — its failure is NOT critical (Neo4j can still be
+  // up; the KG service just routes queries to it).
+  const [postgres, neo4j, kgService, mlflow, airflow, gt, rl] = await Promise.all([
     checkPostgres(),
     checkNeo4j(),
+    checkKgService(),
     checkMlflow(),
     checkAirflow(),
     checkGraphTransformer(),
@@ -373,6 +545,7 @@ export async function getSystemHealth(): Promise<SystemHealth> {
   const services = {
     postgres,
     neo4j,
+    kgService,
     mlflow,
     airflow,
     graphTransformer: gt,

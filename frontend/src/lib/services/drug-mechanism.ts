@@ -104,7 +104,16 @@ export interface PathwayEdge {
   relation: string;
 }
 
-// In-memory cache. Bounded to 256 entries; oldest evicted first.
+// In-memory cache. Bounded to 256 entries; least-recently-used evicted.
+//
+// BE-069 ROOT FIX (v115, LOW): the previous code evicted the OLDEST
+// entry by INSERTION order (FIFO), not by ACCESS order (true LRU).
+// A drug accessed once and never again would stay in the cache as
+// long as a drug accessed every minute — defeating the LRU eviction
+// strategy. The fix: use the `delete + set` pattern on every read
+// to move the accessed key to the END of the Map's insertion order
+// (Map preserves insertion order, and re-inserting a key moves it
+// to the end). This makes the cache a true LRU.
 const CACHE_MAX = 256;
 
 interface CacheEntry {
@@ -119,12 +128,43 @@ function cacheKey(drugName: string): string {
 }
 
 function cacheSet(key: string, value: DrugMechanismResult): void {
-  if (cache.size >= CACHE_MAX) {
-    // Evict the oldest entry (the first key in insertion order).
+  // BE-069 ROOT FIX: true LRU eviction. If the key already exists,
+  // delete it first so the re-insertion moves it to the end (most-
+  // recently-used position). This is the standard LRU pattern for
+  // JavaScript Maps (which preserve insertion order).
+  if (cache.has(key)) {
+    cache.delete(key);
+  } else if (cache.size >= CACHE_MAX) {
+    // Cache is full and this is a NEW key — evict the oldest entry
+    // (the first key in insertion order = least-recently-used).
     const firstKey = cache.keys().next().value;
     if (firstKey !== undefined) cache.delete(firstKey);
   }
   cache.set(key, { result: value, cachedAt: Date.now() });
+}
+
+/**
+ * BE-069 ROOT FIX (v115, LOW): true LRU read. On cache HIT, we delete
+ * the key and re-insert it — this moves it to the END of the Map's
+ * insertion order (most-recently-used position). The next eviction
+ * will therefore target a DIFFERENT (less-recently-used) key, not
+ * this one. This is the standard LRU pattern for JavaScript Maps.
+ *
+ * Returns the cache entry, or undefined if the key is not in the
+ * cache OR the entry has expired (TTL exceeded).
+ */
+function cacheGet(key: string): CacheEntry | undefined {
+  const entry = cache.get(key);
+  if (!entry) return undefined;
+  // Check TTL — expired entries are treated as misses.
+  if (Date.now() - entry.cachedAt > CACHE_TTL_MS) {
+    cache.delete(key);
+    return undefined;
+  }
+  // BE-069: move to end (most-recently-used position) by delete + set.
+  cache.delete(key);
+  cache.set(key, entry);
+  return entry;
 }
 
 /**
@@ -286,12 +326,32 @@ async function fetchMechanism(chemblId: string): Promise<string | null> {
 async function fetchKgPathwayChain(
   drugName: string
 ): Promise<{ pathwayChain: PathwayEdge[]; proteinTargets: string[]; pathways: string[] } | null> {
-  const serviceUrl = process.env.KG_SERVICE_URL;
+  // BE-056 ROOT FIX (v115, LOW): the previous code read
+  // process.env.KG_SERVICE_URL directly. Every other service in the
+  // codebase uses `resolveServiceUrl("KG_SERVICE_URL", ...)` from
+  // http-client.ts — which trims trailing slashes, supports env var
+  // aliases, and centralizes the URL resolution logic. Using the raw
+  // env var here meant:
+  //   1. A trailing slash in KG_SERVICE_URL would produce a malformed
+  //      URL (`http://host:8001//kg/explore`).
+  //   2. No support for legacy alias env vars.
+  //   3. Inconsistent with the rest of the codebase — a future
+  //      developer would not know to look in http-client.ts for the
+  //      canonical resolution logic.
+  //
+  // ROOT FIX: import and use resolveServiceUrl. The function returns
+  // null if the env var is unset — we preserve the previous "return
+  // null to disable KG enrichment" behavior.
+  const { resolveServiceUrl } = await import("@/lib/http-client");
+  const serviceUrl = resolveServiceUrl("KG_SERVICE_URL");
   if (!serviceUrl) return null;
 
   const sanitized = drugName.trim().slice(0, 128);
   if (sanitized.length < 2) return null;
 
+  // BE-056: resolveServiceUrl already trims trailing slashes, but
+  // we keep the defensive .replace() in case the function is later
+  // changed to NOT trim (defensive programming).
   const url = `${serviceUrl.replace(/\/$/, "")}/kg/explore?drug=${encodeURIComponent(sanitized)}&limit=50`;
   try {
     // Task 260: monitored for observability.
@@ -377,8 +437,11 @@ export async function lookupDrugMechanism(
   const now = Date.now();
 
   // FE-028: TTL check. Treat entries older than CACHE_TTL_MS as misses.
-  const cached = cache.get(key);
-  if (cached && now - cached.cachedAt < CACHE_TTL_MS) {
+  // BE-069 ROOT FIX: use cacheGet() (which moves the entry to the
+  // most-recently-used position on hit) instead of cache.get() (which
+  // does not update LRU ordering).
+  const cached = cacheGet(key);
+  if (cached) {
     return cached.result;
   }
   // (else: cache miss or stale — fall through to re-fetch)

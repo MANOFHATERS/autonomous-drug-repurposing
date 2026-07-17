@@ -45,7 +45,14 @@ export type ExternalApiProvider =
   | "rxnorm"
   | "mesh"
   | "chembl"
-  | "kg_service";
+  | "kg_service"
+  // BE-058 ROOT FIX (v115, LOW): added "pubmed" so pubmed.ts can use
+  // monitoredFetch. Previously pubmed.ts used raw fetch() — bypassing
+  // the external-api-monitor — so operators had NO visibility into
+  // PubMed latency, 429s, or outages. Adding "pubmed" here allows
+  // pubmed.ts to route through monitoredFetch like every other
+  // external service.
+  | "pubmed";
 
 export interface ExternalApiCall {
   provider: ExternalApiProvider;
