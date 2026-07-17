@@ -1655,12 +1655,19 @@ class OMIMPipeline(BasePipeline):
                 lambda s: _extract_inheritance_pattern(s) if isinstance(s, str) else None
             )
             # Strip the inheritance pattern from phenotype_name so disease_name
-            # (assigned at Step 18 from phenotype_name) is clean. Pass BOTH
-            # the name and the extracted pattern so the strip function knows
-            # exactly what to remove (defence-in-depth: the function re-runs
-            # the regex to find the exact match span).
+            # (assigned at Step 18 from phenotype_name) is clean.
+            # v114 round 6 FORENSIC ROOT FIX (caller/signature drift):
+            # The previous code called _strip_inheritance_pattern(name, pattern)
+            # with TWO args, but the function signature was refactored to take
+            # ONE arg (phenotype_name) — it now uses the _INHERITANCE_RE regex
+            # to find and remove the pattern, so the explicit pattern arg is no
+            # longer needed. This TypeError broke OMIM cleaning whenever
+            # inheritance_pattern was non-empty (~20 tests failed). ROOT FIX:
+            # call with ONE arg (the regex handles the pattern removal).
+            # The condition `r.get("inheritance_pattern")` is kept as a
+            # micro-optimisation (only strip when a pattern was extracted).
             df["phenotype_name"] = df.apply(
-                lambda r: _strip_inheritance_pattern(r["phenotype_name"], r["inheritance_pattern"])
+                lambda r: _strip_inheritance_pattern(r["phenotype_name"])
                 if isinstance(r.get("phenotype_name"), str) and r.get("inheritance_pattern")
                 else r.get("phenotype_name"),
                 axis=1,

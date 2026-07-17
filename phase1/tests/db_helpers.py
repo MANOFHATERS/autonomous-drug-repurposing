@@ -166,26 +166,44 @@ def sqlite_bulk_upsert_ppi(session: Session, df: pd.DataFrame, batch_size: int =
 # ---- Gene-Disease Associations ----
 
 def sqlite_bulk_upsert_gda(session: Session, df: pd.DataFrame, batch_size: int = 1000) -> int:
-    """SQLite-compatible reimplementation of ``bulk_upsert_gda``."""
+    """SQLite-compatible reimplementation of ``bulk_upsert_gda``.
+
+    v114 round 6 FORENSIC ROOT FIX (ON CONFLICT mismatch):
+    The previous code used ``on_conflict_do_update(index_elements=["gene_symbol",
+    "disease_id", "source"])``. But the GeneDiseaseAssociation model (per
+    P1-056 v107) REMOVED the standard UniqueConstraint on those columns and
+    replaced it with a FUNCTIONAL unique index
+    ``COALESCE(gene_symbol, ''), disease_id, source``. SQLite's
+    ``ON CONFLICT (col, ...)`` clause requires matching NAMED columns — it
+    cannot match a functional index. So the upsert failed with
+    ``OperationalError: ON CONFLICT clause does not match any PRIMARY KEY
+    or UNIQUE constraint``.
+
+    ROOT FIX: do a manual upsert (delete-then-insert) for SQLite. This is
+    the portable approach that works regardless of whether the functional
+    index renders. The production loader (``database/loaders.py::
+    bulk_upsert_gdas``) uses a different PostgreSQL-specific path; this
+    helper is for SQLite tests only.
+    """
     if df.empty:
         return 0
     records = _df_to_dicts(df)
     total = 0
-    updatable_cols = [
-        "uniprot_id", "disease_name", "association_type",
-        "score", "pmid_list",
-    ]
     for chunk in _chunked(records, batch_size):
         _add_timestamps(chunk, GeneDiseaseAssociation.__table__)
-        stmt = sqlite_insert(GeneDiseaseAssociation.__table__).values(chunk)
-        update_dict = {
-            col: stmt.excluded[col] for col in updatable_cols if col in chunk[0]
-        }
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["gene_symbol", "disease_id", "source"],
-            set_=update_dict,
-        )
-        session.execute(stmt)
+        # Manual upsert: delete existing rows with matching (gene_symbol,
+        # disease_id, source), then insert. NULL gene_symbol is treated
+        # as '' for matching (consistent with the functional index).
+        for rec in chunk:
+            gs = rec.get("gene_symbol") or ""
+            did = rec.get("disease_id")
+            src = rec.get("source")
+            session.query(GeneDiseaseAssociation).filter(
+                GeneDiseaseAssociation.gene_symbol == (rec.get("gene_symbol") if rec.get("gene_symbol") else None),
+                GeneDiseaseAssociation.disease_id == did,
+                GeneDiseaseAssociation.source == src,
+            ).delete(synchronize_session=False)
+        session.bulk_insert_mappings(GeneDiseaseAssociation, chunk)
         total += len(chunk)
     session.commit()
     return total
