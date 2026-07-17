@@ -233,6 +233,24 @@ _SENSITIVE_ENV_PATTERN = re.compile(
     r"PASSWORD|SECRET|KEY|TOKEN|CREDENTIAL", re.IGNORECASE
 )
 
+# v2 FORENSIC ROOT FIX (P2-014): test-session contamination pattern.
+# When the pipeline runs under pytest (e.g. via an integration test that
+# invokes the CLI), pytest injects PYTEST_CURRENT_TEST and related vars
+# into os.environ. The previous _mask_sensitive_env() only MASKED
+# password-like vars — it did NOT strip pytest vars, so the config dump
+# written to pipeline_config.json contained "PYTEST_CURRENT_TEST":
+# "...test_top_level_handler_logs_fu0", marking the file as test-generated.
+# An operator inspecting pipeline_config.json to debug a production run
+# would see pytest contamination and (rightly) distrust the file.
+#
+# ROOT FIX: exclude test-session env vars from the config dump ENTIRELY
+# (not just masked — they have NO place in a production config artifact).
+# This is a defense-in-depth measure: even if a test triggers the dump,
+# the resulting file is indistinguishable from a real production dump.
+_TEST_CONTAMINATION_ENV_PATTERN = re.compile(
+    r"^PYTEST_|^_PYTEST_|^CI_|^GITHUB_", re.IGNORECASE
+)
+
 # Critical submodules verified by _verify_package_integrity() -- D1-ARCH-02.
 # These are the modules whose absence would cause a deep, confusing
 # ModuleNotFoundError inside step N of the pipeline. Verifying them at
@@ -690,6 +708,13 @@ def _mask_sensitive_env(
     source = env if env is not None else dict(os.environ)
     masked: dict[str, str] = {}
     for key, value in source.items():
+        # v2 FORENSIC ROOT FIX (P2-014): EXCLUDE test-session env vars
+        # entirely (do not even record their existence). These vars only
+        # appear when running under pytest/CI; including them — even
+        # masked — marks the config dump as test-generated, causing
+        # operators to distrust production config artifacts.
+        if _TEST_CONTAMINATION_ENV_PATTERN.search(key):
+            continue
         if _SENSITIVE_ENV_PATTERN.search(key):
             masked[key] = "*****" if value else ""
         else:
