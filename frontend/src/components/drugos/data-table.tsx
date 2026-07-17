@@ -35,6 +35,16 @@ interface DataTableProps<T> {
   className?: string;
   onRowClick?: (row: T) => void;
   emptyMessage?: string;
+  /**
+   * FE-022 ROOT FIX: Optional row-key extractor. Previously the table used
+   * the row INDEX as the React key (`key={rowIdx}`), which breaks when rows
+   * are reordered, filtered, or sorted (React reuses the wrong DOM nodes,
+   * causing stale state in child components like expand toggles). The fix:
+   * if the caller provides `getRowId`, use it; otherwise fall back to a
+   * composite key of the row's values + index (more stable than index
+   * alone, though callers SHOULD pass getRowId for production use).
+   */
+  getRowId?: (row: T, index: number) => string;
 }
 
 // ---- Component ----
@@ -42,18 +52,24 @@ interface DataTableProps<T> {
 export function DataTable<T extends Record<string, unknown>>({
   data,
   columns,
-  pageSize = 10,
+  pageSize: initialPageSize = 10,
   searchable = true,
   searchPlaceholder = 'Search...',
   searchKeys,
   className = '',
   onRowClick,
   emptyMessage = 'No data found.',
+  getRowId,
 }: DataTableProps<T>) {
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [page, setPage] = useState(0);
+  // FE-022 ROOT FIX: the page-size <Select> previously had onValueChange={() => {}}
+  // — a dead no-op. The selector was rendered but did nothing. Now the page
+  // size is real controlled state, and changing it resets to page 0 so the
+  // user doesn't end up on a page that no longer exists.
+  const [pageSize, setPageSize] = useState(initialPageSize);
 
   // Filter
   const filtered = useMemo(() => {
@@ -101,6 +117,16 @@ export function DataTable<T extends Record<string, unknown>>({
     const val = row[key];
     if (val == null) return '—';
     return String(val);
+  };
+
+  // FE-022 ROOT FIX: stable row key. Prefer the caller's getRowId; fall back
+  // to a composite of the row's own values (so reordering/sorting produces
+  // different keys than the original positions) + index as a last resort.
+  const rowKey = (row: T, idx: number): string => {
+    if (getRowId) return getRowId(row, idx);
+    const idVal = (row as Record<string, unknown>)['id'] ?? (row as Record<string, unknown>)['_id'];
+    if (typeof idVal === 'string' || typeof idVal === 'number') return String(idVal);
+    return `${idx}-${JSON.stringify(row).slice(0, 40)}`;
   };
 
   return (
@@ -157,7 +183,7 @@ export function DataTable<T extends Record<string, unknown>>({
             ) : (
               paginated.map((row, rowIdx) => (
                 <TableRow
-                  key={rowIdx}
+                  key={rowKey(row, rowIdx)}
                   className={cn(onRowClick && 'cursor-pointer hover:bg-muted/30')}
                   onClick={() => onRowClick?.(row)}
                 >
@@ -182,7 +208,7 @@ export function DataTable<T extends Record<string, unknown>>({
         <div className="flex items-center gap-2">
           <Select
             value={String(pageSize)}
-            onValueChange={() => {}}
+            onValueChange={(v) => { setPageSize(Number(v)); setPage(0); }}
           >
             <SelectTrigger className="h-8 w-[70px]">
               <SelectValue />

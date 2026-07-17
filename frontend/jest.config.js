@@ -18,6 +18,8 @@ module.exports = {
     "<rootDir>/src/lib/services/__tests__/**/*.test.ts",
     "<rootDir>/src/lib/auth/__tests__/**/*.test.ts",
     "<rootDir>/src/app/api/**/__tests__/**/*.test.ts",
+    "<rootDir>/src/components/drugos/__tests__/**/*.test.ts",
+    "<rootDir>/src/hooks/__tests__/**/*.test.ts",
     "<rootDir>/tests/api/**/*.test.ts",
     "<rootDir>/tests/e2e/**/*.e2e.ts",
   ],
