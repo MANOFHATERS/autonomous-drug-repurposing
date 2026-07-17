@@ -183,6 +183,35 @@ if "phase1.database.models" in _sys_alias.modules and "database.models" not in _
     _sys_alias.modules["database.models"] = _sys_alias.modules["phase1.database.models"]
 if "phase1.database.base" in _sys_alias.modules and "database.base" not in _sys_alias.modules:
     _sys_alias.modules["database.base"] = _sys_alias.modules["phase1.database.base"]
+# v114 round 10 FORENSIC ROOT FIX (pipelines dual-import):
+# The phase1/__init__.py bootstrap adds phase1/ to sys.path, so 'pipelines'
+# is importable as a BARE package (pipelines.omim_pipeline) AND as a
+# qualified package (phase1.pipelines.omim_pipeline). Python treats these
+# as DIFFERENT modules → the clean() function's __globals__ dict is
+# pipelines.omim_pipeline.__dict__, but the test patches
+# phase1.pipelines.omim_pipeline.OMIM_OUTPUT_PATH (a DIFFERENT dict).
+# Result: clean() reads the UNPATCHED OMIM_OUTPUT_PATH → writes to the
+# REAL processed_data dir, not the test's temp dir → FileNotFoundError.
+# ROOT FIX: alias pipelines → phase1.pipelines so both paths resolve to
+# the SAME module object. This is the same dual-import pattern as
+# database.base (round 7 fix).
+if "phase1.pipelines" in _sys_alias.modules and "pipelines" not in _sys_alias.modules:
+    _sys_alias.modules["pipelines"] = _sys_alias.modules["phase1.pipelines"]
+# Alias all pipeline submodules that define module-level constants
+# (OMIM_OUTPUT_PATH, PROCESSED_DATA_DIR, etc.) that tests monkeypatch.
+for _sub in ("omim_pipeline", "disgenet_pipeline", "chembl_pipeline",
+             "drugbank_pipeline", "uniprot_pipeline", "string_pipeline",
+             "pubchem_pipeline", "base_pipeline", "_dev_samples",
+             "_v50_downloaders", "_chembl_http_client", "_http_client"):
+    _qual = f"phase1.pipelines.{_sub}"
+    _bare = f"pipelines.{_sub}"
+    if _qual in _sys_alias.modules and _bare not in _sys_alias.modules:
+        _sys_alias.modules[_bare] = _sys_alias.modules[_qual]
+# Also alias phase1.config (config.settings dual-import from round 5)
+if "phase1.config" in _sys_alias.modules and "config" not in _sys_alias.modules:
+    _sys_alias.modules["config"] = _sys_alias.modules["phase1.config"]
+if "phase1.config.settings" in _sys_alias.modules and "config.settings" not in _sys_alias.modules:
+    _sys_alias.modules["config.settings"] = _sys_alias.modules["phase1.config.settings"]
 
 # v90 ROOT FIX (BUG #10): _get_environment() now defaults to "production"
 # (fail-closed) when DRUGOS_ENVIRONMENT / ENVIRONMENT / ENV is unset. Tests
