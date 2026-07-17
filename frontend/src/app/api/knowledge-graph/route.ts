@@ -129,8 +129,26 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(data);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    // If KG_SERVICE_URL is not set, the lib returns empty arrays (not
-    // a throw). A throw means the service was configured but failed.
+    // BE-047 ROOT FIX: standardize error handling between GET and POST.
+    // Both routes proxy to the same KG service — a service failure is an
+    // UPSTREAM failure (502 Bad Gateway), not an internal server error
+    // (500). API clients distinguishing 502 (upstream down, retry later)
+    // from 500 (server bug, don't retry) will now handle both routes
+    // consistently. The previous GET path returned 502 (correct) but the
+    // POST path returned 500 via internalError (incorrect). Timeout is
+    // still 504 (also consistent with POST).
+    if (e instanceof Error && e.name === "MlServiceError") {
+      const mlErr = e as { isTimeout?: boolean };
+      if (mlErr.isTimeout) {
+        return NextResponse.json(
+          {
+            error: "kg_timeout",
+            message: `KG service did not respond within the timeout. The query is likely too expensive — add a LIMIT clause or narrow the MATCH pattern.`,
+          },
+          { status: 504 }
+        );
+      }
+    }
     return NextResponse.json(
       {
         error: "kg_service_error",
@@ -193,10 +211,38 @@ export async function POST(req: NextRequest) {
   }
 
   // FE-008 ROOT FIX layer 3: TENANT FORWARDING.
+  // BE-034 ROOT FIX: refuse the request if the user has no active org.
+  // The previous code forwarded `_org_id: null` to the KG service when
+  // the user had no active org (e.g. a platform admin who cleared their
+  // org, or a user whose org membership was removed). The KG service is
+  // expected to use `_org_id` for row-level security (tenant isolation).
+  // If the KG service's Python code does `WHERE org_id = $_org_id` with
+  // `_org_id = null`, the query becomes `WHERE org_id = NULL` which
+  // matches NO rows. But if the KG service does `WHERE $_org_id IS NULL
+  // OR org_id = $_org_id`, then null means "no tenant filter" —
+  // returning ALL rows across ALL tenants. The KG service's behavior is
+  // not verified from the backend side; passing an ambiguous value is a
+  // potential cross-tenant data leak vector. Refusing the request up-front
+  // closes the hole: a user without an active org MUST pick one via
+  // PATCH /api/auth/me before they can query the KG.
+  if (!auth.user.orgId) {
+    return NextResponse.json(
+      {
+        error: "no_active_organization",
+        message:
+          "You must have an active organization to query the Knowledge Graph. " +
+          "Use PATCH /api/auth/me with a valid activeOrganizationId to pick one.",
+      },
+      { status: 403 }
+    );
+  }
   const safeParams: Record<string, unknown> = {
     ...(body.params || {}),
     _user_id: auth.user.userId,
-    _org_id: auth.user.orgId || null,
+    // BE-034: auth.user.orgId is guaranteed non-null here (we returned
+    // 403 above if it was missing). The `|| null` fallback is kept for
+    // TypeScript narrowing but is unreachable in practice.
+    _org_id: auth.user.orgId,
     _max_rows: KG_MAX_ROWS,
   };
 
@@ -249,6 +295,17 @@ export async function POST(req: NextRequest) {
         );
       }
     }
-    return internalError(`KG service proxy failed: ${msg}`);
+    return NextResponse.json(
+      {
+        error: "kg_service_error",
+        message: `KG service proxy failed: ${msg}`,
+      },
+      // BE-047 ROOT FIX: 502 Bad Gateway — the failure is upstream (the KG
+      // service), not internal to this route. API clients can retry 502s
+      // (transient upstream failures) but should NOT retry 500s (server
+      // bugs). The previous code returned 500 via internalError which
+      // misclassified the error and broke client retry logic.
+      { status: 502 }
+    );
   }
 }

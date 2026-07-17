@@ -82,10 +82,23 @@ import { getAuthenticatedUser, type AuthenticatedUser } from "@/lib/auth/server"
 import { writeAuditLog, requireCsrfOrSend } from "@/lib/api-helpers";
 import { checkUserRateLimitDistributed } from "@/lib/auth/per-user-rate-limit";
 
-// Task 273: 1 request per second per platform admin.
-// We use the distributed rate limiter (Redis-backed when REDIS_URL is set,
-// in-memory otherwise) so the cap holds across multiple Node.js instances.
-const PLATFORM_ADMIN_RATE_LIMIT = { max: 1, windowSeconds: 1 };
+// Task 273 + BE-060 ROOT FIX: rate limits for platform admin endpoints.
+//
+// BE-060: The previous code only applied the rate limit to non-GET
+// requests. GET requests were exempt — an admin (or an attacker with a
+// stolen admin session) could make unlimited GET requests to
+// /api/admin/users (which returns PII). At 50 users per request × 1
+// req/sec = 3000 users exfiltrated in 60 seconds. The rate limit is a
+// throttle, not a block — but a stolen admin session could slowly
+// exfiltrate the entire user database over ~1 hour, undetected.
+//
+// Root fix: apply DIFFERENT rate limits to GET vs state-changing
+// methods. GET gets a more generous limit (5 req/sec — still allows the
+// admin console's periodic polling at 1 req/5s, but blocks rapid
+// exfiltration). POST/PATCH/PUT/DELETE keep the strict 1 req/sec limit
+// (state-changing operations should be rare for a platform admin).
+const PLATFORM_ADMIN_WRITE_RATE_LIMIT = { max: 1, windowSeconds: 1 };
+const PLATFORM_ADMIN_READ_RATE_LIMIT = { max: 5, windowSeconds: 1 };
 
 export type PlatformAdminAuth =
   | { user: AuthenticatedUser; response: null }
@@ -172,14 +185,32 @@ export async function requirePlatformAdmin(req: NextRequest | null): Promise<Pla
     };
   }
 
-  // TASK-273: rate limit — 1 req/sec per platform admin. We use the
-  // distributed limiter so the cap holds across multiple Node.js
+  // TASK-273 + BE-060: rate limit — applies to BOTH GET and state-changing
+  // methods now (previously GET was exempt). Different limits:
+  //   - GET/HEAD: 5 req/sec (allows admin console polling, blocks exfil).
+  //   - POST/PATCH/PUT/DELETE: 1 req/sec (state changes should be rare).
+  // We use the distributed limiter so the cap holds across multiple Node.js
   // instances (production deployments behind a load balancer).
-  // Skip the rate limit for GET requests to avoid blocking dashboard
-  // polling (the admin console polls /api/system/status every 5s).
-  if (req && req.method !== "GET" && req.method !== "HEAD") {
-    const rl = await checkUserRateLimitDistributed(user.userId, PLATFORM_ADMIN_RATE_LIMIT);
+  const isWrite = req && req.method !== "GET" && req.method !== "HEAD";
+  const limit = isWrite ? PLATFORM_ADMIN_WRITE_RATE_LIMIT : PLATFORM_ADMIN_READ_RATE_LIMIT;
+  if (req) {
+    const rl = await checkUserRateLimitDistributed(user.userId, limit);
     if (rl.blocked) {
+      // BE-060: when an admin hits the rate limit, log it as a potential
+      // exfiltration signal (for GET) or a misuse signal (for writes).
+      // This is best-effort — the rate limit itself is the primary defense.
+      await writeAuditLog({
+        user,
+        action: "platform_admin_rate_limited",
+        resource: req.url || "(unknown)",
+        metadata: {
+          method: req.method || "GET",
+          limit: `${limit.max}/${limit.windowSeconds}s`,
+          retryAfterSeconds: rl.retryAfterSeconds,
+        },
+      }).catch(() => {
+        // Swallow — audit log failure must not change the 429 response.
+      });
       return {
         user: null,
         response: NextResponse.json(

@@ -75,6 +75,17 @@ export interface RateLimitStorage {
 class InMemoryBackend implements RateLimitStorage {
   private buckets = new Map<string, number[]>();
 
+  // BE-077 NOTE: `recordAndCount` is declared `async` to satisfy the
+  // `RateLimitStorage` interface (which returns `Promise<number>` so the
+  // Redis backend can do network I/O). The InMemoryBackend implementation
+  // is purely synchronous (no `await`) — the `async` keyword wraps the
+  // return value in a resolved Promise. This adds one microtask per call
+  // (negligible at 1000 req/sec) but is REQUIRED for the interface. Do
+  // NOT remove `async` — TypeScript will error because the interface
+  // declares `Promise<number>`. The alternative `return Promise.resolve(
+  // pruned.length)` is equivalent but more verbose; `async` is the
+  // idiomatic shortcut. (BE-077 was filed as LOW — no functional impact,
+  // minor performance overhead, suggested cleanup only.)
   async recordAndCount(key: string, nowMs: number, windowMs: number): Promise<number> {
     const cutoff = nowMs - windowMs;
     const existing = this.buckets.get(key) ?? [];

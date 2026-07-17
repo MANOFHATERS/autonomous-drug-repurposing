@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAuthenticatedUser, signAccessToken, setAuthCookies } from "@/lib/auth/server";
+import { getAuthenticatedUser, signAccessToken, setAuthCookies, clearAuthCookies } from "@/lib/auth/server";
 import { db } from "@/lib/db";
-import { badRequest, writeAuditLog } from "@/lib/api-helpers";
+import { badRequest, writeAuditLog, internalError, requireCsrfOrSend } from "@/lib/api-helpers";
 // BE-029 ROOT FIX (Team Member 12): Zod-validated PATCH body.
 import { validateBody, AuthMePatchBody } from "@/lib/zod-schemas";
 
@@ -74,6 +74,14 @@ export async function GET() {
     // deleted user" (404) from "invalid token" (401). Treating both cases
     // as 401 collapses the side channel — the attacker learns nothing
     // about whether the user ever existed.
+    //
+    // BE-028 ROOT FIX: ALSO clear the auth cookies. The previous code
+    // returned 401 WITHOUT clearing cookies, so the browser kept sending
+    // the bad access cookie on every subsequent request → every request
+    // hit the DB, found no user, returned 401. The user was locked out
+    // until they manually cleared cookies. /api/auth/refresh handles this
+    // correctly (FE-031) — /api/auth/me now does the same.
+    await clearAuthCookies();
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   // BE-039: the memberships are now nested under `organizationMemberships`
@@ -108,8 +116,24 @@ export async function GET() {
   };
   return NextResponse.json(body, {
     headers: {
-      // FE-051: per-user browser cache, 60s. Never cache on shared/CDN.
-      "Cache-Control": "private, max-age=60",
+      // BE-055 ROOT FIX: previously `Cache-Control: private, max-age=60`
+      // was applied to a response body that included `mfaEnabled` and
+      // `emailVerified`. After the user enabled/disabled 2FA (or verified
+      // their email), the cached /me response still showed the OLD value
+      // for up to 60 seconds — the UI said "2FA: Off" even though the DB
+      // said "2FA: On". For a security setting, 60 seconds of stale data
+      // is concerning: the UI may not prompt for 2FA on the next sensitive
+      // action, or the user may re-attempt enrollment and get a confusing
+      // "2FA is already enabled" error. Setting `no-cache` (with
+      // `no-store` for defense in depth) forces the browser to re-fetch
+      // /me on every page load — the extra DB query per page load is
+      // acceptable for a pharma platform where the security state must
+      // be accurate. The previous `private, max-age=60` was a performance
+      // optimization that traded security-state correctness for ~1 DB
+      // query/min savings — not worth it.
+      "Cache-Control": "no-cache, no-store, must-revalidate",
+      "Pragma": "no-cache",
+      "Expires": "0",
     },
   });
 }
@@ -126,6 +150,28 @@ export async function PATCH(req: NextRequest) {
   if (!authUser) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
+
+  // BE-013 ROOT FIX: CSRF protection on the PATCH handler. The previous
+  // code did NOT call `requireCsrfOrSend(req)`, unlike EVERY other
+  // state-changing /api/auth/* route (logout, password, 2fa/setup,
+  // 2fa/verify, 2fa/disable, 2fa/login-verify, register). The PATCH
+  // handler updates the user's profile AND switches their active
+  // organization (which re-issues the access token with a new orgId,
+  // changing what data they can access). This is a state-changing route.
+  // The SameSite=Strict access cookie mitigates cross-site POSTs, but:
+  //   (a) the route also accepts the refresh cookie (SameSite=Lax) which
+  //       IS sent on top-level navigations;
+  //   (b) the audit's defense-in-depth principle says CSRF tokens are
+  //       required EVEN when SameSite is set, because SameSite can be
+  //       bypassed in older browsers and future SSO flows may set
+  //       SameSite=None;
+  //   (c) the FE-011 fix's own comment says "Combined with CSRF tokens
+  //       (FE-011) for defense-in-depth" — this route broke the
+  //       defense-in-depth.
+  // Adding the CSRF check makes the route consistent with every other
+  // state-changing /api/auth/* route.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
 
   // FE-072 ROOT FIX: Suspended users must not be able to edit their profile.
   //
@@ -218,6 +264,42 @@ export async function PATCH(req: NextRequest) {
   // BE-079: Track whether we're doing an org switch (separate from profile update)
   const switchingOrg = body.activeOrganizationId !== undefined;
 
+  // BE-036 ROOT FIX: When `activeOrganizationId: null` is passed, fall back
+  // to the user's FIRST org membership (don't leave them orgless). The
+  // previous code allowed `null` to mean "clear active org" — setting
+  // `lastActiveOrgId = null` and issuing an access token with
+  // `orgId: undefined`. Every org-scoped query (projects, hypotheses,
+  // billing) would then 403 ("No active organization"). There was no UI
+  // flow that would prompt the user to pick a new org — they were stuck
+  // in a "no active org" state until they PATCHed again with a valid
+  // orgId. The previous behavior was a footgun: a bug in the frontend
+  // org switcher (or a confused API client) could leave the user
+  // orgless. The fix uses the audit's suggested option 2: when null is
+  // passed, look up the user's first org membership and switch to THAT
+  // (instead of clearing). If the user genuinely has no org
+  // memberships, we return 400 (they must be invited to an org first).
+  if (switchingOrg && body.activeOrganizationId === null) {
+    const firstMembership = await db.organizationMember.findFirst({
+      where: { userId: authUser.userId },
+      orderBy: { joinedAt: "asc" },
+      select: { organizationId: true },
+    });
+    if (!firstMembership) {
+      return NextResponse.json(
+        {
+          error: "no_organization_membership",
+          message:
+            "You have no organization memberships. Ask an administrator to invite you to an organization before you can use org-scoped features.",
+        },
+        { status: 400 }
+      );
+    }
+    // Replace the null with the first membership's orgId — the rest of
+    // the flow treats this as a regular org switch (with membership
+    // validation already done via the findFirst above).
+    body.activeOrganizationId = firstMembership.organizationId;
+  }
+
   if (Object.keys(data).length === 0 && !switchingOrg) {
     // FE-054 ROOT FIX: HTTP PATCH semantics allow a no-op patch — the server
     // returns 200 with the current (unchanged) resource. Previously this
@@ -272,11 +354,15 @@ export async function PATCH(req: NextRequest) {
   // token immediately so the user doesn't have to wait for the next
   // refresh to see the new org scope.
   let newAccessToken: string | null = null;
-  if (switchingOrg && body.activeOrganizationId !== undefined) {
-    const newOrgId = body.activeOrganizationId;  // can be null (clear active org)
+  if (switchingOrg && body.activeOrganizationId !== undefined && body.activeOrganizationId !== null) {
+    const newOrgId = body.activeOrganizationId;
     // BE-079 v2: Persist the new orgId to the User row. This is the
     // critical missing piece — without it, the org switch only lasts
     // until the access token expires (15 min).
+    // BE-036: newOrgId is guaranteed non-null here (we replaced null
+    // with the first membership's orgId above). The `|| null` fallback
+    // is kept for defensive coding — if newOrgId is somehow empty
+    // string, we don't want to persist that as a valid orgId.
     await db.user.update({
       where: { id: authUser.userId },
       data: { lastActiveOrgId: newOrgId || null },
@@ -285,7 +371,8 @@ export async function PATCH(req: NextRequest) {
       userId: authUser.userId,
       email: authUser.email,
       role: authUser.role,
-      orgId: newOrgId || undefined,
+      platformRole: authUser.platformRole,
+      orgId: newOrgId,
     });
     // Set the new access token cookie. We keep the existing refresh token
     // (org switching doesn't require re-authentication). When the refresh
@@ -298,12 +385,49 @@ export async function PATCH(req: NextRequest) {
     if (refreshToken) {
       await setAuthCookies(newAccessToken, refreshToken);
     }
-    await writeAuditLog({
-      user: { ...authUser, orgId: newOrgId || undefined },
+    // BE-029 ROOT FIX: mark the org-switch audit log as CRITICAL. Switching
+    // the active org changes the user's data access scope — they can now
+    // read a different org's projects, hypotheses, and evidence packages.
+    // This is a security-relevant action that should be audit-logged as
+    // critical (so a failed audit-log write aborts the request, ensuring
+    // the action is always auditable). Other security-relevant actions
+    // (password change, 2FA disable, billing change) are already marked
+    // critical. FDA 21 CFR Part 11 requires complete audit trails for
+    // security events.
+    const orgSwitchAudit = await writeAuditLog({
+      user: { ...authUser, orgId: newOrgId },
       action: "active_org_switched",
       resource: `user:${authUser.userId}`,
       metadata: { previousOrgId: authUser.orgId, newOrgId: newOrgId },
+      critical: true,
     });
+    if (!orgSwitchAudit.ok) {
+      // Critical audit failed — abort the request. We've already persisted
+      // `lastActiveOrgId` and set the new access cookie, so we must roll
+      // those back to maintain the invariant that the audit log captures
+      // every successful org switch.
+      await db.user.update({
+        where: { id: authUser.userId },
+        data: { lastActiveOrgId: authUser.orgId || null },
+      }).catch(() => {
+        // best-effort rollback
+      });
+      // Clear the new access cookie we just set (restore the old one).
+      const { cookies } = await import("next/headers");
+      const cookieStore = await cookies();
+      const oldAccessToken = signAccessToken({
+        userId: authUser.userId,
+        email: authUser.email,
+        role: authUser.role,
+        platformRole: authUser.platformRole,
+        orgId: authUser.orgId,
+      });
+      const refreshToken = cookieStore.get("drugos_refresh")?.value;
+      if (refreshToken) {
+        await setAuthCookies(oldAccessToken, refreshToken);
+      }
+      return internalError("Failed to record org switch in audit log. Org switch has been rolled back.");
+    }
   }
 
   const actionTypes: string[] = [];
@@ -321,8 +445,21 @@ export async function PATCH(req: NextRequest) {
     user: updated,
     // BE-079: Return the new activeOrganizationId so the client can
     // update its local state without re-fetching /api/auth/me.
+    //
+    // BE-041 NOTE: This field is intentionally included for browser
+    // clients (cookie-based auth). The new access token itself is set as
+    // an HttpOnly cookie via setAuthCookies — it is NOT in the JSON body.
+    // Non-browser clients (curl, Postman, API keys) will NOT receive the
+    // new access token from this endpoint; they should use the refresh
+    // flow (/api/auth/refresh) to obtain a new access token after the
+    // org switch. API-key auth reads orgId from the DB's lastActiveOrgId
+    // (which we just updated), so non-browser clients using API keys do
+    // NOT need to call PATCH /api/auth/me at all — they can just
+    // directly call /api/projects and the API key auth path will pick up
+    // the new orgId from the DB. This is documented for clarity; the
+    // inconsistency is cosmetic.
     activeOrganizationId: switchingOrg
-      ? (body.activeOrganizationId || null)
+      ? body.activeOrganizationId
       : (authUser.orgId || null),
     orgSwitched: switchingOrg,
   });

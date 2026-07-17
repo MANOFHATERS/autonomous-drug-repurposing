@@ -17,11 +17,37 @@ import {
   recordFailedLogin,
   recordSuccessfulLogin,
 } from "@/lib/auth/rate-limit";
+import bcrypt from "bcryptjs";
+import { randomBytes } from "crypto";
 
 interface LoginBody {
   email: string;
   password: string;
 }
+
+// BE-010 ROOT FIX: Pre-computed bcrypt hash of a random string, used as a
+// dummy comparator when the email does NOT exist in the DB. Without this,
+// the login route returned `invalid_credentials` IMMEDIATELY for nonexistent
+// emails (no bcrypt.compare call), but took ~250ms for emails that DO
+// exist (bcrypt.compare with cost 12). An attacker measuring response
+// time could distinguish "email exists" (slow) from "email doesn't exist"
+// (fast) — the classic OWASP authentication timing attack. With ~50
+// measurements per email, the attacker can enumerate which emails are
+// registered. For a pharma platform where registered emails reveal which
+// researchers at which companies use the platform, this is competitive
+// intelligence leakage. OWASP ASVS V2.1.6 requires "constant-time"
+// authentication responses.
+//
+// This hash is a real bcrypt hash (cost 12) of a 32-byte random string
+// generated once at module load. The plaintext is NEVER used — we only
+// call bcrypt.compare(password, DUMMY_HASH) to consume the same ~250ms
+// as a real password verification, then discard the result. The hash is
+// safe to commit to source: even if an attacker knows the plaintext, it
+// gives them nothing (they still can't log in as a nonexistent user).
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(
+  randomBytes(32).toString("hex"),
+  12
+);
 
 export async function POST(req: NextRequest) {
   // FE-009 ROOT FIX (Layer 1): IP-based rate limit. Stops credential
@@ -45,8 +71,23 @@ export async function POST(req: NextRequest) {
     // should NOT disable rate limiting entirely (defense in depth).
     console.error("[RATE-LIMIT] distributed IP limiter failed, falling back to sync:", e);
     ipCheck = checkIpRateLimit(req);
-    // The sync path needs a separate recordIpAttempt call (the sync
-    // checkIpRateLimit does NOT record — it only checks).
+    // BE-067 ROOT FIX (CLARIFYING COMMENT — code is correct):
+    // The distributed (Redis) path records the attempt ATOMICALLY with the
+    // check (zadd + zcard in MULTI/EXEC). The sync fallback path is split:
+    // `checkIpRateLimit` does NOT record (it only checks the bucket), so
+    // we MUST call `recordIpAttempt` explicitly here to record the attempt.
+    // Do NOT add another `recordIpAttempt` call after this block — BOTH
+    // paths have already recorded:
+    //   - Redis path: recorded atomically inside checkIpRateLimitDistributed.
+    //   - Sync fallback path: recorded explicitly via the recordIpAttempt
+    //     call on the next line.
+    // Adding another recordIpAttempt later would DOUBLE-COUNT every login
+    // attempt, halving the effective rate limit and locking legitimate
+    // users out prematurely. This comment exists because the prior
+    // implementation's inline comments were confusing and a future
+    // developer might "fix" the apparent double-call by adding another
+    // recordIpAttempt — that would be a regression. (BE-067 was filed as
+    // INFORMATIONAL — VERIFIED CORRECT AFTER DEEP ANALYSIS.)
     recordIpAttempt(req);
   }
   // If we used the Redis path, the attempt was already recorded atomically.
@@ -131,7 +172,17 @@ export async function POST(req: NextRequest) {
   // FE-055 ROOT FIX: Treat a soft-deleted user as if they don't exist.
   // (The IP attempt was already recorded up-front at line 49 — FE-056 —
   // so deleted-account probes consume the rate-limit budget correctly.)
+  //
+  // BE-010 ROOT FIX: When the user does NOT exist (or is soft-deleted),
+  // we perform a dummy bcrypt.compare(password, DUMMY_PASSWORD_HASH) to
+  // consume the same ~250ms that a real password verification would take.
+  // This closes the timing oracle that allowed email enumeration via
+  // response-time differences between "user not found" (immediate 401)
+  // and "wrong password" (~250ms 401). The dummy result is discarded.
+  // The rate-limit counter was already incremented up-front (FE-056),
+  // so we don't double-count by calling recordFailedLogin here.
   if (!user || user.deletedAt !== null) {
+    await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
     return invalidCredentials();
   }
 
@@ -291,8 +342,18 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json({
       mfaRequired: true,
-      mfaToken,
-      message: "Multi-factor authentication required. POST this token (or rely on the drugos_mfa_challenge cookie) and your 6-digit TOTP code to /api/auth/2fa/login-verify.",
+      // BE-022 ROOT FIX: REMOVE the `mfaToken` field from the JSON body.
+      // The FE-016 fix added the HttpOnly cookie specifically to prevent
+      // XSS from reading the MFA challenge token. But the route ALSO
+      // returned `mfaToken` in the JSON body, with the message explicitly
+      // telling the client to use EITHER the cookie OR the body field.
+      // An attacker with XSS could read `response.mfaToken` from the JSON
+      // and submit it to /api/auth/2fa/login-verify via XHR — defeating
+      // the HttpOnly cookie defense entirely. The cookie is the only
+      // secure channel; non-browser API clients (curl, Postman) MUST
+      // extract the `drugos_mfa_challenge` cookie from the Set-Cookie
+      // header and send it back. This is standard practice.
+      message: "Multi-factor authentication required. The drugos_mfa_challenge HttpOnly cookie has been set and will be sent automatically to /api/auth/2fa/login-verify. Non-browser clients must extract the cookie from the Set-Cookie header and send it back.",
     });
   }
 

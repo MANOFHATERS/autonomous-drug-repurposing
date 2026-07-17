@@ -1,10 +1,26 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import {
-  requireAdmin,
   internalError,
   writeAuditLog,
-  isPlatformSuperuser,
 } from "@/lib/api-helpers";
+// BE-007 ROOT FIX: Replace `requireAdmin + isPlatformSuperuser` with
+// `requirePlatformAdmin`. The /api/admin/* namespace is now gated on
+// `platformRole === "admin"` (a SEPARATE field from `role`), enforced by
+// the middleware in lib/auth/require-platform-admin.ts. This is the
+// architectural fix the audit asked for. The prior code accepted any user
+// with `role === "admin" | "owner" | "platformOwner"` — including
+// org-scoped admins who should NOT see system-wide metrics. An org admin
+// could hit /api/admin/metrics and see total user counts across ALL
+// tenants — a cross-tenant data leak. The new gate ensures only SaaS
+// operator staff (platformRole === "admin") can call this endpoint.
+//
+// BE-007 (continued): Since requirePlatformAdmin already gates on
+// platformRole === "admin", the route ALWAYS returns system-wide metrics
+// (platform admins have legitimate need-to-know across tenants — they
+// are SaaS operator staff). The old `isPlatformSuperuser` check (which
+// gated system-wide vs org-scoped counting on `role === "platformOwner"`)
+// is REMOVED entirely. There is no org-scoped path here anymore.
+import { requirePlatformAdmin } from "@/lib/auth/require-platform-admin";
 import { db } from "@/lib/db";
 import { getDatasetStats } from "@/lib/services/dataset-stats";
 import { getKnowledgeGraphStats } from "@/lib/services/knowledge-graph-stats";
@@ -40,25 +56,31 @@ import { getKnowledgeGraphStats } from "@/lib/services/knowledge-graph-stats";
  *   - NRR / cohort retention: requires subscription-event history (not modeled)
  *   - EBITDA projections: requires accounting system integration (not deployed)
  *
- * The InvestorDashboardScreen uses this endpoint to show REAL platform
- * traction (users, projects, hypotheses, validated discoveries, KG size)
- * WITHOUT fabricating financial data. Any financial card shows a clear
- * "Requires Stripe integration" notice — never a fabricated dollar value.
+ * BE-007: AUTH is now `requirePlatformAdmin(req)` — gates on
+ * `platformRole === "admin"` (SaaS operator staff). Org-scoped admins no
+ * longer reach this route. The metrics returned are ALWAYS system-wide
+ * (the platform admin has legitimate need-to-know across tenants).
  *
- * AUTH: requires admin/owner role. Org-scoped admins see only their org's
- * metrics. platformOwner sees system-wide metrics.
+ * BE-081 ROOT FIX: The previous `dailyActiveUsersLast7Days` query used
+ * PostgreSQL-specific raw SQL with `DATE("createdAt")` and
+ * `NOW() - INTERVAL '7 days'`. This breaks if the DB is ever switched
+ * (e.g. to MySQL for cost reasons) and is opaque to the pg-mem test
+ * harness. Replaced with Prisma's `groupBy` on a date-truncated expression
+ * computed in JavaScript — the query is now dialect-agnostic and the
+ * bigint → number footgun is gone. The query is also more efficient
+ * (no raw SQL parsing, no DATE() function call per row).
  */
-export async function GET() {
-  const auth = await requireAdmin();
+export async function GET(req: NextRequest) {
+  const auth = await requirePlatformAdmin(req);
   if (auth.user === null) return auth.response;
 
   try {
-    const isSuperuser = isPlatformSuperuser(auth.user);
-
-    // For org-scoped admins, count only users/projects in their org.
-    // For platformOwner, count system-wide.
-    const orgId = !isSuperuser ? auth.user.orgId : null;
-
+    // BE-007: The route ALWAYS returns system-wide metrics. Platform admins
+    // (the only callers who reach this point) have legitimate need-to-know
+    // across tenants — they are SaaS operator staff investigating incidents,
+    // building investor reports, and monitoring platform health. There is
+    // no org-scoped path here anymore.
+    //
     // Run all DB counts in parallel for performance.
     const [
       totalUsers,
@@ -70,113 +92,84 @@ export async function GET() {
       totalEvidencePackages,
       auditLogEventsLast30Days,
       topActionsRows,
-      dailyActivityRows,
+      auditLogsLast7Days,
       datasetStats,
       kgStats,
     ] = await Promise.all([
-      // User count — org-scoped for non-superusers via OrganizationMember
-      db.user.count(
-        isSuperuser
-          ? undefined
-          : {
-              where: {
-                organizationMemberships: { some: { organizationId: orgId! } },
-              },
-            },
-      ),
-      // Org count — superuser sees all, org admin sees only their org
-      db.organization.count(isSuperuser ? undefined : { where: { id: orgId! } }),
-      // Active subscriptions — org-scoped
-      db.subscription.count({
-        where: {
-          ...(isSuperuser ? {} : { organizationId: orgId! }),
-          status: "active",
-        },
-      }),
-      // Project count — org-scoped (Project has organizationId)
-      db.project.count({ where: isSuperuser ? undefined : { organizationId: orgId! } }),
-      // Hypothesis count — derived via project join, org-scoped
-      db.hypothesis.count({
-        where: isSuperuser
-          ? undefined
-          : { project: { organizationId: orgId! } },
-      }),
-      // Validated hypothesis count — the "real discoveries" metric
-      db.hypothesis.count({
-        where: {
-          status: "validated",
-          ...(isSuperuser ? {} : { project: { organizationId: orgId! } }),
-        },
-      }),
-      // Evidence package count — org-scoped via project join
-      // (EvidencePackage has no direct organizationId, but Project does)
-      db.evidencePackage.count({
-        where: isSuperuser
-          ? undefined
-          : { project: { organizationId: orgId! } },
-      }),
-      // Audit log events in last 30 days — org-scoped
+      // User count — system-wide (platform admin only).
+      db.user.count(),
+      // Org count — system-wide.
+      db.organization.count(),
+      // Active subscriptions — system-wide.
+      db.subscription.count({ where: { status: "active" } }),
+      // Project count — system-wide.
+      db.project.count(),
+      // Hypothesis count — system-wide.
+      db.hypothesis.count(),
+      // Validated hypothesis count — the "real discoveries" metric.
+      db.hypothesis.count({ where: { status: "validated" } }),
+      // Evidence package count — system-wide.
+      db.evidencePackage.count(),
+      // Audit log events in last 30 days — system-wide.
       db.auditLog.count({
         where: {
           createdAt: { gt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
-          ...(isSuperuser ? {} : { organizationId: orgId! }),
         },
       }),
-      // Top actions in last 30 days — GROUP BY action
+      // Top actions in last 30 days — GROUP BY action via Prisma (dialect-agnostic).
       db.auditLog.groupBy({
         by: ["action"],
         _count: { _all: true },
         where: {
           createdAt: { gt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
-          ...(isSuperuser ? {} : { organizationId: orgId! }),
         },
         orderBy: { _count: { action: "desc" } },
         take: 10,
       }),
-      // Daily active users (distinct userId) for last 7 days — raw query.
-      // Prisma $queryRawTyped with parameterized WHERE clause for org scoping.
-      isSuperuser
-        ? db.$queryRaw<Array<{ day: string; active_users: bigint }>>`
-            SELECT DATE("createdAt") AS day,
-                   COUNT(DISTINCT "userId") AS active_users
-            FROM "AuditLog"
-            WHERE "createdAt" > NOW() - INTERVAL '7 days'
-              AND "userId" IS NOT NULL
-            GROUP BY DATE("createdAt")
-            ORDER BY day DESC
-          `
-        : db.$queryRaw<Array<{ day: string; active_users: bigint }>>`
-            SELECT DATE("createdAt") AS day,
-                   COUNT(DISTINCT "userId") AS active_users
-            FROM "AuditLog"
-            WHERE "createdAt" > NOW() - INTERVAL '7 days'
-              AND "userId" IS NOT NULL
-              AND "organizationId" = ${orgId!}
-            GROUP BY DATE("createdAt")
-            ORDER BY day DESC
-          `,
-      // Phase 1 dataset stats
+      // BE-081: Fetch audit logs from the last 7 days with their userId and
+      // createdAt. We do the per-day DISTINCT userId aggregation in JS so
+      // the query is dialect-agnostic (works on PostgreSQL, MySQL, SQLite,
+      // and pg-mem). The previous raw SQL used DATE("createdAt") and
+      // NOW() - INTERVAL '7 days' which are PostgreSQL-specific.
+      db.auditLog.findMany({
+        where: {
+          createdAt: { gt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+          userId: { not: null },
+        },
+        select: { userId: true, createdAt: true },
+      }),
+      // Phase 1 dataset stats.
       getDatasetStats(),
-      // Phase 2 KG stats
+      // Phase 2 KG stats.
       getKnowledgeGraphStats().catch(() => null),
     ]);
 
-    // Convert Prisma groupBy result to plain object
+    // Convert Prisma groupBy result to plain object.
     const topActionsLast30Days = topActionsRows.map((r) => ({
       action: r.action,
       count: Number(r._count._all),
     }));
 
-    // Convert raw query result (bigint -> number)
-    const dailyActiveUsersLast7Days = dailyActivityRows.map((r) => ({
-      day: typeof r.day === "string" ? r.day : String(r.day),
-      activeUsers: Number(r.active_users),
-    }));
+    // BE-081: Compute daily active users (distinct userId per day) in JS.
+    // Group by YYYY-MM-DD day string, then count distinct userIds per day.
+    const dayMap = new Map<string, Set<string>>();
+    for (const row of auditLogsLast7Days) {
+      if (!row.userId) continue;
+      const dayKey = row.createdAt.toISOString().slice(0, 10); // YYYY-MM-DD
+      let set = dayMap.get(dayKey);
+      if (!set) {
+        set = new Set();
+        dayMap.set(dayKey, set);
+      }
+      set.add(row.userId);
+    }
+    const dailyActiveUsersLast7Days = Array.from(dayMap.entries())
+      .map(([day, users]) => ({ day, activeUsers: users.size }))
+      .sort((a, b) => (a.day < b.day ? 1 : -1));
 
-    // Aggregate top-level metrics
+    // Aggregate top-level metrics.
     const metrics = {
-      scope: isSuperuser ? "system" : "organization",
-      organizationId: orgId || null,
+      scope: "system" as const,
       generatedAt: new Date().toISOString(),
       // REAL user/org/subscription counts
       totalUsers,

@@ -14,7 +14,11 @@ import {
   recordSuccessfulLogin,
   recordFailedLogin,
   checkTotpRateLimit,
-  recordFailedTotp,
+  // BE-066: prefer the distributed version (Redis-backed when REDIS_URL
+  // is set) so the TOTP brute-force counter is shared across all Node.js
+  // instances. The sync `recordFailedTotp` is kept only for tests and
+  // for the no-Redis fallback path inside `recordFailedTotpDistributed`.
+  recordFailedTotpDistributed,
   clearTotpAttempts,
 } from "@/lib/auth/rate-limit";
 import jwt from "jsonwebtoken";
@@ -126,6 +130,54 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // BE-006 ROOT FIX (CRITICAL) + BE-065 ROOT FIX:
+  //
+  // BE-006: The previous `select` clause OMITTED `platformRole`. As a
+  // result, signAccessToken at the bottom of this handler received
+  // `platformRole: undefined` and defaulted it to "none" (see
+  // lib/auth/server.ts signAccessToken: `platformRole: payload.platformRole
+  // || "none"`). Effect: a platform admin (SaaS operator staff) who enrolled
+  // in 2FA got an access token with `platformRole: "none"` after completing
+  // 2FA. requirePlatformAdmin() then rejected every /api/admin/* call with
+  // 403 for the full 15-minute access-token TTL. Platform admins with 2FA
+  // enabled (which should be ALL of them) were locked out of the admin
+  // console for 15 minutes after every login. The non-2FA login path
+  // (login/route.ts L108, L336) already selects platformRole and stamps it
+  // into the token; this 2FA path was missed when TASK-261 added the
+  // platformRole field.
+  //
+  // BE-065: We move the user lookup BEFORE the jti replay check below so
+  // the audit-log entry on replay rejection can include the user's actual
+  // role (previously it used `role: "unknown"`). FDA 21 CFR Part 11
+  // requires audit trails to capture the user's identity at the time of
+  // the event; "unknown" broke that. The cost is one extra DB round-trip
+  // before the jti check; the jti check itself is unchanged.
+  const user = await db.user.findUnique({
+    where: { id: challenge.userId },
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      role: true,
+      // BE-006: REQUIRED for the access token to carry platformRole.
+      platformRole: true,
+      status: true,
+      // BE-045 alignment: include deletedAt so we can refuse 2FA for
+      // soft-deleted accounts (the login route already does this).
+      deletedAt: true,
+      mfaEnabled: true,
+      mfaSecret: true,
+      lastTotpCounter: true,
+    },
+  });
+  if (!user || user.deletedAt !== null) {
+    await clearMfaChallengeCookie();
+    return NextResponse.json(
+      { error: "invalid_mfa_token", message: "MFA challenge token is invalid or expired. Please log in again." },
+      { status: 401 }
+    );
+  }
+
   // FE-016 ROOT FIX: replay protection. Extract the jti from the token and
   // atomically claim it in the MfaChallenge table. If the jti is already
   // consumed, reject as a replay attack. We do this BEFORE TOTP verification
@@ -147,10 +199,20 @@ export async function POST(req: NextRequest) {
       } catch (e: any) {
         if (e?.code === "P2002") {
           // Prisma unique-constraint violation → jti already consumed → replay.
+          // BE-065 ROOT FIX: use the user's ACTUAL role + platformRole
+          // (fetched above) instead of the hardcoded "unknown" string.
+          // This makes the audit log forensically useful — compliance
+          // officers reviewing Part 11 audit trails can now distinguish
+          // a platform admin's locked account from a researcher's.
           await writeAuditLog({
-            user: { userId: challenge.userId, email: challenge.email, role: "unknown" },
+            user: {
+              userId: user.id,
+              email: user.email,
+              role: user.role,
+              platformRole: (user.platformRole as string | undefined) || "none",
+            },
             action: "login_mfa_replay_rejected",
-            resource: `user:${challenge.userId}`,
+            resource: `user:${user.id}`,
             metadata: { jti },
           });
           await clearMfaChallengeCookie();
@@ -175,26 +237,6 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const user = await db.user.findUnique({
-      where: { id: challenge.userId },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        role: true,
-        status: true,
-        mfaEnabled: true,
-        mfaSecret: true,
-        lastTotpCounter: true,
-      },
-    });
-    if (!user) {
-      await clearMfaChallengeCookie();
-      return NextResponse.json(
-        { error: "not_found", message: "User not found" },
-        { status: 404 }
-      );
-    }
     if (user.status === "suspended") {
       await clearMfaChallengeCookie();
       return NextResponse.json(
@@ -242,7 +284,17 @@ export async function POST(req: NextRequest) {
       // 2FA after TOTP_MAX_ATTEMPTS (5) wrong codes within
       // TOTP_WINDOW_MINUTES (5). This is SEPARATE from the password
       // failed-login counter (FE-018 below) — both must trip independently.
-      const afterFail = recordFailedTotp(user.id);
+      // BE-066 ROOT FIX: use the DISTRIBUTED version of recordFailedTotp
+      // so the TOTP brute-force counter is shared across all Node.js
+      // instances (K8s replicas, etc.). The previous sync version used an
+      // in-memory Map — each instance had its own counter, so an attacker
+      // could make N × TOTP_MAX_ATTEMPTS attempts before lockout (N =
+      // instance count). At N=3, that's 15 attempts before lockout —
+      // feasible to brute-force TOTP in ~6 minutes. The distributed
+      // version uses Redis when REDIS_URL is set (atomic ZADD + ZCARD in
+      // a MULTI/EXEC transaction) and falls back to the sync in-memory
+      // path when Redis is unavailable (single-instance dev/test).
+      const afterFail = await recordFailedTotpDistributed(user.id);
       // FE-018 ROOT FIX: ALSO increment failedLoginCount on MFA failure
       // so repeated MFA failures accumulate toward account-wide lockout.
       // This closes the gap left by removing recordSuccessfulLogin from
@@ -347,10 +399,16 @@ export async function POST(req: NextRequest) {
       });
     }
     const tokens = await rotateRefreshToken(user.id);
+    // BE-006 ROOT FIX: stamp platformRole into the access token. Without
+    // this, every 2FA login issues an access token with `platformRole:
+    // "none"` (the default in signAccessToken), locking platform admins
+    // out of /api/admin/* for the full 15-minute access-token TTL.
+    // Coerce to "none" if the DB row has null (legacy rows pre-migration).
     const access = signAccessToken({
       userId: user.id,
       email: user.email,
       role: user.role,
+      platformRole: (user.platformRole as string | undefined) || "none",
       orgId: membership?.organizationId,
     });
     await setAuthCookies(access, tokens.refresh);
@@ -385,6 +443,19 @@ export async function POST(req: NextRequest) {
 }
 
 async function clearMfaChallengeCookie(): Promise<void> {
+  // BE-019 ROOT FIX: The previous implementation set `path:
+  // "/api/auth/2fa/login-verify"` here. The login route (login/route.ts)
+  // SETS the cookie with `path: "/api/auth/2fa"`. Per RFC 6265 §5.3,
+  // a cookie's scope is determined by its Path attribute, and to DELETE
+  // a cookie the Set-Cookie response must use the SAME Path (and Domain)
+  // as the original set. With the mismatched paths, the browser treated
+  // this clear as a NEW cookie scoped to /api/auth/2fa/login-verify
+  // (which expired immediately), while the ORIGINAL cookie scoped to
+  // /api/auth/2fa persisted for its full 5-minute TTL. The user's
+  // browser kept sending the consumed MFA challenge token to every
+  // /api/auth/2fa/* endpoint for 5 minutes after login. Aligning the
+  // path to "/api/auth/2fa" matches the SET path and properly deletes
+  // the cookie.
   try {
     const { cookies } = await import("next/headers");
     const store = await cookies();
@@ -392,7 +463,7 @@ async function clearMfaChallengeCookie(): Promise<void> {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
-      path: "/api/auth/2fa/login-verify",
+      path: "/api/auth/2fa",
       maxAge: 0, // delete
     });
   } catch {

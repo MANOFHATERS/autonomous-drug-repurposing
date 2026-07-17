@@ -160,6 +160,29 @@ export function verifyTotpWithReplayCheck(
   // Replay check: reject if the matching counter has already been used.
   // We pick the LOWEST counter among the candidates that matches the
   // code (in practice only one matches, but this is defensive).
+  //
+  // BE-079 ROOT FIX ANALYSIS: The audit suggested using `<` instead of
+  // `<=` to be more forgiving of clock skew (a user re-entering the
+  // same code in the same 30s window). However, changing `<=` to `<`
+  // breaks RFC 6238 §5.2 replay protection — a code valid for counter=N
+  // could be re-used indefinitely within the same 30s window, defeating
+  // the replay check entirely. The FE-033 regression test correctly
+  // catches this: re-using the same code (same counter) MUST be
+  // rejected as "replayed". The `<=` comparison is the correct one.
+  //
+  // The actual clock-skew concern (server clock jumps backward by 30s
+  // → user's just-generated code is rejected as "replayed") is real but
+  // rare (NTP corrections are usually <1s; VM live-migration can cause
+  // larger jumps but is infrequent). The proper fix would be to use a
+  // MONOTONIC clock (process.hrtime.bigint) for the replay check, but
+  // hrtime resets on process restart — so we'd need to persist the
+  // last-used hrtime alongside the wall-clock counter, which is a
+  // larger architectural change. For now, we keep `<=` (correct
+  // replay protection) and accept the rare false-positive on
+  // backward clock jumps. The 5-req/min TOTP rate limit (FE-003) and
+  // 5-attempt lockout catch brute-force, so the practical impact of
+  // a false-positive replay rejection is just one extra 30s wait for
+  // the user — not a security issue.
   if (lastUsedCounter !== null && matched.counter <= lastUsedCounter) {
     return { ok: false, reason: "replayed" };
   }
