@@ -1841,7 +1841,21 @@ class GTRLBridge:
         # C3 fix: the RL data dictionary now documents this as
         # "binary prediction entropy" (NOT attention entropy), which
         # matches what we actually compute here.
-        gnn_scores_np = score_matrix.cpu().numpy()  # (num_drugs, num_diseases)
+        #
+        # v114 FORENSIC ROOT FIX (BUG #1 from Task 3-b audit): the
+        # previous code computed confidence from the RAW score_matrix
+        # (line: gnn_scores_np = score_matrix.cpu().numpy()), but
+        # gnn_score is set to the CALIBRATED probability (line 1903:
+        # gnn_flat = gnn_calibrated_flat). This made confidence and
+        # gnn_score INCONSISTENT -- a pair with raw sigmoid 0.99 and
+        # calibrated 0.6 got gnn_score=0.6, confidence=1.0. The RL
+        # agent's policy network saw a misleading correlation, and the
+        # reward function (which weights BOTH features) was corrupted.
+        # ROOT FIX: compute confidence from the SAME calibrated matrix
+        # that gnn_score is derived from. This makes the two columns
+        # consistent: confidence now measures "how sure is the model
+        # about its CALIBRATED prediction".
+        gnn_scores_np = calibrated_score_matrix.cpu().numpy()  # (num_drugs, num_diseases) -- CALIBRATED (v114 BUG #1 fix)
         p = np.clip(gnn_scores_np, 1e-7, 1 - 1e-7)
         entropy = -(p * np.log(p) + (1 - p) * np.log(1 - p))
         # P3-008 + P3-027 ROOT FIX (combined — two agents fixed the same

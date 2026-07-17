@@ -589,14 +589,76 @@ def writeback_to_phase3(vh: ValidatedHypothesis) -> Path:
     trigger_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Read existing triggers (if any)
+    # v114 FORENSIC ROOT FIX (BUG #2 from Task 3-b audit): the previous
+    # code did `except Exception: existing = []` which SILENTLY discarded
+    # read errors. If the JSON was corrupt (prior crash, NFS issue, manual
+    # edit), the code overwrote the file with just the new entry, DESTROYING
+    # all previously-recorded validated hypotheses. The data flywheel's
+    # history was silently wiped with no log -- a 21 CFR Part 11 data
+    # integrity violation.
+    #
+    # ROOT FIX: on read failure, LOG CRITICAL and BACK UP the corrupt file
+    # (rename to <path>.corrupt.<timestamp>) instead of silently overwriting.
+    # The new entry is still appended (to a fresh list), but the operator
+    # is alerted and the corrupt file is preserved for forensic recovery.
+    import logging as _logging_p4_bug2
+    _log_bug2 = _logging_p4_bug2.getLogger(__name__)
     existing: List[Dict[str, Any]] = []
     if trigger_path.exists():
         try:
             with open(trigger_path) as f:
                 existing = json.load(f)
                 if not isinstance(existing, list):
+                    _log_bug2.critical(
+                        "BUG #2 v114: retrain_triggered.json at %s is valid JSON "
+                        "but NOT a list (got %s). Backing up the file and starting "
+                        "fresh. The previous validated hypotheses are PRESERVED in "
+                        "the .corrupt backup. Investigate what wrote a non-list.",
+                        trigger_path, type(existing).__name__,
+                    )
+                    import time as _time_bug2
+                    _backup = trigger_path.with_suffix(
+                        f".corrupt.{int(_time_bug2.time())}.json"
+                    )
+                    try:
+                        trigger_path.rename(_backup)
+                        _log_bug2.critical(
+                            "BUG #2 v114: corrupt retrain_triggered.json backed up "
+                            "to %s", _backup,
+                        )
+                    except OSError as _ren_err:
+                        _log_bug2.error(
+                            "BUG #2 v114: could not back up corrupt file (%s). "
+                            "The file will be overwritten -- data may be lost.",
+                            _ren_err,
+                        )
                     existing = []
-        except Exception:
+        except (json.JSONDecodeError, OSError) as _read_err:
+            _log_bug2.critical(
+                "BUG #2 v114: FAILED to read retrain_triggered.json at %s (%s). "
+                "The file is corrupt or unreadable. Backing up the corrupt file "
+                "and starting fresh. The new entry will be appended to an empty "
+                "list -- previous validated hypotheses are PRESERVED in the "
+                ".corrupt backup. Investigate the corruption (prior crash, NFS "
+                "issue, manual edit, disk full).",
+                trigger_path, _read_err,
+            )
+            import time as _time_bug2b
+            _backup = trigger_path.with_suffix(
+                f".corrupt.{int(_time_bug2b.time())}.json"
+            )
+            try:
+                trigger_path.rename(_backup)
+                _log_bug2.critical(
+                    "BUG #2 v114: corrupt retrain_triggered.json backed up to %s",
+                    _backup,
+                )
+            except OSError as _ren_err:
+                _log_bug2.error(
+                    "BUG #2 v114: could not back up corrupt file (%s). The file "
+                    "will be overwritten -- data may be lost.",
+                    _ren_err,
+                )
             existing = []
 
     # Append the new validated hypothesis
