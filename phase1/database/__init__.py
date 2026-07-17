@@ -123,10 +123,68 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import sys
 import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# v117 ROOT FIX (Task 1-a NEW finding): schema_version dual-import
+# InvalidRequestError prevention.
+#
+# The codebase has TWO import paths for the database package:
+#   - bare:      `from database.models import Drug`
+#                (used by phase1/pipelines/* and other intra-phase1 code;
+#                 works because phase1/__init__.py adds phase1/ to sys.path)
+#   - absolute:  `from phase1.database.models import Drug`
+#                (used by phase2/3/4 bridges and the preferred form)
+#
+# When BOTH paths are exercised in the same Python process, Python creates
+# TWO separate module objects for the SAME models.py file. The module body
+# executes TWICE, so `class SchemaVersion(Base)` / `class Drug(Base)` run
+# twice against the SAME `Base.metadata`, raising:
+#
+#     sqlalchemy.exc.InvalidRequestError: Table 'schema_version' is already
+#     defined for this MetaData instance.
+#
+# This breaks `import phase1.database.loaders` entirely (the loaders module
+# imports models, which triggers the re-definition). Phase 2's KG builder,
+# Phase 3's GNN trainer, and Phase 4's RL ranker all import phase1.database
+# via the absolute path, so they hit this crash on every run.
+#
+# ROOT FIX: alias `database` -> `phase1.database` (and `database.*` ->
+# `phase1.database.*`) in sys.modules so BOTH import paths resolve to the
+# SAME module object. The module body executes exactly once, so each table
+# is registered exactly once.
+#
+# This block runs at the TOP of __init__.py (before any submodule import),
+# so the alias is in place regardless of which import path is used first:
+#   - If `import phase1.database` runs first: this __init__ executes, sets
+#     sys.modules['database'] = sys.modules['phase1.database']. Subsequent
+#     bare `from database.models import X` finds the alias and resolves to
+#     phase1.database.models (single module).
+#   - If `import database` runs first (via sys.path hack): Python imports
+#     THIS file as module `database`. We detect that __name__ != 'phase1.database'
+#     and alias sys.modules['phase1.database'] = sys.modules['database'] so
+#     the absolute path also resolves to this single module.
+#
+# Defense-in-depth: the model classes ALSO set __table_args__ = {"extend_existing": True}
+# so that even if a third import path slips through, SQLAlchemy reuses the
+# existing Table instead of raising.
+# ---------------------------------------------------------------------------
+_self_module = sys.modules[__name__]
+if __name__ == "phase1.database":
+    # Imported via the canonical absolute path. Alias the bare name.
+    _existing_bare = sys.modules.get("database")
+    if _existing_bare is not _self_module:
+        sys.modules["database"] = _self_module
+else:
+    # Imported via the bare path (e.g. `import database` after sys.path hack).
+    # Alias the canonical absolute name so phase2/3/4 bridges resolve here too.
+    _existing_abs = sys.modules.get("phase1.database")
+    if _existing_abs is not _self_module:
+        sys.modules["phase1.database"] = _self_module
 
 # ---------------------------------------------------------------------------
 # Package metadata (Domain 15: Interoperability / Domain 16: Lineage)
@@ -182,40 +240,44 @@ __all__: list[str] = [
 # in _SYMBOL_MAP with the new backend's module paths.  The __getattr__
 # logic remains the same.
 # ---------------------------------------------------------------------------
+# v117 ROOT FIX: all module paths are ABSOLUTE (phase1.database.*) so the
+# lazy loader resolves to the SAME module object as the absolute import
+# path used by phase2/3/4 bridges. The bare path (database.*) still works
+# via the sys.modules aliasing at the top of this file.
 _SYMBOL_MAP: dict[str, str] = {
-    # --- Connection Management (database.connection) ---
-    "get_db_session": "database.connection",
-    "get_engine": "database.connection",
-    "init_db": "database.connection",
-    "dispose_engine": "database.connection",
-    "check_connection": "database.connection",
-    "get_session_factory": "database.connection",
-    "Base": "database.base",
-    # --- ORM Models (database.models) ---
-    "Drug": "database.models",
-    "Protein": "database.models",
-    "DrugProteinInteraction": "database.models",
-    "ProteinProteinInteraction": "database.models",
-    "GeneDiseaseAssociation": "database.models",
-    "EntityMapping": "database.models",
-    "PipelineRun": "database.models",
-    "SchemaVersion": "database.models",
-    "SCHEMA_VERSION": "database.models",
-    "cleanup_orphan_gda_records": "database.models",
-    # --- Data Operations (database.loaders) ---
-    "bulk_upsert_drugs": "database.loaders",
-    "bulk_upsert_proteins": "database.loaders",
-    "bulk_upsert_dpi": "database.loaders",
-    "bulk_upsert_ppi": "database.loaders",
-    "bulk_upsert_gda": "database.loaders",
-    "bulk_upsert_entity_mapping": "database.loaders",
-    "bulk_update_drugs_from_pubchem": "database.loaders",
-    "get_uniprot_to_protein_id_map": "database.loaders",
-    "get_inchikey_to_drug_id_map": "database.loaders",
-    "build_gene_to_uniprot_maps": "database.loaders",
-    "resolve_gene_symbol_to_uniprot": "database.loaders",
-    # --- Schema Migrations (database.migrations) ---
-    "run_migrations": "database.migrations",
+    # --- Connection Management (phase1.database.connection) ---
+    "get_db_session": "phase1.database.connection",
+    "get_engine": "phase1.database.connection",
+    "init_db": "phase1.database.connection",
+    "dispose_engine": "phase1.database.connection",
+    "check_connection": "phase1.database.connection",
+    "get_session_factory": "phase1.database.connection",
+    "Base": "phase1.database.base",
+    # --- ORM Models (phase1.database.models) ---
+    "Drug": "phase1.database.models",
+    "Protein": "phase1.database.models",
+    "DrugProteinInteraction": "phase1.database.models",
+    "ProteinProteinInteraction": "phase1.database.models",
+    "GeneDiseaseAssociation": "phase1.database.models",
+    "EntityMapping": "phase1.database.models",
+    "PipelineRun": "phase1.database.models",
+    "SchemaVersion": "phase1.database.models",
+    "SCHEMA_VERSION": "phase1.database.models",
+    "cleanup_orphan_gda_records": "phase1.database.models",
+    # --- Data Operations (phase1.database.loaders) ---
+    "bulk_upsert_drugs": "phase1.database.loaders",
+    "bulk_upsert_proteins": "phase1.database.loaders",
+    "bulk_upsert_dpi": "phase1.database.loaders",
+    "bulk_upsert_ppi": "phase1.database.loaders",
+    "bulk_upsert_gda": "phase1.database.loaders",
+    "bulk_upsert_entity_mapping": "phase1.database.loaders",
+    "bulk_update_drugs_from_pubchem": "phase1.database.loaders",
+    "get_uniprot_to_protein_id_map": "phase1.database.loaders",
+    "get_inchikey_to_drug_id_map": "phase1.database.loaders",
+    "build_gene_to_uniprot_maps": "phase1.database.loaders",
+    "resolve_gene_symbol_to_uniprot": "phase1.database.loaders",
+    # --- Schema Migrations (phase1.database.migrations) ---
+    "run_migrations": "phase1.database.migrations",
 }
 
 # ---------------------------------------------------------------------------

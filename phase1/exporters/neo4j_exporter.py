@@ -383,12 +383,23 @@ def validate_phase1_output_contract(
     if contract is None:
         contract = Phase1OutputContract()
     base_dir = Path(base_dir)
-    if not base_dir.exists():
-        raise FileNotFoundError(
-            f"Phase 1 processed_data directory does not exist: {base_dir}"
-        )
-
+    # v117 ROOT FIX (P1-020): raise DrugOSDataError (not FileNotFoundError)
+    # for missing base_dir. Callers (e.g., the master DAG's _trigger_phase2
+    # task) catch DrugOSDataError to handle contract failures gracefully.
+    # A missing base_dir IS a contract failure — the directory is part of
+    # the Phase 1 output contract. Raising FileNotFoundError propagated
+    # as an unhandled exception and crashed the Airflow task with a
+    # confusing "file not found" error instead of a clear "Phase 1
+    # contract failed" message.
     DrugOSDataError = _local_drugos_data_error()
+    if not base_dir.exists():
+        raise DrugOSDataError(
+            f"Phase 1 processed_data directory does not exist: {base_dir}. "
+            "This is a Phase 1 output contract failure — the directory is "
+            "a required contract artifact. Verify that the Phase 1 ETL "
+            "completed successfully and wrote its outputs to the configured "
+            "PROCESSED_DATA_DIR."
+        )
     resolved: Dict[str, Path] = {}
     missing_required: List[str] = []
 

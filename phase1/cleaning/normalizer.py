@@ -622,6 +622,83 @@ _ALLOWED_TYPES_TUPLE: tuple[str, ...] = tuple(ALLOWED_TYPES)
 # [PERF-4] O(1) exact-match lookup (case-insensitive).
 _ALLOWED_TYPES_LOWER: dict[str, str] = {t.lower(): t for t in ALLOWED_TYPES}
 
+# v117 ROOT FIX (P1-039): Explicit drug-type alias map.
+# The previous code relied on WRatio fuzzy matching to map abbreviations
+# like "small_mol" → "Small molecule" (score 70.0, barely above the
+# cutoff=70). This was SCIENTIFICALLY WRONG: the mapping is an EXACT
+# semantic equivalence, not an approximate string similarity. A future
+# cutoff change (e.g., 75) would silently break the mapping, and the
+# fuzzy scorer could match "small_mol" to the WRONG canonical type if
+# a new type were added. The fix adds an EXPLICIT dictionary lookup
+# (exact-match-first, fuzzy-fallback-second) so semantic equivalences
+# are deterministic and independent of the fuzzy threshold.
+#
+# Keys are lowercased for case-insensitive matching. Values MUST be in
+# ALLOWED_TYPES (validated at import time below).
+_DRUG_TYPE_ALIASES: dict[str, str] = {
+    # Small molecule aliases (ChEMBL molecule_type, PubChem, DrugBank)
+    "small_mol": "Small molecule",
+    "small_molecule": "Small molecule",
+    "small-mol": "Small molecule",
+    "small-molecule": "Small molecule",
+    "sm": "Small molecule",
+    "small": "Small molecule",
+    "molecule": "Small molecule",
+    "chemical": "Small molecule",
+    "compound": "Small molecule",
+    "naturally-derived": "Small molecule",
+    # Protein / peptide / antibody aliases (UniProt, DrugBank biotech)
+    "protein": "Protein",
+    "peptide": "Protein",
+    "peptide_protein": "Protein",
+    "biotech": "Protein",
+    "biotech_molecule": "Protein",
+    "antibody": "Antibody",
+    "mab": "Antibody",
+    "monoclonal_antibody": "Antibody",
+    "monoclonal antibody": "Antibody",
+    "immunoglobulin": "Antibody",
+    "fab": "Antibody",
+    "scfv": "Antibody",
+    # Oligosaccharide / carbohydrate aliases
+    "saccharide": "Oligosaccharide",
+    "carbohydrate": "Oligosaccharide",
+    "polysaccharide": "Oligosaccharide",
+    "glycan": "Oligosaccharide",
+    # Oligonucleotide / nucleic acid aliases
+    "nucleotide": "Oligonucleotide",
+    "nucleic_acid": "Oligonucleotide",
+    "nucleic acid": "Oligonucleotide",
+    "rna": "Oligonucleotide",
+    "dna": "Oligonucleotide",
+    "sirna": "Oligonucleotide",
+    "antisense": "Oligonucleotide",
+    "aptamer": "Oligonucleotide",
+    # Cell / gene therapy aliases
+    "cell_therapy": "Cell",
+    "cell therapy": "Cell",
+    "car-t": "Cell",
+    "cart": "Cell",
+    "stem_cell": "Cell",
+    # Enzyme aliases
+    "enzyme_protein": "Enzyme",
+    "catalyst": "Enzyme",
+    # Gene aliases
+    "gene_therapy": "Gene",
+    "gene therapy": "Gene",
+    "vector": "Gene",
+}
+# Validate that all alias values are canonical ALLOWED_TYPES (fail-fast
+# at import time if a typo slips in).
+for _alias_val in _DRUG_TYPE_ALIASES.values():
+    if _alias_val not in _ALLOWED_TYPES_LOWER.values():
+        raise RuntimeError(
+            f"P1-039 ROOT FIX: _DRUG_TYPE_ALIASES contains non-canonical "
+            f"value {_alias_val!r} — must be one of {ALLOWED_TYPES}"
+        )
+# Precompute lowercased alias keys for O(1) lookup
+_DRUG_TYPE_ALIASES_LOWER: dict[str, str] = {k.lower(): v for k, v in _DRUG_TYPE_ALIASES.items()}
+
 # [IDEM-15, CFG-2, DESIGN-5, DESIGN-6] Unit conversions — wrapped in
 # MappingProxyType for safety; mutator helper is _set_unit_conversion.
 _DEFAULT_UNIT_CONVERSIONS: dict[str, float] = {
@@ -3358,6 +3435,16 @@ def _fuzzy_match_drug_type(raw_type: Any) -> str:
     exact = _ALLOWED_TYPES_LOWER.get(cleaned.lower())
     if exact is not None:
         return exact
+
+    # v117 ROOT FIX (P1-039): Explicit alias lookup BEFORE fuzzy fallback.
+    # Common abbreviations (small_mol, mab, sirna, car-t, etc.) are SEMANTIC
+    # equivalences, not approximate string similarities. Matching them via
+    # WRatio fuzzy (score ~70, barely above cutoff=70) was fragile and
+    # scientifically wrong. The explicit dict makes the mapping deterministic
+    # and independent of the fuzzy threshold.
+    alias_match = _DRUG_TYPE_ALIASES_LOWER.get(cleaned.lower())
+    if alias_match is not None:
+        return alias_match
 
     # [IDEM-3, IDEM-13] Sort alphabetically for deterministic tie-breaking.
     sorted_types = sorted(ALLOWED_TYPES)

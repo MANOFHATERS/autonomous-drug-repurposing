@@ -57,11 +57,19 @@ from sqlalchemy import (
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
-from database.base import Base, IDMixin, SoftDeleteMixin, TimestampMixin
+# v117 ROOT FIX (P1-011 + schema_version dual-import): convert bare imports
+# to absolute `phase1.*` paths. The bare form (`from database.base import ...`)
+# only worked when phase1/__init__.py had added phase1/ to sys.path, AND it
+# created a SECOND module object (`database.base` vs `phase1.database.base`)
+# when both import paths were exercised in the same process — causing
+# `InvalidRequestError: Table 'schema_version' is already defined` because
+# the model classes were registered against two different Base/MetaData
+# objects. The absolute import resolves to a single canonical module.
+from phase1.database.base import Base, IDMixin, SoftDeleteMixin, TimestampMixin
 
-# SCHEMA_VERSION is defined in database.base (the single source of truth).
+# SCHEMA_VERSION is defined in phase1.database.base (the single source of truth).
 # Re-export it here so callers can import it from either location.
-from database.base import SCHEMA_VERSION  # noqa: F401 -- re-exported for callers
+from phase1.database.base import SCHEMA_VERSION  # noqa: F401 -- re-exported for callers
 
 # ---------------------------------------------------------------------------
 # Module logger (LOG-01, LOG-02)
@@ -566,6 +574,12 @@ class SchemaVersion(Base, IDMixin):
     version.
     """
     __tablename__ = "schema_version"
+    # v117 ROOT FIX: extend_existing=True so that if the module is ever
+    # imported under two names (database.models vs phase1.database.models),
+    # SQLAlchemy reuses the existing Table instead of raising
+    # InvalidRequestError. Defense-in-depth alongside the meta-path finder
+    # in phase1/__init__.py.
+    __table_args__ = {"extend_existing": True}
 
     version: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
     applied_at: Mapped[datetime.datetime] = mapped_column(
@@ -1082,6 +1096,7 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         # [CODE-06] Removed redundant explicit index on inchikey
         Index("idx_drugs_chembl", "chembl_id"),
         Index("idx_drugs_drugbank", "drugbank_id"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     # [INT-05] Serialization helper
@@ -1331,15 +1346,38 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         if value is None:
             return value
         value = value.strip()
-        if _HUMAN_GENE_SYMBOL_RE.match(value):
+        # v117 ROOT FIX (P1-027): use the permissive ``_GENE_SYMBOL_RE``
+        # (``^[A-Za-z][A-Za-z0-9\-]{0,50}$``) instead of the strict
+        # ``_HUMAN_GENE_SYMBOL_RE`` (ALL-CAPS only). The previous strict
+        # regex REJECTED non-human ortholog gene symbols (mouse Tp53,
+        # rat Brca1, yeast GAL4) that UniProt may emit for model-organism
+        # records. The platform's primary use case is human drug repurposing
+        # (FDA-approved drugs, human protein targets), but the secondary
+        # use case — conserved-pathway drug repurposing — REQUIRES non-human
+        # orthologs to trace evolutionary conservation of drug targets
+        # across species. The docx explicitly lists this as a Phase 2 KG
+        # capability. Rejecting non-human symbols at the DB layer silently
+        # destroyed the Protein node's gene_symbol, breaking the
+        # Gene→encodes→Protein edge and any downstream multi-hop
+        # drug→protein→gene→disease path through that gene.
+        #
+        # The strict ``_HUMAN_GENE_SYMBOL_RE`` is RETAINED for the GDA
+        # validator (DisGeNET/OMIM data is documented human-only), so
+        # cross-table consistency is preserved for the human GDA subset.
+        # Non-human proteins that DO appear in a GDA row are filtered by
+        # the GDA validator (which is correct — DisGeNET is human-only).
+        if _GENE_SYMBOL_RE.match(value):
             return value
         raise ValueError(
-            f"Invalid HUMAN gene symbol for Protein: '{value}'. "
-            "This platform is human-only (UniProt organism_id:9606, "
-            "DrugBank filter_organism_humans, STRING 9606 prefix). "
-            "Protein gene symbols must be ALL CAPS (e.g. BRCA1, FGFR3, TP53) "
-            "to match the GDA validator (cross-table consistency, "
-            "ISSUE-P1-026). Non-human symbols (Tp53, Brca1) are rejected."
+            f"Invalid gene symbol for Protein: '{value}'. "
+            "Gene symbols must start with a letter and contain only "
+            "letters, digits, or hyphens (1-50 chars). This accepts BOTH "
+            "human ALL-CAPS symbols (BRCA1, FGFR3, TP53) AND non-human "
+            "Title-Case ortholog symbols (Tp53, Brca1, GAL4) for "
+            "conserved-pathway drug repurposing. The strict ALL-CAPS "
+            "check is applied only at the GDA layer (DisGeNET/OMIM are "
+            "documented human-only). If this protein is from a non-human "
+            "UniProt record, ensure the organism_id is recorded."
         )
 
     @validates("sequence")
@@ -1418,6 +1456,7 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         # [PERF-04] Removed idx_proteins_gene_name (deprecated column)
         Index("idx_proteins_gene_symbol", "gene_symbol"),
         Index("idx_proteins_string_id", "string_id"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     # [ARCH-06] Unified PPI accessor
@@ -1679,6 +1718,7 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
         Index("idx_dpi_protein", "protein_id"),
         Index("idx_dpi_protein_interaction", "protein_id", "interaction_type"),
         Index("idx_dpi_drug_interaction", "drug_id", "interaction_type"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     # [LOG-02] Enhanced __repr__ with diagnostic fields
@@ -1844,6 +1884,7 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
         ),
         Index("idx_ppi_protein_a", "protein_a_id"),
         Index("idx_ppi_protein_b", "protein_b_id"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     # [SCI-03] Normalized score for ML consumption
@@ -2311,6 +2352,7 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         # already enforces uniqueness on (gene_symbol, disease_id, source)
         # on both SQLite and PostgreSQL, with NULLS DISTINCT semantics on
         # PostgreSQL 15+ (the project's minimum supported version).
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:
@@ -2445,6 +2487,7 @@ class EntityMapping(Base, IDMixin, TimestampMixin):
             "match_confidence IS NULL OR (match_confidence >= 0.0 AND match_confidence <= 1.0)",
             name="chk_entity_mapping_confidence_range",
         ),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:
@@ -2525,6 +2568,7 @@ class DeadLetterGDA(Base, IDMixin, TimestampMixin):
         Index("idx_dlgda_pipeline_run_id", "pipeline_run_id"),
         Index("idx_dlgda_gene_symbol", "gene_symbol"),
         Index("idx_dlgda_disease_id", "disease_id"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:
@@ -2636,6 +2680,7 @@ class AuditLog(Base, IDMixin):
         Index("idx_audit_log_table_name", "table_name"),
         Index("idx_audit_log_operation", "operation"),
         Index("idx_audit_log_changed_at", "changed_at"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:
@@ -2769,6 +2814,7 @@ class PipelineRun(Base, IDMixin, TimestampMixin):
         Index("idx_pr_source", "source"),
         Index("idx_pr_status", "status"),
         Index("idx_pr_run_date", "run_date"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:
@@ -3060,6 +3106,7 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         ),
         # [LIN-10] Index for pipeline-run traceability queries.
         Index("idx_pubchem_props_run_id", "pipeline_run_id"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:
@@ -3146,6 +3193,7 @@ class RejectedRecord(Base, IDMixin):
         ),
         Index("ix_rejected_records_source_table", "source_table"),
         Index("ix_rejected_records_source_pipeline", "source_pipeline"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:
