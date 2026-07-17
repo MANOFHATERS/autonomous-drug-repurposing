@@ -1,0 +1,48 @@
+# v116 IN-040 ROOT FIX: Prometheus scrape config.
+# Scrapes every FastAPI service's /metrics endpoint (prometheus_client
+# make_asgi_app) + node-exporter (host metrics) + cadvisor (container
+# metrics) + pushgateway (batch jobs).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'drugos-platform'
+
+scrape_configs:
+  # ─── Host + container metrics ─────────────────────────────────────────
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+  # ─── Phase 1 services ─────────────────────────────────────────────────
+  - job_name: 'phase1-service'
+    static_configs:
+      - targets: ['phase1-service:8000']
+    metrics_path: /metrics
+
+  # ─── Phase 2 services ─────────────────────────────────────────────────
+  - job_name: 'phase2-kg-api'
+    static_configs:
+      - targets: ['phase2-kg-api:8001']
+    metrics_path: /metrics
+
+  # ─── Phase 3 services ─────────────────────────────────────────────────
+  - job_name: 'phase3-gt-api'
+    static_configs:
+      - targets: ['phase3-gt-api:8002']
+    metrics_path: /metrics
+
+  # ─── Phase 4 services ─────────────────────────────────────────────────
+  - job_name: 'phase4-rl'
+    static_configs:
+      - targets: ['phase4-rl:8003']
+    metrics_path: /metrics
+
+  # ─── Prometheus self-monitoring ───────────────────────────────────────
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

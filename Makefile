@@ -3,17 +3,22 @@
 # Single entry point for all 4 phases:
 #   Phase 1 (Data Ingestion) → Phase 2 (Knowledge Graph) →
 #   Phase 3 (Graph Transformer) → Phase 4 (RL Hypothesis Ranker)
+#
+# v116 ROOT FIX (Teammate 15, issues P1-008/IN-047/P1-009/SH-037/IN-046):
+#   P1-008 (MEDIUM): removed --ignore=tests/test_disgenet_pipeline_institutional_v389.py
+#       from test-phase1. The institutional DisGeNET test now runs in CI.
+#   IN-047/P1-009 (LOW): reordered test-all to test-phase1 → test-phase2 →
+#       test-bridge (matches the data dependency direction).
+#   SH-037 (MEDIUM): added test-shared + test-root targets so shared/tests/
+#       and the top-level tests/ directory are now covered by test-all.
+#   IN-046 (LOW): rewrote run-json to use a single glob + sort by mtime
+#       (most recent manifest first, not alphabetical).
 
 SHELL := /bin/bash
 PYTHON ?= python3
 PIP    ?= pip3
 
-# R-030 root fix: added run-json run-neo4j run-4phase run-full-platform to .PHONY.
-# R-019 root fix: run-pipeline target removed (file renamed to run_4phase.py).
-# RT-012 root fix: added run-demo for explicit in-memory CI / demo runs.
-# Task 363 root fix: run-json now emits manifest.json as JSON instead of
-# calling the non-existent --json flag on run_unified.py.
-.PHONY: help install test test-phase1 test-phase2 test-bridge test-all run run-full-platform run-unified run-4phase run-real run-demo dry-run run-json run-neo4j clean
+.PHONY: help install test test-phase1 test-phase2 test-bridge test-shared test-root test-all test-phase1-fast run run-full-platform run-unified run-4phase run-real run-demo dry-run run-json run-neo4j clean restore-test
 
 help:
 	@echo "Unified Autonomous Drug Repurposing Platform"
@@ -24,21 +29,23 @@ help:
 	@echo ""
 	@echo "Run (all 4 phases):"
 	@echo "  make run             Full 4-phase run (Phase 1+2+3+4) — DEFAULT"
-	@echo "                       (invokes run_4phase.py — the CANONICAL runner per ORCH-003)"
 	@echo "  make run-4phase      Explicit alias for make run"
-	@echo "  make run-full-platform  DEPRECATED (ORCH-003) — emits warning, same as make run"
+	@echo "  make run-full-platform  DEPRECATED — alias for make run"
 	@echo "  make dry-run         Same as make run (alias)"
 	@echo ""
 	@echo "Run (partial):"
-	@echo "  make run-unified     Phase 1+2 (+3+4 via --run-gt-rl flag per ORCH-002)"
-	@echo "  make run-real        DEPRECATED (ORCH-003) — emits warning, use make run"
-	@echo "  make run-json        Print pipeline manifest as JSON (Task 363)"
+	@echo "  make run-unified     DEPRECATED — alias for make run"
+	@echo "  make run-real        DEPRECATED — alias for make run"
+	@echo "  make run-json        Print pipeline manifest as JSON (most recent)"
 	@echo ""
 	@echo "Test:"
-	@echo "  make test-all        Run ALL tests across both phases + bridge"
-	@echo "  make test-bridge     Run ONLY the Phase1<->Phase2 integration tests"
-	@echo "  make test-phase1     Run Phase 1 tests only"
+	@echo "  make test-all        Run ALL tests (phase1 → phase2 → bridge → shared → root)"
+	@echo "  make test-phase1     Run Phase 1 tests (incl. institutional DisGeNET v389)"
+	@echo "  make test-phase1-fast  Run Phase 1 tests EXCLUDING slow tests"
 	@echo "  make test-phase2     Run Phase 2 tests only"
+	@echo "  make test-bridge     Run the Phase1<->Phase2 integration tests"
+	@echo "  make test-shared     Run shared/ tests"
+	@echo "  make test-root       Run top-level tests/ directory"
 	@echo ""
 	@echo "Cleanup:"
 	@echo "  make clean           Remove __pycache__ and .pytest_cache"
@@ -48,26 +55,16 @@ install:
 	@echo ""
 	@echo "Dependencies installed. Run 'make run' for the full 4-phase pipeline."
 
-# v100 ROOT FIX (R-016) + ORCH-003 ROOT FIX (v2): the DEFAULT run
-# target now invokes run_4phase.py — the CANONICAL 4-phase runner.
 dry-run: run
 
 run: run-4phase
 
 run-full-platform:
-	@# v113 IN-072 ROOT FIX: deprecated target -- alias for ``make run``.
-	@# The previous target invoked ``run_full_platform.py`` (a deprecated
-	@# shim). The shim and its 5 sibling copies (3 at root + 3 in
-	@# scripts/legacy/) have been deleted -- the canonical runner is
-	@# ``run_4phase.py`` per ORCH-003. This alias preserves backward
-	@# compat for any CI / external script that calls
-	@# ``make run-full-platform``.
 	@echo "NOTE: 'make run-full-platform' is DEPRECATED (ORCH-003, IN-072)."
 	@echo "      Alias for 'make run' (invokes run_4phase.py)."
 	@$(MAKE) --no-print-directory run
 
 run-unified:
-	@# v113 IN-072 ROOT FIX: deprecated target -- alias for ``make run``.
 	@echo "NOTE: 'make run-unified' is DEPRECATED (ORCH-003, IN-072)."
 	@echo "      Alias for 'make run' (invokes run_4phase.py)."
 	@$(MAKE) --no-print-directory run
@@ -88,24 +85,21 @@ run-demo:
 	$(PYTHON) run_4phase.py
 
 run-real:
-	@# v113 IN-072 ROOT FIX: deprecated target -- alias for ``make run``.
 	@echo "NOTE: 'make run-real' is DEPRECATED (ORCH-003, IN-072)."
 	@echo "      Alias for 'make run' (invokes run_4phase.py)."
 	@$(MAKE) --no-print-directory run
 
+# IN-046 ROOT FIX: single glob + sort by mtime (most recent first). The
+# previous version used three redundant globs chained with `or` and picked
+# the ALPHABETICALLY-first match (oldest, not most recent). Now prints the
+# manifest path to stderr before the JSON content.
 run-json:
-	@# Task 363 ROOT FIX: the previous target invoked `run_unified.py --json`
-	@# but the --json flag does not exist on the canonical runner
-	@# (run_4phase.py — see its argparse definitions). ROOT FIX: emit
-	@# JSON by reading the manifest.json that run_4phase.py writes to
-	@# the output directory. If no manifest exists, instruct the user
-	@# to run `make run` first.
 	@$(PYTHON) -c "import json,sys,glob,os; \
-		out = glob.glob('output_v100/**/manifest.json', recursive=True) \
-			or glob.glob('output_v100/manifest.json') \
-			or glob.glob('output_v100/*/manifest.json'); \
+		out = glob.glob('output_v100/**/manifest.json', recursive=True); \
 		if not out: \
 			sys.exit('No manifest.json found. Run `make run` first to generate pipeline output.'); \
+		out.sort(key=os.path.getmtime, reverse=True); \
+		print(f'# {out[0]}', file=sys.stderr); \
 		with open(out[0]) as f: \
 			print(json.dumps(json.load(f), indent=2, default=str))"
 
@@ -116,13 +110,30 @@ run-neo4j:
 test-bridge:
 	cd phase2 && $(PYTHON) -m pytest tests/test_phase1_phase2_bridge.py -v
 
+# P1-008 ROOT FIX: removed --ignore=tests/test_disgenet_pipeline_institutional_v389.py.
+# The institutional DisGeNET test now runs in CI. If it is genuinely slow,
+# use `make test-phase1-fast` (which excludes @pytest.mark.slow tests).
 test-phase1:
-	cd phase1 && $(PYTHON) -m pytest tests/ -q --ignore=tests/test_disgenet_pipeline_institutional_v389.py
+	cd phase1 && $(PYTHON) -m pytest tests/ -q
+
+test-phase1-fast:
+	cd phase1 && $(PYTHON) -m pytest tests/ -q -m "not slow"
 
 test-phase2:
 	cd phase2 && $(PYTHON) -m pytest tests/ -q
 
-test-all: test-bridge test-phase2 test-phase1
+# SH-037 ROOT FIX: added test-shared + test-root targets.
+test-shared:
+	cd shared && $(PYTHON) -m pytest tests/ -q
+
+test-root:
+	$(PYTHON) -m pytest tests/ -q
+
+# IN-047/P1-009/SH-037 ROOT FIX: correct order is phase1 → phase2 → bridge
+# → shared → root (matches the data dependency direction). The previous
+# order (bridge → phase2 → phase1) ran the bridge against missing/stale
+# Phase 1 data and never ran shared/ or top-level tests/.
+test-all: test-phase1 test-phase2 test-bridge test-shared test-root
 	@echo ""
 	@echo "All test suites complete."
 
@@ -133,8 +144,6 @@ clean:
 	@echo "Clean complete."
 
 # v113 IN-096 ROOT FIX: backup restore-test target.
-# Run weekly (or before any disaster-recovery drill) to verify backups
-# are restorable. Requires staging Postgres + Neo4j instances.
 restore-test:
 	@echo "Running backup restore-test (v113 IN-096)..."
 	$(PYTHON) scripts/restore_test.py
