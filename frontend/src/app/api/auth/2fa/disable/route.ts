@@ -5,7 +5,24 @@ import { verifyTotpWithReplayCheck } from "@/lib/auth/totp";
 import { badRequest, internalError, writeAuditLog, requireCsrfOrSend } from "@/lib/api-helpers";
 import {
   checkTotpRateLimit,
-  recordFailedTotp,
+  // BE-066 REAL ROOT FIX (v126): migrate this route from the SYNC
+  // `recordFailedTotp` (in-memory Map, per-process) to the DISTRIBUTED
+  // `recordFailedTotpDistributed` (Redis-backed when REDIS_URL is set,
+  // falls back to the sync path internally when Redis is unavailable).
+  //
+  // The v123 "BE-066 ROOT FIX" only migrated the /api/auth/2fa/login-verify
+  // route — this route (and /api/billing/subscription) were MISSED. The
+  // audit explicitly warned: "Migrate ALL `recordFailedTotp` callers to
+  // `recordFailedTotpDistributed` (already implemented, just not wired)."
+  // On a multi-instance deploy (K8s with N replicas), each instance's
+  // in-memory Map held its own TOTP brute-force counter — an attacker
+  // could make N × TOTP_MAX_ATTEMPTS attempts before lockout (N=3 → 15
+  // attempts → ~6 min to brute-force TOTP). Wiring this route to the
+  // distributed version closes the hole identically to login-verify.
+  // The function signature is `Promise<{locked, retryAfterSeconds,
+  // attemptsRemaining}>` (vs. the sync version's plain object) so the
+  // call site is updated to `await`.
+  recordFailedTotpDistributed,
   clearTotpAttempts,
 } from "@/lib/auth/rate-limit";
 // BE-029 ROOT FIX (Team Member 12): Zod-validated request body. Replaces
@@ -171,7 +188,11 @@ export async function POST(req: NextRequest) {
       // FE-012: record the failed attempt so the lockout counter
       // advances. This is SEPARATE from the password failedLoginCount
       // — both must trip independently.
-      const afterFail = recordFailedTotp(user.userId);
+      // BE-066 v126: use the DISTRIBUTED version (Redis-backed when
+      // REDIS_URL is set) so the counter is shared across all Node.js
+      // instances — the sync version's in-memory Map was per-process
+      // and gave the attacker N× the budget on multi-instance deploys.
+      const afterFail = await recordFailedTotpDistributed(user.userId);
       await writeAuditLog({
         user,
         action: totpResult.reason === "replayed" ? "2fa_disable_code_replayed" : "2fa_disable_failed",

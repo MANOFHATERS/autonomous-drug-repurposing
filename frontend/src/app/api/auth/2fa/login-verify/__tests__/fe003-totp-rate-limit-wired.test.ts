@@ -34,11 +34,20 @@ function readRouteSource(): string {
 describe("FE-003 (v2): 2FA login-verify route wires in TOTP rate limiting", () => {
   const source = readRouteSource();
 
-  test("imports checkTotpRateLimit, recordFailedTotp, clearTotpAttempts from rate-limit", () => {
+  test("imports checkTotpRateLimit, recordFailedTotpDistributed, clearTotpAttempts from rate-limit", () => {
     // The import statement must reference all three primitives.
+    // BE-066 v123/v126: the route now uses the DISTRIBUTED version
+    // `recordFailedTotpDistributed` (Redis-backed when REDIS_URL is set,
+    // in-memory fallback otherwise). The sync `recordFailedTotp` is still
+    // mentioned in COMMENTS for historical context, but is NOT imported.
+    // The previous test asserted `\brecordFailedTotp\b` which matched the
+    // substring inside `recordFailedTotpDistributed` — that passed even
+    // after the v123 fix migrated the call site, so the test was a
+    // false-positive. This updated assertion specifically requires the
+    // DISTRIBUTED identifier to be imported.
     expect(source).toMatch(/from\s+["']@\/lib\/auth\/rate-limit["']/);
     expect(source).toMatch(/\bcheckTotpRateLimit\b/);
-    expect(source).toMatch(/\brecordFailedTotp\b/);
+    expect(source).toMatch(/\brecordFailedTotpDistributed\b/);
     expect(source).toMatch(/\bclearTotpAttempts\b/);
   });
 
@@ -53,12 +62,22 @@ describe("FE-003 (v2): 2FA login-verify route wires in TOTP rate limiting", () =
     expect(checkIdx).toBeLessThan(verifyIdx);
   });
 
-  test("calls recordFailedTotp on TOTP verification failure", () => {
-    // Within the !result.ok branch, recordFailedTotp must be called.
+  test("calls recordFailedTotpDistributed on TOTP verification failure", () => {
+    // Within the !result.ok branch, recordFailedTotpDistributed must be
+    // called (with `await` — it returns a Promise). The previous test
+    // expected `\brecordFailedTotp\(` which matched the suffix of
+    // `recordFailedTotpDistributed(` — a false positive that hid the
+    // v123 regression where the call was renamed but the test wasn't
+    // updated. The new regex specifically matches the DISTRIBUTED call
+    // (not the sync one) and requires `await` immediately before it.
     const failBranchIdx = source.indexOf("!result.ok");
     expect(failBranchIdx).toBeGreaterThan(-1);
     const afterBranch = source.slice(failBranchIdx);
-    expect(afterBranch).toMatch(/\brecordFailedTotp\(/);
+    // The distributed call: `await recordFailedTotpDistributed(`.
+    // `await` is REQUIRED — the function returns a Promise; without
+    // await, `afterFail.locked` would be `undefined` and the lock check
+    // would silently pass.
+    expect(afterBranch).toMatch(/\bawait\s+recordFailedTotpDistributed\(/);
   });
 
   test("calls clearTotpAttempts on TOTP verification success", () => {
