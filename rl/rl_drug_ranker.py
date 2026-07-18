@@ -245,6 +245,86 @@ def _pandas_lineterminator_kwargs() -> Dict[str, Any]:
 # ============================================================================
 # SECTION 1: COLUMN CONFIGURATION
 # ============================================================================
+
+# --- Core identifier columns ---
+DRUG_COL: str = "drug"
+DISEASE_COL: str = "disease"
+
+# --- Feature columns (observed by the RL agent) ---
+GNN_SCORE_COL: str = "gnn_score"
+SAFETY_COL: str = "safety_score"
+MARKET_COL: str = "market_score"
+CONFIDENCE_COL: str = "confidence"
+PATHWAY_COL: str = "pathway_score"
+
+# PATENT_COL semantics: For REPURPOSING, OFF-patent = better (cheaper,
+# generic availability, no IP blocking by original manufacturer).
+PATENT_COL: str = "patent_score"
+RARE_DISEASE_COL: str = "rare_disease_flag"
+
+# Renamed from existing_drugs_score: previous name was actively misleading.
+UNMET_NEED_COL: str = "unmet_need_score"
+
+# Clinical efficacy signal (project doc requires 3 dimensions including efficacy).
+EFFICACY_COL: str = "efficacy_score"
+
+# ADME (Absorption, Distribution, Metabolism, Excretion) properties.
+ADME_COL: str = "adme_score"
+
+# Disease-context features added at runtime by the env.
+DISEASE_PAIR_COUNT_COL: str = "disease_pair_count"
+DISEASE_AVG_GNN_COL: str = "disease_avg_gnn"
+DISEASE_AVG_SAFETY_COL: str = "disease_avg_safety"
+
+# P4-007 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): gnn_score timestamp
+# column. The input CSV may include this column (ISO 8601 format) to
+# indicate when the gnn_score was computed by the Phase 3 GT model. The
+# DrugRankingEnv checks the timestamp at init time and logs a WARNING if
+# the gnn_score is stale (>24h old), because the GT model may have been
+# retrained since then — the RL agent would be training on stale predictions,
+# and the deployed policy would be mismatched to fresh gnn_scores.
+GNN_SCORE_TIMESTAMP_COL: str = "gnn_score_timestamp"
+GNN_SCORE_STALENESS_WARNING_HOURS: float = 24.0
+
+# P4-013 ROOT FIX (v2 — Team Member 12): import the shared threshold
+# resolver at module load time so the scientific_validation gate (line ~8379)
+# and PipelineConfig.__post_init__ both use the SAME helper as the GT-RL
+# bridge. The import is wrapped in try/except so direct-script execution
+# (without the rl/ package on sys.path) still works — in that case we fall
+# back to a local implementation that is mathematically identical.
+try:
+    from .scientific_thresholds import (
+        KP_RECOVERY_THRESHOLD as _SHARED_KP_RECOVERY_THRESHOLD,
+        resolve_kp_recovery_threshold as _resolve_kp_recovery_threshold,
+    )
+except ImportError:
+    _SHARED_KP_RECOVERY_THRESHOLD: float = 0.5  # type: ignore[no-redef]
+
+    def _resolve_kp_recovery_threshold(config_threshold: float) -> float:  # type: ignore[no-redef]
+        """Local fallback identical to scientific_thresholds.resolve_kp_recovery_threshold."""
+        try:
+            cfg = float(config_threshold)
+        except (TypeError, ValueError):
+            return _SHARED_KP_RECOVERY_THRESHOLD
+        if cfg < 0.0 or cfg > 1.0:
+            return _SHARED_KP_RECOVERY_THRESHOLD
+        return max(cfg, _SHARED_KP_RECOVERY_THRESHOLD)
+
+# Optional canonical-identifier columns.
+SOURCE_DB_COL: str = "source_database"
+DRUG_CANONICAL_COL: str = "drug_inchikey"
+DISEASE_CANONICAL_COL: str = "disease_mesh_id"
+
+# Output column constants
+REWARD_COL: str = "reward"
+RANK_COL: str = "rank"
+LITERATURE_SUPPORT_COL: str = "literature_support"
+IS_KNOWN_POSITIVE_COL: str = "is_known_positive"
+CONTROLLED_SUBSTANCE_COL: str = "controlled_substance"
+
+# Default feature columns. The environment may EXTEND this list with disease
+# context features at runtime.
+FEATURE_COLS: List[str] = [
 # P4-021 ROOT FIX (Team Member 9): column constants are now imported from
 # rl/constants.py (the SELF-CONTAINED constants module). This is the FIRST
 # REAL extraction step toward P4-021's goal of actual decoupling. Both
@@ -10692,6 +10772,9 @@ def run_pipeline(
         # bridge, leaving the pipeline state inconsistent. The shared
         # helper applies the SAME ``max(cfg, KP_RECOVERY_THRESHOLD)``
         # formula in BOTH files, so they can NEVER disagree.
+        "kp_recovery_pass": (
+            recovery["recovery_rate"]
+            >= _resolve_kp_recovery_threshold(config.min_kp_recovery_rate)
         #
         # Issue 180 ROOT FIX: pass n_test_kps (the number of KPs in the
         # test set) so the threshold is SCALE-AWARE. The previous call
