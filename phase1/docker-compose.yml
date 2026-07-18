@@ -127,14 +127,32 @@ services:
   # ===========================================================================
   # Setup — one-shot init container that creates raw_data/processed_data dirs
   # with correct ownership for the airflow user (UID 50000).
+  #
+  # IN-076 v122 FORENSIC ROOT FIX (Teammate 7): the audit found:
+  #   1. `image: busybox` (unpinned :latest) — non-reproducible builds. A
+  #      future busybox release could break the setup script silently.
+  #      ROOT FIX: pin to `busybox:1.36.1` (specific version + digest
+  #      verification is a future IN-080 enhancement).
+  #   2. `chmod 775` gave GROUP-WRITE to UID 0 (root) — any container
+  #      running as root could modify the data dirs, allowing data
+  #      injection attacks. ROOT FIX: `chmod 750` (only owner + airflow
+  #      group can read/write; root group has NO write).
+  #   3. The container ran as ROOT (busybox default). The chown -R worked,
+  #      but any compromised setup script ran with full root privileges.
+  #      ROOT FIX: `user: "50000:0"` runs the container as UID 50000
+  #      (airflow) with GID 0 (root group, for read access to bind mounts
+  #      created by docker daemon). The chown is now a NO-OP (the dirs
+  #      are already owned by 50000) but is retained for forward compat
+  #      with future setup scripts that may need it.
   # ===========================================================================
   setup:
-    image: busybox
+    image: busybox:1.36.1
     init: true
+    user: "50000:0"   # IN-076: run as airflow UID, not root
     volumes:
       - ./raw_data:/tmp/raw_data
       - ./processed_data:/tmp/processed_data
-    command: sh -c "mkdir -p /tmp/raw_data/chembl /tmp/raw_data/drugbank /tmp/raw_data/uniprot /tmp/raw_data/string /tmp/raw_data/disgenet /tmp/raw_data/omim /tmp/raw_data/pubchem /tmp/processed_data && chmod 775 /tmp/raw_data /tmp/raw_data/chembl /tmp/raw_data/drugbank /tmp/raw_data/uniprot /tmp/raw_data/string /tmp/raw_data/disgenet /tmp/raw_data/omim /tmp/raw_data/pubchem /tmp/processed_data && chown -R 50000:0 /tmp/raw_data /tmp/processed_data"
+    command: sh -c "mkdir -p /tmp/raw_data/chembl /tmp/raw_data/drugbank /tmp/raw_data/uniprot /tmp/raw_data/string /tmp/raw_data/disgenet /tmp/raw_data/omim /tmp/raw_data/pubchem /tmp/processed_data && chmod 750 /tmp/raw_data /tmp/raw_data/chembl /tmp/raw_data/drugbank /tmp/raw_data/uniprot /tmp/raw_data/string /tmp/raw_data/disgenet /tmp/raw_data/omim /tmp/raw_data/pubchem /tmp/processed_data && chown -R 50000:0 /tmp/raw_data /tmp/processed_data"
     # T-043 v76: healthcheck verifies WRITABILITY (not just existence) so a
     # chown failure surfaces here, not 20 minutes later in a pipeline task.
     healthcheck:

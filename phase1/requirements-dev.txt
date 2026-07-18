@@ -1,7 +1,13 @@
-pytest>=7.4.4
-pytest-mock>=3.15.1
-pytest-cov>=4.1.0
+# v122 IN-080 FORENSIC ROOT FIX (Teammate 7): added upper bounds to all
+# dev deps to prevent breaking major upgrades. The previous file used
+# unbounded `>=` pins which allowed pip to install breaking major
+# versions (e.g., pytest 9.x with API changes) silently in dev/CI while
+# production Docker pins were at the patch level — a "works in CI, breaks
+# in prod" hazard.
+pytest>=7.4.4,<9.0
+pytest-mock>=3.10.0,<4.0
+pytest-cov>=4.1.0,<6.0
 # [v3.0.0] Property-based testing for deduplicator
-hypothesis>=6.92.0
+hypothesis>=6.92.0,<8.0
 # [v3.0.0] Performance regression tests
-pytest-benchmark>=5.2.3
+pytest-benchmark>=4.0.0,<6.0

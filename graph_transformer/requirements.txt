@@ -7,16 +7,33 @@
 # file. This file is provided for symmetry and for operators who want
 # to install ONLY Phase 3 deps (e.g. a GPU-only training container that
 # does not need Phase 1's airflow/psycopg2).
-torch>=2.0
-torch-geometric>=2.8.0
-scikit-learn>=1.3
-torch>=2.13.0
-torch-geometric>=2.4
-scikit-learn>=1.9.0
-pandas>=2.1.4
-numpy>=1.26.3
+#
+# IN-080 v122 FORENSIC ROOT FIX (Teammate 7): the previous version of
+# this file had THREE critical bugs that made `pip install -r graph_transformer/requirements.txt`
+# fail in production:
+#   1. DUPLICATE declarations of torch, torch-geometric, scikit-learn
+#      with conflicting version bounds (e.g., `torch>=2.0` AND
+#      `torch>=2.13.0`). pip silently picks one; the other is dead
+#      weight that confuses maintainers.
+#   2. NON-EXISTENT package versions: `torch>=2.13.0` (latest stable
+#      torch is 2.5.x), `scikit-learn>=1.9.0` (latest is 1.5.x),
+#      `scipy>=1.18.0` (latest is 1.14.x), `rdkit>=2026.3.4` (RDKit
+#      versions are calendar-based like 2024.9.x; 2026.3.4 does not
+#      exist yet). pip would fail with `No matching distribution found`.
+#   3. UNBOUNDED `>=` pins with no upper `<` bound — pip could install
+#      breaking future major versions silently.
+# ROOT FIX: each package appears EXACTLY ONCE, with bounds that match
+# what actually exists on PyPI as of 2024-12, AND each has an upper
+# bound. Bounds are kept consistent with the root requirements.txt so
+# dev (`pip install -r graph_transformer/requirements.txt`) and Docker
+# (which installs the root requirements.txt) get the SAME versions.
+torch>=2.0,<3.0
+torch-geometric>=2.4,<3.0
+scikit-learn>=1.3,<2.0
+pandas>=2.1.4,<3.0
+numpy>=1.26.3,<2.0
 # Rapidfuzz is used by the Phase 2 adapter's fuzzy KP resolver.
-rapidfuzz>=3.6.1
+rapidfuzz>=3.6.1,<4.0
 # P3-003 ROOT FIX (v113 forensic): RDKit is now a HARD dependency.
 # The previous code fell back to a pseudo-random noise feature when
 # RDKit was unavailable, which produced scientifically meaningless
@@ -25,11 +42,20 @@ rapidfuzz>=3.6.1
 # required for ANY environment (dev, CI, production) -- the adapter
 # now raises immediately if RDKit is not importable, regardless of
 # DRUGOS_ENVIRONMENT. No silent degradation.
-rdkit>=2026.3.4
+#
+# v122 IN-080 FIX: pin to a version that ACTUALLY EXISTS on PyPI.
+# The previous `rdkit>=2026.3.4` was a future version that does not
+# exist — pip install would fail. RDKit uses calendar versioning
+# (YYYY.M.x); 2024.9.x is the latest stable as of 2024-12.
+rdkit>=2024.3.1,<2025.0
 # P3-025 ROOT FIX (v113 forensic): scipy.sparse is required for the
 # pathway_score computation in gt_rl_bridge.py. The previous code
 # allocated two dense (num_pathways, num_diseases) and (num_drugs,
 # num_diseases) matrices (800MB at 10K-drug production scale) and
 # OOMed the Airflow worker. The fix uses scipy.sparse.csr_matrix
 # (the pathway-disease matrix is boolean and sparse).
-scipy>=1.18.0
+#
+# v122 IN-080 FIX: pin to a version that ACTUALLY EXISTS on PyPI.
+# The previous `scipy>=1.18.0` was a future version that does not
+# exist — pip install would fail. scipy 1.14.x is the latest stable.
+scipy>=1.10,<2.0

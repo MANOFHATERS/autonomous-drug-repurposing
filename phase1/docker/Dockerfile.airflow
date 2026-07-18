@@ -68,6 +68,16 @@ USER airflow
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
+# IN-068 v122 FORENSIC ROOT FIX: build-time assertion that the Airflow
+# version installed inside the image EXACTLY matches the base image's
+# pre-installed Airflow (2.10.5). Mirrors the assertion in the root
+# Dockerfile.airflow. See that file for full rationale.
+RUN python -c "import airflow; assert airflow.__version__ == '2.10.5', \
+    'IN-068 ASSERTION FAILED: airflow.__version__=%r (expected 2.10.5). \
+    The base image apache/airflow:2.10.5-python3.11 ships with Airflow \
+    2.10.5 pre-installed. phase1/requirements.txt must not upgrade or \
+    downgrade it.' % airflow.__version__"
+
 # NOTE: no ENTRYPOINT / CMD / ENV set here — the phase1 docker-compose
 # sets per-service `command:` (webserver / scheduler) and `entrypoint:`
 # (airflow-init). The base apache/airflow image's own entrypoint handles

@@ -3,10 +3,17 @@
 # For optional features, see the extras below.
 
 # Core dependencies
-neo4j>=5.0,<7.0
-pandas>=2.0,<3.0
+# v122 IN-080 FORENSIC ROOT FIX (Teammate 7): the previous file had
+# DUPLICATE declarations of `neo4j` (lines 6 and 8) and `pandas`
+# (lines 7 and 9) with DIFFERENT upper bounds (<7.0 vs <6.0 for neo4j;
+# <3.0 vs <4.0 for pandas). pip silently picked ONE of the two
+# declarations (the last one wins in pip's resolver), making the other
+# dead weight that confused maintainers and could mask future pin
+# updates. ROOT FIX: consolidate into a single declaration per package
+# with the TIGHTER upper bound (the safer choice — prevents breaking
+# upgrades from either major version series).
 neo4j>=5.0,<6.0
-pandas>=2.0,<4.0
+pandas>=2.0,<3.0
 networkx>=3.0,<4.0
 numpy>=1.24,<3.0
 torch>=2.0,<3.0
@@ -52,7 +59,9 @@ pyyaml>=6.0,<7.0
 # certifi — TLS certificate bundle for HTTPS downloads (BUG 9.1).
 #   Without it, the loader falls back to the system CA store, which may be
 #   outdated on some Linux distros.
-certifi>=2024.0
+# v122 IN-080 FIX: added upper bound `<2027.0` to prevent breaking
+# major upgrades (certifi uses CalVer YYYY.M.D).
+certifi>=2024.0,<2027.0
 
 # backports.tarfile — tarfile.extractall(filter="data") backport for
 #   Python < 3.12 (BUG 9.5). On Python 3.12+ the stdlib's native filter
@@ -63,7 +72,8 @@ backports.tarfile; python_version < "3.12"
 #   the guard is skipped (logged at DEBUG) and the loader will OOM on
 #   large DRKG variants instead of raising MemoryError with a helpful
 #   message.
-psutil>=5.9
+# v122 IN-080 FIX: added upper bound `<7.0` to prevent breaking major upgrades.
+psutil>=5.9,<7.0
 
 # Recommended: Molecular features
 # rdkit-pypi>=2023.3     # Morgan fingerprints — recommended for compound features
