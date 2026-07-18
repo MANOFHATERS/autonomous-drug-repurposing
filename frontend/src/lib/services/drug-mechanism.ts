@@ -326,43 +326,50 @@ async function fetchMechanism(chemblId: string): Promise<string | null> {
 async function fetchKgPathwayChain(
   drugName: string
 ): Promise<{ pathwayChain: PathwayEdge[]; proteinTargets: string[]; pathways: string[] } | null> {
-  // BE-056 ROOT FIX (v115, LOW): the previous code read
-  // process.env.KG_SERVICE_URL directly. Every other service in the
-  // codebase uses `resolveServiceUrl("KG_SERVICE_URL", ...)` from
-  // http-client.ts — which trims trailing slashes, supports env var
-  // aliases, and centralizes the URL resolution logic. Using the raw
-  // env var here meant:
-  //   1. A trailing slash in KG_SERVICE_URL would produce a malformed
-  //      URL (`http://host:8001//kg/explore`).
-  //   2. No support for legacy alias env vars.
-  //   3. Inconsistent with the rest of the codebase — a future
-  //      developer would not know to look in http-client.ts for the
-  //      canonical resolution logic.
+  // BE-056 ROOT FIX (v118, COMPLETE FIX — not the v115 partial fix):
   //
-  // ROOT FIX: import and use resolveServiceUrl. The function returns
-  // null if the env var is unset — we preserve the previous "return
-  // null to disable KG enrichment" behavior.
-  const { resolveServiceUrl } = await import("@/lib/http-client");
+  // The v115 "ROOT FIX" only migrated the env-var read from
+  // `process.env.KG_SERVICE_URL` to `resolveServiceUrl("KG_SERVICE_URL")`
+  // but kept using `monitoredFetch` for the HTTP call. The audit
+  // specifically required `mlFetch` (which provides retry/timeout/
+  // structured errors for ML service calls). `monitoredFetch` only
+  // adds observability logging — no timeout, no retry, no structured
+  // errors. The KG service call therefore had NO timeout — a slow KG
+  // service would hang the /api/drugs/mechanism route indefinitely.
+  //
+  // REAL ROOT FIX (v118): use `mlFetch` with a 10s timeout and 3
+  // retries (consistent with the GT/RL service clients). The mlFetch
+  // client also provides structured errors (MlServiceError) that the
+  // caller can inspect to distinguish timeout / network / HTTP errors.
+  //
+  // NOTE: mlFetch uses `cache: "no-store"` (no Next.js-level caching).
+  // The previous code used `next: { revalidate: 3600 }` for 1h caching.
+  // We lose that, BUT this module already has its own in-memory LRU
+  // cache (the `cache` Map + CACHE_TTL_MS = 5min) which serves the
+  // same purpose — repeated lookups for the same drug hit the
+  // in-memory cache without any HTTP call. The Next.js-level cache
+  // was redundant.
+  const { resolveServiceUrl, buildServiceUrl, mlFetch } = await import("@/lib/http-client");
   const serviceUrl = resolveServiceUrl("KG_SERVICE_URL");
   if (!serviceUrl) return null;
 
   const sanitized = drugName.trim().slice(0, 128);
   if (sanitized.length < 2) return null;
 
-  // BE-056: resolveServiceUrl already trims trailing slashes, but
-  // we keep the defensive .replace() in case the function is later
-  // changed to NOT trim (defensive programming).
-  const url = `${serviceUrl.replace(/\/$/, "")}/kg/explore?drug=${encodeURIComponent(sanitized)}&limit=50`;
+  const url = buildServiceUrl(
+    serviceUrl,
+    `/kg/explore?drug=${encodeURIComponent(sanitized)}&limit=50`
+  );
   try {
-    // Task 260: monitored for observability.
-    const res = await monitoredFetch("kg_service", url, {
+    const result = await mlFetch<unknown>(url, {
+      service: "kg_service",
+      method: "GET",
+      timeoutMs: 10_000, // 10s — KG queries are expensive but shouldn't take >10s
+      maxRetries: 3, // retry on transient failures (5xx, network)
       headers: { Accept: "application/json" },
-      // KG queries are expensive — cache the fetch result for 1h at the
-      // Next.js level (matches the in-memory TTL).
-      next: { revalidate: 3600 },
     });
-    if (!res.ok) return null;
-    const body = await res.json();
+    if (!result.ok) return null;
+    const body = result.body as { edges?: unknown[]; relations?: unknown[]; nodes?: unknown[]; entities?: unknown[] } | null;
     // The KG service returns { nodes: [...], edges: [...] } OR a similar
     // subgraph shape. We translate the edges into PathwayEdge records.
     const rawEdges: any[] = body?.edges || body?.relations || [];
