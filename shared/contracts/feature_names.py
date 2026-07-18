@@ -249,6 +249,112 @@ DISEASE_CONTEXT_COLS: Final[List[str]] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# P4-006 v118 TM14 ROOT FIX: bridge-vs-env column relationship contract.
+# ---------------------------------------------------------------------------
+# The audit (P4-006) found that the bridge writes 17 columns but the RL env
+# only reads 12 — 5 columns are "silently ignored". This is INTENTIONAL but
+# was UNDOCUMENTED, making it look like a bug.
+#
+# The 5 extra columns the bridge writes are NOT wasted compute:
+#   - gnn_score_calibrated: audit trail (Guo 2017 temperature-scaled score)
+#   - gnn_score_timestamp: GNN staleness tracking (P4-007)
+#   - disease_pair_count, disease_avg_gnn, disease_avg_safety: the env
+#     RE-DERIVES these via groupby (issue #344) instead of reading them.
+#     The bridge writes them for: (a) audit transparency, (b) consumers
+#     OTHER than the env (e.g., the frontend's evidence-package export),
+#     (c) future use if the env's groupby is removed.
+#
+# ROOT FIX: explicitly document the relationship via three constants:
+#   - BRIDGE_REQUIRED_COLUMNS: columns the env MUST have (12).
+#   - BRIDGE_OPTIONAL_COLUMNS: columns the bridge writes but the env
+#     does not require (5). These are written for audit/transparency.
+#   - BRIDGE_WRITES_COLUMNS: the full 17-column schema the bridge writes.
+#     Equal to BRIDGE_REQUIRED_COLUMNS + BRIDGE_OPTIONAL_COLUMNS.
+#
+# The contract consistency test (Task 330) verifies:
+#   1. BRIDGE_REQUIRED_COLUMNS is a SUBSET of BRIDGE_WRITES_COLUMNS.
+#   2. rl/constants.py's REQUIRED_COLUMNS equals BRIDGE_REQUIRED_COLUMNS.
+#   3. The bridge actually writes BRIDGE_WRITES_COLUMNS (no more, no less).
+#
+# This makes the bridge-vs-env relationship EXPLICIT and VERIFIED, replacing
+# the "silently ignored" pattern the audit flagged.
+BRIDGE_REQUIRED_COLUMNS: Final[List[str]] = [
+    # Identity (2)
+    DRUG_COL,
+    DISEASE_COL,
+    # GT output (2 — gnn_score + confidence; calibrated + timestamp are optional)
+    GNN_SCORE_COL,
+    CONFIDENCE_COL,
+    # Drug-level (8)
+    SAFETY_SCORE_COL,
+    MARKET_SCORE_COL,
+    PATHWAY_SCORE_COL,
+    PATENT_SCORE_COL,
+    RARE_DISEASE_FLAG_COL,
+    UNMET_NEED_SCORE_COL,
+    EFFICACY_SCORE_COL,
+    ADME_SCORE_COL,
+]
+"""Columns the RL env REQUIRES the bridge to write. Equals rl/constants.py
+REQUIRED_COLUMNS (12 = 2 identity + 2 GT output + 8 drug-level)."""
+
+BRIDGE_OPTIONAL_COLUMNS: Final[List[str]] = [
+    # GT output extras (audit trail)
+    GNN_SCORE_CALIBRATED_COL,
+    GNN_SCORE_TIMESTAMP_COL,
+    # Disease context (env re-derives via groupby; written for audit)
+    DISEASE_PAIR_COUNT_COL,
+    DISEASE_AVG_GNN_COL,
+    DISEASE_AVG_SAFETY_COL,
+]
+"""Columns the bridge writes but the env does not require. Written for:
+  - Audit trail (calibrated score, timestamp)
+  - Other consumers (frontend evidence-package export)
+  - Future use (env may stop re-deriving disease context)
+"""
+
+BRIDGE_WRITES_COLUMNS: Final[List[str]] = BRIDGE_REQUIRED_COLUMNS + BRIDGE_OPTIONAL_COLUMNS
+"""The full 17-column schema the bridge writes to the RL input CSV."""
+
+# P4-006 v118 contract assertion: BRIDGE_WRITES_COLUMNS must contain the
+# SAME ELEMENTS as RL_FEATURE_COLUMNS (set equality, not list equality —
+# the order differs because RL_FEATURE_COLUMNS groups by category for
+# readability, while BRIDGE_WRITES_COLUMNS groups by required/optional).
+# If these ever diverge, the bridge is writing a different schema than the
+# contract declares — a critical drift that must be caught at import time.
+_bridge_writes_set = frozenset(BRIDGE_WRITES_COLUMNS)
+_rl_feature_set = frozenset(RL_FEATURE_COLUMNS)
+assert _bridge_writes_set == _rl_feature_set, (
+    f"P4-006 v118 CONTRACT DRIFT: BRIDGE_WRITES_COLUMNS does not match "
+    f"RL_FEATURE_COLUMNS (set equality). The bridge writes a different "
+    f"schema than the contract declares. This is a critical drift — fix "
+    f"shared/contracts/feature_names.py. "
+    f"Only in BRIDGE_WRITES: {_bridge_writes_set - _rl_feature_set}; "
+    f"only in RL_FEATURE: {_rl_feature_set - _bridge_writes_set}"
+)
+assert len(BRIDGE_REQUIRED_COLUMNS) == 12, (
+    f"P4-006 v118: BRIDGE_REQUIRED_COLUMNS must have exactly 12 columns "
+    f"(2 identity + 2 GT output + 8 drug-level), got "
+    f"{len(BRIDGE_REQUIRED_COLUMNS)}."
+)
+assert len(BRIDGE_OPTIONAL_COLUMNS) == 5, (
+    f"P4-006 v118: BRIDGE_OPTIONAL_COLUMNS must have exactly 5 columns "
+    f"(2 GT extras + 3 disease context), got "
+    f"{len(BRIDGE_OPTIONAL_COLUMNS)}."
+)
+# REQUIRED ⊆ WRITES (the env's required columns must all be written by bridge).
+_required_set = frozenset(BRIDGE_REQUIRED_COLUMNS)
+assert _required_set.issubset(_bridge_writes_set), (
+    f"P4-006 v118 CONTRACT VIOLATION: BRIDGE_REQUIRED_COLUMNS is not a "
+    f"subset of BRIDGE_WRITES_COLUMNS. The env requires columns the "
+    f"bridge does not write. Missing: "
+    f"{_required_set - _bridge_writes_set}"
+)
+# Clean up the loop vars so they don't leak into the module namespace.
+del _bridge_writes_set, _rl_feature_set, _required_set
+
+
 # ===========================================================================
 # TASK 328 ALIASES — 6 canonical RL feature names (project docx §4, §6)
 # ===========================================================================
@@ -313,6 +419,10 @@ __all__ = [
     "REWARD_FEATURE_COLS",
     "TRANSPARENCY_ONLY_COLS",   # SH-034 v117: columns Phase 3 writes but Phase 4 reward ignores
     "DISEASE_CONTEXT_COLS",
+    # P4-006 v118 bridge-vs-env relationship
+    "BRIDGE_REQUIRED_COLUMNS",
+    "BRIDGE_OPTIONAL_COLUMNS",
+    "BRIDGE_WRITES_COLUMNS",
     # Task 328 aliases (6 canonical RL features)
     "FEATURE_GNN_SCORE",
     "FEATURE_SAFETY_SCORE",

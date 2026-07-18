@@ -379,42 +379,90 @@ def test_phase3_checkpoint_contract_matches_trainer() -> None:
 
 
 # =============================================================================
-# TEST 8: Phase 4 CSV contract exists with the right columns
+# TEST 8: Phase 4 CSV contract matches the canonical shared/contracts/writeback.py
 # =============================================================================
 
 def test_phase4_csv_contract_matches() -> None:
-    """Phase 4 validated_hypotheses.csv contract must have the right columns."""
-    print("\n=== TEST 8: Phase 4 CSV contract has correct columns ===")
+    """Phase 4 validated_hypotheses.csv contract must match the canonical schema.
+
+    TM14 v118 ROOT FIX: the previous test had STALE expected values
+    (drug_id, drug_name, score, validated_inconclusive). The CANONICAL
+    schema lives in shared/contracts/writeback.py (TM14's lane) and uses:
+      - drug/disease (NOT drug_id/drug_name — the canonical schema uses
+        names, not separate ID columns; the ID columns are optional
+        metadata written by some producers but not required).
+      - 4 outcome values: validated_positive, validated_toxic,
+        validated_negative, invalidated (NOT validated_inconclusive —
+        that value never existed in the canonical contract and was the
+        root cause of the drift).
+
+    The rl/contracts/phase4_schema.py module is a MIRROR of the canonical
+    contract — it imports directly from shared/contracts/writeback.py.
+    This test verifies the mirror is in sync.
+    """
+    print("\n=== TEST 8: Phase 4 CSV contract matches canonical schema ===")
     try:
+        # Import the CANONICAL schema from shared/contracts/writeback.py.
+        from shared.contracts.writeback import (
+            WRITEBACK_CSV_COLUMNS as CANONICAL_COLUMNS,
+            REQUIRED_COLUMNS as CANONICAL_REQUIRED,
+            VALID_OUTCOMES as CANONICAL_OUTCOMES,
+        )
+
+        # Import the mirror from rl/contracts/phase4_schema.py.
         from rl.contracts.phase4_schema import (
             VALIDATED_HYPOTHESES_REQUIRED_COLUMNS,
             VALIDATED_HYPOTHESES_COLUMN_NAMES,
             OUTCOME_VALUES,
         )
-        expected_required = {
-            "drug_id", "disease_id", "drug_name", "disease_name",
-            "score", "outcome", "validated_by", "validated_at",
-        }
-        actual_required = {c.name for c in VALIDATED_HYPOTHESES_REQUIRED_COLUMNS}
-        if expected_required == actual_required:
-            _pass(f"Phase 4 CSV has all 8 required columns: {sorted(actual_required)}")
+
+        # Check 1: the mirror's REQUIRED_COLUMNS is a SUPERSET of the
+        # canonical REQUIRED_COLUMNS. The mirror (rl/contracts/phase4_schema.py)
+        # is ALLOWED to be STRICTER (require more columns) — e.g., the RL
+        # ranker may require `validated_by` and `writeback_version` for audit
+        # purposes, even though the canonical contract considers them optional.
+        # The mirror is NOT allowed to be more LENIENT (drop a required column).
+        mirror_required_names = {c.name for c in VALIDATED_HYPOTHESES_REQUIRED_COLUMNS}
+        canonical_required_set = set(CANONICAL_REQUIRED)
+        if canonical_required_set.issubset(mirror_required_names):
+            extra_in_mirror = mirror_required_names - canonical_required_set
+            _pass(
+                f"Phase 4 mirror REQUIRED_COLUMNS is a superset of canonical "
+                f"(canonical={len(canonical_required_set)}, mirror={len(mirror_required_names)}, "
+                f"extra_in_mirror={sorted(extra_in_mirror) or 'none'})"
+            )
         else:
+            missing_in_mirror = canonical_required_set - mirror_required_names
             _fail(
-                f"Phase 4 CSV required columns mismatch. "
-                f"Expected: {sorted(expected_required)}, "
-                f"Actual: {sorted(actual_required)}"
+                f"Phase 4 mirror REQUIRED_COLUMNS is MISSING canonical columns: "
+                f"{sorted(missing_in_mirror)}. The mirror must require AT LEAST "
+                f"the canonical REQUIRED_COLUMNS."
             )
 
-        expected_outcomes = {
-            "validated_positive", "validated_toxic", "validated_inconclusive",
-        }
-        if set(OUTCOME_VALUES) == expected_outcomes:
-            _pass(f"Phase 4 OUTCOME_VALUES correct: {sorted(OUTCOME_VALUES)}")
+        # Check 2: the mirror's full column list matches the canonical
+        # WRITEBACK_CSV_COLUMNS.
+        mirror_all_names = set(VALIDATED_HYPOTHESES_COLUMN_NAMES)
+        canonical_all_set = set(CANONICAL_COLUMNS)
+        if mirror_all_names == canonical_all_set:
+            _pass(
+                f"Phase 4 mirror ALL columns match canonical: "
+                f"{len(mirror_all_names)} columns"
+            )
         else:
             _fail(
-                f"Phase 4 OUTCOME_VALUES mismatch. "
-                f"Expected: {sorted(expected_outcomes)}, "
-                f"Actual: {sorted(OUTCOME_VALUES)}"
+                f"Phase 4 mirror ALL columns drift. "
+                f"Only in canonical: {canonical_all_set - mirror_all_names}; "
+                f"only in mirror: {mirror_all_names - canonical_all_set}"
+            )
+
+        # Check 3: the mirror's OUTCOME_VALUES match the canonical VALID_OUTCOMES.
+        if set(OUTCOME_VALUES) == set(CANONICAL_OUTCOMES):
+            _pass(f"Phase 4 OUTCOME_VALUES matches canonical: {sorted(OUTCOME_VALUES)}")
+        else:
+            _fail(
+                f"Phase 4 OUTCOME_VALUES drift. "
+                f"Canonical: {sorted(CANONICAL_OUTCOMES)}, "
+                f"Mirror: {sorted(OUTCOME_VALUES)}"
             )
     except Exception as exc:
         _fail(f"Could not import rl.contracts.phase4_schema: {exc}")
@@ -605,6 +653,192 @@ def test_recording_graph_builder_serialization_matches_contract() -> None:
 
 
 # =============================================================================
+# TEST 13: P4-006 v118 — bridge-vs-env column relationship contract
+# =============================================================================
+
+def test_p4_006_bridge_env_column_relationship() -> None:
+    """P4-006 v118 ROOT FIX: verify the bridge/env column relationship.
+
+    The audit (P4-006) found that the bridge writes 17 columns but the RL
+    env only reads 12 — 5 columns are "silently ignored". This test
+    verifies the relationship is now EXPLICIT and DOCUMENTED:
+
+      1. shared/contracts/feature_names.py defines BRIDGE_REQUIRED_COLUMNS
+         (12), BRIDGE_OPTIONAL_COLUMNS (5), and BRIDGE_WRITES_COLUMNS (17).
+      2. BRIDGE_WRITES_COLUMNS has the same elements as RL_FEATURE_COLUMNS.
+      3. rl/constants.py's REQUIRED_COLUMNS equals BRIDGE_REQUIRED_COLUMNS.
+      4. BRIDGE_REQUIRED_COLUMNS is a subset of BRIDGE_WRITES_COLUMNS.
+
+    If any of these invariants break, this test fails — surfacing the
+    drift before it reaches production.
+    """
+    print("\n=== TEST 13: P4-006 bridge/env column relationship ===")
+    try:
+        from shared.contracts.feature_names import (
+            RL_FEATURE_COLUMNS,
+            BRIDGE_REQUIRED_COLUMNS,
+            BRIDGE_OPTIONAL_COLUMNS,
+            BRIDGE_WRITES_COLUMNS,
+        )
+        from rl.constants import REQUIRED_COLUMNS as RL_REQUIRED_COLUMNS
+
+        # Check 1: BRIDGE_WRITES_COLUMNS has same elements as RL_FEATURE_COLUMNS.
+        if set(BRIDGE_WRITES_COLUMNS) == set(RL_FEATURE_COLUMNS):
+            _pass(
+                f"BRIDGE_WRITES_COLUMNS ({len(BRIDGE_WRITES_COLUMNS)}) matches "
+                f"RL_FEATURE_COLUMNS ({len(RL_FEATURE_COLUMNS)})"
+            )
+        else:
+            _fail(
+                f"BRIDGE_WRITES_COLUMNS drift. "
+                f"Only in BRIDGE_WRITES: {set(BRIDGE_WRITES_COLUMNS) - set(RL_FEATURE_COLUMNS)}, "
+                f"only in RL_FEATURE: {set(RL_FEATURE_COLUMNS) - set(BRIDGE_WRITES_COLUMNS)}"
+            )
+
+        # Check 2: BRIDGE_REQUIRED_COLUMNS is a subset of BRIDGE_WRITES_COLUMNS.
+        if set(BRIDGE_REQUIRED_COLUMNS).issubset(set(BRIDGE_WRITES_COLUMNS)):
+            _pass(
+                f"BRIDGE_REQUIRED_COLUMNS ({len(BRIDGE_REQUIRED_COLUMNS)}) ⊆ "
+                f"BRIDGE_WRITES_COLUMNS ({len(BRIDGE_WRITES_COLUMNS)})"
+            )
+        else:
+            _fail(
+                f"BRIDGE_REQUIRED_COLUMNS is NOT a subset of BRIDGE_WRITES_COLUMNS. "
+                f"Missing: {set(BRIDGE_REQUIRED_COLUMNS) - set(BRIDGE_WRITES_COLUMNS)}"
+            )
+
+        # Check 3: rl/constants.py REQUIRED_COLUMNS equals BRIDGE_REQUIRED_COLUMNS.
+        if set(RL_REQUIRED_COLUMNS) == set(BRIDGE_REQUIRED_COLUMNS):
+            _pass(
+                f"rl/constants.py REQUIRED_COLUMNS matches BRIDGE_REQUIRED_COLUMNS "
+                f"({len(RL_REQUIRED_COLUMNS)} columns)"
+            )
+        else:
+            _fail(
+                f"rl/constants.py REQUIRED_COLUMNS drift. "
+                f"Only in RL: {set(RL_REQUIRED_COLUMNS) - set(BRIDGE_REQUIRED_COLUMNS)}, "
+                f"only in BRIDGE: {set(BRIDGE_REQUIRED_COLUMNS) - set(RL_REQUIRED_COLUMNS)}"
+            )
+
+        # Check 4: the 5 optional columns are exactly the documented set.
+        expected_optional = {
+            "gnn_score_calibrated", "gnn_score_timestamp",
+            "disease_pair_count", "disease_avg_gnn", "disease_avg_safety",
+        }
+        if set(BRIDGE_OPTIONAL_COLUMNS) == expected_optional:
+            _pass(
+                f"BRIDGE_OPTIONAL_COLUMNS has the documented 5 audit/transparency "
+                f"columns: {sorted(BRIDGE_OPTIONAL_COLUMNS)}"
+            )
+        else:
+            _fail(
+                f"BRIDGE_OPTIONAL_COLUMNS drift. Expected: {sorted(expected_optional)}, "
+                f"Actual: {sorted(BRIDGE_OPTIONAL_COLUMNS)}"
+            )
+    except Exception as exc:
+        _fail(f"P4-006 test raised: {type(exc).__name__}: {exc}")
+
+
+# =============================================================================
+# TEST 14: P3-002 v118 — Phase 2->3 edge mapping completeness contract
+# =============================================================================
+
+def test_p3_002_phase_edge_mapping_completeness() -> None:
+    """P3-002 v118 ROOT FIX: verify every dropped Phase 2 edge has a reason.
+
+    The audit (P3-002, CRITICAL) found that PHASE2_TO_PHASE3_EDGE was
+    missing 20 of 31 Phase 2 CORE_EDGE_TYPES — they were SILENTLY dropped.
+    This test verifies the TM14 v118 fix:
+
+      1. shared/contracts/phase_edge_mapping.py imports successfully.
+      2. Every edge in PHASE2_TO_PHASE3_EDGE_DROPPED has a documented
+         reason in EDGE_DROP_REASONS.
+      3. Every Phase 3 edge in the mapping VALUES is in Phase 3's
+         EDGE_TYPES schema (no orphan mappings).
+      4. map_edge_with_reason returns the right (edge, reason) tuple
+         for mapped, dropped, and unknown edges.
+    """
+    print("\n=== TEST 14: P3-002 phase edge mapping completeness ===")
+    try:
+        from shared.contracts.phase_edge_mapping import (
+            PHASE2_TO_PHASE3_EDGE,
+            PHASE2_TO_PHASE3_EDGE_DROPPED,
+            EDGE_DROP_REASONS,
+            map_edge_with_reason,
+            validate_phase2_to_phase3_completeness,
+            PHASE_EDGE_MAPPING_VERSION,
+        )
+
+        _pass(
+            f"phase_edge_mapping.py imported (version={PHASE_EDGE_MAPPING_VERSION}, "
+            f"mapped={len(PHASE2_TO_PHASE3_EDGE)}, dropped={len(PHASE2_TO_PHASE3_EDGE_DROPPED)})"
+        )
+
+        # Check 1: completeness validation passes.
+        is_complete, unmapped_dropped, invalid_p3 = (
+            validate_phase2_to_phase3_completeness()
+        )
+        if is_complete:
+            _pass(
+                f"Phase 2->3 edge contract is COMPLETE: every dropped edge has "
+                f"a reason, every mapped Phase 3 edge is valid"
+            )
+        else:
+            if unmapped_dropped:
+                _fail(
+                    f"Dropped edges WITHOUT a reason: {sorted(unmapped_dropped)}. "
+                    f"Add them to EDGE_DROP_REASONS in shared/contracts/phase_edge_mapping.py."
+                )
+            if invalid_p3:
+                _fail(
+                    f"Mapped Phase 3 edges NOT in Phase 3's EDGE_TYPES: {sorted(invalid_p3)}. "
+                    f"Fix the mapping in phase2/contracts/phase2_schema.py."
+                )
+
+        # Check 2: map_edge_with_reason returns sensible results.
+        # Test a mapped edge.
+        mapped_p3, mapped_reason = map_edge_with_reason(
+            ("Compound", "inhibits", "Protein")
+        )
+        if mapped_p3 == ("drug", "inhibits", "protein") and mapped_reason == "mapped":
+            _pass("map_edge_with_reason: ('Compound','inhibits','Protein') -> mapped")
+        else:
+            _fail(
+                f"map_edge_with_reason failed for mapped edge: got "
+                f"({mapped_p3}, {mapped_reason})"
+            )
+
+        # Test a dropped edge.
+        dropped_p3, dropped_reason = map_edge_with_reason(
+            ("Protein", "interacts_with", "Protein")
+        )
+        if dropped_p3 is None and dropped_reason.startswith("dropped:"):
+            _pass(
+                f"map_edge_with_reason: ('Protein','interacts_with','Protein') "
+                f"-> dropped with reason"
+            )
+        else:
+            _fail(
+                f"map_edge_with_reason failed for dropped edge: got "
+                f"({dropped_p3}, {dropped_reason})"
+            )
+
+        # Test an unknown edge.
+        unknown_p3, unknown_reason = map_edge_with_reason(
+            ("Nonexistent", "foo", "Bar")
+        )
+        if unknown_p3 is None and unknown_reason.startswith("unknown:"):
+            _pass("map_edge_with_reason: unknown edge -> (None, 'unknown:...')")
+        else:
+            _fail(
+                f"map_edge_with_reason failed for unknown edge: got "
+                f"({unknown_p3}, {unknown_reason})"
+            )
+    except Exception as exc:
+        _fail(f"P3-002 test raised: {type(exc).__name__}: {exc}")
+
+
+# =============================================================================
 # Master test runner
 # =============================================================================
 
@@ -615,7 +849,7 @@ def test_all() -> int:
     code (so CI can use it as a gate).
     """
     print("=" * 72)
-    print("CONTRACT CONSISTENCY TEST (Task 330)")
+    print("CONTRACT CONSISTENCY TEST (Task 330 + TM14 v118 P3-002/P4-006)")
     print("=" * 72)
 
     tests = [
@@ -631,6 +865,9 @@ def test_all() -> int:
         test_service_urls_match_contract,
         test_frontend_contracts_exist,
         test_recording_graph_builder_serialization_matches_contract,
+        # TM14 v118 ROOT FIX tests:
+        test_p4_006_bridge_env_column_relationship,
+        test_p3_002_phase_edge_mapping_completeness,
     ]
 
     for test in tests:
