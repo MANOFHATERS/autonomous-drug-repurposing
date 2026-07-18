@@ -71,7 +71,16 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+# v122 FORENSIC ROOT FIX (BUG-4/BUG-5/BUG-6): wire up shared observability
+# (metrics + structured JSON logging + OpenTelemetry).
+try:
+    from shared.observability import configure_app as _configure_observability
+except Exception:
+    _configure_observability = None
+
 logger = logging.getLogger("phase2.service")
+# v122 BUG-5: structured JSON logging is now configured by
+# shared.observability.configure_app() — keep this basicConfig as a fallback.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -123,6 +132,11 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=_ALLOWED_CORS_HEADERS,
 )
+
+# v122 BUG-4/BUG-5/BUG-6: mount /metrics + configure JSON logging + OTel.
+# Must come AFTER all middleware is added.
+if _configure_observability is not None:
+    _configure_observability(app, service_name="phase2-kg-api")
 
 
 # ─── P2-001 ROOT FIX (v109 forensic): unified Neo4j credential env vars

@@ -74,7 +74,21 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+# v122 FORENSIC ROOT FIX (BUG-4/BUG-5/BUG-6): wire up shared observability
+# (metrics + structured JSON logging + OpenTelemetry). The v116
+# docker-compose.yml added Prometheus + OTel + Jaeger services but the
+# application code never exposed /metrics, never used structured logging,
+# and never instrumented FastAPI. This single call fixes IN-040, IN-041,
+# IN-042 at the application level.
+try:
+    from shared.observability import configure_app as _configure_observability
+except Exception:
+    _configure_observability = None
+
 logger = logging.getLogger("scripts.gt_api")
+# v122 BUG-5: structured JSON logging is now configured by
+# shared.observability.configure_app() — keep this basicConfig as a fallback
+# for when the shared module fails to import (rare).
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -167,6 +181,12 @@ app.add_middleware(
     # misconfiguration if credentials are re-enabled.
     allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
 )
+
+# v122 BUG-4/BUG-5/BUG-6: mount /metrics + configure JSON logging + OTel.
+# Must come AFTER all middleware is added so the request_id middleware
+# wraps around the others (outermost = first added).
+if _configure_observability is not None:
+    _configure_observability(app, service_name="phase3-gt-api")
 
 
 # ─────────────────────── Request / response schemas ─────────────────────

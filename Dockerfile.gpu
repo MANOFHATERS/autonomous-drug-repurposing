@@ -1,6 +1,42 @@
 # =============================================================================
 # Dockerfile.gpu — GPU ML image for Phase 3 (GT) + Phase 4 (RL) on CUDA
 # =============================================================================
+# v122 FORENSIC ROOT FIX (Teammate 15 — hostile-auditor, BUG-2):
+#   The v116 version of this file used `pip install --prefix=/install ...`
+#   (the multi-stage builder pattern from Dockerfile.ml) BUT this file is
+#   a SINGLE-STAGE build — there is NO `COPY --from=builder /install /usr/local`
+#   step. After pip install, packages are at
+#   `/install/lib/python3.11/site-packages/` which is NOT on Python's
+#   default sys.path. `import torch` would fail at runtime with
+#   `ModuleNotFoundError: No module named 'torch'`.
+#
+#   The v116 comment at line 4 claimed "ROOT FIX" but the image was
+#   completely broken — exactly the "comments are fakes, code is broken"
+#   pattern the user warned about. The image BUILDS (pip install succeeds)
+#   but FAILS at runtime (import fails). This is worse than a build failure
+#   because the bug only manifests when the container starts serving
+#   requests — potentially after deployment.
+#
+#   ROOT FIX: drop the `--prefix=/install` flag and install directly into
+#   the system Python's site-packages (which IS on sys.path). This is the
+#   standard single-stage pattern. The multi-stage pattern in Dockerfile.ml
+#   is used there to keep the runtime image small (no compilers); here we
+#   keep the builder tools because removing them in a single-stage build
+#   would require a multi-stage refactor (out of scope for this fix).
+#
+#   ALSO FIXED (IN-092 follow-up): COPY source directories (phase1/,
+#   phase2/, phase4/, rl/, graph_transformer/, shared/, common/, scripts/,
+#   run_4phase.py) into /opt/repo. The v118 fix added these COPYs to
+#   Dockerfile.ml (so `docker run` without compose works) but the SAME
+#   fix was NEVER applied to Dockerfile.gpu. Now both images have the
+#   same COPY set.
+#
+#   ALSO: aligned Python version to 3.12 (was 3.11) to match Dockerfile.ml.
+#   Different Python versions between CPU and GPU images cause .pyc
+#   incompatibilities and import errors when bind mounts shadow the
+#   COPY'd source. Python 3.12 is the canonical version (Dockerfile.ml,
+#   Dockerfile.python-ml).
+#
 # v116 ROOT FIX (Teammate 15, issue IN-006):
 #   The DOCX V1 launch criteria require "AWS/GCP GPU". The previous
 #   docker-compose.yml had NO deploy.resources.reservations.devices and
@@ -21,10 +57,10 @@ FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
 # Avoid tzdata interactive prompt.
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System deps + Python 3.11.
+# System deps + Python 3.12 (matches Dockerfile.ml + Dockerfile.python-ml).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-venv \
+    python3.12 \
+    python3.12-venv \
     python3-pip \
     build-essential \
     curl \
@@ -37,8 +73,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libxrender1 \
     && rm -rf /var/lib/apt/lists/* \
-    && ln -sf /usr/bin/python3.11 /usr/local/bin/python3 \
-    && ln -sf /usr/bin/python3.11 /usr/local/bin/python
+    && ln -sf /usr/bin/python3.12 /usr/local/bin/python3 \
+    && ln -sf /usr/bin/python3.12 /usr/local/bin/python
 
 RUN pip install --no-cache-dir --upgrade \
     pip==24.2 \
@@ -49,19 +85,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONHASHSEED=0
 
-# ─── PyTorch CUDA 12.1 build (aligned to 2.2.0 — matches Dockerfile.ml) ─
-RUN pip install --no-cache-dir --prefix=/install \
+# v122 ROOT FIX: dropped `--prefix=/install` — install directly into the
+# system Python's site-packages so the packages are immediately importable.
+# The previous single-stage build with `--prefix=/install` put packages at
+# /install/lib/python3.12/site-packages/ which is NOT on sys.path, causing
+# `import torch` to fail at runtime.
+RUN pip install --no-cache-dir \
     "torch==2.2.0+cu121" \
     --index-url https://download.pytorch.org/whl/cu121
 
 # PyG extensions built against torch 2.2.0 + cu121.
-RUN pip install --no-cache-dir --prefix=/install \
+RUN pip install --no-cache-dir \
     "torch-geometric==2.5.3" \
     "torch-scatter==2.1.2+pt22cu121" \
     "torch-sparse==0.6.18+pt22cu121" \
     -f https://data.pyg.org/whl/torch-2.2.0+cu121.html
 
-RUN pip install --no-cache-dir --prefix=/install \
+RUN pip install --no-cache-dir \
     "rdkit==2024.3.5" \
     "pandas==2.1.4" \
     "numpy==1.26.4" \
@@ -89,8 +129,23 @@ RUN pip install --no-cache-dir --prefix=/install \
     "prometheus-client==0.20.0" \
     "psutil==5.9.8"
 
+# v122 ROOT FIX (IN-092 follow-up): COPY source directories so `docker run`
+# (without compose bind mounts) works. Mirrors Dockerfile.ml lines 162-176.
 WORKDIR /opt/repo
+# uid 10001 (not 1000) to avoid host uid collisions.
 RUN useradd -m -u 10001 drugos && chown -R drugos:drugos /opt/repo
+# COPY source dirs with --chown so the drugos user owns them. These COPYs
+# are shadowed by docker-compose bind mounts at runtime, but `docker run`
+# without compose needs them to avoid ModuleNotFoundError.
+COPY --chown=drugos:drugos phase1/ ./phase1/
+COPY --chown=drugos:drugos phase2/ ./phase2/
+COPY --chown=drugos:drugos phase4/ ./phase4/
+COPY --chown=drugos:drugos rl/ ./rl/
+COPY --chown=drugos:drugos graph_transformer/ ./graph_transformer/
+COPY --chown=drugos:drugos shared/ ./shared/
+COPY --chown=drugos:drugos common/ ./common/
+COPY --chown=drugos:drugos scripts/ ./scripts/
+COPY --chown=drugos:drugos run_4phase.py ./
 USER drugos
 
 EXPOSE 8002 8003
