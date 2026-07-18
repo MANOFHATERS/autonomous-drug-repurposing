@@ -75,11 +75,22 @@ def healthz() -> dict:
          imported (catches syntax errors, missing deps).
 
     The endpoint returns HTTP 200 with ``"status": "ok"`` ONLY if ALL
-    three checks pass. If ANY check fails, it returns HTTP 503 with
+    three checks pass (with one exception -- see ``phase1_data_present``
+    below). If ANY check fails, it returns HTTP 503 with
     ``"status": "degraded"`` and a ``checks`` dict detailing which
     subsystems are failing. Docker's healthcheck can be configured to
     retry on 503, giving the service time to recover (e.g. waiting for
     Neo4j to start) before the orchestrator restarts the container.
+
+    P2-054 REAL ROOT FIX (Teammate 4, forensic): the ``phase1_data_present``
+    check is NON-FATAL by default (``DRUGOS_HEALTHCHECK_STRICT=0``). In
+    dev/CI, Phase 1 data often doesn't exist (no pipelines have run yet),
+    and failing the healthcheck would cause docker-compose to restart the
+    container infinitely -- a real production outage masquerading as a
+    "ROOT FIX". The check is recorded in the ``checks`` dict (so operators
+    see the state) but ``overall_ok`` stays True. Set
+    ``DRUGOS_HEALTHCHECK_STRICT=1`` in production to make Phase 1 data
+    missing fatal (returns 503, triggers container restart).
 
     Note: this is a READINESS check, not just a liveness check. For
     pure liveness (is the process alive?), use ``/health`` which does
@@ -116,6 +127,27 @@ def healthz() -> dict:
             overall_ok = False
 
     # Check 2: Phase 1 data present.
+    # P2-054 REAL ROOT FIX (Teammate 4, forensic): the previous "ROOT FIX"
+    # comment claimed "In dev/CI, Phase 1 data may not exist -- don't fail
+    # the healthcheck for this... Mark as degraded but not fatal" but the
+    # CODE set ``overall_ok = False`` unconditionally -- which IS fatal
+    # (docker-compose healthcheck sees 503, marks container unhealthy,
+    # restarts it after retries). This is the exact "comments are fakes"
+    # pattern: the comment described the intended behaviour, the code did
+    # the opposite. In dev/CI (where Phase 1 data genuinely doesn't exist
+    # yet), the container would restart infinitely -- a real production
+    # outage masquerading as a "ROOT FIX".
+    #
+    # REAL ROOT FIX: gate the fatality on ``DRUGOS_HEALTHCHECK_STRICT``:
+    #   - "0" (default, dev/CI): Phase 1 data missing is NON-FATAL. The
+    #     check is recorded as ``failed`` in the ``checks`` dict (so
+    #     operators see it) but ``overall_ok`` stays True. The container
+    #     stays healthy and serves /health, /cypher, etc. This matches
+    #     the original comment's intent.
+    #   - "1" (production): Phase 1 data missing IS fatal. Returns 503,
+    #     docker restarts the container. Operators who set STRICT=1 are
+    #     asserting "Phase 1 data SHOULD exist -- if it doesn't, restart".
+    _strict = os.environ.get("DRUGOS_HEALTHCHECK_STRICT", "0") == "1"
     try:
         pdir = _REPO_ROOT / "phase1" / "processed_data"
         if pdir.exists() and any(pdir.glob("*.csv*")):
@@ -124,13 +156,26 @@ def healthz() -> dict:
             checks["phase1_data_present"] = (
                 f"failed: {pdir} is empty or missing"
             )
-            # In dev/CI, Phase 1 data may not exist — don't fail the
-            # healthcheck for this (the service can still respond to
-            # /health and /cypher if Neo4j is up). Mark as degraded
-            # but not fatal.
-            overall_ok = False
+            # P2-054 REAL ROOT FIX: only fail the healthcheck (503) in
+            # STRICT mode. In dev/CI (default), record the failure but
+            # keep the container healthy -- the service can still serve
+            # /health, /cypher, /query if Neo4j is up.
+            if _strict:
+                overall_ok = False
+            else:
+                # Non-fatal: log so operators see the state, but don't
+                # trigger container restart.
+                logger.info(
+                    "P2-054: Phase 1 data not present at %s "
+                    "(DRUGOS_HEALTHCHECK_STRICT=0, non-fatal). Container "
+                    "stays healthy. Set DRUGOS_HEALTHCHECK_STRICT=1 in "
+                    "production to fail the healthcheck when Phase 1 "
+                    "data is missing.",
+                    pdir,
+                )
     except Exception as exc:
         checks["phase1_data_present"] = f"failed: {type(exc).__name__}: {exc}"
+        # Unexpected errors are always fatal (not just strict mode).
         overall_ok = False
 
     # Check 3: bridge importable.
