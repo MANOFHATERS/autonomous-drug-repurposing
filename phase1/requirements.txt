@@ -109,5 +109,5 @@ uvicorn[standard]>=0.27
 # filelock=None and _count_parquet_records would fail if a .parquet
 # file is encountered. pyarrow is needed for parquet support. Adding
 # them as explicit deps ensures they're always available.
-filelock>=3.13.0
+filelock>=3.30.3
 pyarrow>=14.0.0
