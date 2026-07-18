@@ -616,3 +616,68 @@ Stage Summary:
 - Verification: 36/36 contract tests pass. 27/27 TM14 v118 tests pass. run_real_pipeline_verification.py runs end-to-end on REAL data successfully.
 - Branch: teammate-14-root-forensic-fixes-v118. Will merge to main after push + fresh-clone verification.
 - PAT SECURITY: the GitHub PAT was pasted in plaintext in the IM context. User MUST revoke it at https://github.com/settings/tokens immediately.
+
+Task ID: TM1-v119-forensic-verification
+Agent: Super Z (hostile-auditor mode)
+Task: Teammate 1 — Phase 1 Pipelines A (ChEMBL, DrugBank, UniProt) — verify all 22 assigned issues are actually fixed at runtime (not just in comments).
+
+Work Log:
+- Read /home/z/my-project/upload/Pasted Content_1784338958884.txt (the 22-issue audit list for Teammate 1).
+- Read /home/z/my-project/upload/Team_Cosmic_Build_Process_Updated.docx for project context (4 phases: data ingestion, KG construction, graph transformer, RL ranker).
+- Cloned https://github.com/MANOFHATERS/autonomous-drug-repurposing.git at main (HEAD = 03fa1ea, v118).
+- Created branch teammate-1-issues-root-fix-v119.
+- Hostile-auditor mode: assumed every "ROOT FIX" comment was a lie until proven otherwise by actual runtime behavior.
+- Read REAL source code (not comments, not tests) for every file mentioned in the 22 issues:
+    * shared/contracts/writeback.py (459 lines) — SH-002, SH-003, SH-012
+    * rl/contracts/phase4_schema.py (491 lines) — SH-002, SH-003
+    * rl/service.py (843 lines) — SH-004, SH-005, SH-024, SH-035
+    * phase4/writeback.py (959 lines) — SH-012, SH-027
+    * Dockerfile.ml (160 lines) — IN-070
+    * docker-compose.yml (705 lines) — IN-073, IN-074, IN-082
+    * docker-compose.tls.yml (109 lines) — IN-073
+    * Dockerfile.airflow (74 lines) + Dockerfile.airflow.entrypoint.sh — IN-077
+    * phase1/dags/drugbank_dag.py (433 lines) — P1-015
+    * phase1/pipelines/_dev_samples.py (1324 lines) — P1-016, P1-034, P1-048
+    * phase2/drugos_graph/chembl_loader.py (2896 lines, relevant sections) — P2-018
+    * phase2/drugos_graph/data/verified_uniprot_gene_crosswalk.yaml — P2-020
+    * rl/rl_drug_ranker.py (11944 lines, relevant sections) — P4-048, P4-049
+    * frontend/src/lib/ml-contracts.ts (398 lines) — SH-004, SH-005, SH-024
+    * shared/contracts/urls.py — SH-035
+    * requirements.txt + requirements-dev.txt — IN-075
+- Wrote /home/z/my-project/scripts/verify_all_22_issues.py — hostile-auditor runtime verification.
+  Result: 73/73 PASS, 0 FAIL. All 22 issues verified FIXED at runtime.
+- Wrote /home/z/my-project/repo/tests/test_tm1_v119_root_fix_regression.py — fresh
+  behavior-based regression suite (69 tests). Result: 69/69 PASS.
+- Ran existing tests/test_tm1_audit_lockin.py: 37/37 PASS.
+- Ran cross-cutting suites (test_all_18_issues, test_p4_all_25_issues, etc.):
+  78 PASS, 11 FAIL, 10 SKIP. Investigated the 11 failures — ALL are stale
+  pattern-matching tests (looking for literal strings like "out[:limit]" or
+  "issubset" in source code) that fail because the code was REFACTORED to a
+  different but equivalent pattern. The actual behavior is correct (verified
+  by behavior-based tests). These stale tests belong to other teammates'
+  swim lanes (P4-013/014/019 are Teammate 11/12 territory) — out of scope
+  for Teammate 1.
+- Ran py_compile on all 9 touched files: ALL OK.
+- Ran real import smoke test: all modules import cleanly, all runtime values
+  match the contract (VALID_OUTCOMES has 4 values, columns match, etc.).
+- Ran frontend `npx tsc --noEmit`: 0 errors. Ran `npm run lint`: 0 errors
+  (627 style warnings — non-blocking).
+- Ran real 4-phase pipeline smoke test
+  (`run_4phase.py --dev-mode --gt-epochs 2 --rl-timesteps 100`):
+  Phase 1 (11 CSVs) → Phase 2 (82 nodes, 95 edges) → Phase 3 (10 drugs,
+  20 diseases, GT trained 2 epochs) → Phase 4 (30 candidates ranked, 4 returned).
+  Pipeline mechanics all work. "SCIENTIFIC VALIDATION FAILED" is expected
+  with 2 epochs (need 80+ for AUC > 0.85) — this is a smoke test, not a
+  real training run.
+
+Stage Summary:
+- ALL 22 Teammate-1 issues are verified FIXED at runtime (73/73 hostile-auditor checks pass).
+- No NEW bugs introduced by my work (I only ADDED a test file — no production code changed).
+- The 11 pre-existing test failures in other suites are stale pattern-matching
+  tests (test implementation shape, not behavior) — they belong to other
+  teammates' swim lanes and are out of scope for Teammate 1.
+- Frontend TypeScript + Python py_compile + 4-phase pipeline smoke all pass.
+- Added 1 new file: tests/test_tm1_v119_root_fix_regression.py (69 tests).
+- Branch: teammate-1-issues-root-fix-v119. Will merge to main after push + verify.
+- PAT SECURITY: the GitHub PAT was pasted in plaintext in the IM context.
+  User MUST revoke it at https://github.com/settings/tokens immediately.
