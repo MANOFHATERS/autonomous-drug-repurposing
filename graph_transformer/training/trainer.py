@@ -682,6 +682,67 @@ class GraphTransformerTrainer:
         ``create_scheduler(total_steps)`` before the loop to get the
         OneCycleLR warmup+decay in a custom training loop.
 
+        P3-013 ROOT FIX (v119 forensic, DOCUMENTED ARCHITECTURAL CHOICE):
+        This trainer uses a HYBRID full-batch encoder + mini-batch link
+        predictor design. The ``self.model.forward_logits`` call invokes
+        ``self.model.encode(node_features, edge_indices, ...)`` which
+        processes the ENTIRE graph through all Graph Transformer layers
+        — the encoder output is INDEPENDENT of which (drug, disease)
+        pairs are in the batch. The encoder produces the same
+        ``drug_emb_all`` and ``disease_emb_all`` regardless of batch
+        order. Only the link predictor's MLP forward
+        (``link_predictor.forward_logits(drug_emb_batch,
+        disease_emb_batch)``) is batch-dependent.
+
+        Consequence: the ``torch.randperm`` shuffle of pair indices
+        (line ~715) has MINIMAL effect on the final gradient. The loss
+        is ``BCEWithLogitsLoss(logits, batch_labels)`` which is a MEAN
+        over the batch; the gradient of the mean is the mean of the
+        per-sample gradients. Summing these means over all batches
+        gives the same total gradient regardless of batch order
+        (modulo floating-point non-associativity, ~1e-7). The
+        "reproducible shuffling" infrastructure (dedicated
+        ``torch.Generator``, V4 C-F6 fix, P3-028 MPS/XLA fallback) is
+        therefore not scientifically necessary for the current
+        full-batch-encoder design.
+
+        WHY THE SHUFFLE IS RETAINED (deliberate choice, audit P3-013
+        option #3):
+          1. **Future subgraph sampling**: if the encoder is upgraded
+             to use NeighborLoader (PyG) or GraphSAINT subgraph
+             sampling (Hamilton et al. 2017, GraphSAGE), each batch
+             would process a DIFFERENT subgraph, making the shuffle
+             scientifically meaningful. Removing the shuffle now would
+             require re-adding it (with the same reproducibility
+             infrastructure) when subgraph sampling is implemented.
+             The shuffle infrastructure is forward-compatible.
+          2. **Link predictor MLP regularization**: the MLP's dropout
+             IS batch-dependent (different dropout masks per batch).
+             Shuffling changes which samples co-occur in a batch,
+             which changes the dropout correlation structure. The
+             effect is small but non-zero — the shuffle provides a
+             tiny regularization benefit for the MLP.
+          3. **Standard SGD practice**: shuffling is the default in
+             ``torch.utils.data.DataLoader``. Removing it would be a
+             non-standard choice that requires explicit justification
+             to future reviewers. Retaining it is the conservative
+             default.
+          4. **Reproducibility**: the dedicated ``torch.Generator``
+             ensures the shuffle order is deterministic across runs
+             with the same seed. This is required for the V1 AUC
+             reproducibility contract (the team lead must be able to
+             reproduce a reported AUC by re-running with the same
+             seed). Removing the shuffle would NOT break
+             reproducibility, but retaining it makes the
+             reproducibility contract explicit (the shuffle IS
+             reproducible, not stochastic).
+
+        The audit's P3-013 fix #3 (document as deliberate choice) is
+        the SELECTED option. Fixes #1 (remove shuffle) and #2
+        (implement subgraph sampling) are deferred — #1 loses
+        forward-compatibility with subgraph sampling, and #2 is a
+        major architectural change beyond the P3-013 scope.
+
         Args:
             drug_indices: (N,) drug node indices.
             disease_indices: (N,) disease node indices.
@@ -1293,6 +1354,20 @@ class GraphTransformerTrainer:
             # a bug). The compute cost is ~1.5x per epoch (three AUC
             # computations vs one), acceptable for institutional-grade
             # scientific integrity.
+            #
+            # P3-014 ROOT FIX (v119 forensic, THREAD-SAFE INFERENCE):
+            # ``evaluate_link_prediction`` no longer toggles
+            # ``model.eval()`` / ``model.train(prior_training)`` (the
+            # racy pattern P3-014 flagged). The CALLER must set
+            # ``model.eval()`` before invoking it. We do that here with
+            # a save/restore pattern that is safe because ``fit()`` is
+            # single-threaded per epoch (the next ``train_epoch()``
+            # call at line 1261 calls ``self.model.train()`` at line
+            # 697, which restores train mode regardless of the restore
+            # here -- but we restore anyway for safety in case the
+            # loop exits early).
+            _verified_prior_training = self.model.training
+            self.model.eval()
             try:
                 from ..evaluation import evaluate_link_prediction
                 verified_metrics = evaluate_link_prediction(
@@ -1325,6 +1400,14 @@ class GraphTransformerTrainer:
                 verified_val_auc = float(val_metrics["auc"])
                 verified_auc_mannwhitney = verified_val_auc
                 verified_auc_agreement = 0.0
+            finally:
+                # P3-014 v119: restore prior training mode (was TRAIN
+                # before we set eval). The next train_epoch() call would
+                # set it back to TRAIN anyway, but we restore here for
+                # safety in case the loop exits early (e.g., early
+                # stopping) and a caller expects the model to be in the
+                # same mode as before fit() was called.
+                self.model.train(_verified_prior_training)
 
             # P3-011: log discrepancy between trainer AUC and verified AUC.
             trainer_auc = float(val_metrics["auc"])

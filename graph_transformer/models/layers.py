@@ -134,12 +134,54 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         edge_types: Optional[List[Tuple[str, str, str]]] = None,
         dropout: float = 0.1,
         node_types: Optional[List[str]] = None,
+        per_edge_type_out_proj: bool = False,
     ) -> None:
         super().__init__()
         self.embedding_dim = embedding_dim
         self.num_heads = num_heads
         self.edge_types = edge_types or []
         self.dropout = dropout
+        # P3-032 ROOT FIX (v119 forensic, SCIENTIFIC-ML CORRECTNESS):
+        # ``per_edge_type_out_proj`` is an OPTIONAL constructor flag that
+        # enables per-edge-type output projections (standard HGT, Wang et al.
+        # 2019). When True, each edge type has its OWN out_proj module
+        # applied to its messages BEFORE scatter_add (so each edge type
+        # can learn a different "message transformation"). When False
+        # (default), a SINGLE shared out_proj is applied to the SUM of
+        # all edge-type messages AFTER scatter_add (the current behavior,
+        # preserved for backward compatibility with existing trained
+        # checkpoints).
+        #
+        # The audit (P3-032) found that the shared out_proj forces ALL
+        # edge types to share the same output projection — the model
+        # cannot learn "inhibits messages should be transformed
+        # differently from activates messages". The per-edge-type
+        # edge_gates partially compensate (scalar gate per edge type),
+        # but a scalar gate is much less expressive than a full linear
+        # projection. On a production graph with 18+ edge types, the
+        # shared out_proj becomes a bottleneck.
+        #
+        # The flag is FALSE by default to preserve state_dict backward
+        # compatibility: old checkpoints (trained with the shared
+        # out_proj) load cleanly into the default-False model. New
+        # models that want the per-edge-type out_proj must explicitly
+        # set ``per_edge_type_out_proj=True`` at construction. The
+        # resulting model has additional ``out_proj_per_edge_type.*``
+        # state_dict keys (one nn.Linear per edge type) that are NOT
+        # in old checkpoints — load_state_dict(strict=True) on an old
+        # checkpoint into a per_edge_type_out_proj=True model will
+        # FAIL with missing keys. This is the desired behavior: the
+        # operator must retrain from scratch to get the per-edge-type
+        # out_proj weights. Silently initializing them to zero would
+        # make all per-edge-type messages zero (the model would only
+        # see self-loops), which is a silent corruption mode.
+        #
+        # Production deployments targeting the V1 AUC 0.85 target on
+        # the full 18-edge-type graph SHOULD set this flag to True.
+        # Demo / CI runs may leave it False (the shared out_proj is
+        # adequate for the 5-node-type demo graph, where the per-edge-
+        # type signal is weaker).
+        self.per_edge_type_out_proj: bool = bool(per_edge_type_out_proj)
 
         assert embedding_dim % num_heads == 0, (
             f"embedding_dim ({embedding_dim}) must be divisible by "
@@ -197,8 +239,44 @@ class HeterogeneousMultiHeadAttention(nn.Module):
             self.k_proj[edge_key] = k
             self.v_proj[edge_key] = v
 
-        # Output projection: maps concatenated multi-head output back to embedding_dim
+        # Output projection: maps concatenated multi-head output back to embedding_dim.
+        #
+        # P3-032 ROOT FIX (v119): when ``per_edge_type_out_proj=False``
+        # (default), this is the ONLY out_proj — applied to the SUM of
+        # all edge-type messages + self-loop messages AFTER scatter_add
+        # (backward compat with existing trained checkpoints). When
+        # ``per_edge_type_out_proj=True``, this shared out_proj is STILL
+        # CONSTRUCTED (so old checkpoints load cleanly via strict=True)
+        # but is NOT used in the forward pass — the per-edge-type
+        # out_proj modules (``self.out_proj_per_edge_type``) are used
+        # instead, applied BEFORE scatter_add. The shared out_proj's
+        # parameters become dead weight in the per_edge_type_out_proj=True
+        # case (they receive no gradient, since the forward pass does
+        # not use them). This is acceptable: the parameter cost is
+        # ``embedding_dim^2`` (~16K params for embedding_dim=128), which
+        # is negligible compared to the per-edge-type out_proj cost
+        # (``num_edge_types * embedding_dim^2``).
         self.out_proj = nn.Linear(num_heads * self.head_dim, embedding_dim, bias=False)
+
+        # P3-032 ROOT FIX (v119): per-edge-type out_proj modules.
+        # Only used when ``per_edge_type_out_proj=True``. Each edge type
+        # gets its own nn.Linear mapping (num_heads * head_dim) ->
+        # embedding_dim. Applied to weighted_V_flat BEFORE scatter_add
+        # so each edge type's messages are transformed independently.
+        # This matches standard HGT (Wang et al. 2019, Eq. 5-7) where
+        # each edge type has its own message function.
+        if self.per_edge_type_out_proj and self.edge_types:
+            self.out_proj_per_edge_type = nn.ModuleDict({
+                f"{src}_{rel}_{tgt}": nn.Linear(
+                    num_heads * self.head_dim, embedding_dim, bias=False
+                )
+                for src, rel, tgt in self.edge_types
+            })
+        else:
+            # Empty ModuleDict — keeps state_dict shape stable regardless
+            # of the flag value. When per_edge_type_out_proj=False, this
+            # is empty and the forward path uses self.out_proj (shared).
+            self.out_proj_per_edge_type = nn.ModuleDict()
 
         # ROOT FIX (FORENSIC-AUDIT-I05): separate self-loop projection.
         # The previous code applied ``out_proj`` TWICE -- once for self-loops
@@ -538,18 +616,68 @@ class HeterogeneousMultiHeadAttention(nn.Module):
             # type's contribution. Each edge type's message is scaled by
             # 1/sqrt(num_edge_types) so the total message magnitude is
             # bounded regardless of how many edge types a node receives from.
-            messages.scatter_add_(
-                0,
-                tgt_nodes.unsqueeze(-1).expand_as(weighted_V_flat),
-                weighted_V_flat * gate * cross_type_norm,  # V90 BUG #17: dynamic norm
-            )
+            #
+            # P3-032 ROOT FIX (v119 forensic): when
+            # ``per_edge_type_out_proj=True``, apply the per-edge-type
+            # out_proj to weighted_V_flat BEFORE scatter_add. This maps
+            # (E, num_heads * head_dim) -> (E, embedding_dim) using a
+            # DIFFERENT projection per edge type, so each edge type can
+            # learn its own "message transformation" (standard HGT, Wang
+            # et al. 2019). When ``per_edge_type_out_proj=False`` (default),
+            # we scatter_add the raw (E, num_heads * head_dim) messages
+            # and apply the SHARED self.out_proj AFTER the loop (current
+            # behavior, backward compat with existing trained checkpoints).
+            if self.per_edge_type_out_proj and edge_key in self.out_proj_per_edge_type:
+                # P3-032: per-edge-type out_proj BEFORE scatter_add.
+                # weighted_V_flat: (E, num_heads * head_dim) -> (E, embedding_dim)
+                # The scatter_add then accumulates (E, embedding_dim) messages
+                # into the (N, embedding_dim) messages tensor. Note: in this
+                # mode, messages is (N, embedding_dim), NOT (N, num_heads *
+                # head_dim). Since num_heads * head_dim == embedding_dim by
+                # construction (head_dim = embedding_dim // num_heads), the
+                # tensor shape is IDENTICAL — only the semantic meaning of
+                # the columns changes (per-head subspaces vs. projected
+                # embedding). The shared self.out_proj is NOT applied after
+                # the loop in this mode (see the conditional below).
+                projected_messages = self.out_proj_per_edge_type[edge_key](weighted_V_flat)
+                messages.scatter_add_(
+                    0,
+                    tgt_nodes.unsqueeze(-1).expand_as(projected_messages),
+                    projected_messages * gate * cross_type_norm,
+                )
+            else:
+                # Default path (per_edge_type_out_proj=False): scatter_add
+                # the raw (E, num_heads * head_dim) messages; the shared
+                # out_proj is applied AFTER the loop (line 552).
+                messages.scatter_add_(
+                    0,
+                    tgt_nodes.unsqueeze(-1).expand_as(weighted_V_flat),
+                    weighted_V_flat * gate * cross_type_norm,  # V90 BUG #17: dynamic norm
+                )
 
         # ROOT FIX (FORENSIC-AUDIT-I05): output projection applied ONCE
         # (not twice). The previous code applied out_proj to self-loop
         # messages AND to the final output. Now out_proj is applied only
         # to the aggregated messages (edge + self-loop), and self-loops
         # use the separate self_loop_proj.
-        output = self.out_proj(messages)
+        #
+        # P3-032 ROOT FIX (v119): when ``per_edge_type_out_proj=True``,
+        # the per-edge-type out_proj has ALREADY been applied in the loop
+        # above (before scatter_add). The shared ``self.out_proj`` is NOT
+        # applied (it would double-transform the messages). The self-loop
+        # messages are already in embedding_dim (via self_loop_proj), so
+        # no further projection is needed. When
+        # ``per_edge_type_out_proj=False`` (default), the shared
+        # ``self.out_proj`` IS applied to the aggregated messages (the
+        # current behavior, backward compat).
+        if not self.per_edge_type_out_proj:
+            output = self.out_proj(messages)
+        else:
+            # P3-032: messages is already in embedding_dim (each edge
+            # type's messages went through its own out_proj before
+            # scatter_add, and self-loop messages went through
+            # self_loop_proj). No further projection needed.
+            output = messages
 
         # Split back by node type
         updated: Dict[str, torch.Tensor] = {}
@@ -780,10 +908,16 @@ class GraphTransformerLayer(nn.Module):
         layer_norm: bool = True,
         residual_connections: bool = True,
         node_types: Optional[List[str]] = None,
+        per_edge_type_out_proj: bool = False,
     ) -> None:
         super().__init__()
         self.embedding_dim = embedding_dim
         self.residual_connections = residual_connections
+        # P3-032 ROOT FIX (v119): propagate the per-edge-type out_proj flag
+        # to the HeterogeneousMultiHeadAttention. See the attention class's
+        # __init__ docstring for the full rationale. Default False preserves
+        # backward compatibility with existing trained checkpoints.
+        self.per_edge_type_out_proj: bool = bool(per_edge_type_out_proj)
 
         # Pre-norm layer normalizations -- pre-populate with all known
         # node types so that state_dict keys are stable across save/load.
@@ -822,6 +956,7 @@ class GraphTransformerLayer(nn.Module):
             edge_types=edge_types,
             dropout=attention_dropout,
             node_types=node_types,  # P3-015: per-node-type Q projections
+            per_edge_type_out_proj=self.per_edge_type_out_proj,  # P3-032 v119
         )
 
         # FFN
