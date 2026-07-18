@@ -1495,7 +1495,7 @@ function KnowledgeGraphScreen() {
                     <Checkbox checked={checked} onCheckedChange={v => setNodeFilters(p => ({ ...p, [type]: !!v }))} />
                     <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: nodeColors[type] }} />
                     <span className="text-sm capitalize">{type}</span>
-                    <span className="ml-auto text-xs text-muted-foreground">{graphNodes.filter(n => n.type === type).length}</span>
+                    <span className="ml-auto text-xs text-muted-foreground">{allNodes.filter(n => n.type === type).length}</span>
                   </label>
                 ))}
               </div>
@@ -1924,10 +1924,14 @@ function IPPatentsScreen() {
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
-        <StatCard icon={Scale} value={patents.filter(p => p.status === 'active').length} label="Active Patents" color={ACCENT_GREEN} />
-        <StatCard icon={Clock} value={patents.filter(p => p.status === 'pending').length} label="Pending" color={ACCENT_ORANGE} />
-        <StatCard icon={FileText} value={patents.filter(p => p.status === 'expired').length} label="Expired" />
-        <StatCard icon={AlertCircle} value={patents.filter(p => p.status === 'abandoned').length} label="Abandoned" color={ACCENT_RED} />
+        {/* FE-049 ROOT FIX (v118): the stat cards previously filtered the
+            `patents` array imported from @/lib/empty-defaults — which is
+            ALWAYS empty — so every card showed 0. They now filter the REAL
+            `relatedPatents` array sourced from /api/patents/search. */}
+        <StatCard icon={Scale} value={relatedPatents.filter(p => p.status === 'active').length} label="Active Patents" color={ACCENT_GREEN} />
+        <StatCard icon={Clock} value={relatedPatents.filter(p => p.status === 'pending').length} label="Pending" color={ACCENT_ORANGE} />
+        <StatCard icon={FileText} value={relatedPatents.filter(p => p.status === 'expired').length} label="Expired" />
+        <StatCard icon={AlertCircle} value={relatedPatents.filter(p => p.status === 'abandoned').length} label="Abandoned" color={ACCENT_RED} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -2017,8 +2021,58 @@ function EvidenceBuilderScreen() {
   // ClinicalTrials.gov, and openFDA data.
   const { data: builtPackage, loading: building, error: buildError, build } = useBuildEvidencePackage();
 
-  const availableEvidence = evidenceItems.filter(e => e.drugName === selectedDrug);
-  const diseaseEvidence = evidenceItems.filter(e => e.disease === selectedDisease);
+  // FE-049 ROOT FIX (v118): the previous code computed `availableEvidence`
+  // and `diseaseEvidence` by filtering `evidenceItems` imported from
+  // @/lib/empty-defaults — which is ALWAYS empty. So the "Available Evidence"
+  // panel was always blank, and the "Selected" panel could never find the
+  // evidence by id (line 2109 `evidenceItems.find()` always returned undefined).
+  //
+  // Real evidence comes from the BUILT package — the /api/evidence-package
+  // endpoint returns literature, clinicalTrials, and safety sections each
+  // with `items` arrays. We flatten them into a single list once a package
+  // has been built. Before the first build, we show an honest empty state
+  // telling the user to click "Build Evidence Package".
+  const allEvidence: Array<{ id: string; type: string; title: string; source: string; year?: number; summary?: string }> = useMemo(() => {
+    if (!builtPackage) return [];
+    const pkg = (builtPackage as any).package || {};
+    const lit: any[] = pkg?.literature?.items || [];
+    const trials: any[] = pkg?.clinicalTrials?.items || [];
+    const safetyReactions: any[] = (pkg?.safety?.topReactions) || [];
+    return [
+      ...lit.map((a: any, i: number) => ({
+        id: `lit-${a.pmid || i}`,
+        type: 'literature',
+        title: a.title || 'Untitled article',
+        source: 'PubMed',
+        year: a.pubDate ? Number(String(a.pubDate).slice(0, 4)) : undefined,
+        summary: a.abstract || '',
+      })),
+      ...trials.map((t: any, i: number) => ({
+        id: `trial-${t.nctId || i}`,
+        type: 'clinical',
+        title: t.title || 'Untitled trial',
+        source: 'ClinicalTrials.gov',
+        year: t.startDate ? Number(String(t.startDate).slice(0, 4)) : undefined,
+        summary: t.briefSummary || '',
+      })),
+      ...safetyReactions.map((r: any, i: number) => ({
+        id: `safety-${i}`,
+        type: 'safety',
+        title: `${r.term || 'Reaction'} (${r.count} reports)`,
+        source: 'openFDA FAERS',
+        year: undefined,
+        summary: '',
+      })),
+    ];
+  }, [builtPackage]);
+
+  // FE-049 ROOT FIX (v118): `availableEvidence` and `diseaseEvidence` now
+  // derive from the REAL built package (allEvidence) — not the empty
+  // `evidenceItems` array. The drug/disease filter is no longer relevant
+  // (the package was already built for the selected drug+disease), so we
+  // show all evidence from the package.
+  const availableEvidence = allEvidence;
+  const diseaseEvidence: typeof allEvidence = [];
 
   const toggleEvidence = (id: string) => {
     setSelectedEvidence(prev => {
@@ -2034,6 +2088,23 @@ function EvidenceBuilderScreen() {
       disease: selectedDisease,
       notes: `Template: ${template}. Selected evidence: ${[...selectedEvidence].join(', ')}`,
     }).catch(() => { /* error already in state */ });
+  };
+
+  // FE-038 ROOT FIX (v118): the "Preview Package" button previously had no
+  // onClick. Now it opens a new window with the rendered markdown — same as
+  // the "Download markdown" link, but rendered inline (window.open) so the
+  // user can read it without downloading. Disabled until a package is built.
+  const handlePreview = () => {
+    if (!builtPackage) return;
+    const md = (builtPackage as any).markdown || '';
+    if (!md) return;
+    // Render the markdown as a simple <pre> in a new window — no markdown
+    // renderer dependency required. Production-grade: a real renderer
+    // (react-markdown) can be wired later.
+    const w = window.open('', '_blank');
+    if (!w) return;
+    w.document.write(`<!doctype html><html><head><title>Evidence Package Preview — ${selectedDrug} / ${selectedDisease}</title><style>body{font:14px/1.6 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;max-width:800px;margin:2rem auto;padding:0 1rem;color:#1a1a1a}pre{white-space:pre-wrap;background:#f5f5f5;padding:1rem;border-radius:6px;overflow-x:auto}</style></head><body><h1>Evidence Package Preview</h1><p><strong>Drug:</strong> ${selectedDrug}<br><strong>Disease:</strong> ${selectedDisease}<br><strong>Template:</strong> ${template}</p><pre>${md.replace(/</g, '&lt;')}</pre></body></html>`);
+    w.document.close();
   };
 
   const templates = [
@@ -2084,9 +2155,11 @@ function EvidenceBuilderScreen() {
                   {selectedEvidence.has(ev.id) ? <CheckSquare className="h-4 w-4 text-primary" /> : <Square className="h-4 w-4 text-muted-foreground" />}
                   <Badge variant="secondary" className="text-[10px]">{ev.type}</Badge>
                   <span className="text-sm font-medium flex-1">{ev.title}</span>
-                  <span className="text-xs font-bold" style={{ color: scoreColor(ev.quality ? Number(ev.quality) : 0) }}>{ev.quality}</span>
+                  {/* FE-049: `quality` is no longer accessed — the real
+                      evidence from PubMed/CT.gov/openFDA does not have a
+                       quality score, so we show the source+year instead. */}
                 </div>
-                <p className="text-xs text-muted-foreground mt-1 ml-6">{ev.source} · {ev.year ?? 0}</p>
+                <p className="text-xs text-muted-foreground mt-1 ml-6">{ev.source} · {ev.year ?? '—'}</p>
               </div>
             ))}
           </CardContent>
@@ -2101,8 +2174,11 @@ function EvidenceBuilderScreen() {
                 <p className="text-sm text-muted-foreground">Click evidence items to add them</p>
               ) : (
                 <div className="space-y-1">
+                  {/* FE-049 ROOT FIX (v118): look up selected evidence in
+                      the REAL built-package list (`allEvidence`), not the
+                      empty `evidenceItems` array from empty-defaults. */}
                   {[...selectedEvidence].map(id => {
-                    const ev = evidenceItems.find(e => e.id === id);
+                    const ev = allEvidence.find(e => e.id === id);
                     return ev ? (
                       <div key={id} className="flex items-center gap-2 text-xs p-1.5 bg-accent rounded">
                         <span className="flex-1 truncate">{ev.title}</span>
@@ -2164,7 +2240,7 @@ function EvidenceBuilderScreen() {
                 </div>
               </div>
             )}
-            <Button variant="outline" className="w-full">
+            <Button variant="outline" className="w-full" onClick={handlePreview} disabled={!builtPackage} title={builtPackage ? 'Open a preview of the built evidence package markdown' : 'Build a package first to enable preview'}>
               <Eye className="h-4 w-4 mr-2" /> Preview Package
             </Button>
           </div>
@@ -2424,9 +2500,43 @@ function SavedQueriesScreen() {
 
 function DrugComparisonScreen() {
   const { navigate } = useDrugOSNav();
-  const [selectedIds, setSelectedIds] = useState<string[]>(['DC001', 'DC002']);
-  const compared = selectedIds.map(id => drugCandidates.find(c => c.id === id)).filter(Boolean) as DrugCandidate[];
-  const uniqueDrugNames = [...new Set(drugCandidates.map(c => c.drugName))];
+  // FE-050 ROOT FIX (v118): previously used `drugCandidates.find(c => c.id === id)`
+  // and `drugCandidates.map(c => c.drugName)` directly on the empty-defaults
+  // array. The selected drug list was always empty and the comparison table
+  // never rendered. Now we fetch real RL candidates via /api/rl for the list.
+  const { data: rlData, loading: rlLoading } = useRlCandidates({ limit: 50 });
+  const rlCandidates: DrugCandidate[] = useMemo(() =>
+    (rlData?.candidates || []).map((rc: any, i: number) => ({
+      id: rc.id || `rl-${i}`,
+      drugName: rc.drug as string,
+      compositeScore: Math.round((rc.overallScore || rc.reward || 0) * 100),
+      kgScore: Math.round((rc.gnnScore || 0) * 100),
+      molSimScore: null as number | null,
+      safetyScore: Math.round((rc.safetyScore || 0) * 100),
+      clinicalScore: 0,
+      safetyTier: 'unknown' as const,
+      mechanism: '',
+      clinicalPhase: rc.literatureSupport ? 'Literature-supported' : 'Novel',
+      diseaseId: '',
+      diseaseName: rc.disease as string,
+      brandNames: [],
+      genericName: rc.drug as string,
+      ipStatus: null,
+      targets: null,
+      pathways: null,
+    })),
+    [rlData]
+  );
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  useEffect(() => {
+    // Pre-select the first two candidates once RL data arrives so the
+    // comparison table isn't empty on first load.
+    if (selectedIds.length === 0 && rlCandidates.length >= 2) {
+      setSelectedIds([rlCandidates[0].id, rlCandidates[1].id]);
+    }
+  }, [rlCandidates, selectedIds]);
+  const compared = selectedIds.map(id => rlCandidates.find(c => c.id === id)).filter(Boolean) as DrugCandidate[];
+  const uniqueDrugNames = [...new Set(rlCandidates.map(c => c.drugName))];
 
   const toggleDrug = (id: string) => {
     setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : prev.length < 4 ? [...prev, id] : prev);
@@ -2438,15 +2548,16 @@ function DrugComparisonScreen() {
       <Card className="mb-6">
         <CardContent className="p-4">
           <p className="text-sm font-medium mb-2">Select drugs to compare ({selectedIds.length}/4):</p>
-          {drugCandidates.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No drug candidates loaded. Run a search to populate candidates.</p>
+          {rlLoading ? <LoadingSpinner label="Loading RL candidates..." /> :
+           rlCandidates.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No drug candidates loaded. The RL ranker returned no candidates. Deploy the RL service to populate this screen.</p>
           ) : (
             // FE-055 ROOT FIX (TM13): removed the arbitrary `slice(0, 13)`
             // magic number. All candidates are shown in a scrollable
             // container so none are silently hidden; the compare limit
             // (4) is enforced by toggleDrug() above.
             <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto">
-              {drugCandidates.map(c => (
+              {rlCandidates.map(c => (
                 <Badge key={c.id} variant={selectedIds.includes(c.id) ? 'default' : 'outline'} className="cursor-pointer" onClick={() => toggleDrug(c.id)}>{c.drugName}</Badge>
               ))}
             </div>
@@ -2501,17 +2612,25 @@ function DrugComparisonScreen() {
 }
 
 function DrugInteractionScreen() {
+  // FE-050 ROOT FIX (v118): previously used `drugCandidates.map()` and
+  // `drugInteractions.filter()` directly on the empty-defaults arrays.
+  // The drug dropdown was always empty and the interaction results
+  // always returned []. Now we fetch real RL candidates for the dropdown.
+  // There is no /api/drug-interactions endpoint yet, so the results list
+  // honestly shows an EmptyState directing the user to openFDA interaction
+  // API (https://api.fda.gov/drug/event.json) until a real DDI service is
+  // deployed.
   const [drug1, setDrug1] = useState<string>('');
   const [drug2, setDrug2] = useState('');
-  const uniqueDrugNames = [...new Set(drugCandidates.map(c => c.drugName))];
-
-  const results = useMemo(() => {
-    if (!drug2.trim()) return drugInteractions.filter(d => d.drug1 === drug1);
-    return drugInteractions.filter(d =>
-      (d.drug1 === drug1 && (d.drug2 ?? "").toLowerCase().includes(drug2.toLowerCase())) ||
-      (d.drug2 === drug1 && (d.drug1 ?? "").toLowerCase().includes(drug2.toLowerCase()))
-    );
-  }, [drug1, drug2]);
+  const { data: rlData } = useRlCandidates({ limit: 50 });
+  const uniqueDrugNames = useMemo(
+    () => [...new Set((rlData?.candidates || []).map((rc: any) => rc.drug as string).filter(Boolean))],
+    [rlData]
+  );
+  // Real drug-drug interaction data is not yet wired. We do NOT fabricate
+  // interaction entries — show an honest EmptyState pointing the user to
+  // openFDA / FDA Label interactions until /api/drug-interactions exists.
+  const results: DrugInteraction[] = [];
 
   return (
     <FadeIn>
@@ -2520,7 +2639,7 @@ function DrugInteractionScreen() {
         <CardContent className="p-6 space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div><label className="text-sm font-medium mb-1.5 block">Drug 1</label>
-              <Select value={drug1} onValueChange={setDrug1}><SelectTrigger><SelectValue /></SelectTrigger>
+              <Select value={drug1} onValueChange={setDrug1}><SelectTrigger><SelectValue placeholder="Select a drug" /></SelectTrigger>
                 <SelectContent>{uniqueDrugNames.map(d => <SelectItem key={d} value={d}>{d}</SelectItem>)}</SelectContent></Select>
             </div>
             <div><label className="text-sm font-medium mb-1.5 block">Drug 2 (or class)</label>
@@ -2529,16 +2648,17 @@ function DrugInteractionScreen() {
         </CardContent>
       </Card>
       <div className="space-y-3">
-        {results.length > 0 ? results.map((r, i) => (
-          <Card key={i}><CardContent className="p-4">
+        {drug1 && drug2 ? (
+          <Card><CardContent className="p-4">
             <div className="flex items-center gap-2 mb-2">
-              <Badge variant={r.severity === 'contraindicated' ? 'destructive' : r.severity === 'major' ? 'secondary' : r.severity === 'moderate' ? 'outline' : 'secondary'} className="text-xs">{r.severity}</Badge>
-              <span className="font-medium">{r.drug1} ↔ {r.drug2}</span>
+              <AlertCircle className="h-4 w-4 text-amber-600" />
+              <span className="text-sm font-medium text-amber-700">DDI service not yet deployed</span>
             </div>
-            <p className="text-sm">{r.description}</p>
-            <p className="text-xs text-muted-foreground mt-1">Mechanism: {r.mechanism}</p>
+            <p className="text-sm text-muted-foreground">Drug-drug interaction data for <strong>{drug1}</strong> + <strong>{drug2}</strong> requires a real DDI service (e.g. DrugBank interaction API or openFDA drug/event endpoint). Until <code>/api/drug-interactions</code> is wired, verify interactions manually on the <a href={`https://api.fda.gov/drug/event.json?search=patient.drug.medicinalproduct:${encodeURIComponent(drug1)}+AND+patient.drug.medicinalproduct:${encodeURIComponent(drug2)}`} target="_blank" rel="noopener noreferrer" className="underline">openFDA adverse-event portal</a>.</p>
           </CardContent></Card>
-        )) : <Card><CardContent className="p-8 text-center"><p className="text-muted-foreground">No interactions found</p></CardContent></Card>}
+        ) : (
+          <EmptyState title="Select two drugs to check interactions" description="Choose Drug 1 from the dropdown and type Drug 2 in the input above. Real DDI data will appear here once /api/drug-interactions is deployed." />
+        )}
       </div>
     </FadeIn>
   );
@@ -2569,9 +2689,40 @@ function MolecularSimilarityScreen() {
 }
 
 function ScoreBreakdownScreen() {
+  // FE-050 ROOT FIX (v118): the previous code used `drugCandidates.find(c => c.id === selectedId)`
+  // and `drugCandidates.map(c => ...)` directly on the empty-defaults array —
+  // both always returned undefined / []. The select dropdown was always empty
+  // and the chart never rendered. Now we fetch real RL candidates via /api/rl.
+  const { data: rlData, loading: rlLoading, error: rlError } = useRlCandidates({ limit: 50 });
+  const rlCandidates: DrugCandidate[] = useMemo(() => {
+    return (rlData?.candidates || []).map((rc: any, i: number) => ({
+      id: rc.id || `rl-${i}`,
+      drugName: rc.drug as string,
+      compositeScore: Math.round((rc.overallScore || rc.reward || 0) * 100),
+      kgScore: Math.round((rc.gnnScore || 0) * 100),
+      molSimScore: null as number | null,
+      safetyScore: Math.round((rc.safetyScore || 0) * 100),
+      clinicalScore: 0,
+      safetyTier: 'unknown' as const,
+      mechanism: '',
+      clinicalPhase: rc.literatureSupport ? 'Literature-supported' : 'Novel',
+      diseaseName: rc.disease as string,
+      diseaseId: '',
+      brandNames: [],
+      genericName: rc.drug as string,
+      ipStatus: null,
+      targets: null,
+      pathways: null,
+    }));
+  }, [rlData]);
   const [selectedId, setSelectedId] = useState<string>('');
-  const candidate = drugCandidates.find(c => c.id === selectedId) || null;
-  if (!candidate) return <FadeIn><PageHeader title="Composite Score Breakdown" description="Detailed score decomposition for drug candidates" /><EmptyState title="No candidate selected" description="Drug candidates will appear here once the RL ranker is deployed." /></FadeIn>;
+  useEffect(() => {
+    if (!selectedId && rlCandidates.length > 0) setSelectedId(rlCandidates[0].id);
+  }, [rlCandidates, selectedId]);
+  const candidate = rlCandidates.find(c => c.id === selectedId) || null;
+  if (rlLoading) return <FadeIn><PageHeader title="Composite Score Breakdown" description="Detailed score decomposition for drug candidates" /><LoadingSpinner label="Loading RL candidates..." /></FadeIn>;
+  if (rlError) return <FadeIn><PageHeader title="Composite Score Breakdown" description="Detailed score decomposition for drug candidates" /><ErrorDisplay error={rlError} /></FadeIn>;
+  if (!candidate) return <FadeIn><PageHeader title="Composite Score Breakdown" description="Detailed score decomposition for drug candidates" /><EmptyState title="No candidates available" description="The Phase 4 RL ranker returned no candidates. Deploy the RL service to populate this screen." /></FadeIn>;
 
   const chartData = [
     { name: 'KG Score', value: candidate.kgScore, fill: PRIMARY },
@@ -2584,9 +2735,9 @@ function ScoreBreakdownScreen() {
     <FadeIn>
       <PageHeader title="Composite Score Breakdown" description="Detailed score decomposition for drug candidates" />
       <div className="mb-4">
-        <Select value={selectedId} onValueChange={setSelectedId} disabled={drugCandidates.length === 0}>
-          <SelectTrigger className="w-64"><SelectValue placeholder={drugCandidates.length === 0 ? 'No candidates loaded' : 'Select a candidate'} /></SelectTrigger>
-          <SelectContent className="max-h-72 overflow-y-auto">{drugCandidates.map(c => <SelectItem key={c.id} value={c.id}>{c.drugName}</SelectItem>)}</SelectContent>
+        <Select value={selectedId} onValueChange={setSelectedId} disabled={rlCandidates.length === 0}>
+          <SelectTrigger className="w-64"><SelectValue placeholder={rlCandidates.length === 0 ? 'No candidates loaded' : 'Select a candidate'} /></SelectTrigger>
+          <SelectContent className="max-h-72 overflow-y-auto">{rlCandidates.map(c => <SelectItem key={c.id} value={c.id}>{c.drugName}</SelectItem>)}</SelectContent>
         </Select>
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -2626,33 +2777,75 @@ function ScoreBreakdownScreen() {
 
 function DiseaseDetailScreen() {
   const { navigate, currentRoute } = useDrugOSNav();
-  const diseaseId = currentRoute.id || '';
-  const disease: Disease = diseases.find(d => d.id === diseaseId) || {
-    id: diseaseId,
-    name: diseaseId || 'Unknown Disease',
+  // FE-050 ROOT FIX (v118): the previous code used `diseases.find()` and
+  // `drugCandidates.filter()` directly on the empty-defaults arrays. The
+  // disease metadata, related candidates, and related trials all rendered
+  // as empty/zero. Now we fetch real data: MeSH disease metadata via
+  // /api/diseases/search, real RL candidates via /api/rl, and real trials
+  // via /api/clinical-trials/search. The disease `id` passed in the URL is
+  // treated as a disease NAME (the AppSearchPage navigates by name).
+  const diseaseName = currentRoute.id || '';
+  const { data: diseaseSearch } = useDiseaseSearch(diseaseName, 2);
+  const diseaseMeta = diseaseSearch?.items?.[0] || null;
+  const disease: Disease = diseaseMeta ? {
+    id: diseaseMeta.descriptorUi,
+    name: diseaseMeta.name,
+    icdCode: '—',
+    meshTerm: diseaseMeta.name,
+    description: diseaseMeta.scopeNote || 'No MeSH scope note available.',
+    therapeuticArea: diseaseMeta.treeNumber?.[0] || 'N/A',
+    prevalence: 'N/A',
+    geneticBasis: false,
+  } : {
+    id: diseaseName,
+    name: diseaseName || 'Unknown Disease',
     icdCode: '—',
     meshTerm: '',
-    description: 'Disease detail not available. Run a disease search to load real MeSH data.',
+    description: diseaseName ? 'Searching MeSH for disease metadata...' : 'No disease selected. Use the search page to find a disease.',
     therapeuticArea: 'N/A',
     prevalence: 'N/A',
     geneticBasis: false,
   };
-  const relatedCandidates = drugCandidates.filter(c => c.diseaseId === disease.id);
-  const relatedTrials = clinicalTrials.filter(t => t.disease === disease.name);
+  // Real RL candidates for this disease
+  const { data: rlData, loading: rlLoading } = useRlCandidates({ disease: diseaseName, limit: 50 });
+  const relatedCandidates: DrugCandidate[] = (rlData?.candidates || []).map((rc: any, i: number) => ({
+    id: rc.id || `rl-${i}`,
+    drugName: rc.drug as string,
+    compositeScore: Math.round((rc.overallScore || rc.reward || 0) * 100),
+    kgScore: Math.round((rc.gnnScore || 0) * 100),
+    molSimScore: null,
+    safetyScore: Math.round((rc.safetyScore || 0) * 100),
+    clinicalScore: 0,
+    safetyTier: 'unknown' as const,
+    mechanism: '',
+    clinicalPhase: rc.literatureSupport ? 'Literature-supported' : 'Novel',
+    diseaseId: disease.id,
+    diseaseName,
+    brandNames: [],
+    genericName: rc.drug as string,
+    ipStatus: null,
+    targets: null,
+    pathways: null,
+  }));
+  // Real clinical trials for this disease
+  const { data: trialsData } = useClinicalTrialsSearch({ condition: diseaseName, limit: 50 });
+  const relatedTrials = trialsData?.items || [];
 
   return (
     <FadeIn>
       <PageHeader title={disease.name} description={`${disease.therapeuticArea} · ICD-10: ${disease.icdCode} · ${disease.prevalence}`} onBack={() => navigate({ page: 'app', section: 'search' })} />
       <Card className="mb-6"><CardContent className="p-4"><p className="text-sm">{disease.description}</p></CardContent></Card>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-        <StatCard icon={Search} value={relatedCandidates.length} label="Drug Candidates" color={PRIMARY} />
+        <StatCard icon={Search} value={rlLoading ? '—' : relatedCandidates.length} label="Drug Candidates" color={PRIMARY} />
         <StatCard icon={FlaskConical} value={relatedTrials.length} label="Clinical Trials" color={ACCENT_GREEN} />
         <StatCard icon={Activity} value={relatedCandidates.length > 0 ? Math.round(relatedCandidates.reduce((s, c) => s + c.compositeScore, 0) / relatedCandidates.length) : 0} label="Avg Score" color={ACCENT_ORANGE} />
       </div>
       <Card>
         <CardHeader className="pb-3"><CardTitle className="text-base">Top Candidates</CardTitle></CardHeader>
         <CardContent className="space-y-2">
-          {relatedCandidates.sort((a, b) => b.compositeScore - a.compositeScore).map(c => (
+          {rlLoading ? <LoadingSpinner label="Loading RL candidates..." /> :
+           relatedCandidates.length === 0 ? <EmptyState title="No candidates yet" description={`The RL ranker has no candidates for "${diseaseName}". Deploy the RL service to populate this list.`} /> :
+           [...relatedCandidates].sort((a, b) => b.compositeScore - a.compositeScore).map(c => (
             <div key={c.id} className="flex items-center justify-between p-3 border rounded-lg cursor-pointer hover:bg-accent transition-colors" onClick={() => navigate({ page: 'app', section: 'candidate', id: c.id })}>
               <div className="flex items-center gap-3"><span className="font-medium">{c.drugName}</span><SafetyBadge tier={c.safetyTier} /><Badge variant="outline" className="text-xs">{c.clinicalPhase}</Badge></div>
               <ScoreBar score={c.compositeScore} size="sm" />
@@ -2964,34 +3157,61 @@ function EvidenceTimelineScreen() {
 }
 
 function MechanismOfActionScreen() {
+  // FE-050 ROOT FIX (v118): previously used `drugCandidates.find()` and
+  // `drugCandidates.map()` directly on the empty-defaults array — the
+  // drug dropdown was always empty and the screen always showed "No drug
+  // selected". Now we fetch real RL candidates via /api/rl for the dropdown
+  // and real mechanism-of-action data via /api/drugs/mechanism (backed by
+  // ChEMBL/DrugBank) for the displayed mechanism, target proteins, and
+  // pathways. The `useDrugMechanisms` hook takes a list of drug names and
+  // returns a Map keyed by lowercase drug name.
   const [selectedDrug, setSelectedDrug] = useState<string>('');
-  const candidate = drugCandidates.find(c => c.drugName === selectedDrug) || null;
-  const disease = candidate ? (diseases.find(d => d.id === candidate.diseaseId) || null) : null;
-  if (!candidate) return <FadeIn><PageHeader title="Mechanism of Action" description="Detailed MoA view for drug candidates" /><EmptyState title="No drug selected" description="Drug candidates will appear here once the RL ranker is deployed." /></FadeIn>;
+  const { data: rlData, loading: rlLoading } = useRlCandidates({ limit: 50 });
+  const rlDrugNames = useMemo(
+    () => [...new Set((rlData?.candidates || []).map((rc: any) => rc.drug as string).filter(Boolean))],
+    [rlData]
+  );
+  useEffect(() => {
+    if (!selectedDrug && rlDrugNames.length > 0) setSelectedDrug(rlDrugNames[0]);
+  }, [rlDrugNames, selectedDrug]);
+  const { data: mechMap, loading: mechLoading, error: mechError } = useDrugMechanisms(selectedDrug ? [selectedDrug] : []);
+  const mech = mechMap?.get(selectedDrug.toLowerCase()) || null;
+  // FE-050 ROOT FIX (v118): mechanism, targets, pathways come from the REAL
+  // ChEMBL/DrugBank data (useDrugMechanisms). Previously these came from
+  // the empty `drugCandidates` array so the screen always showed 'N/A'.
+  // The DrugMechanismResult type uses `proteinTargets` (not `targets`).
+  const mechanism: string = mech?.mechanism || (selectedDrug ? 'Mechanism not yet fetched from ChEMBL/DrugBank.' : '');
+  const targets: string[] = mech?.proteinTargets || [];
+  const pathways: string[] = mech?.pathways || [];
+  const diseaseName = rlData?.candidates?.find((rc: any) => rc.drug === selectedDrug)?.disease || null;
+  if (rlLoading) return <FadeIn><PageHeader title="Mechanism of Action" description="Detailed MoA view for drug candidates" /><LoadingSpinner label="Loading RL candidates..." /></FadeIn>;
+  if (!selectedDrug) return <FadeIn><PageHeader title="Mechanism of Action" description="Detailed MoA view for drug candidates" /><EmptyState title="No candidates available" description="The Phase 4 RL ranker returned no candidates. Deploy the RL service to populate this screen." /></FadeIn>;
 
   return (
     <FadeIn>
-      <PageHeader title="Mechanism of Action" description="Detailed MoA view for drug candidates" />
+      <PageHeader title="Mechanism of Action" description="Detailed MoA view for drug candidates (real ChEMBL/DrugBank)" />
       <div className="mb-4">
-        <Select value={selectedDrug} onValueChange={setSelectedDrug}>
-          <SelectTrigger className="w-64"><SelectValue /></SelectTrigger>
-          <SelectContent>{[...new Set(drugCandidates.map(c => c.drugName))].map(d => <SelectItem key={d} value={d}>{d}</SelectItem>)}</SelectContent>
+        <Select value={selectedDrug} onValueChange={setSelectedDrug} disabled={rlDrugNames.length === 0}>
+          <SelectTrigger className="w-64"><SelectValue placeholder={rlDrugNames.length === 0 ? 'No drugs loaded' : 'Select a drug'} /></SelectTrigger>
+          <SelectContent>{rlDrugNames.map(d => <SelectItem key={d} value={d}>{d}</SelectItem>)}</SelectContent>
         </Select>
       </div>
+      {mechLoading && <LoadingSpinner label="Fetching mechanism from ChEMBL/DrugBank..." />}
+      {mechError && <ErrorDisplay error={mechError} />}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>
-          <CardHeader className="pb-3"><CardTitle className="text-base">{candidate.drugName} Mechanism</CardTitle></CardHeader>
+          <CardHeader className="pb-3"><CardTitle className="text-base">{selectedDrug} Mechanism</CardTitle></CardHeader>
           <CardContent className="space-y-4">
-            <p className="text-sm">{candidate.mechanism}</p>
+            <p className="text-sm">{mechanism}</p>
             <div><span className="text-xs font-semibold text-muted-foreground">Target Proteins</span>
-              <div className="flex flex-wrap gap-2 mt-1">{(candidate.targets ?? []).length === 0 ? <span className="text-xs text-muted-foreground">N/A</span> : (candidate.targets ?? []).map(t => <Badge key={t} variant="secondary" className="font-mono">{t}</Badge>)}</div></div>
+              <div className="flex flex-wrap gap-2 mt-1">{targets.length === 0 ? <span className="text-xs text-muted-foreground">N/A</span> : targets.map(t => <Badge key={t} variant="secondary" className="font-mono">{t}</Badge>)}</div></div>
             <div><span className="text-xs font-semibold text-muted-foreground">Pathways</span>
-              <div className="flex flex-wrap gap-2 mt-1">{(candidate.pathways ?? []).length === 0 ? <span className="text-xs text-muted-foreground">N/A</span> : (candidate.pathways ?? []).map(p => <Badge key={p} variant="outline">{p}</Badge>)}</div></div>
+              <div className="flex flex-wrap gap-2 mt-1">{pathways.length === 0 ? <span className="text-xs text-muted-foreground">N/A</span> : pathways.map(p => <Badge key={p} variant="outline">{p}</Badge>)}</div></div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-3"><CardTitle className="text-base">Pathway Diagram</CardTitle></CardHeader>
-          <CardContent><PathwayDiagram candidate={candidate} disease={disease || { id: '', name: candidate.diseaseName || 'Unknown', icdCode: '—', meshTerm: '', description: '', therapeuticArea: 'N/A', prevalence: 'N/A', geneticBasis: false }} /></CardContent>
+          <CardContent><PathwayDiagram candidate={{ id: '', drugName: selectedDrug, brandNames: [], genericName: selectedDrug, compositeScore: 0, kgScore: 0, molSimScore: null, safetyScore: 0, clinicalScore: 0, safetyTier: 'unknown', mechanism, clinicalPhase: 'N/A', ipStatus: null, diseaseId: '', diseaseName: diseaseName || 'Unknown', targets: targets.length > 0 ? targets : null, pathways: pathways.length > 0 ? pathways : null } as DrugCandidate} disease={{ id: '', name: diseaseName || 'Unknown', icdCode: '—', meshTerm: '', description: '', therapeuticArea: 'N/A', prevalence: 'N/A', geneticBasis: false } as Disease} /></CardContent>
         </Card>
       </div>
     </FadeIn>
@@ -2999,17 +3219,33 @@ function MechanismOfActionScreen() {
 }
 
 function RegulatoryPathwayScreen() {
+  // FE-050 ROOT FIX (v118): previously used `drugCandidates.find()` and
+  // `drugCandidates.map()` directly on the empty-defaults array. The drug
+  // dropdown was always empty and the screen always showed "No drug selected".
+  // Now we fetch real RL candidates via /api/rl and derive the clinical phase
+  // and IP status from the selected candidate.
   const [selectedDrug, setSelectedDrug] = useState<string>('');
-  const candidate = drugCandidates.find(c => c.drugName === selectedDrug) || null;
-  if (!candidate) return <FadeIn><PageHeader title="Regulatory Pathway Assessment" description="Assess regulatory requirements for drug repurposing" /><EmptyState title="No drug selected" description="Select a drug candidate to view its regulatory pathway assessment." /></FadeIn>;
+  const { data: rlData, loading: rlLoading } = useRlCandidates({ limit: 50 });
+  const rlCandidates = useMemo(() => (rlData?.candidates || []).map((rc: any, i: number) => ({
+    id: rc.id || `rl-${i}`,
+    drugName: rc.drug as string,
+    clinicalPhase: rc.literatureSupport ? 'Literature-supported' : 'Novel',
+    ipStatus: null as string | null,
+  })), [rlData]);
+  useEffect(() => {
+    if (!selectedDrug && rlCandidates.length > 0) setSelectedDrug(rlCandidates[0].drugName);
+  }, [rlCandidates, selectedDrug]);
+  const candidate = rlCandidates.find(c => c.drugName === selectedDrug) || null;
+  if (rlLoading) return <FadeIn><PageHeader title="Regulatory Pathway Assessment" description="Assess regulatory requirements for drug repurposing" /><LoadingSpinner label="Loading RL candidates..." /></FadeIn>;
+  if (!candidate) return <FadeIn><PageHeader title="Regulatory Pathway Assessment" description="Assess regulatory requirements for drug repurposing" /><EmptyState title="No candidates available" description="The Phase 4 RL ranker returned no candidates. Deploy the RL service to populate this screen." /></FadeIn>;
 
   return (
     <FadeIn>
       <PageHeader title="Regulatory Pathway Assessment" description="Assess regulatory requirements for drug repurposing" />
       <div className="mb-4">
-        <Select value={selectedDrug} onValueChange={setSelectedDrug}>
-          <SelectTrigger className="w-64"><SelectValue /></SelectTrigger>
-          <SelectContent>{[...new Set(drugCandidates.map(c => c.drugName))].map(d => <SelectItem key={d} value={d}>{d}</SelectItem>)}</SelectContent>
+        <Select value={selectedDrug} onValueChange={setSelectedDrug} disabled={rlCandidates.length === 0}>
+          <SelectTrigger className="w-64"><SelectValue placeholder={rlCandidates.length === 0 ? 'No drugs loaded' : 'Select a drug'} /></SelectTrigger>
+          <SelectContent>{[...new Set(rlCandidates.map(c => c.drugName))].map(d => <SelectItem key={d} value={d}>{d}</SelectItem>)}</SelectContent>
         </Select>
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
