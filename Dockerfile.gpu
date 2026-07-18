@@ -16,7 +16,7 @@
 #   The CUDA 12.1 wheels match torch 2.2.0 (same patch as Dockerfile.ml) so
 #   a model trained on GPU can be loaded on CPU for inference (and vice versa).
 # =============================================================================
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
 
 # Avoid tzdata interactive prompt.
 ENV DEBIAN_FRONTEND=noninteractive
