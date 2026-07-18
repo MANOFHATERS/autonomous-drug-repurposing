@@ -48,7 +48,7 @@ biopython>=1.83,<2.0
 # rl/rl_drug_ranker.py. Without it, the per-tenant reward-weights loader
 # raises ImportError at call time, breaking the P4-005 multi-tenant
 # feature (rl/reward_weights.yaml + reward_weights.{tenant_id}.yaml).
-pyyaml>=6.0,<7.0
+pyyaml>=6.0.3,<7.0
 
 # fastapi + uvicorn: MANDATORY for rl/service.py (the Phase 4 HTTP API
 # served by the phase4-rl compose service). Without these, the
@@ -56,7 +56,7 @@ pyyaml>=6.0,<7.0
 # immediately. The Dockerfile.ml pins fastapi==0.110.3 and
 # uvicorn[standard]==0.29.0; we use the root requirements.txt's looser
 # bounds for dev flexibility.
-fastapi>=0.110,<1.0
+fastapi>=0.139.2,<1.0
 uvicorn[standard]>=0.27,<1.0
 
 # ─── Indirect but explicitly pinned for reproducibility ────────────────────

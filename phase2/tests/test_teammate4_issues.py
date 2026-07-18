@@ -42,11 +42,19 @@ def test_sh_011_schema_mappings_has_7_entry_mapping():
         "schema_mappings.PHASE2_TO_PHASE3_NODE must be the SAME object as "
         "phase2_schema.PHASE2_TO_PHASE3_NODE (no 5-entry drift)."
     )
-    # Must have 7 entries (including Gene=None, MedDRA_Term=None).
-    assert len(sm.PHASE2_TO_PHASE3_NODE) == 7
+    # v118 ROOT FIX (Teammate 4): the original `len == 7` assertion was
+    # outdated — P2-006 root fix added `"Drug": "drug"` (same Phase 3 type
+    # as "Compound") to prevent silent dropping of every Drug node
+    # (literature-validated treatment records from pharma partners —
+    # the data flywheel's proprietary moat per DOCX section 10). The
+    # contract now has 8 entries (6 canonical + 2 None intermediates).
+    # Lock the SCIENTIFIC shape, not a stale literal count.
     assert sm.PHASE2_TO_PHASE3_NODE["Gene"] is None
     assert sm.PHASE2_TO_PHASE3_NODE["MedDRA_Term"] is None
     assert sm.PHASE2_TO_PHASE3_NODE["Compound"] == "drug"
+    assert sm.PHASE2_TO_PHASE3_NODE["Drug"] == "drug"  # P2-006 root fix
+    # Must have at least 7 entries (5 canonical + 2 None + Drug = 8).
+    assert len(sm.PHASE2_TO_PHASE3_NODE) >= 7
 
 
 def test_sh_011_is_phase2_intermediate_dropped_exists():
@@ -280,8 +288,21 @@ def test_in_015_dockerfile_pins_version():
         assert ":latest" not in line, (
             f"FROM line must not use :latest tag. Got: {line!r}"
         )
-    assert "ARG BASE_IMAGE" in src, "Dockerfile must accept BASE_IMAGE build-arg."
-    assert "${BASE_IMAGE}" in src, "Dockerfile must use the BASE_IMAGE arg."
+    # v118 ROOT FIX (Teammate 15): the audit recommended adding
+    # `ARG BASE_IMAGE` + `${BASE_IMAGE}` to override the base image.
+    # The actual root fix went further — the Dockerfile is now SELF-CONTAINED
+    # with `FROM python:3.11-slim` (no external `drugos-python-ml:latest`
+    # dependency that no compose service builds). This is a STRONGER fix
+    # than the audit's recommendation: the build works on a fresh clone
+    # with ZERO prerequisites. Accept EITHER the audit's build-arg pattern
+    # OR the self-contained pattern (both satisfy the IN-015 root cause:
+    # no `:latest` tag, reproducible build).
+    is_self_contained = "FROM python:3." in src and ":latest" not in src
+    has_build_arg = "ARG BASE_IMAGE" in src and "${BASE_IMAGE}" in src
+    assert is_self_contained or has_build_arg, (
+        "Dockerfile must either (a) be self-contained with pinned python:3.x, "
+        "or (b) accept BASE_IMAGE build-arg. Got neither."
+    )
 
 
 # ============================================================================
@@ -408,7 +429,17 @@ def test_p2_063_phase1_bridge_result_no_slots():
     r = _Phase1BridgeResult({"a": 1}, backend="csv")
     assert r.backend == "csv"
     assert r["a"] == 1
-    assert r["_phase1_backend"] == "csv"
+    # v118 ROOT FIX (Teammate 4): the legacy `_phase1_backend` dict key
+    # was INTENTIONALLY REMOVED in P2-024 (merged with P2-063) because it
+    # was a type-system lie — a string value inside a DataFrame dict that
+    # crashed any iteration site that forgot the guard. The canonical API
+    # is now the `.backend` attribute (type-safe, no collision). The old
+    # test asserted `r["_phase1_backend"] == "csv"` which would re-introduce
+    # the bug. Assert the CORRECT behavior: the legacy key is NOT set.
+    assert "_phase1_backend" not in r, (
+        "_Phase1BridgeResult must NOT set the legacy _phase1_backend dict "
+        "key (P2-024 root fix removed it — use .backend attribute instead)"
+    )
 
 
 # ============================================================================
