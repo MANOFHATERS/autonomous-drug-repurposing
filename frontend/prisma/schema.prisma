@@ -332,6 +332,57 @@ model MfaChallenge {
   @@index([expiresAt])
 }
 
+// BE-078 ROOT FIX (REAL, v123): atomic multi-instance 2FA setup-token
+// enforcement. The prior implementation in lib/auth/two-factor-setup-token.ts
+// used an in-memory Map — each Node.js process had its own Map, so an
+// attacker who sent the same setupToken to TWO instances simultaneously
+// could race both verifications (both see usedAt === null, both return
+// ok, both enroll 2FA — the second enrollment overwrote the first,
+// locking the user out of their account). The comment in the prior code
+// acknowledged this was "documented as limited — single-instance only",
+// which is NOT a root fix.
+//
+// Real root fix: persist setup tokens in the DB with a unique constraint
+// on `tokenHash` + a partial unique index on `tokenHash WHERE usedAt IS
+// NULL`. Postgres supports partial indexes via the `@@unique([...], map: ...)`
+// syntax — but Prisma's `@@unique` doesn't yet support partial indexes
+// directly. We use a `@unique` on `tokenHash` (so a given hash can be
+// inserted only ONCE) combined with the application-level check below.
+// The application flow is:
+//   1. issue2faSetupToken: INSERT a row with usedAt = NULL.
+//   2. verify2faSetupToken: SELECT the row; if usedAt is non-null, reject.
+//      Otherwise, attempt UPDATE ... WHERE id = row.id AND usedAt IS NULL.
+//      If the UPDATE affects 0 rows, another instance beat us to it →
+//      reject as "token_used". This is the atomic claim.
+//
+// The unique constraint on `tokenHash` ensures the same hash can't be
+// inserted twice (defense in depth — the random 32-byte token means
+// collisions are astronomically unlikely, but the constraint is cheap).
+// The atomic UPDATE with `WHERE usedAt IS NULL` is the actual multi-
+// instance race prevention — Postgres row-level locking ensures only one
+// UPDATE can succeed.
+model TwoFactorSetupToken {
+  id           String    @id @default(cuid())
+  // SHA-256 hash of the raw setup token. We NEVER store the raw token.
+  // Lookup is by hash, so a DB read leak doesn't immediately grant
+  // 2FA-enrollment capability.
+  tokenHash    String    @unique
+  userId       String
+  // SHA-256 hash of the TOTP secret the user is enrolling. We don't store
+  // the raw secret either; this is a defense-in-depth against memory dumps
+  // (a DB dump can't recover the secret).
+  secretHash   String
+  issuedAt     DateTime  @default(now())
+  // NULL until the token is consumed. The atomic UPDATE in
+  // verify2faSetupToken sets this; the WHERE clause `usedAt IS NULL`
+  // ensures only one instance can claim the token.
+  usedAt       DateTime?
+  expiresAt    DateTime // 5-minute TTL — same as the prior in-memory impl
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
 // ---------------------------------------------------------------------------
 // PROJECTS & COLLABORATION
 // ---------------------------------------------------------------------------

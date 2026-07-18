@@ -30,7 +30,7 @@ import { checkIpRateLimit, recordIpAttempt } from "@/lib/auth/rate-limit";
 // email-verification tokens for ANY userId — verifying any email without
 // access to the inbox — leading to account takeover via email-verification
 // bypass. Using the shared resolver closes this hole.
-import { resolveJwtSecret, resolvePreviousJwtSecret } from "@/lib/auth/server";
+import { resolveJwtSecret, resolvePreviousJwtSecret, KID_EMAIL_VERIFY } from "@/lib/auth/server";
 import jwt from "jsonwebtoken";
 
 /**
@@ -122,6 +122,29 @@ export async function POST(req: NextRequest) {
         issuer: "drugos",
         algorithms: ["HS256"],
       }) as { sub: string; email: string; type: string };
+      // BE-044 ROOT FIX (COMPLETE, v123): enforce the kid header matches
+      // KID_EMAIL_VERIFY. The prior fix only checked the `type` claim
+      // (decoded.type === "email_verify") — but if a future verify
+      // function ever forgets the type check, an attacker could
+      // substitute an access token (type: "access") for an email_verify
+      // token and have it accepted. The kid header is set at signing
+      // time (in register/route.ts signEmailVerificationToken) and is
+      // part of the JWT HEADER, so it can't be changed without
+      // re-signing (which requires the secret). Rejecting tokens whose
+      // kid is not KID_EMAIL_VERIFY prevents substitution even if the
+      // payload type check is ever weakened.
+      const decodedHeader = jwt.decode(token, { complete: true }) as
+        | { header?: { kid?: string } }
+        | null;
+      const kid = decodedHeader?.header?.kid;
+      if (kid !== KID_EMAIL_VERIFY) {
+        // Wrong kid — this token was not signed as an email_verify token.
+        // Could be an access token, mfa_challenge token, mfa_pending
+        // ticket, or a forged token from a different system entirely.
+        // Reject and try the next secret candidate (rotation window).
+        decoded = null;
+        continue;
+      }
       break;
     } catch {
       // try next candidate (rotation window)

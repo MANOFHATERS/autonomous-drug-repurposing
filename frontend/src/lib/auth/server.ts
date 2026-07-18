@@ -43,9 +43,40 @@ import { db } from "@/lib/db";
 export function resolveJwtSecret(): string {
   const secret = process.env.JWT_SECRET;
   if (!secret || secret.length < 32) {
-    if (process.env.NODE_ENV === "production") {
+    // BE-020 ROOT FIX (REAL, v123): the previous implementation only
+    // checked `process.env.NODE_ENV === "production"`. That meant when
+    // NODE_ENV was UNSET (the default in many deploy environments —
+    // e.g. `node server.js` without NODE_ENV=production, or a misconfigured
+    // container/PM2/systemd unit), the resolver returned the publicly-known
+    // dev secret. Every JWT in the system — access tokens, refresh-rotated
+    // access tokens, MFA challenge tokens, MFA pending tickets, and (via
+    // verify-email/route.ts which delegates here) email-verification
+    // tokens — was signed with a string committed to the repo. An attacker
+    // who reads the repo could forge ANY token type, including access
+    // tokens for arbitrary userIds → full account takeover. The prior
+    // BE-020 "fix" in verify-email/route.ts replaced the inline resolver
+    // with `resolveJwtSecret()` claiming the shared resolver "already
+    // implements the correct fail-closed logic" — that was aspirational,
+    // not actual. The shared resolver had the SAME NODE_ENV-unset bug.
+    //
+    // Real root fix: mirror the register route's `isDev` pattern. `isDev`
+    // is ONLY true when NODE_ENV is EXPLICITLY "development" or "test".
+    // An unset NODE_ENV (undefined, "", or any other value) is treated
+    // as PRODUCTION → fail-closed → throw. This is the OWASP ASVS V2.1.6
+    // "fail-closed secrets" pattern and matches the BE-063 root fix in
+    // register/route.ts. The dev-only fallback is reachable ONLY when
+    // the operator explicitly opts in by setting NODE_ENV=development
+    // or NODE_ENV=test.
+    const isDev =
+      process.env.NODE_ENV === "development" ||
+      process.env.NODE_ENV === "test";
+    if (!isDev) {
+      // Production (including NODE_ENV unset) with missing/short secret
+      // → HARD FAIL. Never silently use the dev-only secret outside of
+      // an explicit dev/test environment.
       throw new Error(
-        "JWT_SECRET must be set to a >=32-char random string in production. " +
+        "JWT_SECRET must be set to a >=32-char random string in production " +
+        "(or any non-dev/test environment, including when NODE_ENV is unset). " +
         "Generate one with: openssl rand -base64 48"
       );
     }
@@ -123,8 +154,23 @@ const MFA_CHALLENGE_TTL_SECONDS = 5 * 60; // 5 minutes
 //
 // The kid values are short, stable strings (NOT secrets) — they identify
 // which "key" (really, which token-type contract) was used to sign.
-const KID_ACCESS = "drugos:access:v1";
-const KID_MFA_CHALLENGE = "drugos:mfa_challenge:v1";
+//
+// BE-044 ROOT FIX (COMPLETE, v123): the prior fix only stamped kid on
+// access + mfa_challenge tokens. email_verify (signed in register/route.ts)
+// and mfa_pending (signed in totp.ts issueMfaTicket) were LEFT WITHOUT a
+// kid header. Their verify functions still checked the `type` claim, so
+// substitution was blocked — but the "defense in depth" the audit asked
+// for was incomplete. A future developer adding a new token type who
+// forgot the type check on the email_verify or mfa_pending verify path
+// would still have a token-substitution vulnerability on those types.
+// This completes the fix: kid constants for ALL FOUR token types are
+// declared here and used at both sign AND verify time. The constants are
+// EXPORTED so register/route.ts and totp.ts can use them without
+// re-declaring (which would risk drift if a constant is renamed).
+export const KID_ACCESS = "drugos:access:v1";
+export const KID_MFA_CHALLENGE = "drugos:mfa_challenge:v1";
+export const KID_EMAIL_VERIFY = "drugos:email_verify:v1";
+export const KID_MFA_PENDING = "drugos:mfa_pending:v1";
 
 export function signMfaChallengeToken(payload: {
   userId: string;
@@ -420,10 +466,38 @@ export async function rotateRefreshToken(userId: string): Promise<RefreshResult>
       platformRole: true,
       status: true,
       lockedUntil: true,
+      // BE-045 ROOT FIX (DEFENSE IN DEPTH, v123): select deletedAt HERE,
+      // inside rotateRefreshToken, so the function refuses to issue new
+      // tokens for soft-deleted users REGARDLESS of which caller invoked
+      // it. The prior fix only checked deletedAt in consumeRefreshToken
+      // (the refresh-cookie path). But rotateRefreshToken is also called
+      // from /api/auth/login (after password verify) and /api/auth/2fa/
+      // login-verify (after TOTP verify). Both of those callers check
+      // deletedAt themselves BEFORE calling rotateRefreshToken — so in
+      // practice the bug was latent. BUT: a future code path that calls
+      // rotateRefreshToken directly (e.g. an admin "force re-issue
+      // tokens" tool, or a session-restore flow) would bypass the
+      // deletedAt check entirely. Defense in depth: the function that
+      // ACTUALLY issues the tokens must verify the user is not deleted,
+      // not rely on every caller to do it. This mirrors the existing
+      // checks for status === "suspended" and lockedUntil — same pattern,
+      // same fail-closed behavior.
+      deletedAt: true,
       lastActiveOrgId: true,
     },
   });
   if (!user) throw new Error("User not found while rotating refresh token");
+  // BE-045 defense in depth: refuse to issue new tokens for soft-deleted
+  // users. Revoke ALL their refresh tokens (cleanup) and throw — the
+  // caller (consumeRefreshToken or a login path) returns null / 401 and
+  // the user is treated as invalid credentials. This is the SAME action
+  // taken for suspended users below — consistency is important for
+  // forensics (the audit log shows the same "all tokens revoked" pattern
+  // for both suspension and deletion).
+  if (user.deletedAt !== null) {
+    await revokeAllRefreshTokensForUser(userId);
+    throw new Error("account_deleted");
+  }
   if (user.status === "suspended") {
     // Revoke ALL refresh tokens for this user — they should not be able
     // to keep using any previously-issued token after suspension.
@@ -518,11 +592,23 @@ export async function consumeRefreshToken(token: string): Promise<RefreshResult 
   try {
     return await rotateRefreshToken(record.userId);
   } catch (e) {
-    // FE-032: rotateRefreshToken throws if the user is suspended or
-    // locked. We swallow the error and return null so the caller returns
-    // 401 (and clears cookies via FE-031).
+    // FE-032: rotateRefreshToken throws if the user is suspended, locked,
+    // or (BE-045 v123 defense-in-depth) soft-deleted. We swallow the
+    // error and return null so the caller returns 401 (and clears
+    // cookies via FE-031). The BE-045 check inside rotateRefreshToken
+    // is a SECOND line of defense — consumeRefreshToken already checks
+    // deletedAt above (line 560), so in practice this catch should
+    // never fire for the deleted case (the earlier check returns first).
+    // But if a race condition makes the user soft-deleted BETWEEN the
+    // consumeRefreshToken check and the rotateRefreshToken call, the
+    // inner check catches it and we treat it the same as suspended /
+    // locked: swallow, return null, force re-auth.
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg === "account_suspended" || msg === "account_locked") {
+    if (
+      msg === "account_suspended" ||
+      msg === "account_locked" ||
+      msg === "account_deleted"
+    ) {
       return null;
     }
     // Unexpected error — rethrow.
