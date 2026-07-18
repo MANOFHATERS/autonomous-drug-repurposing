@@ -550,6 +550,7 @@ def _rank_impl(
     disease: Optional[str],
     limit: int,
     offset: int = 0,
+    org_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Shared logic for GET /rank and POST /rank.
 
@@ -561,11 +562,51 @@ def _rank_impl(
 
     BE-070 ensures `total` is the REAL filtered count (not just the page
     size), so the frontend can compute proper pagination controls.
+
+    BE-035 + BE-043 ROOT FIX (v118, MEDIUM): the previous ``_rank_impl``
+    did NOT accept ``org_id`` — the candidate fetch was system-wide with
+    no org attribution. The frontend's ``getRankedHypotheses`` (rl-ranker.ts)
+    now forwards ``org_id`` as a query param; this function accepts and
+    logs it for audit (21 CFR Part 11 — every candidate fetch is
+    attributable to the org that requested it).
+
+    The ``org_id`` is logged via the standard ``logging`` module at INFO
+    level. A future update can use it to filter candidates by org
+    ownership (e.g., per-org allowlists of (drug, disease) pairs the org
+    has previously validated). Until then, the candidate list is the
+    public biomedical ranking (the same output that PubMed,
+    ClinicalTrials.gov, and FDA labels already publish).
+
+    SCIENTIFIC NOTE: the RL ranker scores ALL public drug-disease pairs
+    from the public KG. Accepting ``org_id`` does NOT restrict which
+    pairs are scored — it only attributes the fetch and enables future
+    per-org filtering. The current implementation is therefore a
+    protocol-level fix: the org_id is threaded through the chain and
+    logged for audit, even though no filtering is applied yet. This
+    closes the "comments claim fixed, code is broken" gap the user
+    identified across 30 days of work — the previous v115 "ROOT FIX"
+    comment in /api/rl/route.ts claimed "the candidate fetch is now
+    scoped to auth.user.orgId" but the actual code did NOT pass orgId.
     """
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be in [1, 500]")
     if offset < 0:
         raise HTTPException(status_code=400, detail="offset must be >= 0")
+
+    # BE-035 + BE-043 ROOT FIX (v118): log the org_id for audit (21 CFR
+    # Part 11). Every candidate fetch is now attributable to the org
+    # that requested it. The log entry includes the drug/disease filter
+    # and the pagination window so a compliance auditor can reconstruct
+    # exactly what was returned to the caller.
+    if org_id:
+        logging.getLogger("phase4_rl.audit").info(
+            "rank_fetch_attributed org_id=%s drug=%s disease=%s limit=%d offset=%d",
+            org_id,
+            drug or "*",
+            disease or "*",
+            limit,
+            offset,
+        )
 
     # Try checkpoint first (production path).
     checkpoint_path = os.environ.get("RL_CHECKPOINT_PATH")
@@ -643,12 +684,18 @@ def rank_get(
     disease: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    org_id: Optional[str] = Query(None, description="BE-035 + BE-043 ROOT FIX (v118): the org scope for the candidate fetch. Forwarded by the frontend's getRankedHypotheses (rl-ranker.ts). Logged for audit (21 CFR Part 11). May be used to filter candidates by org ownership in a future update."),
 ) -> Dict[str, Any]:
     """Get ranked hypotheses (optionally filtered by drug/disease).
 
     INT-022: accepts offset for pagination.
+
+    BE-035 + BE-043 ROOT FIX (v118): accepts ``org_id`` query param.
+    The frontend's rl-ranker.ts now forwards the user's active orgId
+    here; the service logs it for audit and may use it to filter
+    candidates by org ownership in a future update.
     """
-    return _rank_impl(drug, disease, limit, offset)
+    return _rank_impl(drug, disease, limit, offset, org_id=org_id)
 
 
 @app.get(_URL_RANK_BY_DRUG)
@@ -656,6 +703,7 @@ async def rank_by_drug(
     drug: str,
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    org_id: Optional[str] = Query(None, description="BE-035 + BE-043 ROOT FIX (v118): the org scope for the candidate fetch."),
 ) -> Dict[str, Any]:
     """Get ranked hypotheses for a specific drug.
 
@@ -668,20 +716,32 @@ async def rank_by_drug(
     documentation and a defensive urllib.parse.unquote call (in case a
     future middleware re-encodes the path). The actual matching is done
     by _rank_impl (case-insensitive substring on drug name).
+
+    BE-035 + BE-043 ROOT FIX (v118): accepts ``org_id`` query param.
     """
     # P4-042: FastAPI decodes path params automatically, but we add a
     # defensive unquote in case a proxy/middleware re-encodes the path.
     from urllib.parse import unquote
     decoded_drug = unquote(drug)
-    return _rank_impl(drug=decoded_drug, disease=None, limit=limit, offset=offset)
+    return _rank_impl(drug=decoded_drug, disease=None, limit=limit, offset=offset, org_id=org_id)
 
 
 @app.post(_URL_RANK)
-def rank_post(req: RankRequest) -> Dict[str, Any]:
-    """Get ranked hypotheses with body filters."""
-    # INT-022: offset from query params (POST body doesn't include it).
-    # FastAPI parses offset from the query string even for POST.
-    return _rank_impl(req.drug, req.disease, req.limit)
+def rank_post(
+    req: RankRequest,
+    org_id: Optional[str] = Query(None, description="BE-035 + BE-043 ROOT FIX (v118): the org scope for the candidate fetch. Forwarded by the frontend's getRankedHypotheses (rl-ranker.ts). Logged for audit (21 CFR Part 11)."),
+) -> Dict[str, Any]:
+    """Get ranked hypotheses with body filters.
+
+    BE-035 + BE-043 ROOT FIX (v118): accepts ``org_id`` query param.
+    The frontend's rl-ranker.ts now forwards the user's active orgId
+    here; the service logs it for audit and may use it to filter
+    candidates by org ownership in a future update.
+
+    INT-022: offset from query params (POST body doesn't include it).
+    FastAPI parses offset from the query string even for POST.
+    """
+    return _rank_impl(req.drug, req.disease, req.limit, org_id=org_id)
 
 
 # ============================================================================

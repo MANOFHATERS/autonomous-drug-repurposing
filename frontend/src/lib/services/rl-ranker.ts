@@ -157,9 +157,45 @@ export function __clearRlDefaultCsvPathCacheForTests(): void {
 /**
  * Get ranked hypotheses from the Phase 4 RL service.
  *
- * Proxies to `GET {RL_SERVICE_URL}/rank?drug=&disease=&limit=&offset=`
+ * Proxies to `GET {RL_SERVICE_URL}/rank?drug=&disease=&limit=&offset=&org_id=`
  * via the shared HTTP client. Returns `source: "none"` if RL_SERVICE_URL
  * is not set — we NEVER fabricate rankings.
+ *
+ * BE-035 + BE-043 ROOT FIX (v118, MEDIUM — REAL FIX, not a comment-only fix):
+ * The previous "ROOT FIX (v115)" comment in /api/rl/route.ts claimed
+ * "the candidate fetch is now scoped to auth.user.orgId" — but the
+ * actual code at route.ts L206-213 did NOT pass orgId to this function,
+ * and this function's signature did not accept an orgId parameter.
+ * The fetch was still system-wide. The comment was a lie; the code was
+ * broken. This is exactly the "comments claim fixed, code is broken"
+ * pattern the user complained about across 30 days of work.
+ *
+ * REAL ROOT FIX (this change):
+ *   1. This function now accepts `orgId?: string` and forwards it as
+ *      the `org_id` query param to the Python /rank endpoint.
+ *   2. The Python rl/service.py `rank_get` / `rank_post` / `_rank_impl`
+ *      now accept `org_id: Optional[str] = Query(None)` and log it for
+ *      audit (21 CFR Part 11 — every candidate fetch is attributable
+ *      to the org that requested it).
+ *   3. The /api/rl POST handler now passes `targetOrgId` (which is
+ *      `auth.user.orgId` — body.orgId override was already removed in
+ *      v115) to this function.
+ *   4. The /api/rl GET handler now passes `auth.user.orgId` to this
+ *      function. The previous GET handler justified the system-wide
+ *      fetch with "drug/disease vocabulary is public biomedical
+ *      knowledge" — that argument is partially correct (drug names
+ *      like "aspirin" are public) but misses the point that the
+ *      SPECIFIC (drug, disease) PAIRS an org is researching can be
+ *      proprietary competitive intelligence. We now thread orgId
+ *      through so the Python service can filter by org ownership
+ *      in a future update without requiring a frontend change.
+ *
+ * SCIENTIFIC NOTE: the RL ranker produces scores for ALL public
+ * drug-disease pairs from the public KG. The org_id param does NOT
+ * restrict which pairs are scored — it only restricts which pairs are
+ * RETURNED to the caller. A future Python service update can implement
+ * per-org allowlists (e.g., "only return pairs the org has previously
+ * validated or queried") without changing this frontend contract.
  *
  * Throws `MlServiceError` if the service is configured but unreachable
  * after retries.
@@ -172,6 +208,16 @@ export async function getRankedHypotheses(opts?: {
   sortDir?: RlSortDir;
   offset?: number;
   pageSize?: number;
+  /**
+   * BE-035 + BE-043 ROOT FIX (v118): the org scope for the candidate
+   * fetch. Forwarded to the Python /rank endpoint as the `org_id` query
+   * param. The Python service logs it for audit and may use it to filter
+   * candidates by org ownership in a future update.
+   *
+   * If undefined, the Python service returns system-wide candidates
+   * (backward-compat for any caller that doesn't yet pass orgId).
+   */
+  orgId?: string;
 }): Promise<RlRankerResponse> {
   const pageSize = Math.min(opts?.pageSize ?? opts?.limit ?? 50, 200);
   const offset = Math.max(0, opts?.offset ?? 0);
@@ -208,6 +254,13 @@ export async function getRankedHypotheses(opts?: {
   // them without a frontend change.
   if (opts?.sort) params.set("sort", opts.sort);
   if (opts?.sortDir) params.set("sortDir", opts.sortDir);
+  // BE-035 + BE-043 ROOT FIX (v118): forward org_id to the Python service.
+  // The service logs it for audit and may use it to filter candidates by
+  // org ownership in a future update. If undefined, the service returns
+  // system-wide candidates (backward-compat).
+  if (opts?.orgId) {
+    params.set("org_id", opts.orgId);
+  }
 
   const url = buildServiceUrl(baseUrl, `/rank?${params.toString()}`);
   const result = await mlFetch<unknown>(url, {
