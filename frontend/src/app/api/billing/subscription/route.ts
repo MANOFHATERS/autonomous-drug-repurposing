@@ -5,7 +5,20 @@ import { verifyPassword } from "@/lib/auth/server";
 import { verifyMfaTicket, verifyTotpWithReplayCheck } from "@/lib/auth/totp";
 import {
   checkTotpRateLimit,
-  recordFailedTotp,
+  // BE-066 REAL ROOT FIX (v126): migrate this route from the SYNC
+  // `recordFailedTotp` (in-memory Map, per-process) to the DISTRIBUTED
+  // `recordFailedTotpDistributed` (Redis-backed when REDIS_URL is set,
+  // falls back to the sync path internally when Redis is unavailable).
+  //
+  // The v123 "BE-066 ROOT FIX" only migrated /api/auth/2fa/login-verify.
+  // This route AND /api/auth/2fa/disable were MISSED. On a multi-instance
+  // deploy (K8s with N replicas), each instance had its own in-memory
+  // TOTP counter — an attacker could make N × TOTP_MAX_ATTEMPTS attempts
+  // before lockout (N=3 → 15 attempts → ~6 min to brute-force TOTP) per
+  // billing-protected endpoint. Wiring this route to the distributed
+  // version closes the hole identically to login-verify. The function
+  // returns a Promise, so the call site is updated to `await`.
+  recordFailedTotpDistributed,
   clearTotpAttempts,
 } from "@/lib/auth/rate-limit";
 import { db } from "@/lib/db";
@@ -203,7 +216,12 @@ export async function POST(req: NextRequest) {
         userRecord.lastTotpCounter
       );
       if (!totpResult.ok) {
-        const afterFail = recordFailedTotp(auth.user.userId);
+        // BE-066 v126: use the DISTRIBUTED version (Redis-backed when
+        // REDIS_URL is set) so the TOTP brute-force counter is shared
+        // across all Node.js instances — the sync version's in-memory
+        // Map was per-process and gave the attacker N× the budget on
+        // multi-instance deploys. Function is async, hence `await`.
+        const afterFail = await recordFailedTotpDistributed(auth.user.userId);
         await writeAuditLog({
           user: auth.user,
           action:
