@@ -681,16 +681,106 @@ def _load_phase1_entity_mapping_source_index() -> Optional[Dict[Tuple[str, str],
                 stmt = select(P1EntityMapping)
                 df = pd.read_sql(stmt, conn)
         except Exception as conn_exc:
-            # P2-029 case 3: db_unavailable — cannot connect to the DB.
+            # P2-029 REAL ROOT FIX (Teammate 4, forensic): the previous
+            # code caught ALL exceptions here and labelled them
+            # "db_unavailable" -- but this except block also catches:
+            #   - sqlalchemy.exc.OperationalError: table exists but
+            #     schema is wrong (e.g. migrations partially applied)
+            #   - sqlalchemy.exc.ProgrammingError: column missing,
+            #     permission denied, etc.
+            #   - pandas DatabaseError: pd.read_sql query failed
+            #   - KeyError: ORM model expects a column that doesn't exist
+            # All of these are NOT "cannot connect to DB" -- they're
+            # schema/data issues that require DIFFERENT operator action
+            # (run migrations, fix permissions, etc.). Misclassifying
+            # them as "db_unavailable" sends the operator down the wrong
+            # debugging path (checking DATABASE_URL, restarting Postgres)
+            # when the real fix is to run migrations or fix the schema.
+            #
+            # REAL ROOT FIX: classify the exception by type and emit a
+            # specific, actionable log message for each. The classification
+            # is based on the exception type AND its message (since
+            # SQLAlchemy wraps the underlying DB-API error).
+            _exc_type = type(conn_exc).__name__
+            _exc_msg = str(conn_exc).lower()
+            _exc_module = type(conn_exc).__module__ or ""
+            if (
+                "no such table" in _exc_msg
+                or "undefined table" in _exc_msg
+                or "does not exist" in _exc_msg
+                or "relation" in _exc_msg and "does not exist" in _exc_msg
+            ):
+                # schema_missing: the table vanished between the
+                # inspector check and the SELECT (race condition) OR
+                # the inspector check passed but on a DIFFERENT schema
+                # (e.g. SQLite attached DB). ACTION: run migrations.
+                logger.warning(
+                    "P2-029 ROOT FIX: Phase 1's entity_mapping table "
+                    "DISAPPEARED between existence check and SELECT "
+                    "(%s: %s). This is a race condition OR a schema "
+                    "mismatch (inspector saw the table on a different "
+                    "schema). ACTION REQUIRED: run "
+                    "`python -m database.migrations.run_migrations` "
+                    "from the phase1/ directory. Phase 2 will re-"
+                    "resolve every input record via Phase 1's "
+                    "DrugResolver until the table is restored.",
+                    _exc_type, conn_exc,
+                )
+                return None
+            if (
+                "no such column" in _exc_msg
+                or "undefined column" in _exc_msg
+                or "unknown column" in _exc_msg
+                or "column" in _exc_msg and "not found" in _exc_msg
+            ):
+                # schema_mismatch: the table exists but its columns
+                # don't match the ORM model. ACTION: run migrations
+                # to add the missing column(s).
+                logger.error(
+                    "P2-029 ROOT FIX: Phase 1's entity_mapping table "
+                    "exists but its SCHEMA DOES NOT MATCH the ORM "
+                    "model (%s: %s). A required column is missing -- "
+                    "this means the table was created by an OLDER "
+                    "version of the migrations and needs to be "
+                    "upgraded. ACTION REQUIRED: run "
+                    "`python -m database.migrations.run_migrations` "
+                    "from the phase1/ directory to add the missing "
+                    "column(s). Phase 2 will re-resolve every input "
+                    "record via Phase 1's DrugResolver until the "
+                    "schema is upgraded.",
+                    _exc_type, conn_exc,
+                )
+                return None
+            if (
+                "permission denied" in _exc_msg
+                or "access denied" in _exc_msg
+                or "authentication" in _exc_msg
+            ):
+                # auth_failed: the DB user doesn't have permission to
+                # read the table. ACTION: grant SELECT on the table.
+                logger.error(
+                    "P2-029 ROOT FIX: the DB user configured in "
+                    "DATABASE_URL does NOT have permission to read "
+                    "Phase 1's entity_mapping table (%s: %s). ACTION "
+                    "REQUIRED: grant SELECT on the entity_mapping "
+                    "table to the DB user. Phase 2 will re-resolve "
+                    "every input record via Phase 1's DrugResolver "
+                    "until permissions are fixed.",
+                    _exc_type, conn_exc,
+                )
+                return None
+            # Default: db_unavailable (the original case 3). This is
+            # the catch-all for connection errors, network errors,
+            # postgres not running, etc.
             logger.warning(
                 "P2-029 ROOT FIX: cannot connect to Phase 1's database "
-                "(%s). The DATABASE_URL may be unset, the PostgreSQL "
+                "(%s: %s). The DATABASE_URL may be unset, the PostgreSQL "
                 "server may not be running, or credentials may be wrong. "
                 "ACTION REQUIRED: check the DATABASE_URL env var and "
                 "verify the PostgreSQL server is reachable. Until then, "
                 "Phase 2 will re-resolve every input record via Phase "
                 "1's DrugResolver (correct but slow).",
-                conn_exc,
+                _exc_type, conn_exc,
             )
             return None
 
@@ -2229,6 +2319,245 @@ class EntityResolver:
             self.logger.setLevel(getattr(logging, level.upper()))
         except (AttributeError, ValueError):
             self.logger.setLevel(logging.INFO)
+
+    # ------------------------------------------------------------------
+    # P2-032 ROOT FIX (Teammate 4, forensic, real-root-level):
+    # Wire calibrate_confidence_thresholds into the resolver.
+    # ------------------------------------------------------------------
+    # The previous "ROOT FIX" added calibrate_confidence_thresholds() as
+    # a STANDALONE FUNCTION but NEVER called it from any production code
+    # path. It was dead code -- only invoked from tests. The resolver
+    # itself continued to use the static (0.95, 0.85, 0.50) thresholds
+    # from config.py with no validation against the actual KG's match-
+    # confidence distribution. This is the exact "comments and tests
+    # are fakes" pattern the audit warned about.
+    #
+    # REAL ROOT FIX: the resolver now (a) collects observed match-
+    # confidence values from its own mappings dict, (b) computes
+    # calibrated thresholds via calibrate_confidence_thresholds(), (c)
+    # logs a WARNING when the calibrated thresholds differ from the
+    # static defaults by >10% (operator should investigate), and (d)
+    # optionally APPLIES the calibrated thresholds when the env var
+    # DRUGOS_ENTITY_CONFIDENCE_AUTO_CALIBRATE=1 is set (default off --
+    # backward compat for operators who want the static heuristics).
+    #
+    # This is wired into get_resolution_stats() so every stats query
+    # also emits the calibration report. Operators can read the report
+    # in the logs and decide whether to enable auto-calibration.
+
+    def _collect_observed_confidences(self) -> List[float]:
+        """Collect all match_confidence values from the resolver's mappings.
+
+        P2-032 ROOT FIX: this is the bridge between the static thresholds
+        in ``self._entity_conf_*`` and the data-driven calibration
+        function ``calibrate_confidence_thresholds``. Without this
+        method, calibration could never see the actual distribution of
+        match confidences in the current run.
+
+        Returns
+        -------
+        list of float
+            All confidence values from every EntityMapping in
+            ``self.mappings``, filtered to [0.0, 1.0]. Empty list if
+            no mappings have been created yet.
+        """
+        confidences: List[float] = []
+        with self._lock:
+            for entity_mappings in self.mappings.values():
+                for mapping in entity_mappings.values():
+                    try:
+                        conf = float(mapping.confidence)
+                    except (TypeError, ValueError):
+                        continue
+                    if 0.0 <= conf <= 1.0:
+                        confidences.append(conf)
+        return confidences
+
+    def get_threshold_calibration_report(
+        self,
+        *,
+        high_conf_quantile: float = 0.95,
+        low_conf_quantile: float = 0.50,
+        reject_quantile: float = 0.05,
+    ) -> Dict[str, Any]:
+        """Compute a calibration report comparing static vs data-driven thresholds.
+
+        P2-032 ROOT FIX: this method is the production entry point for
+        the calibration function. It collects observed match_confidence
+        values from the resolver's mappings, runs
+        ``calibrate_confidence_thresholds`` on them, and returns a
+        report comparing the calibrated thresholds to the currently-
+        active static thresholds.
+
+        If there are fewer than 10 observed confidences, the report
+        returns ``"status": "insufficient_data"`` and no calibrated
+        thresholds (calibration requires at least 10 values per the
+        function's contract).
+
+        Returns
+        -------
+        dict
+            Keys:
+            - ``status``: "ok" | "insufficient_data" | "error"
+            - ``current_thresholds``: dict with high_conf, low_conf, reject
+            - ``calibrated_thresholds``: dict (only if status == "ok")
+            - ``delta``: dict of absolute differences (only if status == "ok")
+            - ``recommendation``: str (only if status == "ok")
+            - ``sample_size``: int (number of observed confidences)
+            - ``error``: str (only if status == "error")
+        """
+        current = {
+            "high_conf": self._entity_conf_strict,
+            "low_conf": self._entity_conf_threshold,
+            "reject": self._entity_conf_reject,
+        }
+        confidences = self._collect_observed_confidences()
+        if len(confidences) < 10:
+            return {
+                "status": "insufficient_data",
+                "current_thresholds": current,
+                "sample_size": len(confidences),
+                "message": (
+                    f"Only {len(confidences)} observed confidence values; "
+                    f"need at least 10 for stable quantile estimates. "
+                    f"Static thresholds remain in effect."
+                ),
+            }
+        try:
+            calibrated = calibrate_confidence_thresholds(
+                confidences,
+                high_conf_quantile=high_conf_quantile,
+                low_conf_quantile=low_conf_quantile,
+                reject_quantile=reject_quantile,
+            )
+        except ValueError as exc:
+            return {
+                "status": "error",
+                "current_thresholds": current,
+                "sample_size": len(confidences),
+                "error": str(exc),
+            }
+        delta = {
+            "high_conf": round(abs(calibrated["high_conf"] - current["high_conf"]), 4),
+            "low_conf": round(abs(calibrated["low_conf"] - current["low_conf"]), 4),
+            "reject": round(abs(calibrated["reject"] - current["reject"]), 4),
+        }
+        # Recommendation: if any threshold differs by >10%, recommend
+        # enabling auto-calibration.
+        max_delta = max(delta["high_conf"], delta["low_conf"], delta["reject"])
+        if max_delta > 0.10:
+            recommendation = (
+                "STRONG: calibrated thresholds differ from static by >0.10. "
+                "Set DRUGOS_ENTITY_CONFIDENCE_AUTO_CALIBRATE=1 to apply."
+            )
+        elif max_delta > 0.05:
+            recommendation = (
+                "MODERATE: calibrated thresholds differ from static by >0.05. "
+                "Consider enabling DRUGOS_ENTITY_CONFIDENCE_AUTO_CALIBRATE=1."
+            )
+        else:
+            recommendation = (
+                "STATIC_OK: calibrated thresholds are within 0.05 of static. "
+                "Static defaults are appropriate for this KG."
+            )
+        return {
+            "status": "ok",
+            "current_thresholds": current,
+            "calibrated_thresholds": {
+                "high_conf": calibrated["high_conf"],
+                "low_conf": calibrated["low_conf"],
+                "reject": calibrated["reject"],
+            },
+            "delta": delta,
+            "recommendation": recommendation,
+            "sample_size": calibrated["sample_size"],
+            "mean": calibrated["mean"],
+            "std": calibrated["std"],
+        }
+
+    def apply_calibrated_thresholds(
+        self,
+        *,
+        high_conf_quantile: float = 0.95,
+        low_conf_quantile: float = 0.50,
+        reject_quantile: float = 0.05,
+    ) -> Dict[str, Any]:
+        """Apply data-driven thresholds computed from observed confidences.
+
+        P2-032 ROOT FIX: this method UPDATES the resolver's active
+        thresholds based on the observed match_confidence distribution.
+        After this call, ``self._entity_conf_threshold``,
+        ``self._entity_conf_reject``, and ``self._entity_conf_strict``
+        are set to the calibrated values, and ALL subsequent resolution
+        decisions use the new thresholds.
+
+        This is invoked automatically at the end of resolution when
+        ``DRUGOS_ENTITY_CONFIDENCE_AUTO_CALIBRATE=1`` is set. It can
+        also be called manually by an operator (e.g. in a notebook) to
+        inspect the effect of calibration before enabling it permanently.
+
+        Returns
+        -------
+        dict
+            The calibration report (same shape as
+            ``get_threshold_calibration_report``) with an additional
+            ``applied`` boolean indicating whether thresholds were
+            actually updated.
+
+        Raises
+        ------
+        ResolverConfigurationError
+            If the calibrated thresholds violate the invariant
+            ``0 <= reject <= threshold <= strict <= 1`` (should not
+            happen given the quantile ordering enforced by
+            ``calibrate_confidence_thresholds``, but defensive).
+        """
+        report = self.get_threshold_calibration_report(
+            high_conf_quantile=high_conf_quantile,
+            low_conf_quantile=low_conf_quantile,
+            reject_quantile=reject_quantile,
+        )
+        if report["status"] != "ok":
+            report["applied"] = False
+            return report
+        calibrated = report["calibrated_thresholds"]
+        # Defensive: maintain 0 <= reject <= threshold <= strict <= 1.
+        new_reject = float(calibrated["reject"])
+        new_threshold = float(calibrated["low_conf"])
+        new_strict = float(calibrated["high_conf"])
+        if not (0.0 <= new_reject <= new_threshold <= new_strict <= 1.0):
+            raise ResolverConfigurationError(
+                f"Calibrated thresholds violate invariant "
+                f"0<=reject({new_reject})<=threshold({new_threshold})"
+                f"<=strict({new_strict})<=1. Not applying."
+            )
+        old = {
+            "high_conf": self._entity_conf_strict,
+            "low_conf": self._entity_conf_threshold,
+            "reject": self._entity_conf_reject,
+        }
+        with self._lock:
+            self._entity_conf_reject = new_reject
+            self._entity_conf_threshold = new_threshold
+            self._entity_conf_strict = new_strict
+            # Invalidate stats cache so the next get_resolution_stats()
+            # call recomputes needs_review counts with the new thresholds.
+            self._stats_dirty = True
+        self.logger.warning(
+            "P2-032 ROOT FIX: applied calibrated confidence thresholds "
+            "from %d observed match_confidence values. "
+            "OLD: high=%.4f, low=%.4f, reject=%.4f. "
+            "NEW: high=%.4f, low=%.4f, reject=%.4f. "
+            "Subsequent resolution decisions use the new thresholds. "
+            "Existing mappings' needs_review flags are NOT retroactively "
+            "updated (call recompute_needs_review() if needed).",
+            report["sample_size"],
+            old["high_conf"], old["low_conf"], old["reject"],
+            new_strict, new_threshold, new_reject,
+        )
+        report["applied"] = True
+        report["previous_thresholds"] = old
+        return report
 
     def _init_metrics(self) -> Dict[str, Any]:
         """D11-008 -- init counters; degrade gracefully if prometheus missing."""
@@ -5520,6 +5849,19 @@ class EntityResolver:
         Stats are cached (D1-015) and recomputed only when mappings
         change (D8-008).
 
+        P2-032 ROOT FIX (Teammate 4, real-root-level): every stats
+        query ALSO computes a threshold calibration report (comparing
+        the static (0.95, 0.85, 0.50) thresholds against data-driven
+        thresholds computed from the observed match_confidence
+        distribution). The report is logged at WARNING level if the
+        calibrated thresholds differ from static by >10%, so
+        operators see it in production logs without having to call
+        ``get_threshold_calibration_report()`` manually. When
+        ``DRUGOS_ENTITY_CONFIDENCE_AUTO_CALIBRATE=1`` is set, the
+        calibrated thresholds are APPLIED (the resolver's
+        ``_entity_conf_threshold``, ``_entity_conf_reject``, and
+        ``_entity_conf_strict`` are updated in-place).
+
         Returns
         -------
         dict
@@ -5554,7 +5896,65 @@ class EntityResolver:
                 }
             self._stats_cache = stats
             self._stats_dirty = False
-            return stats
+
+        # P2-032 ROOT FIX: emit calibration report after every stats
+        # computation. This is the PRODUCTION WIRING of
+        # calibrate_confidence_thresholds -- it was dead code before.
+        # The report is logged so operators see it in production logs.
+        # Auto-apply if DRUGOS_ENTITY_CONFIDENCE_AUTO_CALIBRATE=1.
+        try:
+            report = self.get_threshold_calibration_report()
+            if report["status"] == "ok":
+                max_delta = max(report["delta"].values())
+                if max_delta > 0.10:
+                    self.logger.warning(
+                        "P2-032 calibration report (n=%d, mean=%.4f, "
+                        "std=%.4f): current high/low/reject = %.4f/%.4f/%.4f, "
+                        "calibrated = %.4f/%.4f/%.4f (max delta=%.4f). "
+                        "RECOMMENDATION: %s",
+                        report["sample_size"], report["mean"], report["std"],
+                        report["current_thresholds"]["high_conf"],
+                        report["current_thresholds"]["low_conf"],
+                        report["current_thresholds"]["reject"],
+                        report["calibrated_thresholds"]["high_conf"],
+                        report["calibrated_thresholds"]["low_conf"],
+                        report["calibrated_thresholds"]["reject"],
+                        max_delta, report["recommendation"],
+                    )
+                else:
+                    self.logger.info(
+                        "P2-032 calibration report (n=%d): static "
+                        "thresholds within 0.05 of calibrated (max "
+                        "delta=%.4f). No action needed.",
+                        report["sample_size"], max_delta,
+                    )
+                # Auto-apply if env var is set.
+                if os.environ.get("DRUGOS_ENTITY_CONFIDENCE_AUTO_CALIBRATE", "0") == "1":
+                    if max_delta > 0.05:
+                        self.apply_calibrated_thresholds()
+                    else:
+                        self.logger.info(
+                            "P2-032: DRUGOS_ENTITY_CONFIDENCE_AUTO_CALIBRATE=1 "
+                            "but calibrated thresholds are within 0.05 of "
+                            "static. Not applying (no meaningful change)."
+                        )
+            elif report["status"] == "insufficient_data":
+                self.logger.debug(
+                    "P2-032: %s (n=%d). Static thresholds in effect.",
+                    report.get("message", ""), report["sample_size"],
+                )
+            elif report["status"] == "error":
+                self.logger.warning(
+                    "P2-032: calibration failed: %s. Static thresholds in effect.",
+                    report.get("error", "unknown"),
+                )
+        except Exception as exc:  # noqa: BLE001
+            # Calibration must NEVER break stats query.
+            self.logger.debug(
+                "P2-032: calibration report computation raised %s. "
+                "Static thresholds in effect.", exc,
+            )
+        return stats
 
     def get_unresolved_report(self) -> Dict[str, List[str]]:
         """Return all unresolved entity IDs for manual review.
