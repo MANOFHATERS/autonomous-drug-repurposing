@@ -84,29 +84,106 @@ def test_sh_011_phase2_adapter_imports_succeed():
 # SH-010: prefer_postgres hardcoded False
 # ============================================================================
 def test_sh_010_run_4phase_respects_env_var(monkeypatch):
-    """SH-010: run_4phase.py must honor DRUGOS_PREFER_POSTGRES env var."""
-    # Read the source and verify the env var is referenced.
+    """SH-010: run_4phase.py must honor DRUGOS_PREFER_POSTGRES env var.
+
+    v125 ROOT FIX (Teammate 4, forensic): the v117 partial fix inlined
+    ``os.environ.get("DRUGOS_PREFER_POSTGRES", "0")`` which STILL defaulted
+    to False in production (the audit's exact complaint). The v125 ROOT
+    FIX delegates to ``resolve_prefer_postgres()`` which defaults to
+    ``"auto"`` mode — auto-detects PG availability so production uses PG
+    when configured, dev/CI uses CSV when no PG.
+    """
     run_4phase_path = _REPO_ROOT / "run_4phase.py"
     src = run_4phase_path.read_text()
-    assert "DRUGOS_PREFER_POSTGRES" in src, (
-        "run_4phase.py must reference DRUGOS_PREFER_POSTGRES env var "
-        "(was hardcoded to False before the fix)."
+    # v125: must delegate to resolve_prefer_postgres() (the centralized
+    # 3-state resolver).
+    assert "resolve_prefer_postgres" in src, (
+        "run_4phase.py must delegate to resolve_prefer_postgres() "
+        "(v125 ROOT FIX for SH-010 — auto-detect PG availability "
+        "instead of the v117 partial fix that defaulted to '0' = False)."
     )
-    # The ACTUAL call site (not the docstring/comment) must use the env
-    # var. We look for the pattern ``prefer_postgres=os.environ.get(``
-    # which is the fixed form.
-    assert "prefer_postgres=os.environ.get(" in src, (
-        "run_4phase.py must use prefer_postgres=os.environ.get(...) "
-        "instead of hardcoded prefer_postgres=False."
+    # The v117 partial-fix pattern (which defaulted to "0" = False) must
+    # NOT appear in LIVE code (comments are OK).
+    stripped = "\n".join(
+        line for line in src.split("\n") if not line.lstrip().startswith("#")
+    )
+    import re as _re
+    stripped = _re.sub(r'""".*?"""', '', stripped, flags=_re.DOTALL)
+    bad_pattern = _re.search(
+        r'prefer_postgres\s*=\s*os\.environ\.get\(\s*"DRUGOS_PREFER_POSTGRES"\s*,\s*"0"',
+        stripped,
+    )
+    assert bad_pattern is None, (
+        "run_4phase.py must NOT use the v117 partial-fix pattern "
+        "(os.environ.get('DRUGOS_PREFER_POSTGRES', '0')) — defaults to "
+        "False in production. Use resolve_prefer_postgres() (v125 ROOT FIX)."
     )
 
 
 def test_sh_010_service_respects_env_var():
-    """SH-010: phase2/service.py must honor DRUGOS_PREFER_POSTGRES env var."""
+    """SH-010: phase2/service.py must honor DRUGOS_PREFER_POSTGRES env var.
+
+    v125 ROOT FIX: both callsites delegate to resolve_prefer_postgres().
+    """
     service_path = _PHASE2_ROOT / "service.py"
     src = service_path.read_text()
-    assert "DRUGOS_PREFER_POSTGRES" in src, (
-        "phase2/service.py must reference DRUGOS_PREFER_POSTGRES env var."
+    assert "resolve_prefer_postgres" in src, (
+        "phase2/service.py must delegate to resolve_prefer_postgres() "
+        "(v125 ROOT FIX for SH-010)."
+    )
+    # Must NOT use the v117 partial-fix pattern in LIVE code.
+    stripped = "\n".join(
+        line for line in src.split("\n") if not line.lstrip().startswith("#")
+    )
+    import re as _re
+    stripped = _re.sub(r'""".*?"""', '', stripped, flags=_re.DOTALL)
+    bad_pattern = _re.search(
+        r'prefer_postgres\s*=\s*os\.environ\.get\(\s*"DRUGOS_PREFER_POSTGRES"\s*,\s*"0"',
+        stripped,
+    )
+    assert bad_pattern is None, (
+        "phase2/service.py must NOT use the v117 partial-fix pattern "
+        "(os.environ.get('DRUGOS_PREFER_POSTGRES', '0')) — defaults to "
+        "False in production. Use resolve_prefer_postgres() (v125 ROOT FIX)."
+    )
+
+
+def test_sh_010_resolve_prefer_postgres_3_state():
+    """SH-010 v125: resolve_prefer_postgres() implements the 3-state protocol.
+
+    The function MUST:
+      - return True  for DRUGOS_PREFER_POSTGRES in {1, true, yes, on}
+      - return False for DRUGOS_PREFER_POSTGRES in {0, false, no, off}
+      - auto-detect for DRUGOS_PREFER_POSTGRES in {auto, unset, anything else}
+    """
+    import os
+    import sys
+    sys.path.insert(0, str(_PHASE2_ROOT))
+    from drugos_graph.phase1_bridge import resolve_prefer_postgres
+
+    # Force True
+    for v in ("1", "true", "yes", "on", "TRUE", "On"):
+        os.environ["DRUGOS_PREFER_POSTGRES"] = v
+        assert resolve_prefer_postgres() is True, (
+            f"DRUGOS_PREFER_POSTGRES={v!r} should force True"
+        )
+    # Force False
+    for v in ("0", "false", "no", "off", "FALSE", "Off"):
+        os.environ["DRUGOS_PREFER_POSTGRES"] = v
+        assert resolve_prefer_postgres() is False, (
+            f"DRUGOS_PREFER_POSTGRES={v!r} should force False"
+        )
+    # Auto-detect (no PG in test env -> False)
+    for v in ("auto", "AUTO", "garbage", ""):
+        os.environ["DRUGOS_PREFER_POSTGRES"] = v
+        # No PG configured in this test env, so auto-detect returns False
+        assert resolve_prefer_postgres() is False, (
+            f"DRUGOS_PREFER_POSTGRES={v!r} should auto-detect (False when no PG)"
+        )
+    # Unset -> auto-detect
+    os.environ.pop("DRUGOS_PREFER_POSTGRES", None)
+    assert resolve_prefer_postgres() is False, (
+        "Unset DRUGOS_PREFER_POSTGRES should auto-detect (False when no PG)"
     )
 
 
@@ -122,6 +199,69 @@ def test_sh_026_service_returns_canonical_fields():
         assert field in src, (
             f"phase2/service.py must return the canonical field {field!r} "
             f"(matches TS KgStatsResponse contract)."
+        )
+
+
+def test_sh_026_ts_contract_aligned_with_python():
+    """SH-026 v125 ROOT FIX: TS KgStatsResponse interface must match Python.
+
+    The audit cited the TS contract (frontend/contracts/api_contracts.ts) which
+    declared PHANTOM fields (total_nodes, total_edges, node_counts, edge_counts,
+    kg_version, built_at) that Python NEVER emitted. The v125 ROOT FIX aligns
+    the TS interface with the actual Python response.
+    """
+    import re as _re
+    ts_path = _REPO_ROOT / "frontend" / "contracts" / "api_contracts.ts"
+    src = ts_path.read_text()
+    # Brace-matched extraction of the KgStatsResponse interface body
+    m = _re.search(r"export interface KgStatsResponse\s*\{", src)
+    assert m, "KgStatsResponse interface not found in api_contracts.ts"
+    start = m.end()
+    depth = 1
+    end = start
+    while end < len(src) and depth > 0:
+        if src[end] == "{":
+            depth += 1
+        elif src[end] == "}":
+            depth -= 1
+        end += 1
+    block = src[start:end - 1]
+    # Strip comments
+    block = _re.sub(r"/\*.*?\*/", "", block, flags=_re.DOTALL)
+    block = _re.sub(r"//[^\n]*", "", block)
+
+    # Required canonical fields (must match Python service.py response)
+    required_fields = [
+        "source:",                    # audit-required enum
+        "node_type_counts:",          # audit-required
+        "edge_type_counts:",          # audit-required
+        "last_updated:",              # audit-required ISO timestamp
+        "node_count:",                # canonical snake_case
+        "edge_count:",                # canonical snake_case
+    ]
+    for field in required_fields:
+        assert field in block, (
+            f"TS KgStatsResponse missing required field: {field!r}"
+        )
+
+    # source MUST be the audit-required enum "neo4j" | "in_memory"
+    assert _re.search(r'source:\s*"neo4j"\s*\|\s*"in_memory"', block), (
+        'TS KgStatsResponse.source must be enum "neo4j" | "in_memory"'
+    )
+
+    # Phantom fields (declared by the old broken contract) must NOT be present
+    phantom_fields = [
+        "total_nodes:",
+        "total_edges:",
+        "node_counts:",
+        "edge_counts:",
+        "kg_version:",
+        "built_at:",
+    ]
+    for phantom in phantom_fields:
+        assert phantom not in block, (
+            f"TS KgStatsResponse must NOT declare phantom field {phantom!r} "
+            f"(Python never emitted it — was a fake contract per SH-026 audit)."
         )
 
 

@@ -2393,6 +2393,63 @@ def _phase1_db_available() -> bool:
     return result
 
 
+def resolve_prefer_postgres() -> bool:
+    """SH-010 ROOT FIX (Teammate 4, v125 forensic, root-level, no surface fix).
+
+    The audit found that ``run_4phase.py`` and ``phase2/service.py`` HARDCODED
+    ``prefer_postgres=False``, which meant Phase 1's PostgreSQL staging DB
+    (populated by the Phase 1 ORM loaders) was ALWAYS bypassed — even in
+    production. The prior "ROOT FIX" changed the hardcode to
+    ``os.environ.get("DRUGOS_PREFER_POSTGRES", "0").lower() in ("1", ...)``
+    but kept the DEFAULT at ``"0"`` (False). This is the SAME bug in a
+    different disguise: in production, operators who deploy via
+    docker-compose without explicitly setting ``DRUGOS_PREFER_POSTGRES=1``
+    STILL bypass PostgreSQL and silently use stale CSV outputs. The audit
+    text "ALWAYS False, even in production!" remained true.
+
+    REAL ROOT FIX: introduce a 3-state resolution protocol that defaults
+    to AUTO-DETECT instead of False:
+
+      1. If ``DRUGOS_PREFER_POSTGRES`` is set to ``"1"`` / ``"true"`` /
+         ``"yes"`` / ``"on"`` (case-insensitive): force ``True``
+         (operator explicitly wants PostgreSQL).
+      2. If ``DRUGOS_PREFER_POSTGRES`` is set to ``"0"`` / ``"false"`` /
+         ``"no"`` / ``"off"`` (case-insensitive): force ``False``
+         (operator explicitly wants CSV — dev/CI mode).
+      3. If ``DRUGOS_PREFER_POSTGRES`` is unset OR set to ``"auto"``
+         (case-insensitive): auto-detect by calling
+         :func:`_phase1_db_available`. If the Phase 1 DB is reachable AND
+         has the required tables populated, use PostgreSQL (the
+         AUTHORITATIVE source per v29 root fix). Otherwise, fall back to
+         CSV (the existing dev/CI behaviour).
+
+    This is the SCIENTIFICALLY correct default: in production, the Phase
+    1 ORM loaders are the AUTHORITATIVE source (per the v29 root-fix
+    comment in :func:`read_phase1_outputs`). Silently using stale CSVs
+    in production is the exact "silent data loss" pattern the audit
+    flagged. Auto-detection ensures the right backend is chosen WITHOUT
+    requiring the operator to remember yet another env-var — the
+    presence of a populated DB is itself the signal.
+
+    The function is CACHED implicitly via :func:`_phase1_db_available`'s
+    per-process cache (so the auto-detection probe runs at most once per
+    process, not once per :func:`run_phase1_to_phase2` call).
+
+    Returns
+    -------
+    bool
+        ``True`` if the bridge should prefer the PostgreSQL backend;
+        ``False`` if it should use CSV.
+    """
+    raw = os.environ.get("DRUGOS_PREFER_POSTGRES", "auto").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    # "auto" (default) or any unrecognized value: auto-detect.
+    return _phase1_db_available()
+
+
 def _phase1_db_available_uncached() -> bool:
     """Actual implementation of _phase1_db_available() (uncached).
 

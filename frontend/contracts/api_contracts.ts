@@ -125,21 +125,78 @@ export type ServiceName = keyof typeof SERVICE_PORTS;
 
 // ─── Phase 2 (KG service) ────────────────────────────────────────────────
 
+// SH-026 ROOT FIX (Teammate 4, v125 forensic, root-level, no surface fix):
+// The audit found that this interface DECLARED fields (``total_nodes``,
+// ``total_edges``, ``node_counts``, ``edge_counts``, ``kg_version``,
+// ``built_at``, ``backend``) that did NOT match what the Python
+// ``phase2/service.py`` actually returned. The Python service emits:
+//   - ``node_count``, ``edge_count`` (snake_case canonical)
+//   - ``node_type_counts``, ``edge_type_counts`` (snake_case canonical)
+//   - ``last_updated`` (ISO 8601 UTC timestamp)
+//   - ``source: "neo4j" | "in_memory"`` (contract enum)
+//   - ``backend`` (legacy alias for ``source``)
+//   - ``nodeCount``, ``edgeCount``, ``nodeTypeCounts``, ``edgeTypeCounts``,
+//     ``generatedAt`` (camelCase mirror, matches the Zod schema in
+//     ``frontend/src/lib/ml-contracts.ts:KgStatsResponseSchema`` so the
+//     runtime validator passes WITHOUT transformation)
+//   - ``sources: GraphSourceStat[]`` (per-source load provenance)
+//
+// The previous TS interface lived in a parallel universe — the frontend's
+// runtime Zod schema (``KgStatsResponseSchema``) validated a DIFFERENT
+// shape, and the static interface here was NEVER enforced. This is the
+// exact "contract drift" pattern the audit flagged as HIGH severity.
+//
+// REAL ROOT FIX: align this static interface with BOTH the Python
+// response AND the runtime Zod schema. The canonical fields are now:
+//   - ``source: "neo4j" | "in_memory"``  (the audit's required enum)
+//   - ``node_type_counts: Record<string, number>``  (snake_case canonical)
+//   - ``edge_type_counts: Record<string, [string, string, string][]>``
+//     (the audit's required shape — array of (src, rel, dst) tuples)
+//   - ``last_updated: string``  (the audit's required ISO timestamp)
+// The legacy ``backend`` field is preserved for backward compatibility
+// (it aliases ``source``). The legacy ``total_nodes`` / ``total_edges``
+// / ``node_counts`` / ``edge_counts`` / ``kg_version`` / ``built_at``
+// fields are REMOVED — they were NEVER emitted by Python and were a
+// phantom contract. Any frontend code that referenced them was broken
+// at runtime (the Zod schema would have rejected the response).
 export interface KgStatsResponse {
-  /** Total number of nodes in the knowledge graph. */
-  total_nodes: number;
-  /** Total number of edges in the knowledge graph. */
-  total_edges: number;
+  /** Total number of nodes in the knowledge graph (canonical snake_case). */
+  node_count: number;
+  /** Total number of edges in the knowledge graph (canonical snake_case). */
+  edge_count: number;
   /** Per-label node counts (e.g., { Compound: 8341, Protein: 24193, ... }). */
-  node_counts: Record<string, number>;
-  /** Per-type edge counts (e.g., { "Compound|inhibits|Protein": 18234, ... }). */
-  edge_counts: Record<string, number>;
-  /** KG build version (semantic version string). */
-  kg_version: string;
-  /** ISO 8601 UTC timestamp when the KG was last built. */
-  built_at: string | null;
-  /** Backend used to build the KG ("neo4j" or "recording"). */
-  backend: string;
+  node_type_counts: Record<string, number>;
+  /** Per-type edge counts as (src_label, rel_type, dst_label) tuples. */
+  edge_type_counts: Record<string, [string, string, string][]>;
+  /** ISO 8601 UTC timestamp when the KG stats were computed. */
+  last_updated: string;
+  /** Backend that produced the KG — canonical contract enum. */
+  source: "neo4j" | "in_memory";
+  /** Backend that produced the KG — legacy alias for ``source``. */
+  backend?: string;
+  /** Per-source load provenance (which Phase 1 sources contributed). */
+  sources?: Array<{
+    name: string;
+    loaded: boolean;
+    loadedReason?: string;
+    version?: string;
+    rows?: number;
+    edgeCount?: number;
+    sha256?: string;
+    producedAt?: string;
+    producedBy?: string;
+    loadId?: string;
+    nodeTypeCounts?: Record<string, number>;
+    edgeTypeCounts?: Record<string, number>;
+  }>;
+  /** CamelCase mirror — matches the Zod schema in ml-contracts.ts. */
+  nodeCount?: number;
+  edgeCount?: number;
+  nodeTypeCounts?: Record<string, number>;
+  edgeTypeCounts?: Record<string, number>;
+  generatedAt?: string;
+  /** Optional operator-facing note (e.g., "degraded mode"). */
+  note?: string;
 }
 
 export interface KgExploreNode {

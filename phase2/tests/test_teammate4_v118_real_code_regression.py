@@ -48,17 +48,63 @@ class TestSH010RealCode:
         )
 
     def test_run_4phase_reads_env_var(self):
+        """v125 ROOT FIX: run_4phase.py delegates to resolve_prefer_postgres().
+
+        The v117 partial fix inlined ``os.environ.get("DRUGOS_PREFER_POSTGRES", "0")``
+        which STILL defaulted to False in production. The v125 ROOT FIX
+        centralizes the resolution in ``resolve_prefer_postgres()`` which
+        defaults to "auto" mode (auto-detect PG availability).
+        """
         src = (_REPO_ROOT / "run_4phase.py").read_text()
-        assert "DRUGOS_PREFER_POSTGRES" in src
-        assert re.search(
-            r'prefer_postgres\s*=\s*os\.environ\.get\(\s*"DRUGOS_PREFER_POSTGRES"',
-            src,
+        # Must delegate to the centralized resolver.
+        assert "resolve_prefer_postgres" in src, (
+            "SH-010 v125 ROOT FIX: run_4phase.py must delegate to "
+            "resolve_prefer_postgres() instead of inlining the v117 "
+            "partial-fix pattern (which defaulted to '0' = False)."
+        )
+        # Strip comments to check LIVE code only.
+        stripped = "\n".join(
+            line for line in src.split("\n") if not line.lstrip().startswith("#")
+        )
+        stripped = re.sub(r'""".*?"""', '', stripped, flags=re.DOTALL)
+        # The v117 partial-fix pattern must NOT appear in LIVE code.
+        bad = re.search(
+            r'prefer_postgres\s*=\s*os\.environ\.get\(\s*"DRUGOS_PREFER_POSTGRES"\s*,\s*"0"',
+            stripped,
+        )
+        assert bad is None, (
+            "SH-010 v125: run_4phase.py must NOT use the v117 partial-fix "
+            "pattern (os.environ.get('DRUGOS_PREFER_POSTGRES', '0')) — "
+            "defaults to False in production. Use resolve_prefer_postgres()."
         )
 
     def test_service_reads_env_var_both_callsites(self):
+        """v125 ROOT FIX: service.py delegates to resolve_prefer_postgres()."""
         src = (_REPO_ROOT / "phase2" / "service.py").read_text()
-        # Two callsites: /kg/stats in-memory fallback + /kg/explore fallback
-        assert src.count("DRUGOS_PREFER_POSTGRES") >= 2
+        # Must delegate to the centralized resolver at BOTH callsites.
+        assert "resolve_prefer_postgres" in src, (
+            "SH-010 v125 ROOT FIX: phase2/service.py must delegate to "
+            "resolve_prefer_postgres() at both callsites."
+        )
+        assert src.count("resolve_prefer_postgres") >= 2, (
+            f"SH-010 v125: phase2/service.py should reference "
+            f"resolve_prefer_postgres at least twice (one per callsite); "
+            f"found {src.count('resolve_prefer_postgres')}"
+        )
+        # Strip comments to check LIVE code only.
+        stripped = "\n".join(
+            line for line in src.split("\n") if not line.lstrip().startswith("#")
+        )
+        stripped = re.sub(r'""".*?"""', '', stripped, flags=re.DOTALL)
+        bad = re.search(
+            r'prefer_postgres\s*=\s*os\.environ\.get\(\s*"DRUGOS_PREFER_POSTGRES"\s*,\s*"0"',
+            stripped,
+        )
+        assert bad is None, (
+            "SH-010 v125: phase2/service.py must NOT use the v117 partial-fix "
+            "pattern (os.environ.get('DRUGOS_PREFER_POSTGRES', '0')) — "
+            "defaults to False in production. Use resolve_prefer_postgres()."
+        )
 
     def test_service_no_live_hardcoded_false(self):
         src = (_REPO_ROOT / "phase2" / "service.py").read_text()
