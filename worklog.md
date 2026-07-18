@@ -210,3 +210,39 @@ Stage Summary:
 - ZERO new TypeScript errors, ZERO new test failures, ZERO new build breakage.
 - 1 cosmetic cleanup: removed unnecessary set +e/set -e toggling in run-all-tests.sh.
 - Branch: teammate-13-issues, ready to push and merge to main.
+
+---
+Task ID: teammate-3-v124-forensic-verification
+Agent: Teammate 3 (Phase 1 Forensic Verification, hostile-auditor pass)
+Task: Forensic verification of all 39 P1/IN/SH issues from the audit. Read each file line-by-line (NOT comments, NOT tests). Fix any issues still broken. Run REAL code (not smoke tests). Write proper tests. Push to branch, verify, merge to main, re-clone to confirm.
+
+Work Log:
+- Cloned repo, created branch `teammate-3-forensic-verification-v124-remaining-issues`.
+- Read project docx (`Team_Cosmic_Build_Process_Updated.docx`) to understand Phase 1-4 architecture (7 data sources, KG in Neo4j, Graph Transformer in PyTorch+PyG, RL ranker).
+- Read the full 39-issue audit list (39 issues: 1 CRITICAL, 2 HIGH security, 11 HIGH, 18 MEDIUM, 11 LOW).
+- Audited ACTUAL CODE line-by-line for each of the 39 issues. Did NOT trust "ROOT FIX" comments. Verified each fix by reading the code, then by importing the module and asserting the fix is in place at runtime.
+- Result of audit:
+  - 36 of 39 issues were ALREADY REAL-fixed by prior teammates (v113-v123).
+  - 3 issues needed additional work:
+    - P1-022 (require_airflow dead code): The audit was WRONG. `require_airflow()` IS actively used by `tests/test_dag_structure.py::test_airflow_is_importable` to verify Airflow is importable with a clear remediation message. NOT dead code. Did NOT delete it. Added a regression test that asserts it remains importable AND that test_dag_structure.py still uses it.
+    - P1-045 (validate_output redundancy): The audit was WRONG. `validate_output` does NOT just wrap `validate_output_dir`. It runs 4 SEPARATE checks: identifier format validation, fake/synthesized data detection (SYNTH% in production), entity resolution completeness, and DB row count sanity. Deleting it would LOSE these checks. Added a FORENSIC CLARIFICATION comment in master_pipeline_dag.py explaining the separation of concerns, plus a regression test asserting validate_output does these 4 checks.
+    - P1-050 (phase1_schema.py CI test): The audit was CORRECT -- no CI test existed for contract-vs-pipeline drift. Added `detect_contract_vs_pipeline_drift()` to `contracts/phase1_schema.py`. This function imports each pipeline module and (if the module exposes `_get_processed_columns()`) compares the pipeline's declared output columns against the contract's required_columns + optional_columns. Drift is returned as a list of structured warnings. Added 2 regression tests.
+- Wrote `tests/v124_forensic/test_v124_all_39_issues.py` with 50 runtime tests that verify EVERY one of the 39 audit issues is REAL-fixed at runtime (by importing the code and asserting the fix is in place). Tests use comment-stripping to avoid matching historical-comment text that describes the OLD broken state. All 50 tests pass.
+- Wrote `/home/z/my-project/scripts/run_v124_real_code.py` -- a 12-test real-code end-to-end verification script that invokes ACTUAL production code paths (not test mocks) to verify fixes work at runtime. All 12 tests pass.
+- Ran py_compile on all 17 touched/adjacent files -- ALL compile clean.
+- Verified no new test regressions: 8 pre-existing `test_entity_resolution_init.py` failures are unchanged and unrelated to this PR (they exist on the original main branch).
+- Pushed branch `teammate-3-forensic-verification-v124-remaining-issues` to GitHub.
+- Verified branch on GitHub via `git fetch` + `git log origin/<branch>` -- commit 03f38b4 is present.
+- Merged to main with `git merge --no-ff` (merge commit b70300f). No conflicts.
+- Pushed main to GitHub.
+- Re-cloned the repo to a fresh directory (`autonomous-drug-repurposing-verify`) and ran the v124 tests on the fresh clone: 50/50 pass. Ran the real-code e2e script: 12/12 pass.
+
+Stage Summary:
+- 3 remaining issues addressed (P1-022 audit wrong, P1-045 audit wrong, P1-050 needed CI test).
+- 50 runtime regression tests added (all pass).
+- 12 real-code end-to-end tests added (all pass).
+- 36 of 39 issues verified REAL-fixed by reading actual code, not comments.
+- 0 new test regressions introduced.
+- Main branch on GitHub has all fixes (verified by fresh clone).
+- Branch: teammate-3-forensic-verification-v124-remaining-issues (commit 03f38b4).
+- Merge commit on main: b70300f.
