@@ -3,7 +3,7 @@ requests>=2.31.0
 
 # Data processing
 pandas>=2.1.4
-numpy>=1.26.3
+numpy>=2.2.6
 
 # Chemistry (InChIKey conversion)
 # RDKit — chemistry toolkit for SMILES to InChIKey conversion
@@ -26,10 +26,10 @@ numpy>=1.26.3
 # official `rdkit` package has wheels for all Python versions (3.8+
 # including 3.13). Both provide the same `from rdkit import Chem`
 # import — code is unchanged.
-rdkit>=2022.9.5; python_version>="3.8"
+rdkit>=2026.3.4; python_version>="3.8"
 
 # Database
-sqlalchemy>=2.0.25
+sqlalchemy>=2.0.51
 psycopg2-binary>=2.9.9
 
 # XML parsing (DrugBank)
@@ -70,18 +70,44 @@ lxml>=5.1.0
 #   When the project upgrades to Airflow 3.x, this pin AND the Docker
 #   image tag AND the DAG code must be updated together — that's the
 #   point of pinning (force an explicit upgrade decision).
-apache-airflow>=2.10.0,<3.0.0; python_version>="3.12"
-apache-airflow>=2.8.0,<3.0.0; python_version<"3.12"
+# P1-046 v113 ROOT FIX: the previous pin split on python_version >= 3.12
+# vs < 3.12. The Docker image (apache/airflow:2.10.5-python3.11) uses
+# Python 3.11, so the second pin (>=2.8.0,<3.0.0) was selected. A
+# `pip install -r requirements.txt` inside the 2.10.5 image would
+# DOWNGRADE Airflow to 2.8.0 (the lowest version satisfying >=2.8.0),
+# breaking the image's pre-installed Airflow (2.8.0's migration schema
+# doesn't match 2.10.5's metadata DB layout). ROOT FIX: single pin
+# `>=2.10.0,<3.0.0` for ALL Python versions. The Docker image's base
+# Airflow (2.10.5) satisfies this pin and will NOT be downgraded.
+apache-airflow>=2.10.0,<3.0.0
 
 # Fuzzy matching (entity resolution)
 rapidfuzz>=3.6.1
 
 # Utils
-python-dotenv>=1.0.0
+python-dotenv>=1.2.2
+
+# P1-003 v114 FORENSIC ROOT FIX: fastapi + uvicorn were missing from
+# phase1/requirements.txt. phase1/service.py (the Phase 1 Dataset HTTP
+# Service) does `from fastapi import FastAPI, HTTPException` and
+# `from fastapi.middleware.cors import CORSMiddleware` at module top.
+# Without these deps, `python phase1/service.py` raises
+# ModuleNotFoundError: No module named 'fastapi' inside the Airflow
+# container (Dockerfile.airflow line 44 installs ONLY
+# phase1/requirements.txt). The Makefile's run-airflow target and
+# docker-compose up phase1-airflow both failed to provide a working
+# /datasets endpoint, and the frontend's DATASET_SERVICE_URL proxy 404'd.
+# ROOT FIX: declare fastapi + uvicorn here so the Phase 1 service can
+# run in its own container. These are also in the top-level
+# requirements.txt (RT-014), but the Phase 1 Docker image does NOT
+# install the top-level file -- it installs ONLY phase1/requirements.txt.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
 # v39 ROOT FIX (P1 #66): added filelock and pyarrow. base_pipeline.py
 # imports filelock with a try/except fallback, but the fallback sets
 # filelock=None and _count_parquet_records would fail if a .parquet
 # file is encountered. pyarrow is needed for parquet support. Adding
 # them as explicit deps ensures they're always available.
-filelock>=3.13.0
+filelock>=3.30.3
 pyarrow>=14.0.0

@@ -69,7 +69,7 @@ from pipelines.drugbank_pipeline import (  # noqa: E402
     DrugBankPipeline,
     __version__,
 )
-from tests.db_helpers import (  # noqa: E402
+from db_helpers import (  # noqa: E402
     sqlite_bulk_upsert_drugs,
     sqlite_bulk_upsert_dpi,
     sqlite_bulk_upsert_proteins,

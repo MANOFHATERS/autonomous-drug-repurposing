@@ -600,67 +600,58 @@ def test_p1_010_sqlite_pre_count_path_exists():
     )
 
 
-def test_p1_010_bulk_upsert_drugs_counts_updates_on_second_run():
+def test_p1_010_bulk_upsert_drugs_counts_updates_on_second_run(db_engine):
     """P1-010 ROOT FIX: re-running bulk_upsert_drugs on the same data
     must report inserted=0, updated=N (not inserted=N, updated=0).
 
     This is the audit-trail falsification test. Before the fix, the
     second run reported N inserts when there were actually 0 -- a
-    FDA 21 CFR Part 11 violation."""
-    os.environ["DATABASE_URL"] = "sqlite:///:memory:"
-    try:
-        import database.connection as conn_mod
-        from database.connection import get_db_session
-        from database.base import Base
-        from database.models import Drug
-        from database.loaders import bulk_upsert_drugs, UpsertResult
-        try:
-            conn_mod.dispose_engine()
-        except Exception:
-            pass
-        conn_mod.reset_global_state()
-        engine = conn_mod.get_engine()
-        # Create the drugs table.
-        Base.metadata.create_all(engine)
-        import pandas as pd
-        # Include is_fda_approved=False to satisfy the chk_drugs_is_fda_approved
-        # CHECK constraint (the column is NOT NULL with a CHECK that requires
-        # a boolean). Without this, the INSERT fails with IntegrityError
-        # before the upsert logic can run.
-        df = pd.DataFrame([
-            {"inchikey": "BSYNRYMUTXBXSQ-UHFFFAOYSA-N", "name": "Aspirin",
-             "is_fda_approved": False},
-            {"inchikey": "RZVAJINKQORUOD-UHFFFAOYSA-N", "name": "Ibuprofen",
-             "is_fda_approved": False},
-        ])
-        # First run: 2 inserts, 0 updates.
-        with get_db_session() as session:
-            r1 = bulk_upsert_drugs(session, df)
-            assert r1.inserted == 2, (
-                f"P1-010: first run should have inserted=2, got {r1.inserted}"
-            )
-            assert r1.updated == 0, (
-                f"P1-010: first run should have updated=0, got {r1.updated}"
-            )
-        # Second run: 0 inserts, 2 updates (P1-010 ROOT FIX).
-        with get_db_session() as session:
-            r2 = bulk_upsert_drugs(session, df)
-            assert r2.inserted == 0, (
-                f"P1-010 REGRESSION: second run should have inserted=0, "
-                f"got {r2.inserted}. The audit trail is FALSIFIED -- this is "
-                f"a FDA 21 CFR Part 11 violation."
-            )
-            assert r2.updated == 2, (
-                f"P1-010 REGRESSION: second run should have updated=2, "
-                f"got {r2.updated}."
-            )
-    finally:
-        try:
-            import database.connection as conn_mod
-            conn_mod.dispose_engine()
-        except Exception:
-            pass
-        os.environ.pop("DATABASE_URL", None)
+    FDA 21 CFR Part 11 violation.
+
+    v106 FIX: use the ``db_engine`` fixture from conftest.py which
+    creates a proper in-memory SQLite with ALL tables pre-created via
+    ``Base.metadata.create_all(engine)``. The fixture uses SQLAlchemy's
+    SingletonThreadPool so all sessions from the same engine in the
+    same thread share the same in-memory database. This avoids the
+    global engine caching issues that caused test-ordering failures
+    when using ``get_db_session()``."""
+    from sqlalchemy.orm import Session
+    from database.loaders import bulk_upsert_drugs
+    import pandas as pd
+
+    # Include is_fda_approved=False to satisfy the chk_drugs_is_fda_approved
+    # CHECK constraint (the column is NOT NULL with a CHECK that requires
+    # a boolean). Without this, the INSERT fails with IntegrityError
+    # before the upsert logic can run.
+    df = pd.DataFrame([
+        {"inchikey": "BSYNRYMUTXBXSQ-UHFFFAOYSA-N", "name": "Aspirin",
+         "is_fda_approved": False},
+        {"inchikey": "RZVAJINKQORUOD-UHFFFAOYSA-N", "name": "Ibuprofen",
+         "is_fda_approved": False},
+    ])
+    # First run: 2 inserts, 0 updates.
+    with Session(db_engine) as session:
+        r1 = bulk_upsert_drugs(session, df)
+        session.commit()
+        assert r1.inserted == 2, (
+            f"P1-010: first run should have inserted=2, got {r1.inserted}"
+        )
+        assert r1.updated == 0, (
+            f"P1-010: first run should have updated=0, got {r1.updated}"
+        )
+    # Second run: 0 inserts, 2 updates (P1-010 ROOT FIX).
+    with Session(db_engine) as session:
+        r2 = bulk_upsert_drugs(session, df)
+        session.commit()
+        assert r2.inserted == 0, (
+            f"P1-010 REGRESSION: second run should have inserted=0, "
+            f"got {r2.inserted}. The audit trail is FALSIFIED -- this is "
+            f"a FDA 21 CFR Part 11 violation."
+        )
+        assert r2.updated == 2, (
+            f"P1-010 REGRESSION: second run should have updated=2, "
+            f"got {r2.updated}."
+        )
 
 
 # ===========================================================================

@@ -34,6 +34,8 @@
  * callers that explicitly want a small page.
  */
 
+import { monitoredFetch } from "@/lib/external-api-monitor";
+
 const PATENTSVIEW_BASE = "https://search.patentsview.org/api/v1/patent";
 
 /**
@@ -42,9 +44,52 @@ const PATENTSVIEW_BASE = "https://search.patentsview.org/api/v1/patent";
  * This prevents a runaway loop from exhausting the API quota. 1000
  * patents is more than enough for any drug's IP due diligence
  * (aspirin, the most-patented drug, has ~500).
+ *
+ * BE-057 ROOT FIX (v115, MEDIUM): the previous value of 1000 was too
+ * high — the API route rarely needs more than the first 100 patents
+ * (the UI shows a paginated table, and patent attorneys typically
+ * filter by CPC class before deep-diving). 1000 patents × 2s/page =
+ * 20s+ of API time, well beyond Next.js's default 30s request timeout.
+ * The new cap of 200 (2 pages) gives the UI enough patents to be
+ * useful while keeping the request under 5s. Callers that need MORE
+ * patents can paginate via the API directly (offset param).
  */
-const MAX_PATENTS_PER_SEARCH = 1000;
+const MAX_PATENTS_PER_SEARCH = 200;
 const PATENTSVIEW_PAGE_SIZE = 100;
+/**
+ * BE-057 ROOT FIX (v115, MEDIUM): per-page + overall timeout.
+ * The pagination loop fetches up to MAX_PATENTS_PER_SEARCH patents
+ * sequentially. Each page request is capped at 5s. The overall loop
+ * is capped at 15s — if PatentsView is slow on multiple pages, we
+ * return partial results with a "degraded" reason rather than
+ * making the researcher wait 30s.
+ */
+const PER_PAGE_TIMEOUT_MS = 5_000;
+const OVERALL_TIMEOUT_MS = 15_000;
+
+/**
+ * BE-057 ROOT FIX (v115, MEDIUM): wrap a promise with a timeout.
+ * Returns the original promise's result if it resolves before the
+ * timeout, else rejects with a timeout error. The timeout timer is
+ * cleared on settlement to avoid leaking a long-lived timer handle.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    p.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
 
 export interface PatentRecord {
   patentNumber: string;
@@ -134,7 +179,15 @@ async function fetchPatentsPage(
   size: number,
   offset: number
 ): Promise<{ patents: PatentRecord[]; totalHits: number; ok: boolean; status: number }> {
-  const res = await fetch(PATENTSVIEW_BASE, {
+  // Task 260: monitored for observability — every PatentsView call is
+  // logged with URL, duration, and status so operators can detect slow
+  // or degraded upstream responses (and 401s from an expired API key).
+  //
+  // BE-057 ROOT FIX (v115, MEDIUM): wrap the monitoredFetch in a
+  // per-page 5s timeout. If PatentsView is slow on a single page,
+  // we abort and treat it as a failure (the caller returns partial
+  // results from earlier pages).
+  const fetchPromise = monitoredFetch("patentsview", PATENTSVIEW_BASE, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -143,6 +196,14 @@ async function fetchPatentsPage(
     body: JSON.stringify(buildRequestBody(query, size, offset)),
     next: { revalidate: 86400 },
   });
+  let res: Response;
+  try {
+    res = await withTimeout(fetchPromise, PER_PAGE_TIMEOUT_MS, `PatentsView page offset=${offset}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[patentsview] page fetch failed (offset=${offset}):`, msg);
+    return { patents: [], totalHits: 0, ok: false, status: 0 };
+  }
   if (!res.ok) {
     return { patents: [], totalHits: 0, ok: false, status: res.status };
   }
@@ -210,12 +271,30 @@ export async function searchPatents(params: {
   // all results OR hit the safety cap. PatentsView's `total_hits`
   // tells us the true total; we keep paging until our accumulated
   // count reaches it (or we hit MAX_PATENTS_PER_SEARCH).
+  //
+  // BE-057 ROOT FIX (v115, MEDIUM): the loop also has an OVERALL
+  // timeout of 15s. If the loop exceeds 15s (e.g., PatentsView is
+  // slow on every page), we stop and return partial results with a
+  // "degraded" reason. This prevents a researcher from waiting 30s+
+  // for a patent search that's hitting a degraded upstream.
   const allPatents: PatentRecord[] = [];
   let totalHits = 0;
   let pagesFetched = 0;
   let offset = 0;
+  const loopStartTime = Date.now();
 
   while (allPatents.length < MAX_PATENTS_PER_SEARCH) {
+    // BE-057: check the overall timeout BEFORE fetching the next page.
+    const elapsed = Date.now() - loopStartTime;
+    if (elapsed > OVERALL_TIMEOUT_MS) {
+      return {
+        total: totalHits,
+        patents: allPatents,
+        paginated: pagesFetched > 1,
+        pagesFetched,
+        reason: `Patent search exceeded overall timeout of ${OVERALL_TIMEOUT_MS}ms after fetching ${pagesFetched} pages (${allPatents.length} of ${totalHits} patents). Returning partial results.`,
+      };
+    }
     const remaining = MAX_PATENTS_PER_SEARCH - allPatents.length;
     const size = Math.min(PATENTSVIEW_PAGE_SIZE, remaining);
     const page = await fetchPatentsPage(q, size, offset);

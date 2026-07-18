@@ -112,13 +112,17 @@ export interface ProjectDetail extends Project {
   activities: ProjectActivity[];
 }
 
+/**
+ * FE-024 ROOT FIX: Aligned with the actual billing.ts Plan interface.
+ * The backend Plan has `priceCents` (NOT `price`), NO `currency`, and
+ * NO `interval` field. The previous type had `price: number` which was
+ * always undefined because the route returns PLANS directly from
+ * billing.ts — causing "$0" and "$NaN" renders in the subscription UI.
+ */
 export interface Plan {
   id: string;
   name: string;
-  price: number;
-  priceCents?: number; // FE-027 unblock: some components read priceCents
-  currency: string;
-  interval: string;
+  priceCents: number;
   seats: number;
   features: string[];
 }
@@ -205,11 +209,18 @@ export interface DrugSearchResult {
   tty?: string;
 }
 
+/**
+ * FE-023 ROOT FIX: Aligned with the actual MeshDescriptor returned by
+ * the MeSH service (mesh.ts). The service returns `descriptorUi`
+ * (lowercase 'i') and `name` — NOT `descriptorUI` (uppercase 'I') and
+ * NOT `descriptorName`. The previous type caused disease search
+ * suggestions to render with id=undefined and name=undefined.
+ */
 export interface DiseaseSearchResult {
-  descriptorUI: string;
-  descriptorName: string;
+  descriptorUi: string;
+  name: string;
   scopeNote?: string;
-  synonyms?: string[];
+  treeNumber?: string[];
 }
 
 export interface ClinicalTrial {
@@ -237,7 +248,14 @@ export interface PubMedArticle {
 }
 
 export interface SafetyReport {
-  drug: string;
+  // BE-040 ROOT FIX (Team Member 12): the previous type had `drug: string`
+  // — but the actual `DrugSafetySummary` returned by /api/safety/[drug]
+  // (from frontend/src/lib/services/openfda.ts) has `brandName` and
+  // `genericName`, NOT `drug`. Any consumer that read `safetyData.drug`
+  // got `undefined`. We align the api-client type with the actual route
+  // response shape so consumers can rely on the typed contract.
+  brandName: string;
+  genericName: string;
   totalReports: number;
   seriousReports: number;
   seriousReportsWithDeath?: number;
@@ -513,8 +531,13 @@ export const api = {
   // BILLING
   listPlans: () => request<{ plans: Plan[] }>("/api/billing/plans"),
   getSubscription: () => request<{ subscription: Subscription | null; plans: Plan[] }>("/api/billing/subscription"),
-  changePlan: (planId: string) =>
-    request<{ ok: true }>("/api/billing/subscription", { method: "POST", body: JSON.stringify({ planId }) }),
+  // FE-021 ROOT FIX: The billing/subscription route requires currentPassword
+  // (re-authentication) and optionally totpCode or mfaTicket when MFA is
+  // enabled. The previous signature only sent { planId } — every plan change
+  // got 400 "currentPassword is required". Updated signature accepts the
+  // full required parameter object.
+  changePlan: (body: { planId: string; currentPassword: string; totpCode?: string; mfaTicket?: string }) =>
+    request<{ ok: true }>("/api/billing/subscription", { method: "POST", body: JSON.stringify(body) }),
   listInvoices: () => request<{ items: Invoice[] }>("/api/billing/invoices"),
 
   // API KEYS
@@ -547,8 +570,18 @@ export const api = {
     request<{ items: DrugSearchResult[] }>(`/api/drugs/search?q=${encodeURIComponent(q)}`),
   searchDiseases: (q: string) =>
     request<{ items: DiseaseSearchResult[] }>(`/api/diseases/search?q=${encodeURIComponent(q)}`),
-  searchClinicalTrials: (q: string) =>
-    request<{ items: ClinicalTrial[] }>(`/api/clinical-trials/search?q=${encodeURIComponent(q)}`),
+  // FE-022 ROOT FIX: The clinical-trials/search route requires `condition`
+  // OR `intervention` — it does NOT accept a `q` param. The previous
+  // signature always caused 400 errors. Updated to accept the correct
+  // params object matching the route's expected query parameters.
+  searchClinicalTrials: (params: { condition?: string; intervention?: string; limit?: number; pageToken?: string }) => {
+    const qs = new URLSearchParams();
+    if (params.condition) qs.set("condition", params.condition);
+    if (params.intervention) qs.set("intervention", params.intervention);
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.pageToken) qs.set("pageToken", params.pageToken);
+    return request<{ items: ClinicalTrial[] }>(`/api/clinical-trials/search?${qs.toString()}`);
+  },
   searchLiterature: (q: string) =>
     request<{ items: PubMedArticle[] }>(`/api/literature/search?q=${encodeURIComponent(q)}`),
   getSafety: (drug: string) =>
@@ -567,15 +600,121 @@ export const api = {
   // ROOT FIX for FE-001/FE-002/FE-003: the UI now calls these real endpoints
   // instead of rendering mock data. The endpoints serve real data from the
   // Phase 1/2/4 Python pipeline artifacts.
-  getRankedHypotheses: (params?: { drug?: string; disease?: string; limit?: number }) => {
-    const qs = new URLSearchParams();
-    if (params?.drug) qs.set("drug", params.drug);
-    if (params?.disease) qs.set("disease", params.disease);
-    if (params?.limit) qs.set("limit", String(params.limit));
-    return request<RlRankerResponse>(`/api/rl?${qs.toString()}`);
-  },
-  syncRlOutput: () =>
-    request<RlRankerResponse>("/api/rl", { method: "POST", body: JSON.stringify({ sync: true, limit: 200 }) }),
+  //
+  // FE-003 ROOT FIX (Team Member 15, v108): re-added getDatasetStats().
+  // The previous FE-025 "ROOT FIX" removed this method as "dead code" —
+  // but that decision was itself a bug, because DataSourcesScreen NEEDS
+  // this method to replace its hardcoded fake source list (FE-003).
+  // Removing the method made it impossible to wire DataSourcesScreen to
+  // real data without re-adding the method. The /api/dataset endpoint
+  // exists and returns real source stats (loaded/rowsLoaded/sha256)
+  // from the Phase 1 dataset-stats service. This method is now CALLED
+  // by DataSourcesScreen — it is no longer dead code.
   getDatasetStats: () => request<DatasetStatsResponse>("/api/dataset"),
-  getKnowledgeGraphStats: () => request<KnowledgeGraphStatsResponse>("/api/knowledge-graph"),
+
+  // Issue 306 (audit 301-320): Graph Stats screen must call
+  // /api/knowledge-graph/stats. The endpoint path /api/knowledge-graph
+  // already returns the stats payload (route at
+  // src/app/api/knowledge-graph/route.ts). For backward compat we keep
+  // the original method name; new code should prefer getKnowledgeGraphStats.
+  getKnowledgeGraphStats: () =>
+    request<KnowledgeGraphStatsResponse>("/api/knowledge-graph"),
+
+  // Issue 307 (audit 301-320): Quality screen calls /api/dataset/quality.
+  // Returns REAL quality metrics derived from Phase 1 + Phase 2 stats
+  // (completeness, integrity, freshness, canonical coverage). No
+  // fabricated percentages.
+  getDatasetQuality: () =>
+    request<DatasetQualityResponse>("/api/dataset/quality"),
+
+  // Issue 315 (audit 301-320): Investor Dashboard calls /api/admin/metrics.
+  // Returns REAL platform metrics (user/org/project/hypothesis counts,
+  // audit-log activity, dataset + KG scale). Financial metrics
+  // (ARR/MRR/NRR) are explicitly null — NOT fabricated.
+  getAdminMetrics: () => request<AdminMetricsResponse>("/api/admin/metrics"),
 };
+
+// ---------------------------------------------------------------------------
+// Issue 318 (audit 301-320): Type contract for /api/dataset/quality and
+// /api/admin/metrics. Aligned with the actual route response shapes —
+// no descriptorUI/descriptorUi, price/priceCents, drug/brandName style
+// mismatches. Each field name matches exactly what the route returns.
+// ---------------------------------------------------------------------------
+
+export interface DatasetQualityResponse {
+  status: "ok" | "no_data" | "service_down";
+  generatedAt: string;
+  source: string;
+  // Real coverage metrics — percentages computed from actual loaded/total
+  sourceCompletenessPct: number;
+  canonicalCoveragePct: number;
+  checksumCoveragePct: number;
+  // Real graph-anomaly signal
+  nodeEdgeRatio: number;
+  nodesLoaded: number;
+  edgesLoaded: number;
+  // Real per-canonical-type breakdown
+  canonicalNodeCoverage: Array<{
+    type: string;
+    present: boolean;
+    count: number;
+  }>;
+  // Real integrity signals
+  sourcesWithChecksum: number;
+  totalSources: number;
+  // Real freshness signal
+  freshnessHoursAgo: number | null;
+  isStale: boolean;
+  checkpointGeneratedAt: string | null;
+  // Real issue counts
+  warningsCount: number;
+  errorsCount: number;
+  warnings: string[];
+  errors: string[];
+  // Pipeline version metadata (for audit trail)
+  pipelineVersion: string | null;
+  schemaVersion: string | null;
+  bridgeVersion: string | null;
+  note?: string;
+}
+
+export interface AdminMetricsResponse {
+  scope: "system" | "organization";
+  organizationId: string | null;
+  generatedAt: string;
+  // REAL user/org/subscription counts
+  totalUsers: number;
+  totalOrganizations: number;
+  activeSubscriptions: number;
+  // REAL research activity counts
+  totalProjects: number;
+  totalHypotheses: number;
+  totalValidatedHypotheses: number;
+  totalEvidencePackages: number;
+  // REAL platform activity (last 30 days)
+  auditLogEventsLast30Days: number;
+  topActionsLast30Days: Array<{ action: string; count: number }>;
+  dailyActiveUsersLast7Days: Array<{ day: string; activeUsers: number }>;
+  // REAL Phase 1 + Phase 2 data scale
+  dataset: {
+    nodesLoaded: number;
+    edgesLoaded: number;
+    sourcesLoaded: number;
+    sourcesTotal: number;
+    source: string;
+    status: string;
+  };
+  knowledgeGraph: {
+    nodeCount: number;
+    edgeCount: number;
+    source: string;
+  } | null;
+  // EXPLICITLY NOT FABRICATED — financial metrics are null, not invented
+  financials: {
+    arr: null;
+    mrr: null;
+    customerCount: null;
+    nrr: null;
+    note: string;
+  };
+}

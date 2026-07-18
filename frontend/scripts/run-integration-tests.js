@@ -16,6 +16,65 @@ const PORT = 3010; // Use a different port to avoid conflicts
 // reassigns this to point at it instead of starting a second server.
 let BASE_URL = `http://localhost:${PORT}`;
 
+// IN-067 ROOT FIX (Teammate 13, LOW): the previous version spawned the dev
+// server with `detached: false` and then called `process.kill(-server.pid,
+// "SIGTERM")`. `process.kill(-pid, ...)` sends the signal to the process
+// GROUP with PGID=pid — but that ONLY works when the child was spawned
+// with `detached: true` (which makes it a process-group leader). With
+// `detached: false` the child shares the PARENT's process group, so
+// `process.kill(-server.pid, ...)` either fails with ESRCH (no such group)
+// or kills an UNRELATED group. The subsequent `server.kill("SIGTERM")` /
+// `server.kill("SIGKILL")` killed only the immediate child — NOT its
+// descendants (Next.js spawns worker processes that survived as zombies
+// on port 3010). The `pkill -9 -f "next dev"` in run-all-tests.sh was a
+// band-aid that killed ALL next dev processes including unrelated ones.
+//
+// ROOT FIX:
+//   1. Spawn with `detached: true` so the child IS a process-group leader
+//      (its PID == its PGID). Now `process.kill(-server.pid, ...)` targets
+//      the correct group (the dev server + all its workers).
+//   2. Shutdown: SIGTERM the whole group, wait a 5s grace period, then
+//      SIGKILL the group if still alive. This gives Next.js time to close
+//      sockets cleanly but guarantees termination.
+//   3. Register `process.on("exit")` + `uncaughtException` + `SIGINT/TERM`
+//      handlers so the server is killed even if the test runner crashes
+//      or is interrupted — no more zombie servers on port 3010.
+let server = null;
+
+function killServerGroup() {
+  if (!server || server.pid == null) return;
+  const pid = server.pid;
+  // SIGTERM the whole process group (dev server + workers).
+  try { process.kill(-pid, "SIGTERM"); } catch {}
+  // Poll for up to 5s: `process.kill(-pid, 0)` throws ESRCH once the
+  // group has exited. If it throws, the group is gone (clean exit). If
+  // it succeeds, the group is still alive — sleep 200ms and re-check.
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    let alive = true;
+    try { process.kill(-pid, 0); } catch { alive = false; }
+    if (!alive) return; // group exited cleanly within grace period
+    // Synchronous busy-wait would burn CPU; use a short Atomics wait if
+    // available, else a tiny loop. 200ms is granular enough for shutdown.
+    const sleepEnd = Date.now() + 200;
+    while (Date.now() < sleepEnd) { /* spin briefly */ }
+  }
+  // Still alive after 5s grace — force-kill the whole group.
+  try { process.kill(-pid, "SIGKILL"); } catch {}
+  // Also unref the immediate child as a final fallback.
+  try { server.kill("SIGKILL"); } catch {}
+}
+
+// Ensure cleanup on ANY exit path: normal exit, crash, or signal.
+process.on("exit", killServerGroup);
+process.on("SIGINT", () => { killServerGroup(); process.exit(130); });
+process.on("SIGTERM", () => { killServerGroup(); process.exit(143); });
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err);
+  killServerGroup();
+  process.exit(1);
+});
+
 async function waitForServer(maxAttempts = 60) {
   for (let i = 0; i < maxAttempts; i++) {
     try {
@@ -251,7 +310,22 @@ async function runTests() {
 async function main() {
   // If a dev server is already running (e.g., on port 3000), reuse it
   // instead of starting a new one. This avoids Next.js lock conflicts.
-  let server = null;
+  //
+  // IN-067 REAL ROOT FIX (Teammate 13, round 2): the previous "ROOT FIX"
+  // claimed the cleanup logic was wired up, but it introduced a NEW bug —
+  // a local `let server = null;` declaration here SHADOWED the module-level
+  // `server` (line 42). Because `killServerGroup()` (line 44) closes over
+  // the MODULE-LEVEL binding, it ALWAYS saw `null` and returned at line 45
+  // without killing anything. The `finally` block at line 362-366 referenced
+  // the LOCAL `server` (which WAS the spawned child), so the `if (server)`
+  // check passed and `killServerGroup()` was invoked — but inside that
+  // function `server` was still the module-level null. Result: the dev
+  // server was NEVER killed, zombie Next.js processes accumulated on
+  // port 3010, and subsequent test runs failed with "port already in use".
+  //
+  // ROOT FIX: do NOT redeclare `server` locally. Assign to the module-level
+  // binding so `killServerGroup()` (and the process.on("exit") / SIGINT /
+  // SIGTERM / uncaughtException handlers) all see the real ChildProcess.
   let baseUrl = BASE_URL;
 
   const existingUrl = process.env.E2E_BASE_URL || "http://localhost:3000";
@@ -273,7 +347,10 @@ async function main() {
     console.log("Starting Next.js dev server on port", PORT);
     server = spawn("node", ["node_modules/next/dist/bin/next", "dev", "-p", String(PORT)], {
       cwd: process.cwd(),
-      detached: false,
+      // IN-067: detached:true makes the child a process-group leader so
+      // `process.kill(-server.pid, ...)` targets the dev server AND its
+      // worker processes (not an unrelated group).
+      detached: true,
       stdio: "pipe",
     });
 
@@ -300,9 +377,7 @@ async function main() {
   } finally {
     if (server) {
       console.log("Shutting down server...");
-      try { process.kill(-server.pid, "SIGTERM"); } catch {}
-      server.kill("SIGTERM");
-      server.kill("SIGKILL");
+      killServerGroup();
     }
   }
 }

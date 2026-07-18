@@ -15,6 +15,8 @@
  * causation.
  */
 
+import { monitoredFetch } from "@/lib/external-api-monitor";
+
 const OPENFDA_BASE = "https://api.fda.gov";
 
 /**
@@ -123,10 +125,25 @@ export async function getDrugSafetySummary(drugName: string): Promise<DrugSafety
   // back to literal `+` so the openFDA API sees the operator it
   // expects. This is the same final URL format the openFDA docs
   // publish: `search=field:"value"+OR+field:"value"`.
+  //
+  // BE-053 ROOT FIX (v115, LOW): the previous whitelist allowed
+  // apostrophes (e.g. "St John's Wort"), but openFDA's Lucene query
+  // parser treats apostrophes as STRING TERMINATORS. An attacker
+  // passing drug="aspirin'-OR-'ibuprofen" would craft:
+  //   patient.drug.openfda.generic_name:"aspirin'-OR-'ibuprofen"
+  // Lucene would parse this as a multi-clause query and return
+  // adverse events for aspirin OR ibuprofen — mixing two drugs' data.
+  //
+  // ROOT FIX: escape apostrophes inside the quoted value by doubling
+  // them ("St John's Wort" → "St John''s Wort"). Lucene interprets
+  // a doubled quote inside a quoted string as a literal quote. This
+  // preserves legitimate drug names with apostrophes while preventing
+  // query injection. (Hyphens don't need escaping in Lucene.)
+  const escapedForLucene = sanitized.replace(/'/g, "''");
   const searchValue =
-    `patient.drug.openfda.generic_name:"${sanitized}"` +
+    `patient.drug.openfda.generic_name:"${escapedForLucene}"` +
     `+OR+` +
-    `patient.drug.openfda.brand_name:"${sanitized}"`;
+    `patient.drug.openfda.brand_name:"${escapedForLucene}"`;
   const params = new URLSearchParams({ limit: "100" });
   // FE-024: include api_key when configured — raises rate limit from
   // 240 req/min (shared public) to 120,000 req/min (per-key).
@@ -140,7 +157,10 @@ export async function getDrugSafetySummary(drugName: string): Promise<DrugSafety
 
   // Note: openFDA responses can exceed Next.js's 2MB fetch cache limit, so
   // we do not pass `next: { revalidate }` here — we always fetch fresh.
-  const res = await fetch(url, {
+  // Task 260: monitored for observability — every openFDA call is logged
+  // with URL, duration, and status so operators can detect slow or
+  // degraded upstream responses.
+  const res = await monitoredFetch("openfda", url, {
     headers: { Accept: "application/json" },
   });
   if (res.status === 404) {

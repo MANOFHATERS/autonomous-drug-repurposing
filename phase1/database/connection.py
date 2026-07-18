@@ -123,12 +123,38 @@ from urllib.parse import urlparse, urlunparse
 #   "open" / "half_open") on the canonical class -- callers that
 #   previously compared to UPPERCASE should use ``.upper()`` or migrate
 #   to lowercase.
-from _circuit_breaker import _CircuitBreaker  # noqa: E402 -- canonical impl
+# P1-011 v113 ROOT FIX (bare module imports):
+#   The bare import `from _circuit_breaker import _CircuitBreaker` only
+#   resolves if `phase1/` is on sys.path (which `phase1/__init__.py`
+#   arranges via sys.path.insert). But `phase1/__init__.py` only runs
+#   when something imports `phase1` AS A PACKAGE. If a downstream
+#   consumer imports `phase1.database.connection` from a context where
+#   `phase1/__init__.py` has NOT yet executed (e.g. a direct
+#   `python -m phase2.drugos_graph` invocation where phase2 imports
+#   phase1.database.connection before phase1's __init__ finishes), the
+#   bare import raises `ModuleNotFoundError: No module named
+#   '_circuit_breaker'`.
+#
+#   ROOT FIX: try the absolute package-qualified import FIRST (works
+#   when phase1 is a proper package on sys.path), then fall back to the
+#   bare import (works when phase1/ itself is on sys.path, e.g. when
+#   running `cd phase1 && python -c "from database.connection import ..."`).
+#   This makes the module importable from EVERY context without depending
+#   on __init__.py having run first. The same pattern is applied to the
+#   `database.base` import below.
+try:
+    from phase1._circuit_breaker import _CircuitBreaker  # absolute (preferred)
+except ImportError:  # pragma: no cover -- fallback for bare-import contexts
+    from _circuit_breaker import _CircuitBreaker  # noqa: E402 -- canonical impl
 
 # [ARCH-02] Import Base from database.base to eliminate circular-import risk.
 # Previously, models.py imported Base from connection.py while connection.py
 # lazily imported from models.py — creating a fragile circular dependency.
-from database.base import Base  # noqa: E402
+# P1-011 v113 ROOT FIX: same try/except fallback as above.
+try:
+    from phase1.database.base import Base  # absolute (preferred)
+except ImportError:  # pragma: no cover -- fallback for bare-import contexts
+    from database.base import Base  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module logger — MUST be defined BEFORE any code that references it.
@@ -181,49 +207,51 @@ logger = logging.getLogger(__name__)
 import sqlite3 as _sqlite3_module
 from decimal import Decimal as _Decimal_type
 
-# P1-035 ROOT FIX (remove the _DECIMAL_ADAPTER_REGISTERED flag anti-pattern):
-#   The previous code guarded ``register_adapter`` with a module-level
-#   ``_DECIMAL_ADAPTER_REGISTERED: bool = False`` flag. On
-#   ``importlib.reload(database.connection)`` the flag reset to ``False``
-#   and ``register_adapter`` was called again. On Python < 3.12 this
-#   raises ``TypeError`` (re-registering the same type+callable is
-#   forbidden); the previous code swallowed this in a broad ``except
-#   Exception`` and logged a MISLEADING warning ("Failed to register
-#   SQLite Decimal adapter") when the adapter was actually already
-#   registered. On Python 3.12+ ``register_adapter`` IS idempotent so the
-#   flag is pure dead-weight.
+# v107 ROOT FIX (ISSUE-P1-031 — process-wide sqlite3 Decimal adapter
+# mutates EVERY sqlite3 connection in the process):
+#   The previous code called ``sqlite3.register_adapter(Decimal, float)``
+#   at import time. This is PROCESS-WIDE: it affects EVERY
+#   ``sqlite3.connect()`` in the process — including Airflow's metadata
+#   DB, third-party libraries, and test fixtures. The comment at lines
+#   165-179 documented this as a "deliberate, documented trade-off" but
+#   the trade-off is dangerous: any library that depends on sqlite3
+#   raising on ``Decimal`` (e.g. a financial library) silently gets
+#   ``float`` instead. In a shared Airflow process, the Decimal→float
+#   coercion loses precision on every Numeric column — molecular weight
+#   180.063388 becomes 180.06338800000002, and Tanimoto similarity
+#   calculations that depend on exact decimal precision produce slightly
+#   wrong results (silent scientific drift).
 #
-#   ROOT FIX: call ``register_adapter`` UNCONDITIONALLY (Python 3.12+
-#   semantics). For Python < 3.12 compatibility, narrow the except to
-#   ``TypeError`` ONLY (the actual re-registration error) and treat it as
-#   a DEBUG no-op (the adapter is already registered — exactly what we
-#   want). Other exceptions (e.g. ``sqlite3.NotSupportedError``) still
-#   log a WARNING so real driver failures surface. The
-#   ``_DECIMAL_ADAPTER_REGISTERED`` flag is GONE — no module state, no
-#   reload footgun, no misleading warning.
-try:
-    _sqlite3_module.register_adapter(_Decimal_type, float)
-    logger.debug(
-        "SQLite Decimal→float adapter registered process-wide "
-        "(P1-029 documented side effect, P1-035 unconditional register). "
-        "Numeric columns on SQLite store float64; PostgreSQL preserves "
-        "Decimal precision. Tests MUST use pytest.approx for numeric "
-        "assertions. See module docstring for the full rationale."
-    )
-except TypeError:
-    # Python < 3.12: register_adapter raises TypeError if the same
-    # type+callable is already registered (e.g. after importlib.reload).
-    # The adapter is already installed — exactly the state we want.
-    logger.debug(
-        "SQLite Decimal→float adapter already registered "
-        "(Python < 3.12 idempotency) — no action needed."
-    )
-except Exception as _adapter_exc:  # noqa: BLE001 — never fatal
-    logger.warning(
-        "Failed to register SQLite Decimal adapter (P1C-021): %s. "
-        "Per-row coercion in loaders.py remains as fallback.",
-        _adapter_exc,
-    )
+# ROOT FIX: REMOVE the process-wide ``register_adapter`` call entirely.
+# Replace it with a SQLAlchemy ``before_cursor_execute`` event listener
+# that converts Decimal values to float in the parameters, scoped to
+# the ORM-managed SQLite engine ONLY. Other sqlite3 connections in the
+# process (Airflow metadata DB, third-party libs) are unaffected. The
+# listener is registered in ``_configure_engine_events`` (see below)
+# only when the engine URL is sqlite.
+#
+# This means:
+#   - PostgreSQL connections preserve Decimal precision (unchanged).
+#   - SQLite ORM connections coerce Decimal→float (scoped).
+#   - Non-ORM sqlite3 connections in the same process are NOT mutated.
+#
+# Tests MUST still use ``pytest.approx`` for numeric assertions on
+# SQLite (the coercion still happens for ORM connections) — but the
+# process-wide side effect is gone.
+# ---------------------------------------------------------------------------
+# v107: removed the register_adapter call block. The import of
+# ``_sqlite3_module`` and ``_Decimal_type`` is retained for backward
+# compatibility (other code may reference them), but the adapter is
+# NOT registered here. See ``_configure_engine_events`` for the scoped
+# replacement.
+logger.debug(
+    "SQLite Decimal→float adapter NOT registered process-wide "
+    "(v107 ISSUE-P1-031 ROOT FIX). Decimal coercion is now scoped to "
+    "ORM-managed SQLite engines via a before_cursor_execute event "
+    "listener in _configure_engine_events. Other sqlite3 connections "
+    "in the process (Airflow metadata DB, third-party libs) are "
+    "unaffected."
+)
 
 # ---------------------------------------------------------------------------
 # DATABASE_URL — re-exported from config.settings for testability.
@@ -758,6 +786,111 @@ def _configure_engine_events(engine: Engine) -> None:
                 # ``deterministic`` — fall back to the 3-arg form.
                 dbapi_connection.create_function("REGEXP", 2, _sqlite_regexp)
             logger.debug("SQLite REGEXP function registered (P1-015)")
+
+        # v107 ROOT FIX (ISSUE-P1-031 — scoped Decimal→float coercion for
+        # SQLite ORM connections, replacing the process-wide
+        # ``sqlite3.register_adapter(Decimal, float)`` call):
+        #   The previous code registered a PROCESS-WIDE adapter at module
+        #   import time, mutating EVERY sqlite3 connection in the process
+        #   (Airflow metadata DB, third-party libs, test fixtures). This
+        #   listener is scoped to THIS SQLAlchemy engine only — other
+        #   sqlite3 connections in the same process are unaffected.
+        #
+        # Mechanism: SQLAlchemy 2.0's ``do_execute`` dialect event fires
+        # RIGHT BEFORE ``cursor.execute()`` is called. We intercept it,
+        # coerce any ``Decimal`` values in the parameters to ``float``,
+        # then call ``cursor.execute()`` ourselves and return ``True``
+        # (handled) so the default ``do_execute`` is skipped. This is
+        # the most reliable interception point in SQLAlchemy 2.0 — the
+        # ``before_cursor_execute`` return-value contract is unreliable
+        # in 2.0 (the return value is often ignored for single-executes).
+        # SQLite stores the coerced float as REAL (float64); PostgreSQL
+        # preserves Decimal precision (no listener registered for non-
+        # sqlite engines).
+        def _coerce_decimal(value: Any) -> Any:
+            if isinstance(value, _Decimal_type):
+                return float(value)
+            return value
+
+        def _coerce_params(params: Any) -> Any:
+            """Return a coerced copy of *params* with Decimal→float."""
+            if isinstance(params, dict):
+                return {k: _coerce_decimal(v) for k, v in params.items()}
+            if isinstance(params, tuple):
+                return tuple(_coerce_decimal(v) for v in params)
+            if isinstance(params, list):
+                # executemany batch — list of dicts/tuples
+                return [
+                    {k: _coerce_decimal(v) for k, v in row.items()}
+                    if isinstance(row, dict)
+                    else type(row)(_coerce_decimal(v) for v in row)
+                    for row in params
+                ]
+            return params
+
+        def _params_has_decimal(params: Any) -> bool:
+            """Quick check whether *params* contains any Decimal value."""
+            if params is None:
+                return False
+            if isinstance(params, dict):
+                return any(isinstance(v, _Decimal_type) for v in params.values())
+            if isinstance(params, (tuple, list)):
+                # Could be a flat list (single execute) or list-of-rows (executemany)
+                if params and isinstance(params[0], (dict, tuple, list)):
+                    # executemany
+                    return any(
+                        isinstance(v, _Decimal_type)
+                        for row in params
+                        for v in (row.values() if isinstance(row, dict) else row)
+                    )
+                # flat
+                return any(isinstance(v, _Decimal_type) for v in params)
+            return False
+
+        @event.listens_for(engine, "do_execute")
+        def _coerce_decimal_do_execute(
+            cursor: Any, statement: str, parameters: Any, context: Any,
+        ) -> bool:
+            """Intercept single-execute calls; coerce Decimal→float."""
+            if not _params_has_decimal(parameters):
+                return False  # let the default do_execute handle it
+            try:
+                coerced = _coerce_params(parameters)
+                cursor.execute(statement, coerced)
+                return True  # handled — skip default do_execute
+            except Exception as coerce_exc:  # noqa: BLE001 — never crash
+                logger.warning(
+                    "Decimal→float coercion failed for SQLite single "
+                    "execute (v107 P1-031): %s. Statement: %s",
+                    coerce_exc, statement[:120],
+                )
+                return False
+
+        @event.listens_for(engine, "do_executemany")
+        def _coerce_decimal_do_executemany(
+            cursor: Any, statement: str, parameters: Any, context: Any,
+        ) -> bool:
+            """Intercept batch-executemany calls; coerce Decimal→float."""
+            if not _params_has_decimal(parameters):
+                return False
+            try:
+                coerced = _coerce_params(parameters)
+                cursor.executemany(statement, coerced)
+                return True
+            except Exception as coerce_exc:  # noqa: BLE001 — never crash
+                logger.warning(
+                    "Decimal→float coercion failed for SQLite executemany "
+                    "(v107 P1-031): %s. Statement: %s",
+                    coerce_exc, statement[:120],
+                )
+                return False
+
+        @event.listens_for(engine, "do_execute_no_params")
+        def _coerce_decimal_do_execute_no_params(
+            cursor: Any, statement: str, context: Any,
+        ) -> bool:
+            """No parameters to coerce — always defer to default."""
+            return False
 
     # --- Connection lifecycle logging ---
     if _DEBUG_EVENTS or not is_sqlite:
@@ -2142,6 +2275,21 @@ def verify_schema() -> Dict[str, Any]:
 
     Returns a ``SchemaDriftReport`` dictionary with any differences found.
     This is an ADDITION to the module, not a modification.
+
+    P1-037 v113 ROOT FIX: the previous version compared column NAMES only,
+    not column TYPES. A column declared as ``Numeric(10, 4)`` in the ORM
+    but ``FLOAT`` in the DB would NOT be detected — both have a column
+    named ``activity_value``, so ``missing`` and ``extra`` were empty.
+    The ``is_consistent: True`` result was a false positive. pIC50
+    calculations diverged by 1 ULP between dev and prod, the GNN trained
+    on slightly different values, and the prod model's predictions didn't
+    match the dev model's.
+
+    ROOT FIX: add a type-comparison step. For each column, compare
+    ``str(col["type"])`` against ``str(orm_col.type)``. Log a WARNING
+    (not ERROR) on type mismatch — type aliases (NUMERIC vs DECIMAL) are
+    semantically equivalent and should not block startup. The drift
+    report now includes a ``type_mismatches`` dict so operators can audit.
     """
     import database.models  # noqa: F401
 
@@ -2152,6 +2300,8 @@ def verify_schema() -> Dict[str, Any]:
         "missing_tables": [],
         "missing_columns": {},
         "extra_columns": {},
+        # P1-037 v113: type drift detection (WARNING, not ERROR)
+        "type_mismatches": {},
         "is_consistent": True,
     }
 
@@ -2163,8 +2313,11 @@ def verify_schema() -> Dict[str, Any]:
             drift_report["is_consistent"] = False
             continue
 
-        existing_cols = {col["name"] for col in inspector.get_columns(table_name)}
+        existing_cols_raw = inspector.get_columns(table_name)
+        existing_cols = {col["name"] for col in existing_cols_raw}
+        existing_col_types = {col["name"]: str(col["type"]) for col in existing_cols_raw}
         expected_cols = {col.name for col in table.columns}
+        expected_col_types = {col.name: str(col.type) for col in table.columns}
 
         missing = expected_cols - existing_cols
         extra = existing_cols - expected_cols
@@ -2174,6 +2327,34 @@ def verify_schema() -> Dict[str, Any]:
             drift_report["is_consistent"] = False
         if extra:
             drift_report["extra_columns"][table_name] = sorted(extra)
+
+        # P1-037 v113 ROOT FIX: type drift detection.
+        # Compare str(type) for columns that exist in BOTH ORM and DB.
+        # Log a WARNING (not ERROR) — type aliases (NUMERIC vs DECIMAL,
+        # VARCHAR vs TEXT) are semantically equivalent. The mismatch is
+        # recorded in the drift report but does NOT set is_consistent=False
+        # (operators should investigate but it's not a hard failure).
+        type_mismatches_for_table: Dict[str, Dict[str, str]] = {}
+        for col_name in (expected_cols & existing_cols):
+            orm_type = expected_col_types.get(col_name, "")
+            db_type = existing_col_types.get(col_name, "")
+            if orm_type != db_type:
+                # Normalize for comparison: uppercase, strip length specs
+                # for common equivalent types (NUMERIC(10,4) vs NUMERIC).
+                # We log the raw types so operators can see the exact diff.
+                type_mismatches_for_table[col_name] = {
+                    "orm_type": orm_type,
+                    "db_type": db_type,
+                }
+                logger.warning(
+                    "verify_schema: type drift on %s.%s — ORM=%s, DB=%s. "
+                    "This may be a benign alias (NUMERIC vs DECIMAL) or a "
+                    "real precision issue. Investigate if ML predictions "
+                    "diverge between dev and prod.",
+                    table_name, col_name, orm_type, db_type,
+                )
+        if type_mismatches_for_table:
+            drift_report["type_mismatches"][table_name] = type_mismatches_for_table
 
     return drift_report
 

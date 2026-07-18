@@ -20,11 +20,28 @@ import numpy as np
 import pandas as pd
 import pytest
 
-# Make rl/ importable
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'rl'))
+# v114 round 4 FORENSIC ROOT FIX (relative import error):
+# The previous code added `rl/` to sys.path and did `import rl_drug_ranker`.
+# But rl_drug_ranker.py line 255 does `from .constants import ...` (a
+# relative import) which requires `rl` to be a PACKAGE, not a sys.path
+# entry. When rl/ is on sys.path directly, rl_drug_ranker is a top-level
+# module with no parent package → the relative import raises
+# "ImportError: attempted relative import with no known parent package".
+# This caused the ENTIRE P4-001-to-024 forensic test suite (24 tests) to
+# be silently SKIPPED at collection time. ROOT FIX: add the REPO ROOT to
+# sys.path (not rl/) and import via the package: `from rl import rl_drug_ranker`.
+# This makes `rl` a proper package and the relative import resolves correctly.
+_REPO_ROOT = os.path.join(os.path.dirname(__file__), '..')
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+# Also make phase1 + phase2 importable (rl_drug_ranker imports from them).
+for _sub in ('phase1', 'phase2', 'rl'):
+    _p = os.path.join(_REPO_ROOT, _sub)
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-import rl_drug_ranker as rld
-from rl_drug_ranker import (
+from rl import rl_drug_ranker as rld
+from rl.rl_drug_ranker import (
     DRUG_COL, DISEASE_COL, REWARD_COL, RANK_COL, GNN_SCORE_COL, SAFETY_COL,
     MARKET_COL, CONFIDENCE_COL, PATHWAY_COL, PATENT_COL, RARE_DISEASE_COL,
     UNMET_NEED_COL, EFFICACY_COL, ADME_COL, LITERATURE_SUPPORT_COL,
@@ -143,7 +160,15 @@ class TestP4_002_003_ThalidomideIndicationSpecific:
             f"P4-002: thalidomide for morning sickness was NOT rejected (reward={reward}). Should be -1.0."
 
     def test_validated_thalidomide_pair_reachable(self):
-        """P4-003: (thalidomide, multiple myeloma) validated bonus is reachable."""
+        """P4-003: (thalidomide, multiple myeloma) validated bonus is reachable.
+        v114 round 4: the P4-002 refactor moved the validated_bonus from
+        compute() to step() (applied AFTER the high_action_bonus multiplier,
+        so the effective bonus is 0.1 not 0.5). The old test compared
+        reward vs reward_no_bonus from compute() — but compute() no longer
+        applies the bonus, so they were always equal. ROOT FIX: verify
+        the _is_validated FLAG is set correctly in rf._last_flags (step()
+        reads this flag to apply the bonus post-multiplier). This tests
+        the actual mechanism."""
         # The validated_hypotheses.csv has this pair
         rf = RewardFunction()
         # Verify the pair is in VALIDATED_HYPOTHESES
@@ -165,13 +190,19 @@ class TestP4_002_003_ThalidomideIndicationSpecific:
             ADME_COL: 0.7,
         })
         reward = rf.compute(row)
-        # The validated_bonus should have been applied (reward includes +0.1)
-        # Verify by comparing to the same pair WITHOUT the validated bonus
-        rf_no_validated = RewardFunction()
-        rf_no_validated.set_validated_hypotheses(set())
-        reward_no_bonus = rf_no_validated.compute(row)
-        assert reward > reward_no_bonus, \
-            f"P4-003: validated bonus not applied. reward={reward}, reward_no_bonus={reward_no_bonus}"
+        # P4-002 refactor: compute() sets the _is_validated flag on
+        # rf._last_flags. step() reads this flag to apply the +0.1 bonus
+        # AFTER the high_action_bonus multiplier. Verify the flag is set.
+        assert hasattr(rf, '_last_flags'), \
+            "P4-003: RewardFunction._last_flags not set by compute()"
+        assert rf._last_flags.get('_is_validated') is True, \
+            f"P4-003: _is_validated flag not True for validated pair " \
+            f"(got {rf._last_flags.get('_is_validated')}). step() cannot " \
+            f"apply the bonus without this flag."
+        # Verify the base reward is finite (compute() ran successfully).
+        import math
+        assert isinstance(reward, (int, float)) and math.isfinite(reward), \
+            f"P4-003: compute() returned non-finite reward={reward}"
 
 
 # ============================================================================
@@ -625,8 +656,13 @@ class TestP4_018_PpoGammaConfigurable:
             f"P4-001: ppo_gamma default should be 0.0 (contextual bandit), got {cfg.ppo_gamma}"
 
     def test_ppo_gamma_can_be_overridden(self):
-        """P4-018: ppo_gamma can be set to a different value."""
-        cfg = PipelineConfig(timesteps=64, top_n=3, ppo_gamma=0.9)
+        """P4-018: ppo_gamma can be set to a different value.
+        v114 round 4: ppo_gamma > 0 (sequential MDP) requires
+        max_episode_steps > 0 for proper value bootstrapping (P4-026
+        validation). The old test did not set max_episode_steps, hitting
+        the ValueError. ROOT FIX: set max_episode_steps when ppo_gamma>0."""
+        cfg = PipelineConfig(timesteps=64, top_n=3, ppo_gamma=0.9,
+                             max_episode_steps=3)
         assert cfg.ppo_gamma == 0.9
 
 

@@ -40,6 +40,8 @@
  * "what are ALL the descriptors under D03.438?".
  */
 
+import { monitoredFetch } from "@/lib/external-api-monitor";
+
 const MESH_BASE = "https://id.nlm.nih.gov/mesh/lookup";
 
 export interface MeshDescriptor {
@@ -127,6 +129,24 @@ export function buildTreeNumberHierarchy(treeNumbers: string[]): MeshTreeNode[] 
 /**
  * Lookup MeSH descriptors matching a free-text disease query.
  * Returns the canonical descriptor record(s) used to index that disease.
+ *
+ * BE-059 ROOT FIX (v115, MEDIUM): the previous code made 1 search call
+ * + (10 descriptors × 3 sequential calls each) = 31 SEQUENTIAL HTTP
+ * requests to NLM. At ~300ms per call, that's ~9.3s for a single
+ * disease search — well beyond the 2s UX budget. Under V1's 100-
+ * concurrent-request load, NLM would block the platform's IP.
+ *
+ * ROOT FIX:
+ *   1. Parallelize the per-descriptor calls (name, scopeNote,
+ *      treeNumber) via Promise.all — each descriptor now takes
+ *      ~300ms (the slowest of the 3) instead of ~900ms.
+ *   2. Parallelize across descriptors via Promise.all on the outer
+ *      loop — all 10 descriptors' calls run concurrently.
+ *   3. Add a 5s overall timeout — if NLM is slow, we abort and
+ *      return partial results rather than making the researcher wait.
+ *
+ * Net: 31 sequential calls → 2 concurrent waves (1 search + 1 wave
+ * of 10 descriptors × 3 parallel calls = ~600ms total instead of 9.3s).
  */
 export async function searchDiseasesByName(
   query: string,
@@ -135,7 +155,8 @@ export async function searchDiseasesByName(
   const q = (query || "").trim();
   if (q.length < 2) return [];
   const url = `${MESH_BASE}/descriptor?label=${encodeURIComponent(q)}&limit=${limit}`;
-  const res = await fetch(url, {
+  // Task 260: monitored for observability.
+  const res = await monitoredFetch("mesh", url, {
     headers: { Accept: "application/json" },
     next: { revalidate: 86400 * 30 }, // MeSH updates ~weekly
   });
@@ -144,51 +165,107 @@ export async function searchDiseasesByName(
   }
   const uris: string[] = await res.json();
   if (uris.length === 0) return [];
-  const descriptors: MeshDescriptor[] = [];
-  for (const uri of uris.slice(0, limit)) {
+
+  // BE-059 ROOT FIX: parallelize ALL descriptor lookups. Each
+  // descriptor makes 3 concurrent HTTP calls (name, scopeNote,
+  // treeNumber) — Promise.all inside the per-descriptor function.
+  // The outer Promise.all runs all descriptors in parallel.
+  const OVERALL_TIMEOUT_MS = 5_000;
+
+  // Per-descriptor fetcher: returns MeshDescriptor or null on failure.
+  // All 3 HTTP calls (name, scopeNote, treeNumber) run concurrently
+  // via Promise.allSettled — a failure in any one does NOT abort the
+  // others (we still get name + treeNumber even if scopeNote fails).
+  async function fetchDescriptor(uri: string): Promise<MeshDescriptor | null> {
     const descriptorUi = uri.split("/").pop() || "";
-    if (!descriptorUi) continue;
-    // Fetch the name and scope note
-    const nameRes = await fetch(
-      `${MESH_BASE}/descriptor?resource=${encodeURIComponent(uri)}`,
-      {
-        headers: { Accept: "application/json" },
-        next: { revalidate: 86400 * 30 },
-      }
-    );
-    if (!nameRes.ok) continue;
-    const name = (await nameRes.text()).trim().replace(/^"|"$/g, "");
-    let scopeNote: string | undefined;
-    try {
-      const snRes = await fetch(
+    if (!descriptorUi) return null;
+
+    const commonOpts = {
+      headers: { Accept: "application/json" },
+      next: { revalidate: 86400 * 30 },
+    };
+
+    // Fire all 3 requests in parallel — Promise.allSettled so a
+    // failure in one doesn't abort the others.
+    const [nameResult, snResult, tnResult] = await Promise.allSettled([
+      monitoredFetch(
+        "mesh",
+        `${MESH_BASE}/descriptor?resource=${encodeURIComponent(uri)}`,
+        commonOpts
+      ),
+      monitoredFetch(
+        "mesh",
         `${MESH_BASE}/scopeNote?resource=${encodeURIComponent(uri)}`,
-        {
-          headers: { Accept: "application/json" },
-          next: { revalidate: 86400 * 30 },
-        }
-      );
-      if (snRes.ok) scopeNote = (await snRes.text()).trim().replace(/^"|"$/g, "");
-    } catch {}
-    let treeNumber: string[] = [];
-    try {
-      const tnRes = await fetch(
+        commonOpts
+      ),
+      monitoredFetch(
+        "mesh",
         `${MESH_BASE}/treeNumber?resource=${encodeURIComponent(uri)}`,
-        {
-          headers: { Accept: "application/json" },
-          next: { revalidate: 86400 * 30 },
-        }
-      );
-      if (tnRes.ok) treeNumber = await tnRes.json();
-    } catch {}
-    descriptors.push({
+        commonOpts
+      ),
+    ]);
+
+    // Extract name (required — if this failed, skip the descriptor).
+    if (nameResult.status !== "fulfilled" || !nameResult.value.ok) {
+      return null;
+    }
+    const name = (await nameResult.value.text()).trim().replace(/^"|"$/g, "");
+    if (!name) return null;
+
+    // Extract scopeNote (optional — undefined if failed).
+    let scopeNote: string | undefined;
+    if (snResult.status === "fulfilled" && snResult.value.ok) {
+      try {
+        scopeNote = (await snResult.value.text()).trim().replace(/^"|"$/g, "");
+      } catch {
+        scopeNote = undefined;
+      }
+    }
+
+    // Extract treeNumber (optional — [] if failed).
+    let treeNumber: string[] = [];
+    if (tnResult.status === "fulfilled" && tnResult.value.ok) {
+      try {
+        const tnVal = await tnResult.value.json();
+        if (Array.isArray(tnVal)) treeNumber = tnVal;
+      } catch {
+        treeNumber = [];
+      }
+    }
+
+    return {
       descriptorUi,
       name,
       scopeNote,
       allowDuplicates: false,
       treeNumber,
-      // FE-027: build the nested hierarchy from the flat list.
       treeNumberHierarchy: buildTreeNumberHierarchy(treeNumber),
-    });
+    };
   }
-  return descriptors;
+
+  // Race the parallel descriptor fetches against the overall timeout.
+  // If the timeout fires, return whatever descriptors completed
+  // (better partial results than none).
+  const descriptorPromises = uris.slice(0, limit).map(fetchDescriptor);
+  const timeoutPromise = new Promise<MeshDescriptor[]>((resolve) => {
+    setTimeout(() => {
+      // Return whatever we have — descriptors that haven't resolved
+      // yet are simply dropped.
+      resolve([]);
+    }, OVERALL_TIMEOUT_MS);
+  });
+
+  // We need to capture partial results if the timeout fires. Use a
+  // shared array that each descriptor promise appends to as it resolves.
+  const partialResults: MeshDescriptor[] = [];
+  const capturePromise = Promise.all(
+    descriptorPromises.map(async (p) => {
+      const result = await p;
+      if (result) partialResults.push(result);
+    })
+  );
+
+  await Promise.race([capturePromise, timeoutPromise]);
+
+  return partialResults;
 }

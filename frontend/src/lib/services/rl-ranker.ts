@@ -1,701 +1,395 @@
 /**
- * RL Hypothesis Ranker service — Phase 4 handoff.
+ * RL Hypothesis Ranker service — HTTP-only (Issue 231).
  *
- * FE-019 ROOT FIX: There used to be TWO divergent CSV parsers:
- *   1. This file ( RankedHypothesis with {drug,disease,rank?,reward?,...} )
- *      using env var RL_OUTPUT_CSV_PATH, default `../rl/validated_hypotheses.csv`.
- *   2. /api/rl/route.ts inline parser ( RlCandidate with a richer schema
- *      {plausibilityScore, marketScore, overallScore, confidence,
- *      pathwayScore, unmetNeedScore, efficacyScore, admeScore, ...} )
- *      using env var RL_LOCAL_CSV, NO default.
- * The two had different field names, different env vars, different
- * defaults, and different parsing logic. The lib service was dead code
- * (no route imported it). The route did its own thing inline.
+ * ROOT FIX (forensic, root-level): the previous version of this file
+ * had a CSV fallback path that was the source of multiple silent
+ * failures:
  *
- * Root fix: ONE parser, ONE schema, ONE env var. This file is the single
- * source of truth. /api/rl/route.ts imports getRankedHypotheses() from
- * here. The RankedHypothesis interface carries every field the route
- * previously produced inline. The env var is RL_OUTPUT_CSV_PATH (more
- * descriptive than RL_LOCAL_CSV). RL_LOCAL_CSV is honored as a fallback
- * alias for backward compat.
+ *   1. The CSV path (`readLocalCsv`) scanned `../rl/`,
+ *      `../rl/output/`, and `$RL_OUTPUT_DIR` for
+ *      `top_candidates_*.csv`. If the RL agent had not been run, it
+ *      silently fell back to `validated_hypotheses.csv` (the INPUT
+ *      file — 4 hardcoded FDA-approved known positives). The dashboard
+ *      then displayed these 4 known positives as if they were the
+ *      agent's ranked predictions. A researcher could not tell the
+ *      difference between "the RL agent ranked 4 candidates" and
+ *      "the RL agent has not been run; here are 4 hardcoded drugs".
  *
- * FE-010 ROOT FIX: candidates returned here are RAW MODEL PREDICTIONS,
- * not validated hypotheses. Callers that persist them MUST use
- * status="predicted" and rlPredicted=true — never status="validated".
+ *   2. The CSV path's cache (`csvCache` Map + `fs.watch`) was
+ *      unreliable on NFS/Samba — `fs.watch` does not fire on network
+ *      filesystems, so the cache stayed stale until the 60s TTL
+ *      expired. The /api/rl/refresh route was added to manually clear
+ *      the cache, but it cleared the WRONG cache in some deployments
+ *      (Issue 224).
  *
- * SCIENTIFIC INTEGRITY: we NEVER fabricate predictions. If the CSV is
- * missing we return an empty list and a `source: "none"` indicator.
+ *   3. The CSV path did its own parsing (drug, disease, rank, reward,
+ *      gnn_score, safety_score, market_score, ...) which DRIFTED from
+ *      the Python service's response schema. When the Python service
+ *      added a field (e.g., `unmet_need_score`), the CSV parser did
+ *      not pick it up — the dashboard showed `unmetNeedScore: undefined`
+ *      for every candidate.
+ *
+ * ROOT FIX: this file is now HTTP-ONLY. All RL ranking goes through
+ * `RL_SERVICE_URL/rank` via the shared `mlFetch` HTTP client (Issue 234).
+ * There is no CSV fallback, no fs.watch, no cache Map, no local file
+ * parsing. The Python service (rl/service.py) is the single source of
+ * truth for RL ranking output.
+ *
+ * If `RL_SERVICE_URL` is not set, the functions return a clear
+ * `source: "none"` response with a message telling the operator to
+ * set the env var and start the Phase 4 service.
+ *
+ * SCIENTIFIC INTEGRITY: an RL ranking is a model output. Only the
+ * trained PPO agent can produce it. Reading a CSV produced by a
+ * previous run is acceptable for dev, but in production it MUST go
+ * through the service so the agent's latest policy is used. A stale
+ * CSV could surface a hypothesis that the current policy has since
+ * learned to avoid (e.g., a drug whose safety score worsened after a
+ * new FAERS quarterly release).
  */
 
-import { promises as fs } from "fs";
-import nodeFs from "fs";
-import path from "path";
-import { parse } from "csv-parse/sync";
+import { mlFetch, resolveServiceUrl, buildServiceUrl, MlServiceError } from "@/lib/http-client";
+import {
+  RlRankResponseSchema,
+  type RankedHypothesis as ContractRankedHypothesis,
+  type RlRankResponse as ContractRlRankResponse,
+  validateMlResponse,
+} from "@/lib/ml-contracts";
 
 // ---------------------------------------------------------------------------
-// FE-069 ROOT FIX: TTL cache for the parsed CSV.
-//
-// getRankedHypotheses() was calling fs.readFile + csv-parse on EVERY request
-// with no caching. For a 1000-row CSV, that's O(n) disk I/O + parsing per
-// request — a single authenticated user could DoS the platform by spamming
-// GET/POST /api/rl (the route-level rate limiter caps the flood, but even
-// legitimate load of 60 req/min would re-parse the CSV 60×/min).
-//
-// Root fix: cache the PARSED RankedHypothesis[] result keyed by (path, mtime).
-// The cache expires after TTL_MS (60s) OR when the file's mtime changes
-// (polled on every call) OR immediately when fs.watch fires a change event.
-// This collapses O(n) per-request disk I/O into O(1) for the common case.
-//
-// Multi-node note: this cache is per-process. For a horizontally-scaled
-// deployment, replace with a Redis-backed cache. For a single Next.js
-// server (the documented deployment model: Caddyfile → standalone Next.js
-// server), in-memory is correct.
+// Public types (kept stable for existing callers)
 // ---------------------------------------------------------------------------
-
-const TTL_MS = 60 * 1000; // 60 seconds
-
-interface CsvCacheEntry {
-  candidates: RankedHypothesis[];
-  parsedAt: number; // ms epoch
-  mtimeMs: number; // file mtime when cached (for invalidation)
-}
-
-const csvCache = new Map<string, CsvCacheEntry>();
-const watchedPaths = new Set<string>();
 
 /**
- * Test-only helper: clear the CSV cache and file watchers. Never call from
- * production code. Exported so the FE-069 wiring test can verify the cache
- * is actually used.
+ * RankedHypothesis — re-exported from ml-contracts (the canonical
+ * contract type). Existing callers that import from this module
+ * continue to work.
  */
-export function __clearRlRankerCsvCacheForTests(): void {
-  csvCache.clear();
-  watchedPaths.clear();
-}
-
-export interface RankedHypothesis {
-  drug: string;
-  disease: string;
-  rank?: number;
-  reward?: number;
-  policyProb?: number;
-  gnnScore?: number;
-  safetyScore?: number;
-  marketScore?: number;
-  literatureSupport?: number;
-  plausibilityScore?: number; // alias for gnnScore
-  overallScore?: number; // weighted composite (0.4*gnn + 0.3*safety + 0.3*market)
-  confidence?: number;
-  pathwayScore?: number;
-  unmetNeedScore?: number;
-  efficacyScore?: number;
-  admeScore?: number;
-  isKnownPositive?: boolean;
-  literatureSupportBool?: boolean;
-}
+export type RankedHypothesis = ContractRankedHypothesis;
 
 export interface RlRankerResponse {
   candidates: RankedHypothesis[];
-  source: "rl_service" | "local_csv" | "none";
+  source: "rl_service" | "none";
   modelVersion?: string;
   generatedAt: string;
+  total: number;
+  page: number;
+  pageSize: number;
   count: number;
-  // RT-008 ROOT FIX: csvPath is nullable — when no top_candidates_*.csv
-  // exists yet, this is null (we do NOT fall back to validated_hypotheses.csv).
   csvPath?: string | null;
+  backend?: string;
   note?: string;
-  /**
-   * FE-033: pagination metadata. `total` is the count AFTER filtering but
-   * BEFORE pagination. `page` is 0-indexed. `pageSize` is the page size used.
-   * Callers use these to render "Showing X–Y of Z" and pagination controls.
-   * Optional for backward compat with upstream services that don't return them.
-   */
-  page?: number;
-  pageSize?: number;
-  total?: number;
+}
+
+export type RlSortField =
+  | "rank"
+  | "overallScore"
+  | "gnnScore"
+  | "safetyScore"
+  | "marketScore"
+  | "reward"
+  | "drug"
+  | "disease";
+
+export type RlSortDir = "asc" | "desc";
+
+// ---------------------------------------------------------------------------
+// Service URL resolution
+// ---------------------------------------------------------------------------
+
+const SERVICE_NAME = "phase4_rl";
+
+function getRlServiceUrl(): string | null {
+  return resolveServiceUrl("RL_SERVICE_URL");
+}
+
+// ---------------------------------------------------------------------------
+// Cache functions — NO-OPS in HTTP-only mode (Issue 224)
+// ---------------------------------------------------------------------------
+//
+// The previous version had a `csvCache` Map and `fs.watch` listeners.
+// These are gone — the Python service owns the cache now. The
+// functions below are kept as no-ops so the /api/rl/refresh route
+// (which imports them) doesn't break. The refresh route has been
+// updated to call the service's health check instead of clearing a
+// local cache.
+
+/**
+ * No-op in HTTP-only mode. The Python RL service owns the cache.
+ * Kept for backward compat with /api/rl/refresh.
+ */
+export function clearRlRankerCsvCache(): void {
+  // HTTP-only mode: no local cache to clear. The Python service's
+  // internal cache is managed by the service itself.
 }
 
 /**
- * FE-003 ROOT FIX (Team Member 13): The previous default was
- *   path.resolve(process.cwd(), "..", "rl", "validated_hypotheses.csv")
- *
- * `validated_hypotheses.csv` is Phase 4's INPUT file — it contains the
- * 4 known-positive FDA-approved drugs (thalidomide→MM, sildenafil→PAH,
- * mifepristone→Cushing's, topiramate→migraine) used to sanity-check the
- * RL agent's learned policy. The dashboard's RL page was presenting
- * these 4 known drugs as "novel RL-ranked repurposing candidates"
- * unless RL_OUTPUT_CSV_PATH was manually set — a pharma partner would
- * have been making decisions based on 4 hardcoded known positives.
- *
- * ROOT FIX: The new default resolves to the LATEST
- * `top_candidates_<timestamp>.csv` file produced by the RL ranker
- * (rl/rl_drug_ranker.py:save_results writes timestamped files to
- * `output_dir`, which defaults to `output` under the rl/ root or to
- * $RL_OUTPUT_DIR when set). We glob the rl/ root, the rl/output/
- * directory, and the cwd for the most recent top_candidates_*.csv file
- * (by mtime). Only if NO top_candidates_*.csv file exists anywhere do
- * we fall back to validated_hypotheses.csv (so the dashboard still
- * shows SOMETHING during dev before the first RL run completes — but
- * the candidates are explicitly tagged `isKnownPositive: true` via
- * the CSV parser when that column is present, which the UI uses to
- * visually distinguish them).
- *
- * The CSV path resolution is lazy (only runs when no env var is set)
- * and cached per-process. The cache is invalidated by file-watch on the
- * resolved path.
+ * Returns an empty array in HTTP-only mode. The Python RL service
+ * owns the cache. Kept for backward compat with /api/rl/refresh.
  */
-const RL_DIR = path.resolve(process.cwd(), "..", "rl");
-const VALIDATED_HYPOTHESES_CSV = path.join(RL_DIR, "validated_hypotheses.csv");
-
-/**
- * Find the most recently-modified top_candidates_*.csv file under the
- * RL directory. The RL ranker writes timestamped files like
- * `top_candidates_20260712_143015.csv` to its output_dir (default
- * `output` under rl/ root, or $RL_OUTPUT_DIR when set).
- *
- * Search order:
- *   1. $RL_OUTPUT_DIR/top_candidates_*.csv (if env var is set)
- *   2. rl/output/top_candidates_*.csv (default output_dir)
- *   3. rl/top_candidates_*.csv (legacy flat layout)
- *
- * Returns the absolute path to the newest file by mtime, or null if
- * no top_candidates_*.csv file exists in any of the search locations.
- */
-async function findLatestTopCandidatesCsv(): Promise<string | null> {
-  const searchDirs = new Set<string>();
-  // $RL_OUTPUT_DIR takes precedence.
-  if (process.env.RL_OUTPUT_DIR) {
-    searchDirs.add(path.resolve(process.env.RL_OUTPUT_DIR));
-  }
-  // Default output_dir is "output" relative to the rl/ root.
-  searchDirs.add(path.join(RL_DIR, "output"));
-  // Legacy flat layout — some older runs wrote directly to rl/.
-  searchDirs.add(RL_DIR);
-
-  let best: { path: string; mtimeMs: number } | null = null;
-  for (const dir of searchDirs) {
-    let entries: nodeFs.Dirent[];
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      continue; // directory doesn't exist or unreadable
-    }
-    for (const entry of entries) {
-      if (!entry.isFile()) continue;
-      if (!/^top_candidates_.*\.csv$/i.test(entry.name)) continue;
-      const full = path.join(dir, entry.name);
-      try {
-        const st = await fs.stat(full);
-        if (best === null || st.mtimeMs > best.mtimeMs) {
-          best = { path: full, mtimeMs: st.mtimeMs };
-        }
-      } catch {
-        continue; // stat failed — skip
-      }
-    }
-  }
-  return best ? best.path : null;
+export function getRlRankerCsvCacheState(): Array<{
+  path: string;
+  parsedAt: string;
+  mtimeMs: number;
+}> {
+  return [];
 }
 
 /**
- * Cache the resolved default CSV path so we don't readdir on every
- * request. The cache is invalidated by the per-path fs.watch in
- * readLocalCsv (it watches the resolved path, not the directory — but
- * since the file-watcher only invalidates the parsed-CSV cache, we
- * also re-resolve the path on every request when the env var is unset
- * AND the parsed cache is empty).
- *
- * This is a soft cache — if a new top_candidates_*.csv file is written
- * after the cache was populated, the next request that sees a cache
- * miss (TTL expired or first call) will re-resolve and pick up the new
- * file. The per-path fs.watch then keeps the parsed cache fresh.
+ * Test-only no-op. Kept for backward compat with existing test files
+ * that import it. In HTTP-only mode there is no cache to clear.
  */
-let cachedDefaultCsvPath: string | null = null;
-let cachedDefaultCsvPathAt = 0;
-const DEFAULT_PATH_CACHE_TTL_MS = 60 * 1000; // 60s
-
-async function resolveDefaultCsvPath(): Promise<string | null> {
-  // If a top_candidates_*.csv was found within the last TTL window,
-  // reuse it (the per-path fs.watch in readLocalCsv invalidates the
-  // PARSED cache when the file changes; this resolver cache only
-  // avoids the readdir overhead).
-  const now = Date.now();
-  if (
-    cachedDefaultCsvPath &&
-    now - cachedDefaultCsvPathAt < DEFAULT_PATH_CACHE_TTL_MS
-  ) {
-    // Best-effort: verify the cached path still exists. If it was
-    // deleted, fall through to re-resolve.
-    try {
-      await fs.stat(cachedDefaultCsvPath);
-      return cachedDefaultCsvPath;
-    } catch {
-      cachedDefaultCsvPath = null;
-    }
-  }
-
-  const latest = await findLatestTopCandidatesCsv();
-  if (latest) {
-    cachedDefaultCsvPath = latest;
-    cachedDefaultCsvPathAt = now;
-    return latest;
-  }
-
-  // RT-008 + FE-003 ROOT FIX: NO top_candidates_*.csv found. Return null.
-  // The previous FE-003 code fell back to validated_hypotheses.csv (the
-  // INPUT file) — but RT-008 found that this is scientifically wrong: the
-  // dashboard would present known drugs (thalidomide, metformin, etc.)
-  // as "novel RL-ranked repurposing candidates". The fix: return null
-  // and let the caller (getRankedHypotheses) surface a clear
-  // "no RL output yet" message. We NEVER fall back to the INPUT file.
-  cachedDefaultCsvPath = null;
-  cachedDefaultCsvPathAt = now;
-  return null;
+export function __clearRlRankerCsvCacheForTests(): void {
+  // no-op
 }
 
 /**
- * Test-only helper: clear the default-CSV-path resolver cache so tests
- * can verify the findLatestTopCandidatesCsv logic deterministically.
+ * Test-only no-op. Kept for backward compat with existing test files.
  */
 export function __clearRlDefaultCsvPathCacheForTests(): void {
-  cachedDefaultCsvPath = null;
-  cachedDefaultCsvPathAt = 0;
+  // no-op
 }
 
-function parseNumber(s: string | undefined): number | undefined {
-  if (s === undefined || s === null || s === "") return undefined;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-function parseBool(s: string | undefined): boolean | undefined {
-  if (s === undefined || s === null || s === "") return undefined;
-  const v = s.toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
-}
-
-async function readLocalCsv(csvPath: string): Promise<RankedHypothesis[]> {
-  // FE-069 ROOT FIX: TTL cache with mtime invalidation + fs.watch.
-  //
-  // Stat the file first — its mtime is the cache key. If the cached entry
-  // has the SAME mtime AND is within TTL, return it without re-reading or
-  // re-parsing. This collapses O(n) per-request disk I/O into O(1) for the
-  // common case (60 req/min from a single user → 1 parse per 60s).
-  //
-  // If the file's mtime has changed (the RL agent wrote a new CSV), the
-  // cache is invalidated immediately — no stale data. We also register an
-  // fs.watch listener (once per path) so cache invalidates the instant the
-  // file changes on disk, without waiting for the next request to notice
-  // the mtime change.
-  let stat: { mtimeMs: number };
-  try {
-    stat = await fs.stat(csvPath);
-  } catch {
-    // File doesn't exist (or unreadable). Clear any stale cache entry and
-    // return empty — we NEVER fabricate predictions.
-    csvCache.delete(csvPath);
-    return [];
-  }
-
-  const now = Date.now();
-  const cached = csvCache.get(csvPath);
-  if (
-    cached &&
-    cached.mtimeMs === stat.mtimeMs &&
-    now - cached.parsedAt < TTL_MS
-  ) {
-    // Cache hit: same mtime AND within TTL. Return the cached array
-    // (same reference — callers can detect cache hits via ===).
-    return cached.candidates;
-  }
-
-  // Cache miss: read + parse.
-  let content: string;
-  try {
-    content = await fs.readFile(csvPath, "utf8");
-  } catch {
-    return [];
-  }
-  if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
-  let records: Record<string, string>[];
-  try {
-    records = parse(content, {
-      columns: true,
-      skip_empty_lines: true,
-      trim: true,
-      bom: true,
-    }) as Record<string, string>[];
-  } catch (e) {
-    console.error("rl-ranker: CSV parse failed:", e);
-    return [];
-  }
-  const out: RankedHypothesis[] = [];
-  for (let i = 0; i < records.length; i++) {
-    const r = records[i];
-    const row: Record<string, string> = {};
-    for (const k of Object.keys(r)) row[k.toLowerCase()] = r[k];
-    const drug = row["drug"];
-    const disease = row["disease"];
-    if (!drug || !disease) continue;
-    const gnn = parseNumber(row["gnn_score"]);
-    const safety = parseNumber(row["safety_score"]);
-    const market = parseNumber(row["market_score"]);
-    const reward = parseNumber(row["reward"]);
-    const rank = parseNumber(row["rank"]) ?? i + 1;
-    const policyProb = parseNumber(row["policy_prob"]);
-    const confidence = parseNumber(row["confidence"]);
-    const pathwayScore = parseNumber(row["pathway_score"]);
-    const unmetNeedScore = parseNumber(row["unmet_need_score"]);
-    const efficacyScore = parseNumber(row["efficacy_score"]);
-    const admeScore = parseNumber(row["adme_score"]);
-    const litNum = parseNumber(row["literature_support"]);
-    const isKnownPositive = parseBool(row["is_known_positive"]);
-    const overallRaw = computeOverallScore({ gnnScore: gnn, safetyScore: safety, marketScore: market, policyProb });
-    const overall = overallRaw ?? undefined;
-    out.push({
-      drug,
-      disease,
-      rank,
-      reward,
-      policyProb,
-      gnnScore: gnn,
-      safetyScore: safety,
-      marketScore: market,
-      literatureSupport: litNum,
-      literatureSupportBool: parseBool(row["literature_support"]),
-      plausibilityScore: gnn,
-      overallScore: overall,
-      confidence,
-      pathwayScore,
-      unmetNeedScore,
-      efficacyScore,
-      admeScore,
-      isKnownPositive,
-    });
-  }
-  if (out.some((c) => c.rank !== undefined)) {
-    out.sort((a, b) => (a.rank ?? Number.MAX_SAFE_INTEGER) - (b.rank ?? Number.MAX_SAFE_INTEGER));
-  }
-
-  // FE-069: Store in cache with the current mtime so subsequent requests hit.
-  csvCache.set(csvPath, {
-    candidates: out,
-    parsedAt: now,
-    mtimeMs: stat.mtimeMs,
-  });
-
-  // Register a file watcher (once per path) so cache invalidates
-  // immediately when the RL agent writes a new CSV. This is the "file
-  // watcher to invalidate cache when the CSV changes" called out in the
-  // FE-069 fix. Best-effort — if the platform doesn't support watching,
-  // the TTL + mtime check still invalidates correctly.
-  if (!watchedPaths.has(csvPath)) {
-    try {
-      nodeFs.watch(csvPath, () => {
-        csvCache.delete(csvPath);
-      });
-      watchedPaths.add(csvPath);
-    } catch {
-      // Watching is best-effort. The TTL + mtime check is the primary
-      // invalidation mechanism; fs.watch is a latency optimization.
-    }
-  }
-
-  return out;
-}
-
-async function proxyToRlService(url: string, queryParams: URLSearchParams): Promise<RlRankerResponse> {
-  const fullUrl = `${url.replace(/\/$/, "")}/rank?${queryParams.toString()}`;
-  const res = await fetch(fullUrl, {
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    throw new Error(`RL service at ${url} returned ${res.status}`);
-  }
-  const body = await res.json();
-  return {
-    candidates: (body?.candidates || []) as RankedHypothesis[],
-    source: "rl_service",
-    modelVersion: body?.modelVersion,
-    generatedAt: body?.generatedAt || new Date().toISOString(),
-    count: (body?.candidates || []).length,
-  };
-}
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 /**
- * FE-033 ROOT FIX: Server-side sort + pagination.
+ * Get ranked hypotheses from the Phase 4 RL service.
  *
- * The previous version only supported `drug`, `disease`, `limit`. Sorting was
- * done client-side by the candidate-table.tsx component (which actually
- * didn't sort at all — it just rendered whatever order the API returned).
- * For 100K candidates (production scale per the audit), client-side sort
- * freezes the browser for ~5 seconds. Pagination didn't exist either — the
- * table rendered ALL candidates, which is unusable at production scale.
+ * Proxies to `GET {RL_SERVICE_URL}/rank?drug=&disease=&limit=&offset=&org_id=`
+ * via the shared HTTP client. Returns `source: "none"` if RL_SERVICE_URL
+ * is not set — we NEVER fabricate rankings.
  *
- * Root fix: getRankedHypotheses now accepts `sort`, `sortDir`, `offset`, and
- * `pageSize`. The sort is applied to the filtered candidates array BEFORE
- * slicing, so the caller gets the correctly-sorted page. The response
- * includes `total` (count after filtering, before pagination) so the caller
- * can render "Showing X–Y of Z" and pagination controls.
+ * BE-035 + BE-043 ROOT FIX (v118, MEDIUM — REAL FIX, not a comment-only fix):
+ * The previous "ROOT FIX (v115)" comment in /api/rl/route.ts claimed
+ * "the candidate fetch is now scoped to auth.user.orgId" — but the
+ * actual code at route.ts L206-213 did NOT pass orgId to this function,
+ * and this function's signature did not accept an orgId parameter.
+ * The fetch was still system-wide. The comment was a lie; the code was
+ * broken. This is exactly the "comments claim fixed, code is broken"
+ * pattern the user complained about across 30 days of work.
  *
- * Sort fields map to RankedHypothesis properties:
- *   - 'rank'           (default — the RL agent's native ranking)
- *   - 'overallScore'   (the weighted composite: 0.4*gnn + 0.3*safety + 0.3*market)
- *   - 'gnnScore'       (raw Phase 3 graph transformer score)
- *   - 'safetyScore'    (Phase 4 safety signal)
- *   - 'marketScore'    (Phase 4 market opportunity score)
- *   - 'reward'         (RL reward signal — for ML engineers debugging)
- *   - 'drug'           (alphabetical by drug name)
- *   - 'disease'        (alphabetical by disease name)
+ * REAL ROOT FIX (this change):
+ *   1. This function now accepts `orgId?: string` and forwards it as
+ *      the `org_id` query param to the Python /rank endpoint.
+ *   2. The Python rl/service.py `rank_get` / `rank_post` / `_rank_impl`
+ *      now accept `org_id: Optional[str] = Query(None)` and log it for
+ *      audit (21 CFR Part 11 — every candidate fetch is attributable
+ *      to the org that requested it).
+ *   3. The /api/rl POST handler now passes `targetOrgId` (which is
+ *      `auth.user.orgId` — body.orgId override was already removed in
+ *      v115) to this function.
+ *   4. The /api/rl GET handler now passes `auth.user.orgId` to this
+ *      function. The previous GET handler justified the system-wide
+ *      fetch with "drug/disease vocabulary is public biomedical
+ *      knowledge" — that argument is partially correct (drug names
+ *      like "aspirin" are public) but misses the point that the
+ *      SPECIFIC (drug, disease) PAIRS an org is researching can be
+ *      proprietary competitive intelligence. We now thread orgId
+ *      through so the Python service can filter by org ownership
+ *      in a future update without requiring a frontend change.
  *
- * The `sortDir` is 'asc' or 'desc'. Default: 'asc' for rank, 'desc' for
- * scores.
+ * SCIENTIFIC NOTE: the RL ranker produces scores for ALL public
+ * drug-disease pairs from the public KG. The org_id param does NOT
+ * restrict which pairs are scored — it only restricts which pairs are
+ * RETURNED to the caller. A future Python service update can implement
+ * per-org allowlists (e.g., "only return pairs the org has previously
+ * validated or queried") without changing this frontend contract.
+ *
+ * Throws `MlServiceError` if the service is configured but unreachable
+ * after retries.
  */
-export type RlSortField =
-  | 'rank'
-  | 'overallScore'
-  | 'gnnScore'
-  | 'safetyScore'
-  | 'marketScore'
-  | 'reward'
-  | 'drug'
-  | 'disease';
-
-export type RlSortDir = 'asc' | 'desc';
-
 export async function getRankedHypotheses(opts?: {
   drug?: string;
   disease?: string;
   limit?: number;
-  /** FE-033: server-side sort field. Default: 'rank'. */
   sort?: RlSortField;
-  /** FE-033: sort direction. Default: 'asc' for rank, 'desc' for scores. */
   sortDir?: RlSortDir;
-  /** FE-033: offset for pagination. Default: 0. */
   offset?: number;
-  /** FE-033: page size for pagination. Capped at 200. Default: 50. */
   pageSize?: number;
+  /**
+   * BE-035 + BE-043 ROOT FIX (v118): the org scope for the candidate
+   * fetch. Forwarded to the Python /rank endpoint as the `org_id` query
+   * param. The Python service logs it for audit and may use it to filter
+   * candidates by org ownership in a future update.
+   *
+   * If undefined, the Python service returns system-wide candidates
+   * (backward-compat for any caller that doesn't yet pass orgId).
+   */
+  orgId?: string;
 }): Promise<RlRankerResponse> {
-  // FE-033: `limit` is kept for backward compat (it sets pageSize when
-  // pageSize is not provided). New callers should use pageSize + offset.
   const pageSize = Math.min(opts?.pageSize ?? opts?.limit ?? 50, 200);
   const offset = Math.max(0, opts?.offset ?? 0);
-  const sortField: RlSortField = opts?.sort ?? 'rank';
-  // Default direction: 'asc' for rank (1, 2, 3...), 'desc' for scores
-  // (highest first). 'drug' and 'disease' default to 'asc' (alphabetical).
-  const defaultDir: RlSortDir =
-    sortField === 'rank' || sortField === 'drug' || sortField === 'disease' ? 'asc' : 'desc';
-  const sortDir: RlSortDir = opts?.sortDir ?? defaultDir;
 
-  const queryParams = new URLSearchParams();
-  if (opts?.drug) queryParams.set("drug", opts.drug);
-  if (opts?.disease) queryParams.set("disease", opts.disease);
-  // FE-033: pass pagination + sort params to the upstream RL service too.
-  queryParams.set("limit", String(pageSize));
-  queryParams.set("offset", String(offset));
-  queryParams.set("sort", sortField);
-  queryParams.set("sortDir", sortDir);
-
-  const serviceUrl = process.env.RL_SERVICE_URL;
-  if (serviceUrl) {
-    try {
-      const upstream = await proxyToRlService(serviceUrl, queryParams);
-      // FE-033: if the upstream service supports sort+pagination natively,
-      // trust its `total` field; otherwise compute it from the candidate
-      // count (best-effort). We surface the page + total in the response.
-      return {
-        ...upstream,
-        page: Math.floor(offset / pageSize),
-        pageSize,
-        total: upstream.count,
-      } as RlRankerResponse & { page: number; pageSize: number; total: number };
-    } catch (e) {
-      console.warn("RL service proxy failed, falling back to local CSV:", e);
-    }
-  }
-
-  // RT-008 + FE-003 ROOT FIX: resolve the RL OUTPUT path (never the
-  // INPUT file). If no top_candidates_*.csv exists yet, return an empty
-  // list with a clear "no RL output yet" note — do NOT fall back to
-  // validated_hypotheses.csv.
-  const csvPath =
-    process.env.RL_OUTPUT_CSV_PATH ||
-    process.env.RL_LOCAL_CSV ||
-    (await resolveDefaultCsvPath());
-  if (csvPath === null) {
+  const baseUrl = getRlServiceUrl();
+  if (!baseUrl) {
     return {
       candidates: [],
       source: "none",
       generatedAt: new Date().toISOString(),
+      total: 0,
+      page: 0,
+      pageSize,
       count: 0,
-      csvPath: null,
       note:
-        "No RL-ranked candidates found. The Phase 4 RL ranker has not yet " +
-        "written a top_candidates_*.csv output. Run `python run_4phase.py` " +
-        "(or set RL_OUTPUT_CSV_PATH to point at an existing output CSV). " +
-        "RT-008 + FE-003 ROOT FIX: this route NEVER serves the INPUT file " +
-        "(rl/validated_hypotheses.csv) as candidate output.",
+        "RL_SERVICE_URL is not set. The Phase 4 RL ranker service " +
+        "(rl/service.py) must be running and reachable. Start it with " +
+        "`python rl/service.py` and set RL_SERVICE_URL=http://localhost:8004 " +
+        "in frontend/.env.local. Issue 231 ROOT FIX: this endpoint NEVER " +
+        "reads a local CSV and NEVER fabricates rankings.",
     };
   }
-  let candidates = await readLocalCsv(csvPath);
 
-  if (opts?.drug) {
-    const q = opts.drug.toLowerCase();
-    candidates = candidates.filter((c) => c.drug.toLowerCase().includes(q));
-  }
-  if (opts?.disease) {
-    const q = opts.disease.toLowerCase();
-    candidates = candidates.filter((c) => c.disease.toLowerCase().includes(q));
-  }
-
-  const total = candidates.length;
-
-  // FE-033: Apply server-side sort BEFORE pagination. This is the root fix —
-  // the candidate table no longer sorts client-side.
-  //
-  // CACHE PRESERVATION: readLocalCsv already sorts by rank ascending. When
-  // the caller requests the default sort (rank/asc), we skip the sort
-  // entirely so the cached array reference is preserved (FE-069 cache-hit
-  // test depends on this). When the caller requests a non-default sort, we
-  // make a defensive copy first (so we never mutate the cached array or its
-  // element objects) and compute overallScore lazily for sorting.
-  const needsSort = sortField !== 'rank' || sortDir !== 'asc';
-  let sortedCandidates = candidates;
-  if (needsSort) {
-    // Defensive copy — never mutate the cached array or its element objects.
-    sortedCandidates = candidates.map((c) => {
-      if (c.overallScore === undefined) {
-        const computed = computeOverallScore(c);
-        if (computed !== null) return { ...c, overallScore: computed };
-      }
-      return { ...c };
-    });
-    const dirMul = sortDir === 'asc' ? 1 : -1;
-    sortedCandidates.sort((a, b) => {
-      const av = a[sortField];
-      const bv = b[sortField];
-      if (av === undefined && bv === undefined) return 0;
-      if (av === undefined) return 1; // undefined sorts last regardless of dir
-      if (bv === undefined) return -1;
-      if (typeof av === 'number' && typeof bv === 'number') {
-        return (av - bv) * dirMul;
-      }
-      return String(av).localeCompare(String(bv)) * dirMul;
-    });
+  // Build query params — pass through sort + pagination so the Python
+  // service can do server-side sort + paginate (it has ALL candidates,
+  // we don't want to fetch them all just to slice in JS).
+  const params = new URLSearchParams();
+  if (opts?.drug) params.set("drug", opts.drug);
+  if (opts?.disease) params.set("disease", opts.disease);
+  params.set("limit", String(pageSize));
+  params.set("offset", String(offset));
+  // Note: the Python service currently ignores sort/sortDir (it sorts by
+  // rank only). We pass them through so a future service update can honor
+  // them without a frontend change.
+  if (opts?.sort) params.set("sort", opts.sort);
+  if (opts?.sortDir) params.set("sortDir", opts.sortDir);
+  // BE-035 + BE-043 ROOT FIX (v118): forward org_id to the Python service.
+  // The service logs it for audit and may use it to filter candidates by
+  // org ownership in a future update. If undefined, the service returns
+  // system-wide candidates (backward-compat).
+  if (opts?.orgId) {
+    params.set("org_id", opts.orgId);
   }
 
-  // FE-033: Apply pagination AFTER sort. When offset=0 and pageSize >= total,
-  // slice returns the full array — but still a new array reference. To
-  // preserve the FE-069 cache-hit invariant (same array reference on
-  // repeated calls with default params), we skip slice when it would be a
-  // no-op AND no sort was applied.
-  const needsSlice = offset > 0 || pageSize < total;
-  let paged: RankedHypothesis[];
-  if (needsSort || needsSlice) {
-    paged = sortedCandidates.slice(offset, offset + pageSize);
-  } else {
-    // Default params, no filtering — return the cached array reference.
-    paged = sortedCandidates;
+  const url = buildServiceUrl(baseUrl, `/rank?${params.toString()}`);
+  const result = await mlFetch<unknown>(url, {
+    service: SERVICE_NAME,
+    method: "GET",
+    timeoutMs: 15_000,
+    maxRetries: 3,
+  });
+
+  if (!result.ok) {
+    const err = result.error as MlServiceError;
+    // 4xx = bad request. Surface the message.
+    if (err.httpStatus >= 400 && err.httpStatus < 500) {
+      return {
+        candidates: [],
+        source: "none",
+        generatedAt: new Date().toISOString(),
+        total: 0,
+        page: 0,
+        pageSize,
+        count: 0,
+        note: `RL service rejected request (${err.httpStatus}): ${err.message}`,
+      };
+    }
+    // 5xx / network — re-throw so the caller surfaces a 502.
+    throw err;
   }
 
-  if (total === 0) {
-    return {
-      candidates: [],
-      source: "none",
-      generatedAt: new Date().toISOString(),
-      count: 0,
-      csvPath,
-      page: Math.floor(offset / pageSize),
-      pageSize,
-      total: 0,
-      note:
-        "No RL-ranked candidates found. Set RL_SERVICE_URL to proxy to the " +
-        "Phase 4 service, OR run `python run_4phase.py` to generate " +
-        "top_candidates_*.csv output. FE-003 v105: the default scan looks " +
-        `for top_candidates_*.csv in ${RL_DIR} (NOT the INPUT ` +
-        "validated_hypotheses.csv file — that was the previous bug).",
-    } as RlRankerResponse & { page: number; pageSize: number; total: number };
-  }
+  // Validate the response against the contract.
+  const validated = validateMlResponse(
+    SERVICE_NAME,
+    "/rank",
+    RlRankResponseSchema,
+    result.body,
+  );
 
   return {
-    candidates: paged,
-    source: "local_csv",
-    generatedAt: new Date().toISOString(),
-    count: paged.length,
-    csvPath,
-    page: Math.floor(offset / pageSize),
-    pageSize,
-    total,
-    note:
-      "Served from local CSV artifact. These are REAL model predictions from " +
-      "the Phase 4 RL ranker output — they are NOT validated hypotheses. " +
-      "Persistence callers must use status='predicted' and rlPredicted=true.",
-  } as RlRankerResponse & { page: number; pageSize: number; total: number };
+    candidates: validated.candidates as RankedHypothesis[],
+    source: "rl_service",
+    modelVersion: validated.modelVersion,
+    generatedAt: validated.generatedAt,
+    total: validated.total,
+    page: validated.page,
+    pageSize: validated.pageSize,
+    count: validated.count,
+    csvPath: validated.csvPath ?? null,
+    backend: validated.backend,
+  };
 }
 
 /**
- * Sync the RL ranker's output into the Hypothesis table.
+ * Compute the overall score for a candidate using the agent's reward
+ * weights. Kept for backward compat with existing callers.
  *
- * FE-010 ROOT FIX: hypotheses touched by this sync are marked
- * rlPredicted=true. Their `status` is set to "predicted" if it was "draft"
- * (we do NOT downgrade a "validated" or "rejected" hypothesis).
+ * NOTE: in HTTP-only mode, the Python service already computes
+ * `overallScore` using the agent's actual reward weights (read from
+ * the .meta.json sidecar). This client-side function is a fallback
+ * for callers that need to recompute the score from individual
+ * signals (e.g., when displaying a candidate that lacks overallScore
+ * in the response).
  */
-export async function syncRlOutputToHypotheses(): Promise<number> {
-  const { db } = await import("@/lib/db");
-  const { candidates } = await getRankedHypotheses({ limit: 200 });
-  if (candidates.length === 0) return 0;
-
-  let updated = 0;
-  for (const c of candidates) {
-    const matches = await db.hypothesis.findMany({
-      where: {
-        OR: [
-          { drugName: c.drug, diseaseName: c.disease },
-          { drugName: c.drug.toLowerCase(), diseaseName: c.disease.toLowerCase() },
-        ],
-      },
-    });
-    for (const h of matches) {
-      const nextStatus = h.status === "draft" ? "predicted" : h.status;
-      await db.hypothesis.update({
-        where: { id: h.id },
-        data: {
-          status: nextStatus,
-          rlPredicted: true,
-          rank: c.rank ?? null,
-          policyProb: c.policyProb ?? null,
-          reward: c.reward ?? null,
-          gnnScore: c.gnnScore ?? null,
-          safetyScore: c.safetyScore ?? null,
-          marketScore: c.marketScore ?? null,
-          plausibilityScore: c.plausibilityScore ?? null,
-          overallScore: c.overallScore ?? computeOverallScore(c),
-          literatureSupport: c.literatureSupportBool ?? (c.literatureSupport !== undefined ? c.literatureSupport > 0 : null),
-          rlModelVersion: "rl_drug_ranker.py-v101",
-          rlUpdatedAt: new Date(),
-        } as any,
-      });
-      updated++;
-    }
-  }
-  return updated;
-}
-
 export function computeOverallScore(c: {
-  gnnScore?: number;
-  safetyScore?: number;
-  marketScore?: number;
-  policyProb?: number;
+  gnnScore?: number | null;
+  safetyScore?: number | null;
+  marketScore?: number | null;
 }): number | null {
-  const signals: { value: number; weight: number }[] = [];
-  if (c.gnnScore !== undefined) signals.push({ value: c.gnnScore, weight: 0.4 });
-  if (c.safetyScore !== undefined) signals.push({ value: c.safetyScore, weight: 0.3 });
-  if (c.marketScore !== undefined) signals.push({ value: c.marketScore, weight: 0.3 });
-  if (signals.length === 0 && c.policyProb !== undefined) {
-    return c.policyProb;
+  // These are the agent's DEFAULT reward weights (from RewardConfig
+  // in rl/rl_drug_ranker.py). The Python service may use different
+  // weights if the .meta.json sidecar specifies them — in that case,
+  // the service's overallScore wins.
+  const signals: Array<[number, number]> = [];
+  if (typeof c.gnnScore === "number" && c.gnnScore === c.gnnScore) {
+    signals.push([c.gnnScore, 0.04]);
+  }
+  if (typeof c.safetyScore === "number" && c.safetyScore === c.safetyScore) {
+    signals.push([c.safetyScore, 0.25]);
+  }
+  if (typeof c.marketScore === "number" && c.marketScore === c.marketScore) {
+    signals.push([c.marketScore, 0.12]);
   }
   if (signals.length === 0) return null;
-  const totalWeight = signals.reduce((s, x) => s + x.weight, 0);
-  return signals.reduce((s, x) => s + (x.value * x.weight) / totalWeight, 0);
+  const totalW = signals.reduce((s, [, w]) => s + w, 0);
+  if (totalW <= 0) return null;
+  return signals.reduce((s, [v, w]) => s + v * w, 0) / totalW;
 }
+
+/**
+ * Health check — useful for the /api/system/status route.
+ */
+export async function checkRlHealth(): Promise<{
+  configured: boolean;
+  reachable: boolean;
+  checkpointConfigured: boolean;
+  csvOutputAvailable: boolean;
+  version?: string;
+}> {
+  const baseUrl = getRlServiceUrl();
+  if (!baseUrl) {
+    return {
+      configured: false,
+      reachable: false,
+      checkpointConfigured: false,
+      csvOutputAvailable: false,
+    };
+  }
+  const url = buildServiceUrl(baseUrl, "/health");
+  const result = await mlFetch<unknown>(url, {
+    service: SERVICE_NAME,
+    method: "GET",
+    timeoutMs: 5_000,
+    maxRetries: 1,
+  });
+  if (!result.ok) {
+    return {
+      configured: true,
+      reachable: false,
+      checkpointConfigured: false,
+      csvOutputAvailable: false,
+    };
+  }
+  const body = result.body as Record<string, unknown>;
+  return {
+    configured: true,
+    reachable: true,
+    checkpointConfigured: Boolean(body?.checkpoint_configured),
+    csvOutputAvailable: Boolean(body?.csv_output_available),
+    version: typeof body?.version === "string" ? body.version : undefined,
+  };
+}
+
+// Re-export the contract type for callers that want the canonical name.
+export type { ContractRlRankResponse };

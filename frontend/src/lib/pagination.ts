@@ -35,15 +35,32 @@ export interface PaginatedResponse<T> {
  * Extract and validate `limit` + `offset` from a URLSearchParams.
  * Returns sane defaults (limit=50, offset=0) when the params are absent
  * or invalid. Always clamps limit to [1, 100] and offset to [0, 2^31-1].
+ *
+ * BE-071 ROOT FIX (v115, LOW): the previous code accepted `limit=0`
+ * (clamped to default) but did NOT explicitly reject `limit=-1` —
+ * `Number.parseInt("-1")` returns -1, which fails the `> 0` check and
+ * falls through to the default. The behavior was correct (no bug),
+ * but the code was unclear about intent. The fix adds an explicit
+ * comment and a stricter check that rejects ANY non-positive limit
+ * (including 0, -1, -100, etc.) with the same default fallback.
+ *
+ * This is a defense-in-depth measure: if a future refactor changes
+ * the check to `>= 0` (allowing 0), the explicit `Math.max(1, ...)`
+ * clamp below ensures limit is ALWAYS at least 1.
  */
 export function parsePagination(params: URLSearchParams): PaginatedQuery {
   const rawLimit = Number.parseInt(params.get("limit") || "", 10);
   const rawOffset = Number.parseInt(params.get("offset") || "", 10);
+  // BE-071: explicit rejection of non-positive limits. `Number.isFinite`
+  // rules out NaN, Infinity, -Infinity. The `> 0` check rules out 0
+  // and negative values. The result is clamped to [1, MAX_PAGE_LIMIT]
+  // via Math.min + Math.max so a future refactor that changes the
+  // default cannot produce limit=0 (which would break Prisma's `take`).
   const limit = Number.isFinite(rawLimit) && rawLimit > 0
-    ? Math.min(rawLimit, MAX_PAGE_LIMIT)
+    ? Math.max(1, Math.min(rawLimit, MAX_PAGE_LIMIT))
     : DEFAULT_PAGE_LIMIT;
   const offset = Number.isFinite(rawOffset) && rawOffset >= 0
-    ? rawOffset
+    ? Math.min(rawOffset, 2_147_483_647) // clamp to INT32_MAX for SQL safety
     : 0;
   return { limit, offset };
 }

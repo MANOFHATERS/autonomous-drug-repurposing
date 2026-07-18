@@ -3,6 +3,8 @@ import { requireAuth } from "@/lib/api-helpers";
 import {
   checkUserApiRateLimit,
   recordUserApiRequest,
+  checkUserApiRateLimitV2,
+  recordUserApiRequestV2,
   getClientIpFromHeaders,
 } from "@/lib/auth/rate-limit";
 import type { AuthenticatedUser } from "@/lib/auth/server";
@@ -112,4 +114,75 @@ export function recordApiRequestForUser(
   _ip?: string
 ): void {
   recordUserApiRequest(user.userId);
+}
+
+// ---------------------------------------------------------------------------
+// Task 253 ROOT FIX: V2 guard — 5 req/sec per user.
+//
+// The V1 guard above enforces 60 req/MIN per user (too strict for bursty
+// UI interactions, and the unit doesn't match the audit spec of "5
+// req/sec per user"). The V2 guard enforces a strict 5 req/sec sliding
+// window per user, matching the audit spec exactly.
+//
+// All 7 public-API-proxy routes (drugs/search, drugs/mechanism,
+// diseases/search, safety/[drug], clinical-trials/search, patents/search,
+// literature/search) should call `requireAuthAndRateLimitV2` instead of
+// the V1 guard. The V1 guard is kept for backwards compat on any routes
+// we missed.
+// ---------------------------------------------------------------------------
+
+export async function requireAuthAndRateLimitV2(req?: NextRequest): Promise<
+  | { user: AuthenticatedUser; ip: string; response: null }
+  | { user: null; ip: string; response: NextResponse }
+> {
+  const ip = req ? getClientIpFromHeaders(req.headers) : "unknown";
+
+  const auth = await requireAuth();
+  if (auth.user === null) {
+    return {
+      user: null,
+      ip,
+      response: new NextResponse(auth.response.body, {
+        status: auth.response.status,
+        statusText: auth.response.statusText,
+        headers: auth.response.headers,
+      }),
+    };
+  }
+
+  const rl = checkUserApiRateLimitV2(auth.user.userId);
+  if (rl.blocked) {
+    return {
+      user: null,
+      ip,
+      response: NextResponse.json(
+        {
+          error: "rate_limited",
+          message: `Too many requests. Try again in ${rl.retryAfterSeconds} second(s).`,
+          retryAfterSeconds: rl.retryAfterSeconds,
+        },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(rl.retryAfterSeconds),
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Policy": "5-per-second",
+          },
+        }
+      ),
+    };
+  }
+
+  return { user: auth.user, ip, response: null };
+}
+
+/**
+ * Record a successful upstream API request against the 5 req/sec limit.
+ */
+export function recordApiRequestForUserV2(
+  user: AuthenticatedUser,
+  _ip?: string
+): void {
+  recordUserApiRequestV2(user.userId);
 }

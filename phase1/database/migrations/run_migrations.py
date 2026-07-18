@@ -1488,6 +1488,17 @@ def validate_scientific_constraints(engine) -> list[str]:
                 logger.warning("Could not check molecular_weight precision: %s", exc)
 
             # BUG-SCI-01: InChIKey format check
+            # v117 ROOT FIX (P1-047): wire _INCHIKEY_STANDARD_RE into the
+            # scientific-constraints validator. The regex was compiled at
+            # module level (line 433) but NEVER used — dead code that
+            # misled readers into believing the migration runner validated
+            # InChIKey format. The SQL LENGTH/LIKE check below catches
+            # length violations and SYNTH-prefix exceptions, but does NOT
+            # verify the canonical regex structure (14 uppercase letters,
+            # hyphen, 10 uppercase letters, hyphen, 1 uppercase letter).
+            # The Python-side regex check below catches malformed InChIKeys
+            # that have the right LENGTH but wrong character composition
+            # (e.g., lowercase letters, digits in block 2, missing hyphens).
             if _column_exists(inspector, "drugs", "inchikey"):
                 try:
                     r = conn.execute(
@@ -1515,6 +1526,33 @@ def validate_scientific_constraints(engine) -> list[str]:
                         logger.warning(msg)
                 except (OperationalError, ProgrammingError) as exc:
                     logger.warning("Could not check InChIKey format: %s", exc)
+
+                # v117 P1-047: strict Python-side regex check (catches
+                # right-length-but-wrong-composition InChIKeys that the
+                # SQL LENGTH check misses).
+                try:
+                    r = conn.execute(
+                        text("SELECT inchikey FROM drugs WHERE inchikey IS NOT NULL")
+                    )
+                    bad_regex_keys: list[str] = []
+                    for (inchikey,) in r.fetchall():
+                        if inchikey.startswith(SYNTHETIC_INCHIKEY_PREFIX):
+                            continue  # SYNTH-prefixed surrogate keys bypass the canonical regex
+                        if not _INCHIKEY_STANDARD_RE.match(inchikey):
+                            bad_regex_keys.append(inchikey)
+                    if bad_regex_keys:
+                        msg = (
+                            f"SCI-MIG-07a: {len(bad_regex_keys)} drug(s) have "
+                            f"InChIKey(s) that fail the canonical regex "
+                            f"^[A-Z]{{14}}-[A-Z]{{10}}-[A-Z]$ (right length but "
+                            f"wrong character composition). First few: "
+                            f"{bad_regex_keys[:5]}. These will be rejected by "
+                            f"downstream validation (normalizer.is_canonical_inchikey)."
+                        )
+                        warnings_list.append(msg)
+                        logger.warning(msg)
+                except (OperationalError, ProgrammingError) as exc:
+                    logger.warning("Could not run strict InChIKey regex check: %s", exc)
 
             # BUG-SCI-01: molecular_weight > 0 check
             try:
@@ -6205,9 +6243,222 @@ def get_database_fingerprint(engine) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
+# P1-042 ROOT FIX (v110): the previous CLI only supported FORWARD migrations
+# (``python run_migrations.py``). The ``rollback_migration()`` function
+# existed in the public API but was NOT invokable from the CLI — operators
+# had to write a Python one-liner to call it. The audit's specific
+# complaint: "down migrations are not invoked by the runner."
+#
+# ROOT FIX: add ``argparse``-based CLI with three modes:
+#   1. ``python run_migrations.py``                   — apply pending forward migrations (default)
+#   2. ``python run_migrations.py --rollback NAME``   — rollback a specific migration by filename
+#                                                          (e.g. ``--rollback 013_is_fda_approved_nullable.sql``)
+#   3. ``python run_migrations.py --down N``          — rollback the LAST N applied migrations
+#                                                          (e.g. ``--down 2`` rolls back the 2 most recent)
+#   4. ``python run_migrations.py --status``          — print migration status (applied / pending / failed)
+#   5. ``python run_migrations.py --check``           — verify all migrations are applied + ORM matches
+#
+# All rollback operations execute the per-migration ``<name>_rollback.sql``
+# sidecar inside a single transaction. If a sidecar is missing, the CLI
+# exits with a clear error naming the missing file.
+
+def _build_cli_parser():
+    """Build the argparse parser for the migration CLI."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="run_migrations",
+        description=(
+            "Cross-dialect migration runner for the Drug Repurposing ETL platform. "
+            "Supports forward migrations, rollback (down migrations), status checks, "
+            "and ORM/schema parity verification."
+        ),
+    )
+    parser.add_argument(
+        "--rollback",
+        metavar="MIGRATION_FILENAME",
+        default=None,
+        help=(
+            "Rollback (down-migrate) a specific migration by filename. "
+            "Example: --rollback 013_is_fda_approved_nullable.sql. "
+            "Executes the <name>_rollback.sql sidecar inside a single "
+            "transaction. If the sidecar is missing, exits with a clear "
+            "error naming the missing file."
+        ),
+    )
+    parser.add_argument(
+        "--down",
+        type=int,
+        metavar="N",
+        default=None,
+        help=(
+            "Rollback the LAST N applied migrations (in reverse order). "
+            "Example: --down 2 rolls back the 2 most recently applied "
+            "migrations. Reads _migration_history to determine the order."
+        ),
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        default=False,
+        help="Print migration status (applied / pending / failed) and exit.",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        default=False,
+        help=(
+            "Verify all migrations are applied AND the ORM matches the DB "
+            "schema. Exits 0 if healthy, 1 if drift detected."
+        ),
+    )
+    return parser
+
+
+def _cli_rollback_one(migration_filename: str) -> int:
+    """Rollback a single migration by filename. Returns process exit code."""
+    # Normalize the filename — accept both "013_is_fda_approved_nullable"
+    # and "013_is_fda_approved_nullable.sql".
+    if not migration_filename.endswith(".sql"):
+        migration_filename = migration_filename + ".sql"
+    try:
+        result = rollback_migration(migration_filename)
+    except (NotImplementedError, FileNotFoundError) as exc:
+        print(f"ROLLBACK FAILED: {exc}")
+        return 1
+    except RuntimeError as exc:
+        print(f"ROLLBACK FAILED: {exc}")
+        return 1
+    if result.get("rolled_back"):
+        print(
+            f"ROLLBACK COMPLETE: {migration_filename} — "
+            f"{result.get('statements_executed', 0)} statements executed in "
+            f"{result.get('elapsed_s', 0.0):.2f}s."
+        )
+        return 0
+    print(f"ROLLBACK FAILED: {result.get('error', 'unknown error')}")
+    return 1
+
+
+def _cli_rollback_last_n(n: int) -> int:
+    """Rollback the last N applied migrations (reverse order)."""
+    if n <= 0:
+        print(f"ROLLBACK FAILED: --down requires N >= 1, got {n}.")
+        return 1
+    # Resolve the engine so we can query _migration_history.
+    try:
+        engine = _resolve_engine(None)
+    except Exception as exc:
+        print(f"ROLLBACK FAILED: could not resolve engine ({exc}).")
+        return 1
+    from sqlalchemy import text as _sa_text
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(
+                _sa_text(
+                    "SELECT migration_name FROM _migration_history "
+                    "WHERE status = 'applied' "
+                    "ORDER BY id DESC LIMIT :n"
+                ),
+                {"n": n},
+            ).fetchall()
+    except Exception as exc:
+        print(f"ROLLBACK FAILED: could not read _migration_history ({exc}).")
+        return 1
+    if not rows:
+        print(f"ROLLBACK: no applied migrations to roll back (requested {n}).")
+        return 0
+    if len(rows) < n:
+        print(
+            f"ROLLBACK: only {len(rows)} applied migration(s) found — "
+            f"rolling back all of them (requested {n})."
+        )
+    exit_code = 0
+    for row in rows:
+        name = row[0]
+        print(f"  Rolling back {name}...")
+        rc = _cli_rollback_one(name)
+        if rc != 0:
+            exit_code = rc
+            break  # stop on first failure — don't roll back further
+    return exit_code
+
+
+def _cli_print_status() -> int:
+    """Print migration status. Returns process exit code."""
+    try:
+        engine = _resolve_engine(None)
+    except Exception as exc:
+        print(f"STATUS FAILED: could not resolve engine ({exc}).")
+        return 1
+    status = get_migration_status(engine)
+    print("=== Migration Status ===")
+    print(f"  Applied:  {len(status.applied)}")
+    print(f"  Pending:  {len(status.pending)}")
+    print(f"  Failed:   {len(status.failed)}")
+    if status.applied:
+        print("  Applied migrations:")
+        for name in status.applied:
+            print(f"    - {name}")
+    if status.pending:
+        print("  Pending migrations:")
+        for name in status.pending:
+            print(f"    - {name}")
+    if status.failed:
+        print("  Failed migrations:")
+        for name in status.failed:
+            print(f"    - {name}")
+    return 0 if not status.failed else 1
+
+
+def _cli_check() -> int:
+    """Verify all migrations are applied + ORM matches. Returns exit code."""
+    try:
+        engine = _resolve_engine(None)
+    except Exception as exc:
+        print(f"CHECK FAILED: could not resolve engine ({exc}).")
+        return 1
+    health = check_migrations(engine)
+    print("=== Migration Health Check ===")
+    print(f"  All applied:        {health.all_applied}")
+    print(f"  Schema version OK:  {health.schema_version_matches}")
+    print(f"  Healthy:            {health.healthy}")
+    if health.missing:
+        print(f"  Missing migrations: {health.missing}")
+    if health.errors:
+        print(f"  Errors:")
+        for err in health.errors:
+            print(f"    - {err}")
+    # Also verify ORM parity.
+    try:
+        parity = verify_schema_matches_orm(engine)
+        print(f"  ORM parity:         {parity.get('matches', 'unknown')}")
+        if not parity.get("matches", True):
+            print(f"  Drift details:      {parity.get('drift', {})}")
+            return 1
+    except Exception as exc:
+        print(f"  ORM parity check failed: {exc}")
+        return 1
+    return 0 if health.healthy else 1
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    parser = _build_cli_parser()
+    args = parser.parse_args()
+
+    # Dispatch based on the flags. --check, --status, --rollback, --down
+    # are mutually exclusive with the default forward-migration mode.
+    if args.check:
+        raise SystemExit(_cli_check())
+    if args.status:
+        raise SystemExit(_cli_print_status())
+    if args.rollback:
+        raise SystemExit(_cli_rollback_one(args.rollback))
+    if args.down is not None:
+        raise SystemExit(_cli_rollback_last_n(args.down))
+
+    # Default: forward migrations.
     result = run_migrations()
     if hasattr(result, "failed") and result.failed:
         print(f"MIGRATION FAILED: {len(result.failed)} migration(s) failed")

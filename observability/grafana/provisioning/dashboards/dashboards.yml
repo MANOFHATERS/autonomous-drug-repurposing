@@ -1,0 +1,12 @@
+# v116 IN-040 ROOT FIX: Grafana dashboard provider config.
+apiVersion: 1
+
+providers:
+  - name: 'drugos-dashboards'
+    orgId: 1
+    folder: 'DrugOS'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

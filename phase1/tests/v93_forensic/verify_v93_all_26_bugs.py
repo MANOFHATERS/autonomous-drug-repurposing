@@ -278,11 +278,14 @@ check("P1-028 source_id empty -> None", test_p1_028_source_id_none)
 # ============================================================================
 def test_p1_029_omim_single_source():
     from pipelines.omim_pipeline import SCORE_BY_MAPPING_KEY
-    # The canonical map should have the correct values
+    # v106 P1-006 ROOT FIX: the canonical map uses Piñero 2020 §2.3 values.
+    # The old wrong values (0.5/0.6 for mk=1/mk=2) were 2.4x-2.5x too high
+    # and caused the GNN to over-weight weakly-supported disease-gene
+    # associations. The correct values are 0.2/0.25 (weak tier).
     assert SCORE_BY_MAPPING_KEY[3] == 0.9, f"mk=3 should be 0.9, got {SCORE_BY_MAPPING_KEY[3]}"
     assert SCORE_BY_MAPPING_KEY[4] == 0.8, f"mk=4 should be 0.8, got {SCORE_BY_MAPPING_KEY[4]}"
-    assert SCORE_BY_MAPPING_KEY[2] == 0.6, f"mk=2 should be 0.6, got {SCORE_BY_MAPPING_KEY[2]}"
-    assert SCORE_BY_MAPPING_KEY[1] == 0.5, f"mk=1 should be 0.5, got {SCORE_BY_MAPPING_KEY[1]}"
+    assert SCORE_BY_MAPPING_KEY[2] == 0.25, f"mk=2 should be 0.25 (Piñero 2020 weak tier), got {SCORE_BY_MAPPING_KEY[2]}"
+    assert SCORE_BY_MAPPING_KEY[1] == 0.2, f"mk=1 should be 0.2 (Piñero 2020 weak tier), got {SCORE_BY_MAPPING_KEY[1]}"
 
     # The validator in missing_values.py should import from the pipeline
     # (lazy import -- verified by source code inspection, but we can also
@@ -647,7 +650,7 @@ check("P1-046 docstring matches default", test_p1_046_docstring_matches_default)
 # P1-047: embedded_samples gene_mim != disease_id
 # ============================================================================
 def test_p1_047_gene_mim_distinct():
-    from pipelines._embedded_samples import embedded_omim_gda
+    from pipelines._dev_samples import embedded_omim_gda
     df = embedded_omim_gda()
     # For each row, gene_mim should be DIFFERENT from the numeric part
     # of disease_id (no self-loops).

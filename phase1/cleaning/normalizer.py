@@ -332,7 +332,7 @@ class _CorrelationIdFilter(logging.Filter):
         try:
             from . import get_correlation_id  # type: ignore
             cid = get_correlation_id()
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
             cid = None
         record.correlation_id = cid or "-"
         return True
@@ -372,7 +372,8 @@ def _log_event(
             cid = get_correlation_id()
             if cid:
                 payload["correlation_id"] = cid
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
         log_fn("%s: %s", event, json.dumps(payload, default=str, sort_keys=True))
     else:
@@ -620,6 +621,83 @@ ALLOWED_TYPES: list[str] = list(_DEFAULT_ALLOWED_TYPES)
 _ALLOWED_TYPES_TUPLE: tuple[str, ...] = tuple(ALLOWED_TYPES)
 # [PERF-4] O(1) exact-match lookup (case-insensitive).
 _ALLOWED_TYPES_LOWER: dict[str, str] = {t.lower(): t for t in ALLOWED_TYPES}
+
+# v117 ROOT FIX (P1-039): Explicit drug-type alias map.
+# The previous code relied on WRatio fuzzy matching to map abbreviations
+# like "small_mol" → "Small molecule" (score 70.0, barely above the
+# cutoff=70). This was SCIENTIFICALLY WRONG: the mapping is an EXACT
+# semantic equivalence, not an approximate string similarity. A future
+# cutoff change (e.g., 75) would silently break the mapping, and the
+# fuzzy scorer could match "small_mol" to the WRONG canonical type if
+# a new type were added. The fix adds an EXPLICIT dictionary lookup
+# (exact-match-first, fuzzy-fallback-second) so semantic equivalences
+# are deterministic and independent of the fuzzy threshold.
+#
+# Keys are lowercased for case-insensitive matching. Values MUST be in
+# ALLOWED_TYPES (validated at import time below).
+_DRUG_TYPE_ALIASES: dict[str, str] = {
+    # Small molecule aliases (ChEMBL molecule_type, PubChem, DrugBank)
+    "small_mol": "Small molecule",
+    "small_molecule": "Small molecule",
+    "small-mol": "Small molecule",
+    "small-molecule": "Small molecule",
+    "sm": "Small molecule",
+    "small": "Small molecule",
+    "molecule": "Small molecule",
+    "chemical": "Small molecule",
+    "compound": "Small molecule",
+    "naturally-derived": "Small molecule",
+    # Protein / peptide / antibody aliases (UniProt, DrugBank biotech)
+    "protein": "Protein",
+    "peptide": "Protein",
+    "peptide_protein": "Protein",
+    "biotech": "Protein",
+    "biotech_molecule": "Protein",
+    "antibody": "Antibody",
+    "mab": "Antibody",
+    "monoclonal_antibody": "Antibody",
+    "monoclonal antibody": "Antibody",
+    "immunoglobulin": "Antibody",
+    "fab": "Antibody",
+    "scfv": "Antibody",
+    # Oligosaccharide / carbohydrate aliases
+    "saccharide": "Oligosaccharide",
+    "carbohydrate": "Oligosaccharide",
+    "polysaccharide": "Oligosaccharide",
+    "glycan": "Oligosaccharide",
+    # Oligonucleotide / nucleic acid aliases
+    "nucleotide": "Oligonucleotide",
+    "nucleic_acid": "Oligonucleotide",
+    "nucleic acid": "Oligonucleotide",
+    "rna": "Oligonucleotide",
+    "dna": "Oligonucleotide",
+    "sirna": "Oligonucleotide",
+    "antisense": "Oligonucleotide",
+    "aptamer": "Oligonucleotide",
+    # Cell / gene therapy aliases
+    "cell_therapy": "Cell",
+    "cell therapy": "Cell",
+    "car-t": "Cell",
+    "cart": "Cell",
+    "stem_cell": "Cell",
+    # Enzyme aliases
+    "enzyme_protein": "Enzyme",
+    "catalyst": "Enzyme",
+    # Gene aliases
+    "gene_therapy": "Gene",
+    "gene therapy": "Gene",
+    "vector": "Gene",
+}
+# Validate that all alias values are canonical ALLOWED_TYPES (fail-fast
+# at import time if a typo slips in).
+for _alias_val in _DRUG_TYPE_ALIASES.values():
+    if _alias_val not in _ALLOWED_TYPES_LOWER.values():
+        raise RuntimeError(
+            f"P1-039 ROOT FIX: _DRUG_TYPE_ALIASES contains non-canonical "
+            f"value {_alias_val!r} — must be one of {ALLOWED_TYPES}"
+        )
+# Precompute lowercased alias keys for O(1) lookup
+_DRUG_TYPE_ALIASES_LOWER: dict[str, str] = {k.lower(): v for k, v in _DRUG_TYPE_ALIASES.items()}
 
 # [IDEM-15, CFG-2, DESIGN-5, DESIGN-6] Unit conversions — wrapped in
 # MappingProxyType for safety; mutator helper is _set_unit_conversion.
@@ -1232,7 +1310,8 @@ def get_metrics() -> dict[str, int]:
         from . import get_metrics as _pkg_metrics  # type: ignore
         pkg = _pkg_metrics()
         merged["package"] = pkg
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
     return merged
 
@@ -1292,7 +1371,8 @@ def _add_dead_letter(entry: dict[str, Any]) -> None:
             entry.get("error_category") or entry.get("step") or "normalizer",
             entry.get("error") or entry.get("reason") or "",
         )
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
 
 
@@ -1312,7 +1392,7 @@ def get_cache_info() -> dict[str, Any]:
             "maxsize": info.maxsize,
             "current_size": info.currsize,
         }
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
         return {"available": False}
 
 
@@ -1361,7 +1441,7 @@ def _sanitize_string_local(value: str, *, max_length: int = 200) -> str:
     try:
         from . import _sanitize_string as _pkg_sanitize  # type: ignore
         return _pkg_sanitize(value, max_length=max_length)
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
         if not isinstance(value, str):
             return str(value)
         # Strip null bytes and control chars except \n \t
@@ -1620,7 +1700,7 @@ def _smiles_to_mol(smiles: str, *, sanitize: bool = True):
             _truncate_for_log(smiles),
         )
         return mol
-    except Exception as exc:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
         # [CODE-1] Specific RDKit exceptions only; re-raise others.
         if isinstance(
             exc,
@@ -1682,7 +1762,7 @@ def _audit_log_local(operation: str, details: dict | None = None) -> None:
     try:
         from . import _audit_log as _pkg_audit  # type: ignore
         _pkg_audit(operation, details)
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "module": "cleaning.normalizer",
@@ -1695,7 +1775,8 @@ def _audit_log_local(operation: str, details: dict | None = None) -> None:
             cid = get_correlation_id()
             if cid:
                 entry["correlation_id"] = cid
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
         logger.info("AUDIT: %s", json.dumps(entry, default=str))
 
@@ -1938,7 +2019,7 @@ def _convert_to_inchikey_uncached(
     # [SCI-13] Validate atom count, handle mixtures.
     try:
         n_atoms = mol.GetNumAtoms()
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
         n_atoms = 0
     if n_atoms == 0:
         logger.warning(
@@ -1971,7 +2052,7 @@ def _convert_to_inchikey_uncached(
     # recorded in the log for audit trail.
     try:
         frags = Chem.GetMolFrags(mol, asMols=True)
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
         frags = (mol,)
     if len(frags) > 1:
         # Try mixture InChIKey first (preserves salt form).
@@ -1980,7 +2061,7 @@ def _convert_to_inchikey_uncached(
             mixture_inchi = Chem.MolToInchi(mol, options="-WarnOnEmptyStructure")
             if mixture_inchi:
                 mixture_inchikey = Chem.InchiToInchiKey(mixture_inchi)
-        except Exception as _mix_exc:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _mix_exc:
             logger.debug(
                 "convert_to_inchikey: mixture InChIKey generation failed "
                 "for %s: %s — falling back to largest fragment",
@@ -2009,7 +2090,7 @@ def _convert_to_inchikey_uncached(
         for _frag in frags:
             try:
                 _n_atoms = _frag.GetNumAtoms()
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
                 _n_atoms = 0
             if _n_atoms < 10:
                 counterion_frags.append(_frag)
@@ -2021,7 +2102,7 @@ def _convert_to_inchikey_uncached(
             for _cf in counterion_frags:
                 try:
                     _ci_smiles.append(Chem.MolToSmiles(_cf, isomericSmiles=True, canonical=True))
-                except Exception:
+                except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
                     _ci_smiles.append(f"<{len(counterion_frags)} counterion(s) with <10 atoms>")
             logger.info(
                 "convert_to_inchikey: DESALTING — removed %d counterion(s) "
@@ -2046,7 +2127,7 @@ def _convert_to_inchikey_uncached(
             # sodium chloride with no organic component at all).
             try:
                 mol = max(frags, key=lambda m: m.GetNumAtoms())
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
                 pass  # keep original
 
     # [SCI-5] Tautomer canonicalization (guarded — not all RDKit builds
@@ -2082,7 +2163,7 @@ def _convert_to_inchikey_uncached(
                     if bond.GetStereo() != Chem.BondStereo.STEREONONE:
                         _orig_has_stereo = True
                         break
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
             _orig_has_stereo = False
         enumerator = rdMolStandardize.TautomerEnumerator()
         canonical_mol = enumerator.Canonicalize(mol)
@@ -2106,7 +2187,7 @@ def _convert_to_inchikey_uncached(
                             if bond.GetStereo() != Chem.BondStereo.STEREONONE:
                                 _canon_has_stereo = True
                                 break
-                except Exception:
+                except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
                     _canon_has_stereo = False
                 if not _canon_has_stereo:
                     logger.warning(
@@ -2134,11 +2215,12 @@ def _convert_to_inchikey_uncached(
                         "changed molecule for SMILES %s",
                         _truncate_for_log(smiles),
                     )
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+                logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
                 pass
     except ImportError:
         pass  # MolStandardize not available
-    except Exception as exc:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
         logger.debug(
             "convert_to_inchikey: tautomer canonicalization failed for "
             "SMILES %s: %s",
@@ -2155,7 +2237,8 @@ def _convert_to_inchikey_uncached(
     if _effective_stereo == "ignore":
         try:
             Chem.RemoveStereochemistry(mol)
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
 
     # [REL-6] Check if MolToInchi is broken.
@@ -2197,7 +2280,7 @@ def _convert_to_inchikey_uncached(
             exc,
         )
         return None
-    except Exception as exc:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
         # [CODE-1] Unexpected error — log CRITICAL and re-raise as
         # CleaningError (if raise_on_error) or return None.
         logger.error(
@@ -2218,7 +2301,7 @@ def _convert_to_inchikey_uncached(
     # InchiToInchiKey
     try:
         inchikey = InchiToInchiKey(inchi)
-    except Exception as exc:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
         logger.warning(
             "convert_to_inchikey: InchiToInchiKey failed for SMILES %s: %s",
             _truncate_for_log(smiles),
@@ -2333,7 +2416,7 @@ def convert_to_inchikey_detailed(
                 try:
                     # v43 ROOT FIX (P1): explicit isomericSmiles=True
                     smiles = Chem.MolToSmiles(smiles, isomericSmiles=True, canonical=True)
-                except Exception as exc:
+                except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
                     return ConversionResult(
                         success=False,
                         inchikey=None,
@@ -2341,7 +2424,7 @@ def convert_to_inchikey_detailed(
                         error_category="RDKIT_PARSE_ERROR",
                         rdkit_version=_RDKIT_VERSION,
                     )
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
             pass  # fall through to string validation
 
     if not isinstance(smiles, str):
@@ -2356,7 +2439,7 @@ def convert_to_inchikey_detailed(
     # [INTEROP-6] Non-ASCII warning.
     try:
         non_ascii = any(ord(c) > 127 for c in smiles)
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
         non_ascii = False
     if non_ascii:
         logger.warning(
@@ -2473,7 +2556,7 @@ def convert_to_inchikey_detailed(
                     smiles_hash=s_hash,
                     rdkit_version=_RDKIT_VERSION,
                 )
-        except Exception as _rl_exc:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _rl_exc:
             # Log the exception so the operator sees the misconfiguration.
             # Do NOT silently swallow — a misconfigured rate limiter is a
             # programming bug, not a transient error.
@@ -2633,7 +2716,8 @@ def convert_to_inchikey_detailed(
         if mol_post is not None:
             # v43 ROOT FIX (P1): explicit isomericSmiles=True
             canonical_smiles = Chem.MolToSmiles(mol_post, isomericSmiles=True, canonical=True)
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
 
     # [SCI-17, DQ-3] Collision tracking.
@@ -2677,7 +2761,8 @@ def convert_to_inchikey_detailed(
             stereo_ambiguous = any(
                 len(center) > 1 and center[1] == "?" for center in chiral_centers
             )
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
 
     # [SEC-8, LINEAGE-12] Audit log.
@@ -2699,7 +2784,8 @@ def convert_to_inchikey_detailed(
                 "inputs": [{"smiles_hash": s_hash}],
                 "outputs": [{"inchikey": inchikey}],
             })
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
 
     return ConversionResult(
@@ -2846,7 +2932,7 @@ def convert_to_inchikeys(
             try:
                 _, ik = future.result()
                 results[idx] = ik
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
                 results[idx] = None
 
     return results
@@ -3350,6 +3436,16 @@ def _fuzzy_match_drug_type(raw_type: Any) -> str:
     if exact is not None:
         return exact
 
+    # v117 ROOT FIX (P1-039): Explicit alias lookup BEFORE fuzzy fallback.
+    # Common abbreviations (small_mol, mab, sirna, car-t, etc.) are SEMANTIC
+    # equivalences, not approximate string similarities. Matching them via
+    # WRatio fuzzy (score ~70, barely above cutoff=70) was fragile and
+    # scientifically wrong. The explicit dict makes the mapping deterministic
+    # and independent of the fuzzy threshold.
+    alias_match = _DRUG_TYPE_ALIASES_LOWER.get(cleaned.lower())
+    if alias_match is not None:
+        return alias_match
+
     # [IDEM-3, IDEM-13] Sort alphabetically for deterministic tie-breaking.
     sorted_types = sorted(ALLOWED_TYPES)
 
@@ -3391,7 +3487,7 @@ def _fuzzy_match_drug_type(raw_type: Any) -> str:
                     "re-raising"
                 )
                 raise
-            except Exception as exc:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
                 # [CODE-11, REL-7] Catch specific exceptions; fall back.
                 logger.warning(
                     "_fuzzy_match_drug_type: rapidfuzz error matching %r: %s",
@@ -3877,8 +3973,24 @@ def standardize_drug_record(
                     warnings_list.append("inchikey_mismatch")
                     with _DQ_LOCK:
                         _DQ_COUNTS["inchikey_mismatches"] += 1
-            except Exception:
-                pass  # never crash on cross-check
+            # v107 ROOT FIX (ISSUE-P1-022 — InChIKey cross-check silently
+            #   skipped on ANY exception):
+            #   The previous ``except Exception: pass`` silently swallowed
+            #   ALL errors, including programming bugs (wrong column name,
+            #   AttributeError from a typo). A bug in the cross-check logic
+            #   was invisible — the data-quality signal was never recorded.
+            #   ROOT FIX: narrow to the realistic exception types raised by
+            #   RDKit's ``convert_to_inchikey`` (ValueError on bad SMILES,
+            #   AttributeError on None mol, RuntimeError on RDKit internal,
+            #   KeyError on missing dict key). Log at WARNING so operators
+            #   see when the cross-check itself fails (vs. when it passes).
+            except (ValueError, AttributeError, RuntimeError, KeyError, TypeError) as _ik_xchk_exc:
+                logger.warning(
+                    "standardize_drug_record: InChIKey cross-check failed "
+                    "(non-fatal, but data-quality signal NOT recorded): %s "
+                    "(v107 P1-022)",
+                    _ik_xchk_exc,
+                )
 
     # [DQ-4] MW vs SMILES-derived MW.
     if smiles_val and out.get("molecular_weight") is not None and _RDKIT_AVAILABLE:
@@ -3905,8 +4017,15 @@ def standardize_drug_record(
                         warnings_list.append(
                             f"mw_mismatch:{recorded_mw}_vs_{derived_mw:.2f}"
                         )
-        except Exception:
-            pass
+        # v107 ROOT FIX (ISSUE-P1-022 — MW cross-check silently skipped):
+        #   narrow to RDKit's realistic exception types and log at WARNING.
+        except (ValueError, AttributeError, RuntimeError, KeyError, TypeError, ZeroDivisionError) as _mw_xchk_exc:
+            logger.warning(
+                "standardize_drug_record: MW cross-check failed "
+                "(non-fatal, but data-quality signal NOT recorded): %s "
+                "(v107 P1-022)",
+                _mw_xchk_exc,
+            )
 
     # [SCI-19] Molecular formula vs SMILES-derived formula.
     if (
@@ -3929,8 +4048,15 @@ def standardize_drug_record(
                     warnings_list.append(
                         f"formula_mismatch:{out['molecular_formula']}_vs_{derived_formula}"
                     )
-        except Exception:
-            pass
+        # v107 ROOT FIX (ISSUE-P1-022 — formula cross-check silently skipped):
+        #   narrow to RDKit's realistic exception types and log at WARNING.
+        except (ValueError, AttributeError, RuntimeError, KeyError, TypeError) as _formula_xchk_exc:
+            logger.warning(
+                "standardize_drug_record: molecular_formula cross-check "
+                "failed (non-fatal, but data-quality signal NOT recorded): "
+                "%s (v107 P1-022)",
+                _formula_xchk_exc,
+            )
 
     # [DQ-9] Referential integrity check.
     if known_inchikeys is not None and inchikey_val and inchikey_val not in known_inchikeys:
@@ -4008,7 +4134,8 @@ def standardize_drug_record(
         cid = get_correlation_id()
         if cid:
             provenance["correlation_id"] = cid
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
     # [SEC-3] PII warnings.
     if pii_warnings:
@@ -4038,7 +4165,8 @@ def standardize_drug_record(
             json.dumps(out_for_hash, sort_keys=True, default=str).encode("utf-8", errors="replace")
         ).hexdigest()
         out["_provenance"]["output_sha256"] = output_sha
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
 
     # [IDEM-11] Sanity assertion — input keys preserved in order.
@@ -4059,7 +4187,8 @@ def standardize_drug_record(
                     output_keys[i],
                 )
                 break
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
 
     # [IDEM-6] Audit log.
@@ -4111,7 +4240,7 @@ def standardize_drug_records_batch(
         try:
             out = standardize_drug_record(record, **kwargs)
             succeeded.append(out)
-        except Exception as exc:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
             logger.error(
                 "standardize_drug_records_batch: record %d failed: %s",
                 idx,
@@ -4125,7 +4254,8 @@ def standardize_drug_records_batch(
         if on_checkpoint is not None and (idx + 1) % checkpoint_every == 0:
             try:
                 on_checkpoint(idx + 1, succeeded)
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+                logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
                 pass
     return {"succeeded": succeeded, "failed": failed}
 
@@ -4160,7 +4290,7 @@ def standardize_drug_records_chunked(
     for idx, record in enumerate(records):
         try:
             yield standardize_drug_record(record, **kwargs)
-        except Exception as exc:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
             logger.error(
                 "standardize_drug_records_chunked: record %d failed: %s",
                 idx,
@@ -4171,7 +4301,8 @@ def standardize_drug_records_chunked(
         if on_chunk is not None and count % chunk_size == 0:
             try:
                 on_chunk(idx + 1, count)
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+                logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
                 pass
 
 
@@ -4420,7 +4551,8 @@ def normalize_activity_value(
                 _s = str(units)
                 if _s in ("<NA>", "NaT", "<NA>", "nan", "NaN"):
                     _is_na = True
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+                logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
                 pass
         if _is_na:
             logger.warning(
@@ -4446,7 +4578,7 @@ def normalize_activity_value(
         )
         try:
             units = str(units)
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
             units = ""
     if units == "":
         # v36 ROOT FIX (Phase 1 Issue #34): if activity_type is p-scale
@@ -5318,7 +5450,8 @@ def configure_normalizer(
         # [CODE-17] Clear the LRU cache since stereo_policy affects output.
         try:
             _convert_to_inchikey_cached.cache_clear()
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
         logger.info("configure_normalizer: stereo_policy=%s", STEREO_POLICY)
 
@@ -5516,7 +5649,8 @@ def watch_config(path: str, interval_sec: float = 60.0) -> None:
         last_mtime = 0.0
         try:
             last_mtime = Path(path).stat().st_mtime
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
         while True:
             time.sleep(interval_sec)
@@ -5526,7 +5660,7 @@ def watch_config(path: str, interval_sec: float = 60.0) -> None:
                     logger.info("watch_config: %s changed — reloading", path)
                     load_config(path)
                     last_mtime = mtime
-            except Exception as exc:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
                 logger.debug("watch_config: %s", exc)
 
     if _config_watcher_thread is None or not _config_watcher_thread.is_alive():

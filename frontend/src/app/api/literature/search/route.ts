@@ -21,6 +21,16 @@ import {
 // ROOT FIX: Standardize on `{ items: [...], total: number, ... }`. We map
 // the service's `articles` field to `items` and pass through `total`,
 // `limit`, and `offset` for paginated follow-up requests.
+//
+// Issue 229 ROOT FIX: the audit reported that `api.searchClinicalTrials`
+// was called without `condition`/`intervention` and always 400'd. After
+// forensic code reading, the literature/search route does NOT call
+// searchClinicalTrials — it calls searchPubMed directly (line 43 below).
+// The `api.searchClinicalTrials` client in api-client.ts (line 577) WAS
+// fixed in a prior FE-022 commit to require `{ condition?, intervention? }`.
+// This route is verified correct: it calls searchPubMed with a `query`
+// string, which is the correct contract for PubMed literature search
+// (PubMed accepts free-text queries, not condition/intervention pairs).
 export async function GET(req: NextRequest) {
   const guard = await requireAuthAndRateLimit(req);
   if (guard.response !== null) return guard.response;

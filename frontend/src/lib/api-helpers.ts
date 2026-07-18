@@ -20,13 +20,47 @@ export async function requireAuth(): Promise<{ user: AuthenticatedUser; response
 export async function requireAdmin(): Promise<{ user: AuthenticatedUser; response: null } | { user: null; response: Response }> {
   const auth = await requireAuth();
   if (auth.user === null) return auth;
-  if (auth.user.role !== "admin" && auth.user.role !== "owner") {
+  // BE-002 ROOT FIX: accept admin, owner, AND platformOwner. All three are
+  // "admin-level" roles for the purpose of requireAdmin (they can all
+  // access admin endpoints). The DIFFERENCE is in cross-tenant scoping:
+  // only `platformOwner` bypasses org scoping (see isPlatformSuperuser).
+  // `owner` is now org-scoped just like `admin` — the previous code
+  // granted `owner` system-wide access, which was a multi-tenant data
+  // breach (any user promoted to owner could enumerate every user in
+  // every org). The fix is to introduce `platformOwner` as the ONLY
+  // role with system-wide access, settable only via direct DB access.
+  if (
+    auth.user.role !== "admin" &&
+    auth.user.role !== "owner" &&
+    auth.user.role !== "platformOwner"
+  ) {
     return {
       user: null,
       response: NextResponse.json({ error: "forbidden", message: "Admin access required" }, { status: 403 }),
     };
   }
   return auth;
+}
+
+/**
+ * BE-002 ROOT FIX: returns true ONLY for the `platformOwner` role.
+ *
+ * The `platformOwner` role is the ONLY role that bypasses org scoping.
+ * It is reserved for the SaaS operator's staff and can ONLY be set via
+ * direct DB access — no API route can grant it (ALLOWED_ROLES_ADMIN in
+ * register/route.ts does NOT include "platformOwner").
+ *
+ * Routes that have a "system-wide" path (e.g. admin/users GET without
+ * org filter, audit-logs GET without org filter) MUST gate that path
+ * on `isPlatformSuperuser(auth.user)`. The `owner` and `admin` roles
+ * are org-scoped — they see only their own org's data.
+ *
+ * This is the root fix for the multi-tenant data breach where any user
+ * promoted to `owner` could read every user in every org, suspend any
+ * user system-wide, and read every audit log across all tenants.
+ */
+export function isPlatformSuperuser(user: { role: string } | null): boolean {
+  return user?.role === "platformOwner";
 }
 
 /**
@@ -60,8 +94,11 @@ export async function requireRole(
       ),
     };
   }
-  // Admin/owner are always allowed (superuser bypass).
-  const allowed = new Set([...roles, "admin", "owner"]);
+  // Admin/owner/platformOwner are always allowed (superuser bypass).
+  // BE-002: platformOwner is the new system-wide superuser role. owner
+  // and admin are org-scoped admin-level roles (they can access admin
+  // endpoints but only see their own org's data).
+  const allowed = new Set([...roles, "admin", "owner", "platformOwner"]);
   if (!allowed.has(user.role)) {
     return {
       user: null,
@@ -204,7 +241,13 @@ export async function writeAuditLog(params: {
           // as JSON.
           ...(effectiveOrgId ? { organizationId: effectiveOrgId } : {}),
         }),
-      } as any,
+      },
+      // BE-061 ROOT FIX (v115, LOW): the previous code had `as any` on
+      // the data object — this bypassed TypeScript's type check on the
+      // AuditLog.organizationId field. The fix removes the `as any` so
+      // TypeScript validates the payload. If the Prisma schema is
+      // updated (e.g., a new required field is added), the build will
+      // fail here instead of silently writing null at runtime.
     });
     return { ok: true };
   } catch (e) {
@@ -225,38 +268,86 @@ export async function writeAuditLog(params: {
       return { ok: false, error: errMsg };
     }
 
-    // Non-critical: try to write to a fallback mechanism. If the DB
-    // itself is down, this also fails — but at least we tried.
+    // BE-003 ROOT FIX: non-critical fallback — write to the
+    // AuditLogDeadLetter table (modeled in Prisma schema). The previous
+    // code used raw $executeRaw SQL with CREATE TABLE IF NOT EXISTS on
+    // every call — that had three bugs (see schema.prisma comment for
+    // AuditLogDeadLetter). The Prisma-model path is:
+    //   1. Type-safe (no SQL injection, no DDL on every call).
+    //   2. Queryable from the application layer (operators can list
+    //      dead-letter entries via /api/admin/audit-logs?dead_letter=true).
+    //   3. Monitorable (alert when row count grows — indicates a
+    //      systemic AuditLog write failure that needs operator attention).
+    // If THIS write also fails (DB truly down), we log to stderr as the
+    // last-resort record. The request continues because the action was
+    // non-critical — but the dead-letter entry is the compliance trail.
+    //
+    // The underlying PostgreSQL table name is `audit_log_dead_letter`
+    // (Prisma maps the AuditLogDeadLetter model to this snake_case
+    // table name via the @@map annotation in schema.prisma). The
+    // /api/admin/audit-logs route accepts a `?dead_letter=true` query
+    // param to list rows from this table.
+    //
+    // BE-080 ROOT FIX (v115, LOW): the previous code swallowed the
+    // dead-letter write error silently (only a console.error). The fix
+    // captures the dead-letter error in a structured log entry that
+    // includes the original audit-log params — so operators can
+    // RECONSTRUCT the audit trail from the stderr log if both the
+    // primary AND dead-letter writes fail. The structured format is
+    // machine-parseable for log aggregation (Splunk, CloudWatch Logs,
+    // ELK). The dead-letter error is ALSO returned to the caller (in
+    // the result.error field) so the caller can decide whether to
+    // surface a user-facing warning.
+    let deadLetterError: string | undefined;
     try {
-      // Best-effort fallback: write to a separate "audit_log_dead_letter"
-      // table if it exists. We don't model it in Prisma because adding
-      // a model would require a migration; instead we use $executeRaw
-      // with a CREATE TABLE IF NOT EXISTS so it's idempotent.
-      // For SQLite/Postgres compatible DDL.
-      await db.$executeRaw`CREATE TABLE IF NOT EXISTS audit_log_dead_letter (
-        id SERIAL PRIMARY KEY,
-        action TEXT NOT NULL,
-        resource TEXT,
-        user_id TEXT,
-        actor_name TEXT,
-        metadata TEXT,
-        error TEXT,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-      )`;
-      await db.$executeRaw`INSERT INTO audit_log_dead_letter
-        (action, resource, user_id, actor_name, metadata, error)
-        VALUES (${params.action}, ${params.resource || null},
-                ${params.user?.userId || null},
-                ${params.user?.email || "anonymous"},
-                ${JSON.stringify(params.metadata || {})},
-                ${errMsg})`;
+      await db.auditLogDeadLetter.create({
+        data: {
+          action: params.action,
+          resource: params.resource || null,
+          userId: params.user?.userId || null,
+          actorName: params.user?.email || "anonymous",
+          metadata: JSON.stringify(params.metadata || {}),
+          error: errMsg,
+          // FE-016 ROOT FIX (Team Member 15, v108 — pre-existing build blocker):
+          // We already returned early at line 260 if params.critical === true,
+          // so by the time we reach this dead-letter write, params.critical is
+          // guaranteed to be `false | undefined`. TypeScript narrows the type
+          // accordingly and flags `params.critical === true` as an unintentional
+          // comparison. Use `false` directly — semantically identical to the
+          // narrowed expression.
+          critical: false,
+          ...(effectiveOrgId ? { organizationId: effectiveOrgId } : {}),
+        },
+      });
     } catch (fallbackErr) {
-      // Both primary and fallback failed — the DB is likely down.
-      // The stderr log above is the only record. Operators must
-      // monitor for [AUDIT-LOG-FAILURE] entries.
-      console.error("[AUDIT-LOG-FAILURE] Fallback also failed:", fallbackErr);
+      // BE-080: Both primary and fallback failed — the DB is likely
+      // down. Capture the dead-letter error and log a STRUCTURED
+      // record with the FULL audit-log params so operators can
+      // reconstruct the audit trail from the stderr log.
+      deadLetterError = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+      console.error("[AUDIT-LOG-FAILURE] Dead-letter write ALSO failed — MANUAL RECOVERY REQUIRED:", {
+        originalAuditLog: {
+          action: params.action,
+          resource: params.resource,
+          userId: params.user?.userId,
+          actorName: params.user?.email || "anonymous",
+          organizationId: effectiveOrgId,
+          metadata: params.metadata,
+          ip: params.ip,
+          userAgent: params.userAgent,
+        },
+        primaryError: errMsg,
+        deadLetterError,
+        timestamp: new Date().toISOString(),
+        recoveryAction:
+          "Both the AuditLog and AuditLogDeadLetter tables are unreachable. " +
+          "The audit trail for this event exists ONLY in this log entry. " +
+          "Operators MUST manually re-create the audit log entry once the " +
+          "DB is restored, OR accept that this event is unrecorded (FDA " +
+          "21 CFR Part 11 compliance incident — file a CAPA).",
+      });
     }
-    return { ok: false, error: errMsg };
+    return { ok: false, error: deadLetterError ? `${errMsg} (dead-letter also failed: ${deadLetterError})` : errMsg };
   }
 }
 
@@ -383,28 +474,54 @@ export async function clearCsrfCookie(): Promise<void> {
 }
 
 /**
- * FE-011 ROOT FIX: Validate the CSRF token on every state-changing request.
- * Returns { ok: true, response: null } if the request passes, or
- * { ok: false, response: <403 Response> } if it fails.
+ * BE-078 ROOT FIX: CSRF bypass via fake API key.
+ *
+ * The previous code exempted ANY request with `Authorization: Bearer drugos_...`
+ * from CSRF checks — even if the key was INVALID. An attacker with the victim's
+ * session cookie could send `Authorization: Bearer drugos_fake_key` to skip the
+ * CSRF check, then the cookie auth would still succeed. The attacker could now
+ * make state-changing requests (POST, PATCH, DELETE) without the CSRF token.
+ *
+ * Root fix: Only exempt CSRF if the API key is VALID. We now call
+ * authenticateApiKey() to verify the key before exempting. Invalid API keys
+ * fall through to the normal CSRF check (which will reject the request if
+ * cookies are present but no CSRF token is provided).
  *
  * Exemptions:
- *   - Requests with an `Authorization: Bearer drugos_…` header are EXEMPT.
+ *   - Requests with a VALID `Authorization: Bearer drugos_…` API key are EXEMPT.
  *     API-key auth is not vulnerable to CSRF (the attacker cannot make the
- *     victim's browser send the attacker's key, and even if they could,
- *     they'd be using their own key). Exempting programmatic clients is
+ *     victim's browser send the attacker's key). Exempting VALID API keys is
  *     necessary for the developer platform to work.
  */
 export async function requireCsrfOrSend(req: NextRequest): Promise<{
   ok: boolean;
   response: null;
 } | { ok: false; response: Response }> {
-  // Exemption 1: API-key auth (Bearer drugos_…). Programmatic clients are
-  // not vulnerable to CSRF.
-  const authHeader = req.headers.get("authorization") || req.headers.get("Authorization");
+  // BE-078: Exemption 1 — API-key auth (Bearer drugos_…) ONLY if the key
+  // is VALID. An attacker sending a fake drugos_ prefix to bypass CSRF
+  // will fail the auth check and fall through to the cookie-based CSRF
+  // validation, which will reject the request.
+  //
+  // BE-032 ROOT FIX (v115, LOW): Headers.get() is case-insensitive per
+  // the Fetch API spec (RFC 7230 §3.2). The previous code redundantly
+  // checked `req.headers.get("authorization") || req.headers.get("Authorization")`
+  // — the second call always returns the same value as the first. Same
+  // for the CSRF header check below. Removed the redundant lookups.
+  const authHeader = req.headers.get("authorization");
   if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
     const rawKey = authHeader.slice(7).trim();
     if (rawKey.startsWith("drugos_")) {
-      return { ok: true, response: null };
+      // Verify the key is actually valid before exempting CSRF.
+      const { authenticateApiKey } = await import("@/lib/auth/server");
+      const apiUser = await authenticateApiKey(rawKey);
+      if (apiUser) {
+        // Valid API key — exempt from CSRF (programmatic clients are not
+        // vulnerable to browser-based CSRF attacks).
+        return { ok: true, response: null };
+      }
+      // Invalid API key — do NOT exempt. Fall through to the cookie-based
+      // CSRF check below. This closes the bypass: an attacker with a fake
+      // key and a valid session cookie will still need the CSRF token.
     }
   }
 
@@ -433,7 +550,9 @@ export async function requireCsrfOrSend(req: NextRequest): Promise<{
     return { ok: true, response: null };
   }
 
-  const headerToken = req.headers.get(CSRF_HEADER_NAME) || req.headers.get(CSRF_HEADER_NAME.toUpperCase()) || "";
+  // BE-032 ROOT FIX: Headers.get is case-insensitive per Fetch spec —
+  // removed the redundant `.toUpperCase()` fallback.
+  const headerToken = req.headers.get(CSRF_HEADER_NAME) || "";
 
   if (!cookieToken || !headerToken) {
     return {

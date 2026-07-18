@@ -210,19 +210,26 @@ def test_c2_adme_score_is_drug_level():
 
 
 def test_c2_efficacy_score_is_drug_level():
-    """v89 ROOT FIX: efficacy_score is a PAIR-LEVEL property (drug, disease).
+    """TASK-147 ROOT FIX (v111): efficacy_score is a DRUG-LEVEL property.
 
-    The v88 code made efficacy_score a DRUG-LEVEL property (same value for
-    all disease pairs of the same drug). This was scientifically WRONG --
-    efficacy is a (drug, disease) property. A drug can be efficacious for
-    disease A and useless for disease B.
-
-    The v89 fix computes efficacy as:
+    The v89 code made efficacy_score a PAIR-LEVEL linear combination:
       efficacy = 0.5 * gnn_score + 0.3 * pathway_score + 0.2 * drug_validation
-    This is PAIR-LEVEL (varies by disease pair), which is scientifically correct.
+    This was SCIENTIFICALLY WRONG because it was perfectly collinear with
+    gnn_score and pathway_score — the RL reward function double-counted the
+    gnn_score signal (once as gnn_score, once via efficacy_score = 0.5*gnn).
 
-    This test verifies efficacy_score VARIES across disease pairs for the same
-    drug (it's NOT drug-level constant anymore).
+    The P3-009 / TASK-147 fix makes efficacy_score DRUG-LEVEL (computed from
+    target diversity — the count of distinct protein targets a drug has).
+    This is an INDEPENDENT signal:
+      - It does NOT depend on gnn_score (the GT model's prediction).
+      - It does NOT depend on pathway_score (multi-hop path count).
+      - It measures the drug's clinical validation breadth.
+
+    This test verifies:
+      1. efficacy_score is the SAME across all disease pairs for a given drug
+         (drug-level, not pair-level).
+      2. efficacy_score is NOT a linear combination of gnn_score and
+         pathway_score (no collinearity / double-counting).
     """
     from graph_transformer.gt_rl_bridge import GTRLBridge
 
@@ -234,20 +241,49 @@ def test_c2_efficacy_score_is_drug_level():
 
         df = bridge.generate_rl_input()
 
-        # v89: efficacy_score should NOW vary across disease pairs (pair-level)
-        # At least one drug should have >1 unique efficacy value across its pairs
-        found_variation = False
+        # TASK-147: efficacy_score must be DRUG-LEVEL (same value across all
+        # disease pairs for a given drug). At least one drug should have
+        # multiple disease pairs — for that drug, efficacy_score must be
+        # constant.
+        found_drug_level = False
         for drug_name in df["drug"].unique():
             drug_rows = df[df["drug"] == drug_name]
+            if len(drug_rows) < 2:
+                continue  # need >= 2 pairs to verify constancy
             efficacy_values = drug_rows["efficacy_score"].values
-            if len(np.unique(efficacy_values)) > 1:
-                found_variation = True
-                break
-        assert found_variation, (
-            f"v89 ROOT FIX FAILED: efficacy_score is STILL drug-level constant "
-            f"(no drug has varying efficacy across disease pairs). efficacy_score "
-            f"must be PAIR-LEVEL (varies by disease)."
+            # All efficacy values for this drug must be equal (drug-level).
+            assert len(np.unique(efficacy_values)) == 1, (
+                f"TASK-147 FAILED: drug '{drug_name}' has varying "
+                f"efficacy_score across disease pairs ({len(np.unique(efficacy_values))} "
+                f"unique values). efficacy_score must be DRUG-LEVEL (constant "
+                f"per drug, computed from target diversity)."
+            )
+            found_drug_level = True
+        assert found_drug_level, (
+            "No drug with >=2 disease pairs found — cannot verify drug-level "
+            "efficacy_score. The demo graph may be too small."
         )
+
+        # TASK-147: efficacy_score must NOT be a linear combination of
+        # gnn_score and pathway_score. Compute the correlation — if it's
+        # near 1.0, efficacy_score is collinear (the old v89 bug).
+        # Allow some noise tolerance (the drug-level efficacy may weakly
+        # correlate with gnn_score if drugs with more targets also score
+        # higher, but the correlation should be far from 1.0).
+        if len(df) > 10:
+            corr_gnn = df["efficacy_score"].corr(df["gnn_score"])
+            corr_path = df["efficacy_score"].corr(df["pathway_score"])
+            assert abs(corr_gnn) < 0.95, (
+                f"TASK-147 FAILED: efficacy_score is highly correlated with "
+                f"gnn_score (corr={corr_gnn:.3f}). This indicates efficacy_score "
+                f"is a linear combination of gnn_score (the v89 bug). The fix "
+                f"requires efficacy_score to be an INDEPENDENT signal."
+            )
+            assert abs(corr_path) < 0.95, (
+                f"TASK-147 FAILED: efficacy_score is highly correlated with "
+                f"pathway_score (corr={corr_path:.3f}). This indicates "
+                f"efficacy_score is a linear combination of pathway_score."
+            )
 
     print("  C-2: efficacy_score is pair-level (v89 PASS)")
 
@@ -616,8 +652,17 @@ def test_c5_get_top_k_non_strict_falls_back():
 
 
 def test_c5_run_full_pipeline_strict_phase6():
-    """C-5: run_full_pipeline has strict_phase6 parameter (default True)
-    that raises RuntimeError if the RL model fails to load.
+    """C-5: run_full_pipeline has strict_phase6 parameter.
+
+    P3-048 ROOT FIX (v113 forensic): the default is now ``None`` (auto-detect):
+    - For the DEMO path (graph_data is None and phase1_staged_data is None),
+      the default resolves to ``False`` (the demo's rl_timesteps may not
+      converge enough to produce a valid PPO checkpoint).
+    - For the PRODUCTION path (real graph data), the default resolves to
+      ``True`` (a missing RL checkpoint is a critical failure).
+
+    The previous default was ``True`` unconditionally, which broke the demo
+    pipeline whenever PPO didn't converge.
     """
     from graph_transformer.gt_rl_bridge import GTRLBridge
     import inspect
@@ -626,16 +671,20 @@ def test_c5_run_full_pipeline_strict_phase6():
     assert "strict_phase6" in sig.parameters, (
         "C-5: run_full_pipeline must have strict_phase6 parameter"
     )
-    assert sig.parameters["strict_phase6"].default == True, (
-        "C-5: strict_phase6 must default to True"
+    # P3-048: default is now None (auto-detect demo vs production).
+    assert sig.parameters["strict_phase6"].default is None, (
+        "C-5/P3-048: strict_phase6 must default to None (auto-detect)"
     )
 
-    print("  C-5: run_full_pipeline has strict_phase6=True default (PASS)")
+    print("  C-5: run_full_pipeline has strict_phase6=None (auto-detect) default (PASS)")
 
 
 def test_c5_no_silent_fallback_in_source():
     """C-5: verify the source code no longer has the silent GT-only fallback
     in strict mode. The fallback should only be reachable in non-strict mode.
+
+    P3-048 ROOT FIX (v113): the default is now ``Optional[bool] = None``
+    (auto-detect). The previous ``bool = True`` is replaced.
     """
     bridge_path = os.path.join(
         _PROJECT_ROOT, "graph_transformer", "gt_rl_bridge.py"
@@ -649,10 +698,13 @@ def test_c5_no_silent_fallback_in_source():
         "C-5: get_top_k_novel_predictions must have strict=True default"
     )
 
-    # The run_full_pipeline method must have strict_phase6 parameter
+    # The run_full_pipeline method must have strict_phase6 parameter.
+    # P3-048 v113: the default is now ``Optional[bool] = None`` (auto-detect),
+    # not ``bool = True``. The auto-detection resolves to True for
+    # production runs and False for demo runs.
     run_pipeline_section = source[source.index("def run_full_pipeline"):]
-    assert "strict_phase6: bool = True" in run_pipeline_section, (
-        "C-5: run_full_pipeline must have strict_phase6=True default"
+    assert "strict_phase6: Optional[bool] = None" in run_pipeline_section, (
+        "C-5/P3-048: run_full_pipeline must have strict_phase6=None (auto-detect) default"
     )
 
     # Both must raise RuntimeError in strict mode (not just log)

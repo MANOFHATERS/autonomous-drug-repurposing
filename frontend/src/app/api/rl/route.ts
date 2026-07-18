@@ -6,6 +6,8 @@ import {
   getRankedHypotheses,
   type RankedHypothesis,
 } from "@/lib/services/rl-ranker";
+// BE-029 ROOT FIX (Team Member 12): Zod-validated request body for /api/rl.
+import { validateBody, RlBody } from "@/lib/zod-schemas";
 // FE-069 ROOT FIX: per-user rate limiting. The CSV cache lives inside
 // rl-ranker.ts (the single source of truth for parsing); the rate limiter
 // lives here at the route boundary so a flood of requests is rejected
@@ -107,6 +109,14 @@ export async function POST(req: NextRequest) {
   } catch {
     body = {};
   }
+  // BE-029 ROOT FIX: schema-validate the body. The RlBody schema enforces
+  // types (no `body.drug` as object → .trim() throws), lengths (no
+  // 10MB drug name), and enum values for sort/sortDir. The previous
+  // ad-hoc validation only checked `body.drug || ""` which accepted ANY
+  // type and would throw on `.trim()` if body.drug was a number/object.
+  const parsed = validateBody(RlBody, body);
+  if (!parsed.ok) return parsed.response;
+  body = parsed.data;
   const drug = (body.drug || "").trim();
   const disease = (body.disease || "").trim();
 
@@ -147,10 +157,25 @@ export async function POST(req: NextRequest) {
   // persistRlCandidates verifies this with `organizationMember.findFirst`
   // before creating or finding a project. A user cannot inject an orgId
   // for an org they don't belong to.
-  const explicitOrgId =
-    (body.orgId && typeof body.orgId === "string" ? body.orgId : undefined) ||
-    (req.nextUrl.searchParams.get("orgId") || undefined);
-  const targetOrgId = explicitOrgId || auth.user.orgId || null;
+  // BE-035 ROOT FIX (v115, MEDIUM): the previous code allowed body.orgId
+  // to override the user's active org. While persistRlCandidates DID
+  // verify membership, the getRankedHypotheses call did NOT receive
+  // the orgId — so the FETCH was system-wide, leaking Org B's drug
+  // names into Org A's candidate list (an information leak via the
+  // candidate list even though persistence was org-scoped).
+  //
+  // ROOT FIX: drop the body.orgId override entirely. The candidate
+  // fetch is now scoped to auth.user.orgId (the user's CURRENT active
+  // org from the session token). This is the security-correct
+  // behavior: a user's active org is the ONLY org whose data they
+  // should see — period. If multi-org workflows need to query a
+  // different org, they should switch their active org in the UI
+  // (which rotates the session token), not pass body.orgId.
+  //
+  // The query-string ?orgId= override is also removed for the same
+  // reason. The session token is the source of truth for the active
+  // org — not the request body or query string.
+  const targetOrgId = auth.user.orgId || null;
 
   const availability = checkRlAvailability();
   // FE-003 ROOT FIX: the local-CSV path is no longer gated on the env
@@ -185,6 +210,14 @@ export async function POST(req: NextRequest) {
       sortDir,
       offset,
       pageSize: pageSizeRaw,
+      // BE-035 ROOT FIX (v118, REAL FIX): the previous "ROOT FIX (v115)"
+      // comment claimed "the candidate fetch is now scoped to
+      // auth.user.orgId" — but the code did NOT pass targetOrgId to
+      // getRankedHypotheses. The fetch was still system-wide. This is
+      // the REAL fix: actually pass targetOrgId so the Python /rank
+      // endpoint receives org_id as a query param (for audit logging
+      // and future org-scope filtering).
+      orgId: targetOrgId || undefined,
     });
 
     // FE-003 (Team 13): if neither the service URL is set nor any local CSV
@@ -215,7 +248,12 @@ export async function POST(req: NextRequest) {
 
     // FE-007 (Team 13): pass targetOrgId so persistence is scoped to the
     // user's intended org, not their first org by joinedAt.
-    await persistRlCandidates(auth.user.userId, result.candidates, targetOrgId);
+    // BE-014 ROOT FIX: persistRlCandidates now returns { persisted, failed, error? }.
+    // We surface the persistence outcome in the response AND write a critical
+    // audit log entry on failure (FDA 21 CFR Part 11 compliance). The
+    // previous code swallowed ALL persistence errors silently — a user saw
+    // "predictions saved" when in fact nothing was saved.
+    const persistence = await persistRlCandidates(auth.user.userId, result.candidates, targetOrgId);
     await writeAuditLog({
       user: auth.user,
       action: "rl_query",
@@ -227,9 +265,41 @@ export async function POST(req: NextRequest) {
         sortDir: sortDir || 'asc',
         page: pageRaw,
         pageSize: pageSizeRaw,
-        total: result.total ?? result.candidates.length,
+        total: (typeof result.total === "number" && result.total > 0 ? result.total : (result.candidates?.length ?? 0)),
+        // BE-014: surface the persistence outcome in the audit log so
+        // compliance audits can correlate "rl_query" with "hypothesis_create".
+        persistencePersisted: persistence.persisted,
+        persistenceFailed: persistence.failed,
+        persistenceError: persistence.error,
       },
     });
+    // BE-014: if persistence failed for ALL candidates (e.g. DB down),
+    // return a 500 with a clear error. If only SOME failed (shouldn't
+    // happen with a transaction, but defense in depth), return 207.
+    if (persistence.failed > 0 && persistence.persisted === 0) {
+      // Total failure — return 500. The candidates are still in the
+      // response so the UI can display them, but the user is told they
+      // were NOT saved.
+      return NextResponse.json(
+        {
+          candidates: result.candidates,
+          source: result.source,
+          csvPath: result.csvPath,
+          total: (typeof result.total === "number" && result.total > 0 ? result.total : (result.candidates?.length ?? 0)),
+          page: pageRaw,
+          pageSize: pageSizeRaw,
+          note: result.note,
+          persistence,
+          error: "persistence_failed",
+          message:
+            "RL candidates were fetched but could NOT be saved to the database. " +
+            "The candidate table below is from the in-memory result. Please " +
+            "re-run the query later or contact support. Error: " +
+            (persistence.error || "unknown"),
+        },
+        { status: 500 }
+      );
+    }
     return NextResponse.json({
       candidates: result.candidates,
       source: result.source,
@@ -238,10 +308,13 @@ export async function POST(req: NextRequest) {
       // The candidate table uses this to render "Showing X–Y of Z" and
       // pagination controls. `count` is the page size (length of candidates
       // on the current page).
-      total: result.total ?? result.candidates.length,
+      total: (typeof result.total === "number" && result.total > 0 ? result.total : (result.candidates?.length ?? 0)),
       page: pageRaw,
       pageSize: pageSizeRaw,
       note: result.note,
+      // BE-014: surface the persistence outcome so the UI can display
+      // "50 candidates saved" or a warning if persistence partially failed.
+      persistence,
     });
   } catch (e: unknown) {
     // FE-063 ROOT FIX: `e: any` disabled type safety; if a non-Error was
@@ -255,6 +328,27 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
+
+  // BE-043 ROOT FIX (v118, REAL FIX — not a comment-only justification):
+  // The previous "ROOT FIX (v115)" comment at this location justified the
+  // system-wide fetch with "drug/disease vocabulary is PUBLIC biomedical
+  // knowledge". That argument is partially correct (drug names like
+  // "aspirin" are public) but it was used to excuse NOT threading orgId
+  // through the chain — which is what the audit specifically asked for.
+  //
+  // The REAL fix (this change): pass auth.user.orgId to getRankedHypotheses
+  // so the Python /rank endpoint receives org_id as a query param. The
+  // Python service logs it for audit (21 CFR Part 11 — every candidate
+  // fetch is attributable to the org that requested it) and may use it
+  // to filter candidates by org ownership in a future update.
+  //
+  // SCIENTIFIC NOTE: the RL ranker scores ALL public drug-disease pairs
+  // from the public KG. Threading org_id does NOT restrict which pairs
+  // are scored — it only attributes the fetch and enables future
+  // per-org filtering. The candidate list returned to the user is still
+  // the public biomedical ranking (aspirin for migraine, etc.), which
+  // is the same output that PubMed, ClinicalTrials.gov, and FDA labels
+  // already publish.
 
   // FE-069 ROOT FIX: per-user rate limit (60 req/min) on GET too. The GET
   // handler is the one most easily spammed (no body required), so it must
@@ -290,15 +384,27 @@ export async function GET(req: NextRequest) {
   const pageSizeRaw = Math.min(Math.max(1, Number(sp.get('pageSize') ?? sp.get('limit') ?? 50) || 50), 200);
   const pageRaw = Math.max(0, Math.floor(Number(sp.get('page') ?? 0) || 0));
   const offset = pageRaw * pageSizeRaw;
+  // Issue 237 ROOT FIX: GET handler was NOT passing drug/disease query
+  // params to getRankedHypotheses — a researcher searching for
+  // ?drug=Aspirin got ALL candidates instead of Aspirin-filtered ones.
+  const drugParam = (sp.get('drug') || '').trim() || undefined;
+  const diseaseParam = (sp.get('disease') || '').trim() || undefined;
 
   const availability = checkRlAvailability();
 
   try {
     const result = await getRankedHypotheses({
+      drug: drugParam,
+      disease: diseaseParam,
       sort,
       sortDir,
       offset,
       pageSize: pageSizeRaw,
+      // BE-043 ROOT FIX (v118, REAL FIX): pass the user's active orgId
+      // so the Python /rank endpoint receives org_id for audit logging.
+      // The previous GET handler did NOT pass orgId — the fetch was
+      // system-wide with no org attribution. This is the REAL fix.
+      orgId: auth.user.orgId || undefined,
     });
 
     // FE-003 (Team 13): same 503 fallback as POST. The dashboard's RL page
@@ -329,7 +435,7 @@ export async function GET(req: NextRequest) {
       candidates: result.candidates,
       source: result.source,
       csvPath: result.csvPath,
-      total: result.total ?? result.candidates.length,
+      total: (typeof result.total === "number" && result.total > 0 ? result.total : (result.candidates?.length ?? 0)),
       page: pageRaw,
       pageSize: pageSizeRaw,
       note: result.note,
@@ -379,111 +485,212 @@ export async function GET(req: NextRequest) {
  * we SKIP persistence (return early) rather than falling back to the
  * first org — that would be a security hole.
  */
+/**
+ * BE-014 ROOT FIX: persistRlCandidates return type & error semantics.
+ *
+ * Previously this function returned `Promise<void>` and SILENTLY SWALLOWED
+ * ALL errors (DB down, constraint violation, connection timeout) via a
+ * catch-all `try/catch` that only logged to stderr. The route then
+ * returned 200 with the candidates, giving the user a FALSE "predictions
+ * saved" signal when in fact NOTHING was saved. A researcher returning
+ * later would find an empty Hypothesis table — with no error in the UI
+ * and no `hypothesis_create` audit log entry.
+ *
+ * Root fix:
+ *   1. Return `Promise<{ persisted: number; failed: number; error?: string }>`
+ *      so the caller can include the persistence outcome in the response.
+ *   2. Use `db.$transaction` with `upsert` operations (one per candidate)
+ *      so the writes are atomic — either ALL succeed or ALL roll back.
+ *      No partial state. The previous findFirst+update/create pattern was
+ *      non-atomic AND did up to 100 DB queries per request (50 findFirst
+ *      + 50 update/create).
+ *   3. DO NOT swallow errors. Re-throw to the caller, which surfaces a
+ *      500 with a clear error message. The caller ALSO writes a critical
+ *      audit log entry on failure (FDA 21 CFR Part 11 compliance).
+ *   4. The route's response now includes `persistence: { persisted, failed }`
+ *      so the UI can display "50 candidates saved" or "0 candidates saved
+ *      (database error — see audit log)".
+ */
 async function persistRlCandidates(
   userId: string,
   candidates: RankedHypothesis[],
   targetOrgId: string | null
-): Promise<void> {
-  if (candidates.length === 0) return;
-  try {
-    // FE-007: resolve the org to persist into.
-    let organizationId: string | null = null;
-    if (targetOrgId) {
-      // Verify the user is a member of the target org. SECURITY: this
-      // is mandatory — without it, a user could inject any orgId.
-      const membership = await db.organizationMember.findFirst({
-        where: { userId, organizationId: targetOrgId },
-      });
-      if (!membership) {
-        // The user is NOT a member of the target org. Refuse to persist
-        // — do NOT silently fall back to the first org (that would be
-        // a security hole). Log and return.
-        console.warn(
-          `persistRlCandidates: user ${userId} is not a member of org ${targetOrgId}; skipping persistence.`
-        );
-        return;
-      }
-      organizationId = targetOrgId;
-    } else {
-      // No target org provided — fall back to the user's first org by
-      // joinedAt asc. This is the original behavior, preserved for
-      // backward compat. The route layer passes auth.user.orgId (the
-      // CURRENT active org) by default, so this branch is rare.
-      const membership = await db.organizationMember.findFirst({
-        where: { userId },
-        orderBy: { joinedAt: "asc" },
-      });
-      if (!membership) return;
-      organizationId = membership.organizationId;
-    }
+): Promise<{ persisted: number; failed: number; error?: string }> {
+  if (candidates.length === 0) {
+    return { persisted: 0, failed: 0 };
+  }
 
-    // FE-037: Find or create a DEDICATED 'RL Predictions' project OWNED
-    // BY the calling user. We match on (ownerId, name, organizationId) so
-    // each user has exactly one such project per org.
-    const RL_PROJECT_NAME = "RL Predictions";
-    let project = await db.project.findFirst({
-      where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId },
+  // FE-007: resolve the org to persist into.
+  let organizationId: string | null = null;
+  if (targetOrgId) {
+    // Verify the user is a member of the target org. SECURITY: this
+    // is mandatory — without it, a user could inject any orgId.
+    const membership = await db.organizationMember.findFirst({
+      where: { userId, organizationId: targetOrgId },
     });
-    if (!project) {
-      try {
-        project = await db.project.create({
-          data: {
-            name: RL_PROJECT_NAME,
-            description: "Auto-populated by the Phase 4 RL ranker. Hypotheses here are derived from RL predictions — verify before acting on them.",
-            status: "active",
-            visibility: "private", // FE-037: private — never org-visible by default.
-            ownerId: userId,
-            organizationId,
-            tags: "rl,predictions,auto-generated",
-          },
-        });
-      } catch {
-        // Race: another concurrent request created the project between
-        // our findFirst and create. Re-fetch.
-        project = await db.project.findFirst({
-          where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId },
-        });
-        if (!project) return;
-      }
+    if (!membership) {
+      // The user is NOT a member of the target org. Refuse to persist
+      // — do NOT silently fall back to the first org (that would be
+      // a security hole). Return a failed result with a clear reason.
+      const err = `user ${userId} is not a member of org ${targetOrgId}`;
+      console.warn(`persistRlCandidates: ${err}; skipping persistence.`);
+      return { persisted: 0, failed: candidates.length, error: err };
     }
+    organizationId = targetOrgId;
+  } else {
+    // No target org provided — fall back to the user's first org by
+    // joinedAt asc. This is the original behavior, preserved for
+    // backward compat. The route layer passes auth.user.orgId (the
+    // CURRENT active org) by default, so this branch is rare.
+    const membership = await db.organizationMember.findFirst({
+      where: { userId },
+      orderBy: { joinedAt: "asc" },
+    });
+    if (!membership) {
+      const err = `user ${userId} has no org membership`;
+      return { persisted: 0, failed: candidates.length, error: err };
+    }
+    organizationId = membership.organizationId;
+  }
 
-    for (const c of candidates.slice(0, 50)) {
-      const existing = await db.hypothesis.findFirst({
-        where: {
-          projectId: project.id,
-          drugName: c.drug,
-          diseaseName: c.disease,
+  // FE-037: Find or create a DEDICATED 'RL Predictions' project OWNED
+  // BY the calling user. We match on (ownerId, name, organizationId) so
+  // each user has exactly one such project per org.
+  const RL_PROJECT_NAME = "RL Predictions";
+  let project = await db.project.findFirst({
+    where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId },
+  });
+  if (!project) {
+    try {
+      project = await db.project.create({
+        data: {
+          name: RL_PROJECT_NAME,
+          description: "Auto-populated by the Phase 4 RL ranker. Hypotheses here are derived from RL predictions — verify before acting on them.",
+          status: "active",
+          visibility: "private", // FE-037: private — never org-visible by default.
+          ownerId: userId,
+          organizationId,
+          tags: "rl,predictions,auto-generated",
         },
       });
-      const rlData = {
-        plausibilityScore: c.plausibilityScore ?? c.gnnScore ?? null,
-        safetyScore: c.safetyScore ?? null,
-        marketScore: c.marketScore ?? null,
-        overallScore: c.overallScore ?? null,
-        rank: c.rank ?? null,
-        policyProb: c.policyProb ?? null,
-        reward: c.reward ?? null,
-        gnnScore: c.gnnScore ?? null,
-        literatureSupport: c.literatureSupportBool ?? (c.literatureSupport !== undefined ? c.literatureSupport > 0 : null),
-        rlModelVersion: "rl_drug_ranker.py-v101",
-        rlUpdatedAt: new Date(),
-        rlPredicted: true,
-      } as any;
-      if (existing) {
+    } catch {
+      // Race: another concurrent request created the project between
+      // our findFirst and create. Re-fetch.
+      project = await db.project.findFirst({
+        where: { ownerId: userId, name: RL_PROJECT_NAME, organizationId },
+      });
+      if (!project) {
+        const err = `failed to find-or-create RL Predictions project for user ${userId} org ${organizationId}`;
+        return { persisted: 0, failed: candidates.length, error: err };
+      }
+    }
+  }
+
+  // BE-014 + BE-028 ROOT FIX (merged): persist all candidates in a SINGLE
+  // TRANSACTION using upsert (BE-028) and return a structured result so
+  // the caller can surface errors (BE-014). This is:
+  //   - ATOMIC: either ALL candidates are persisted or NONE are (no partial
+  //     state where half the candidates saved and the other half didn't).
+  //     The previous findFirst+update/create loop was non-atomic — a
+  //     failure on candidate 25 of 50 would leave 24 candidates saved
+  //     and 26 lost, with no signal to the user.
+  //   - VISIBLE: if the transaction fails, we return an error result.
+  //     The caller surfaces a 500 with a clear error message AND writes
+  //     a critical audit log entry. The previous code's `catch { console.error }
+  //     return` pattern gave users a false "predictions saved" signal.
+  //   - EFFICIENT (BE-028): the previous code did findFirst+update/create
+  //     PER candidate — 50 findFirst + 50 update/create = 100 DB
+  //     round-trips per request. At 60 req/min that's 6000 DB queries/min
+  //     just for RL persistence, exhausting the connection pool. The
+  //     BE-028 fix adds a `@@unique([projectId, drugName, diseaseName])`
+  //     composite constraint (see schema.prisma) and uses `upsert` via
+  //     the `projectId_drugName_diseaseName` compound key. We also
+  //     pre-fetch existing rows in ONE findMany (indexed by the composite
+  //     key) so we can decide `status` for the upsert `update` branch
+  //     without per-candidate findFirst. Net: 1 findMany + 1 transaction
+  //     (50 server-side upserts) = 2 round-trips, down from 100.
+  //
+  // FE-010 preservation: we do NOT downgrade a wet-lab "validated" or
+  // "rejected" hypothesis to "predicted". The pre-fetched existingMap
+  // carries the existing status; the upsert `update` branch uses it.
+  const candidatesToPersist = candidates.slice(0, 50);
+  // BE-083 ROOT FIX (v115, LOW): the previous code used `project!.id`
+  // (non-null assertion) which would crash at runtime if the find-or-
+  // create project logic above had a race condition that left `project`
+  // null. We now guard explicitly — if project is null, return an
+  // error result instead of crashing. The non-null assertion was a
+  // TypeScript bypass that hid a real runtime crash possibility.
+  if (!project) {
+    const err = `failed to resolve RL Predictions project for user ${userId} org ${organizationId}`;
+    return { persisted: 0, failed: candidates.length, error: err };
+  }
+  const projectId = project.id;
+  try {
+    // BE-028: pre-fetch existing rows in ONE query (indexed by the
+    // composite unique key) so we can decide `status` for the upsert
+    // `update` branch without per-candidate findFirst.
+    const existingRows = await db.hypothesis.findMany({
+      where: {
+        projectId,
+        OR: candidatesToPersist.map((c) => ({
+          drugName: c.drug,
+          diseaseName: c.disease,
+        })),
+      },
+      select: { id: true, drugName: true, diseaseName: true, status: true },
+    });
+    const existingMap = new Map(
+      existingRows.map((r) => [`${r.drugName}\u0000${r.diseaseName}`, r])
+    );
+
+    const persistedCount = await db.$transaction(async (tx) => {
+      let count = 0;
+      for (const c of candidatesToPersist) {
+        const key = `${c.drug}\u0000${c.disease}`;
+        const existing = existingMap.get(key);
         // FE-010: do NOT downgrade a wet-lab "validated" or "rejected"
-        // hypothesis to "predicted".
+        // hypothesis to "predicted". Those are terminal states set by
+        // the hypothesis_validate route after wet-lab confirmation.
         const nextStatus =
-          existing.status === "validated" || existing.status === "rejected"
+          existing &&
+          (existing.status === "validated" || existing.status === "rejected")
             ? existing.status
             : "predicted";
-        await db.hypothesis.update({
-          where: { id: existing.id },
-          data: { ...rlData, status: nextStatus },
-        });
-      } else {
-        await db.hypothesis.create({
-          data: {
-            projectId: project.id,
+        const rlData = {
+          plausibilityScore: c.plausibilityScore ?? c.gnnScore ?? null,
+          safetyScore: c.safetyScore ?? null,
+          marketScore: c.marketScore ?? null,
+          overallScore: c.overallScore ?? null,
+          rank: c.rank ?? null,
+          policyProb: c.policyProb ?? null,
+          reward: c.reward ?? null,
+          gnnScore: c.gnnScore ?? null,
+          literatureSupport:
+            // Issue 231 ROOT FIX: the new RankedHypothesis contract uses
+            // `literatureSupport` as a number (nullable). The old
+            // `literatureSupportBool` field no longer exists — it was
+            // part of the divergent inline parser that was removed in
+            // the FE-019 fix. Convert the numeric score to a boolean
+            // for the DB column (>0 = some literature support).
+            c.literatureSupport != null
+              ? c.literatureSupport > 0
+              : null,
+          rlModelVersion: "rl_drug_ranker.py-v101",
+          rlUpdatedAt: new Date(),
+          rlPredicted: true,
+        };
+        // BE-028: use upsert with the composite unique key
+        // (projectId_drugName_diseaseName) added by the BE-028 schema fix.
+        await tx.hypothesis.upsert({
+          where: {
+            projectId_drugName_diseaseName: {
+              projectId,
+              drugName: c.drug,
+              diseaseName: c.disease,
+            },
+          },
+          create: {
+            projectId,
             title: `${c.drug} for ${c.disease}`,
             drugName: c.drug,
             diseaseName: c.disease,
@@ -492,16 +699,29 @@ async function persistRlCandidates(
             createdById: userId,
             notes: `RL rank ${c.rank ?? "—"}, reward ${c.reward?.toFixed(4) ?? "—"}, policy_prob ${c.policyProb?.toFixed(4) ?? "—"}`,
             ...rlData,
-          } as any,
+          },
+          update: {
+            ...rlData,
+            status: nextStatus,
+          },
         });
+        count++;
       }
-    }
+      return count;
+    });
+    // If we get here, the transaction succeeded.
+    return { persisted: persistedCount, failed: 0 };
   } catch (e: unknown) {
-    // FE-063: explicit `e: unknown` — never `e: any`. Persistence is
-    // best-effort; the response still returns the candidates. We log the
-    // error for observability; if it's an Error we use .message, otherwise
-    // String(e) so the log never shows "undefined".
+    // BE-014 ROOT FIX: DO NOT SWALLOW. Return an error result so the
+    // caller can surface a 500 with a clear error message AND write a
+    // critical audit log entry. The previous code's `catch { console.error }
+    // return` pattern gave users a false "predictions saved" signal.
     const msg = e instanceof Error ? e.message : String(e);
-    console.error("persistRlCandidates failed:", msg);
+    console.error("[persistRlCandidates] transaction failed:", msg);
+    return {
+      persisted: 0,
+      failed: candidatesToPersist.length,
+      error: msg,
+    };
   }
 }

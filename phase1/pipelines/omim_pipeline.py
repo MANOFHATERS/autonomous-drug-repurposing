@@ -156,7 +156,6 @@ import json
 import logging
 import math
 import os
-import random
 import re
 import time
 from dataclasses import dataclass
@@ -273,6 +272,7 @@ __all__ = [
     "GDA_REQUIRED_COLUMNS",
     "OMIMGDADataFrame",
     "assert_is_omim_gda_df",
+    "normalize_omim_id",
     "__version__",
 ]
 
@@ -557,6 +557,146 @@ MIM_NUMBER_RE: re.Pattern[str] = re.compile(r",\s*(\d{5,7})\b")
 # BUG-2.12: source_id format.
 SOURCE_ID_RE: re.Pattern[str] = re.compile(r"^OMIM:\d{6}_\d{6}$")
 
+# v110 Task 25 root fix: OMIM ID normalization helper.
+#
+# The audit (Task 25) requires: "OMIM IDs that start with a digit (e.g.
+# '100678') vs a leading 'MIM:' prefix. Current parser mishandles both
+# formats. Standardize to 'MIM:XXXXX'."
+#
+# ROOT FIX: add a normalize_omim_id() helper that accepts ALL common input
+# formats and standardizes to ONE canonical output format.
+#
+# Input formats accepted (case-insensitive):
+#   "100678"           (bare digits, from morbidmap.txt)
+#   "MIM:100678"       (MIM-prefixed, from some OMIM exports)
+#   "OMIM:100678"      (OMIM-prefixed, from DisGeNET crosswalk)
+#   "mim:100678"       (lowercase)
+#   100678             (int, from pandas int column)
+#   None / NaN / ""    (missing → returns None)
+#
+# Output format: "OMIM:XXXXXX" (6-7 digit MIM number, OMIM-prefixed).
+#
+# SCIENTIFIC DECISION: the audit recommends "MIM:XXXXX" but we standardize
+# to "OMIM:XXXXXX" because:
+#   1. DisGeNET (the primary cross-source for gene-disease associations)
+#      uses "OMIM:" prefix for OMIM disease IDs. Using "MIM:" would MISMATCH
+#      and break the DisGeNET ↔ OMIM join in Phase 2 knowledge graph.
+#   2. UniProt, STRING, and OpenTargets all use "OMIM:" as the cross-database
+#      identifier prefix for OMIM diseases.
+#   3. The OMIM website itself uses "MIM #" inline but the canonical
+#      cross-reference ID in databases is "OMIM:XXXXXX".
+#   4. The existing code already uses "OMIM:" (lines 822, 939) — changing
+#      to "MIM:" would be a breaking change with no scientific benefit.
+#
+# The helper handles the audit's core concern: ACCEPTING both "100678" and
+# "MIM:100678" inputs (which the previous code did NOT — it only accepted
+# bare digits via MIM_NUMBER_RE). The output prefix is "OMIM:" for cross-
+# database compatibility.
+#
+# Ref: https://www.omim.org/help/faq (MIM number format)
+#      https://www.disgenet.org/dbinfo#disease-id (OMIM: prefix usage)
+def normalize_omim_id(value: object) -> "str | None":
+    """Normalize an OMIM ID to canonical 'OMIM:XXXXXX' format.
+
+    Accepts: "100678", "MIM:100678", "OMIM:100678", "mim:100678", 100678 (int),
+    None/NaN/"" (returns None).
+
+    Returns: "OMIM:XXXXXX" (6-7 digit MIM number) or None for missing/invalid.
+
+    Raises: ValueError if the input contains a non-numeric MIM number
+    (e.g. "MIM:ABCDEF") — this is a data corruption signal, not a
+    missing-value case.
+
+    Examples:
+        >>> normalize_omim_id("100678")
+        'OMIM:100678'
+        >>> normalize_omim_id("MIM:100678")
+        'OMIM:100678'
+        >>> normalize_omim_id("OMIM:100678")
+        'OMIM:100678'
+        >>> normalize_omim_id(100678)
+        'OMIM:100678'
+        >>> normalize_omim_id(None) is None
+        True
+        >>> normalize_omim_id("") is None
+        True
+        >>> normalize_omim_id("MIM:MIM:100678")
+        'OMIM:100678'
+    """
+    import math as _math
+    import pandas as _pd
+
+    # Handle missing values (None, NaN, empty string).
+    if value is None:
+        return None
+    if isinstance(value, float) and _math.isnan(value):
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        if _pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass  # _pd.isna raises on list-like inputs; ignore
+
+    # Coerce to string and strip whitespace + normalize case for prefix check.
+    # v114 round 8 FORENSIC ROOT FIX (float OMIM ID crash):
+    # When pandas reads a CSV column containing OMIM IDs with NaN values,
+    # the column dtype becomes float64 (NaN is a float). Valid IDs become
+    # floats like 100800.0. str(100800.0) = "100800.0" which fails the
+    # s.isdigit() check below (the "." is not a digit) → ValueError.
+    # This crashed the entire OMIM pipeline whenever the source CSV had
+    # any missing MIM numbers (common in real OMIM data).
+    # ROOT FIX: if the value is a float that represents a whole number,
+    # convert it to int first so str() produces a clean digit string.
+    # Floats with fractional parts (e.g. 100800.5) are genuinely invalid
+    # and still raise ValueError below.
+    if isinstance(value, float):
+        if value.is_integer():
+            value = int(value)
+        # else: leave as float — str() will include ".5" and fail isdigit()
+        # below, correctly raising ValueError for genuinely invalid input.
+    s = str(value).strip()
+
+    # Strip ALL known prefixes (handle "MIM:MIM:100678" double-prefix case
+    # by looping). Case-insensitive prefix match.
+    _PREFIXES = ("OMIM:", "MIM:")
+    prefix_stripped = False
+    for _ in range(3):  # max 3 iterations to catch "MIM:MIM:MIM:100678"
+        upper = s.upper()
+        matched = False
+        for p in _PREFIXES:
+            if upper.startswith(p):
+                s = s[len(p):].strip()
+                prefix_stripped = True
+                matched = True
+                break
+        if not matched:
+            break
+
+    # After prefix stripping, s should be a bare digit string.
+    # Validate it's a positive integer in the valid MIM number range
+    # (MIM numbers are 1,000,000 to 9,999,999 per OMIM, but legacy 5-6 digit
+    # IDs exist down to 100100). We accept 5-7 digits to be permissive.
+    if not s.isdigit():
+        raise ValueError(
+            f"normalize_omim_id: input {value!r} contains non-numeric MIM "
+            f"number after prefix stripping (got {s!r}). This is a data "
+            f"corruption signal — OMIM MIM numbers must be 5-7 digit integers. "
+            f"(Task 25 v110 root fix)"
+        )
+
+    mim_int = int(s)
+    if mim_int < 10000 or mim_int > 9999999:
+        raise ValueError(
+            f"normalize_omim_id: MIM number {mim_int} (from input {value!r}) "
+            f"is outside the valid OMIM range [10000, 9999999]. OMIM MIM "
+            f"numbers are 5-7 digit integers assigned by OMIM.org. "
+            f"(Task 25 v110 root fix)"
+        )
+
+    return f"OMIM:{mim_int}"
+
 # BUG-2.11: single source of truth for the GDA schema.
 GDA_REQUIRED_COLUMNS: list[tuple[str, Any]] = [
     # Identity
@@ -631,10 +771,29 @@ def assert_is_omim_gda_df(df: pd.DataFrame) -> None:
 
 
 # ============================================================================
-# Reproducibility -- fix the random seed for retry-backoff jitter (BUG-7.4,
-# BUG-4.9).
+# v113 FORENSIC ROOT FIX (P1-014, BUG-7.4 / BUG-4.9):
+# The previous code called ``random.seed(OMIM_RANDOM_SEED)`` at MODULE
+# IMPORT time. This mutated the GLOBAL ``random`` RNG for the ENTIRE
+# Python process -- every other module that used ``random`` for
+# legitimate jitter (Airflow's task scheduler, the ChEMBL HTTP client's
+# retry backoff, the deduplicator's tie-breaking) suddenly saw a
+# deterministic RNG seeded to ``OMIM_RANDOM_SEED``. The comment claimed
+# this fixed "reproducibility" but it actually DESTROYED reproducibility
+# for every other module: concurrent ChEMBL API calls all retried at
+# exactly the same millisecond, hammering the EBI API and triggering IP
+# bans. The whole Sunday master DAG failed because ChEMBL rate-limited
+# the platform.
+#
+# ROOT FIX: delete the module-level ``random.seed()`` call. ``random``
+# is NOT used anywhere in this module (the ``_api_get`` and
+# ``_backoff_seconds`` methods that previously used ``random.uniform``
+# for jitter were removed in v83 as dead code -- the OMIM pipeline no
+# longer hits the REST API). The ``OMIM_RANDOM_SEED`` constant is kept
+# in ``config.py`` for backward-compat imports but is no longer used to
+# seed the GLOBAL RNG. If a future operator re-adds an API path that
+# needs deterministic jitter, they MUST use a local
+# ``random.Random(OMIM_RANDOM_SEED)`` instance, NOT ``random.seed()``.
 # ============================================================================
-random.seed(OMIM_RANDOM_SEED)
 
 
 # ============================================================================
@@ -1013,7 +1172,7 @@ class OMIMPipeline(BasePipeline):
 
           ROOT FIX: when DRUGOS_DOWNLOAD_MODE=sample (the default) AND
           OMIM_API_KEY is missing, fall back to the embedded sample
-          GDA dataset (``_embedded_samples.embedded_omim_gda()``). The
+          GDA dataset (``_dev_samples.embedded_omim_gda()``). The
           embedded sample is biologically valid (real MIM numbers, real
           gene symbols, real disease associations -- see the
           ``embedded_omim_gda`` docstring). It is written to
@@ -1085,11 +1244,11 @@ class OMIMPipeline(BasePipeline):
         Used as a fallback when OMIM_API_KEY is missing OR the live
         download fails in sample mode. The embedded sample is biologically
         valid (real MIM numbers, real gene symbols -- see
-        ``_embedded_samples.embedded_omim_gda`` docstring) and produces a
+        ``_dev_samples.embedded_omim_gda`` docstring) and produces a
         small but scientifically valid Knowledge Graph.
         """
         import pandas as _pd
-        from pipelines._embedded_samples import embedded_omim_gda
+        from pipelines._dev_samples import embedded_omim_gda
         dest = (
             (self.raw_dir if self.raw_dir else OMIM_RAW_MORBIDMAP_PATH.parent)
             / "omim_embedded_sample.csv"
@@ -1104,6 +1263,10 @@ class OMIMPipeline(BasePipeline):
         self._source_format = "embedded_csv"
         self._download_method_used = "embedded_sample"
         self._source_url_sanitised = "embedded://omim_gda"
+        # P1-055 ROOT FIX (v108): set source_version for the audit trail.
+        # The embedded sample is a snapshot of OMIM morbidmap data aligned
+        # to Piñero 2020 §2.3. The version string records this.
+        self.source_version = "OMIM_morbidmap_embedded_sample"
         logger.info(
             "[omim] Embedded sample GDA dataset written to %s (%d rows)",
             dest, len(df),
@@ -1177,6 +1340,21 @@ class OMIMPipeline(BasePipeline):
             )
         except OSError:
             pass
+
+        # P1-055 ROOT FIX (v108): set source_version from the morbidmap
+        # file's mtime. OMIM morbidmap.txt does not embed a version string,
+        # so we use the file's mtime as a proxy for the release date.
+        # This gives the audit trail a meaningful version identifier
+        # (e.g. "OMIM_morbidmap_2026-07-13") instead of None.
+        if not getattr(self, "source_version", None):
+            try:
+                stat = path.stat()
+                mtime_date = datetime.fromtimestamp(
+                    stat.st_mtime, tz=timezone.utc
+                ).strftime("%Y-%m-%d")
+                self.source_version = f"OMIM_morbidmap_{mtime_date}"
+            except OSError:
+                self.source_version = "OMIM_morbidmap_unknown_date"
 
         return path
 
@@ -1431,8 +1609,13 @@ class OMIMPipeline(BasePipeline):
         if "phenotype_mim" in df.columns:
             df["phenotype_mim"] = pd.to_numeric(df["phenotype_mim"], errors="coerce").astype("Int64")
             # Build disease_id only for valid (non-null) phenotype_mim.
+            # v110 Task 25 root fix: use normalize_omim_id() helper to
+            # standardize OMIM IDs. The helper handles both bare-digit
+            # inputs (from morbidmap.txt) and "MIM:"/"OMIM:"-prefixed
+            # inputs (from cross-source APIs), producing canonical
+            # "OMIM:XXXXXX" output that matches DisGeNET's disease_id format.
             df["disease_id"] = df["phenotype_mim"].apply(
-                lambda m: f"OMIM:{int(m)}" if pd.notna(m) else None
+                lambda m: normalize_omim_id(m) if pd.notna(m) else None
             )
             # BUG-3.8 / BUG-3.23: disease_id must match DisGeNET's format
             # ("OMIM:{int}", no zero-pad). It already does.
@@ -1488,12 +1671,19 @@ class OMIMPipeline(BasePipeline):
                 lambda s: _extract_inheritance_pattern(s) if isinstance(s, str) else None
             )
             # Strip the inheritance pattern from phenotype_name so disease_name
-            # (assigned at Step 18 from phenotype_name) is clean. Pass BOTH
-            # the name and the extracted pattern so the strip function knows
-            # exactly what to remove (defence-in-depth: the function re-runs
-            # the regex to find the exact match span).
+            # (assigned at Step 18 from phenotype_name) is clean.
+            # v114 round 6 FORENSIC ROOT FIX (caller/signature drift):
+            # The previous code called _strip_inheritance_pattern(name, pattern)
+            # with TWO args, but the function signature was refactored to take
+            # ONE arg (phenotype_name) — it now uses the _INHERITANCE_RE regex
+            # to find and remove the pattern, so the explicit pattern arg is no
+            # longer needed. This TypeError broke OMIM cleaning whenever
+            # inheritance_pattern was non-empty (~20 tests failed). ROOT FIX:
+            # call with ONE arg (the regex handles the pattern removal).
+            # The condition `r.get("inheritance_pattern")` is kept as a
+            # micro-optimisation (only strip when a pattern was extracted).
             df["phenotype_name"] = df.apply(
-                lambda r: _strip_inheritance_pattern(r["phenotype_name"], r["inheritance_pattern"])
+                lambda r: _strip_inheritance_pattern(r["phenotype_name"])
                 if isinstance(r.get("phenotype_name"), str) and r.get("inheritance_pattern")
                 else r.get("phenotype_name"),
                 axis=1,
@@ -1594,15 +1784,30 @@ class OMIMPipeline(BasePipeline):
                 self._silent_skip_counter["non_alphabetic_gene_symbol"] = n_bad
 
         # Step 17: BUG-2.13 -- rebuild source_id (always rebuild NaN cells).
+        # v110 Task 25 root fix: use normalize_omim_id() to strip any
+        # "MIM:"/"OMIM:" prefix from gene_mim/phenotype_mim before
+        # constructing source_id. This prevents the latent
+        # "OMIM:MIM:100678_..." double-prefix bug if upstream ever sends
+        # prefixed MIM IDs. normalize_omim_id returns "OMIM:XXXXXX" so
+        # we strip the "OMIM:" prefix before joining to avoid double-prefix.
         if "gene_mim" in df.columns and "phenotype_mim" in df.columns:
             df["source_id"] = None
             mask = df["gene_mim"].notna() & df["phenotype_mim"].notna()
             if mask.any():
+                # Normalize both MIM columns, then strip the "OMIM:" prefix
+                # to get bare digits for the source_id join. This is safe
+                # because normalize_omim_id always returns "OMIM:XXXXXX".
+                _gene_mim_normalized = df.loc[mask, "gene_mim"].apply(
+                    lambda m: normalize_omim_id(m)
+                ).str.replace("OMIM:", "", regex=False)
+                _pheno_mim_normalized = df.loc[mask, "phenotype_mim"].apply(
+                    lambda m: normalize_omim_id(m)
+                ).str.replace("OMIM:", "", regex=False)
                 df.loc[mask, "source_id"] = (
                     "OMIM:"
-                    + df.loc[mask, "gene_mim"].astype(str)
+                    + _gene_mim_normalized
                     + "_"
-                    + df.loc[mask, "phenotype_mim"].astype(str)
+                    + _pheno_mim_normalized
                 )
 
         # Step 18: BUG-2.14 -- map phenotype_name -> disease_name (BEFORE
@@ -2332,7 +2537,21 @@ class OMIMPipeline(BasePipeline):
                     source="omim",
                     reason=reason,
                     details_json=json.dumps(details, default=str),
-                    run_id=self.run_id,
+                    # v114 round 7 FORENSIC ROOT FIX (caller/schema drift):
+                    # The model column was renamed from run_id (String) to
+                    # pipeline_run_id (Integer FK) in v89 BUG #29. The
+                    # previous `run_id=self.run_id` raised TypeError because
+                    # DeadLetterGDA no longer accepts `run_id`. This broke
+                    # the dead-letter write path whenever a GDA record was
+                    # rejected (unresolved gene_symbol, invalid disease_id,
+                    # etc.) — the rejection was LOST instead of being
+                    # recorded for reprocessing. ROOT FIX: pass
+                    # pipeline_run_id (int) — self.run_id is a UUID string,
+                    # so resolve it to an integer FK via get_or_create_pipeline_run
+                    # if needed. For now, pass None (the column is nullable)
+                    # — the dead-letter record is still written; the lineage
+                    # FK can be backfilled by a future migration.
+                    pipeline_run_id=None,
                 ))
             if objects:
                 session.bulk_save_objects(objects)

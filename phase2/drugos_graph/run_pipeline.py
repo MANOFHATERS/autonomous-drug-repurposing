@@ -172,8 +172,16 @@ _shutdown_requested: bool = False
 # This is a hard guard — operators cannot bypass it without editing
 # source code. The escape hatches remain available for dev/test.
 def _check_production_escape_hatches() -> None:
-    """Refuse to load if escape hatches are set in production env."""
-    env = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
+    """Refuse to load if escape hatches are set in production env.
+
+    P2-035 ROOT FIX (v107): the default was "dev" — a production
+    deployment that forgot to set DRUGOS_ENVIRONMENT=production got
+    the dev behavior, and the escape hatches below were ALLOWED. This
+    let a worse-than-random model (TransE AUC=0.47) ship to V1 launch.
+    ROOT FIX: default to "production" so the escape hatches are
+    REFUSED unless the operator explicitly sets DRUGOS_ENVIRONMENT=dev.
+    """
+    env = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
     if env in ("prod", "production"):
         offenders: List[str] = []
         for flag in (
@@ -181,6 +189,10 @@ def _check_production_escape_hatches() -> None:
             "DRUGOS_ALLOW_PERMISSIVE_KG",
             "DRUGOS_ALLOW_PERMISSIVE_DPI",
             "DRUGOS_ALLOW_LAUNCH_FAIL",
+            # P2-026 ROOT FIX (v107): the eval-set size escape hatch
+            # must also be refused in production — it bypasses the
+            # AUC statistical-reliability gate.
+            "DRUGOS_ALLOW_SMALL_IMBALANCED_EVAL",
         ):
             if os.environ.get(flag, "") == "1":
                 offenders.append(flag)
@@ -212,8 +224,11 @@ _check_production_escape_hatches()
 # preserves the legacy lenient behavior (so dev/CI runners without
 # all data sources still work).
 def _is_production_mode() -> bool:
-    """Return True iff DRUGOS_ENVIRONMENT is set to prod/production."""
-    return os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() in ("prod", "production")
+    """Return True iff DRUGOS_ENVIRONMENT is set to prod/production.
+
+    P2-035 ROOT FIX (v107): default changed from "dev" to "production".
+    """
+    return os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() in ("prod", "production")
 
 
 def _step_exception_or_skip(step_name: str, exc: Exception, results: dict) -> None:
@@ -365,6 +380,32 @@ def _configure_logging() -> None:
         root_logger.addHandler(console_handler)
         root_logger.addHandler(file_handler)
         root_logger.addFilter(_RunIdFilter(_pipeline_run_id))
+
+        # P2-027 ROOT FIX (Team 8 — forensic completion): ALSO configure
+        # the ``drugos.phase2`` named logger via ``setup_logging()`` from
+        # utils.py. The existing ``drugos_pipeline`` logger above is
+        # correct, but modules that use ``logging.getLogger('drugos.phase2.*')``
+        # (the canonical phase2 logger name per utils.py) would NOT be
+        # routed to the file handler without this call. In an Airflow
+        # deployment, those modules' records would fall through to the
+        # root logger (which Airflow controls) — the exact P2-027 bug.
+        # ``setup_logging()`` is idempotent and attaches a FileHandler +
+        # StreamHandler to the ``drugos.phase2`` logger with
+        # ``propagate=False``, so its records go to
+        # ``${DRUGOS_LOG_DIR:-/var/log/drugos}/phase2.log`` regardless
+        # of Airflow's root configuration.
+        try:
+            from .utils import setup_logging as _setup_phase2_logging
+            _setup_phase2_logging()
+        except Exception:
+            # Defensive: if utils.setup_logging is unavailable (e.g.
+            # partial install), the ``drugos_pipeline`` logger above
+            # still handles the pipeline's own records. The P2-027 fix
+            # is best-effort here — the primary entry points
+            # (run_4phase.py, __main__.py) also call setup_logging()
+            # directly so the named logger is configured even if this
+            # site fails.
+            pass
 
         _logger_configured = True
 
@@ -971,10 +1012,25 @@ def _validate_neo4j_cli_combos(args: argparse.Namespace) -> Optional[str]:
 
     Fixes GAP-CONF-01: No validation of CLI argument combinations.
 
+    v108 ROOT FIX (issue 75): added validation for the new
+    ``--from-saved`` / ``--from-phase1`` / ``--save-graph`` flags.
+    The mutex group in ``main()`` already rejects
+    ``--from-phase1 + --from-saved``; this function adds the manual
+    check for ``--from-saved + --data-source drkg`` (which can't be
+    in the mutex group because ``drkg`` is a value of ``--data-source``,
+    not its own flag). It also rejects ``--from-phase1 + --data-source
+    drkg`` defensively (even though ``main()`` silently overrides it,
+    a loud error is safer than a silent behavior change for an operator
+    who passed contradictory flags).
+
     Parameters
     ----------
     args : argparse.Namespace
-        Parsed CLI arguments.
+        Parsed CLI arguments. Expected to have attributes: ``skip_neo4j``,
+        ``step``, ``from_phase1``, ``from_saved``, ``data_source``,
+        ``save_graph`` (the issue-75 attributes are read via ``getattr``
+        with safe defaults so older unit tests that construct a partial
+        namespace don't crash).
 
     Returns
     -------
@@ -987,6 +1043,31 @@ def _validate_neo4j_cli_combos(args: argparse.Namespace) -> Optional[str]:
         return "--skip-neo4j with --step 12 is redundant (step 12 validates Neo4j)"
     if args.skip_neo4j and args.step == 13:
         return "--skip-neo4j with --step 13 means README will be minimal"
+    # v108 ROOT FIX (issue 75): mutual-exclusion checks for the new
+    # input-mode flags. The mutex group in ``main()`` already prevents
+    # ``--from-phase1 + --from-saved`` at the argparse layer, but we
+    # ALSO need to check ``--from-saved + --data-source drkg`` and
+    # ``--from-phase1 + --data-source drkg`` manually here (a value of
+    # ``--data-source`` cannot be in a mutually exclusive group with
+    # action flags).
+    _from_phase1 = getattr(args, "from_phase1", False)
+    _from_saved = getattr(args, "from_saved", None)
+    _data_source = getattr(args, "data_source", "phase1")
+    if _from_saved is not None and _data_source == "drkg":
+        return (
+            "--from-saved and --data-source drkg are mutually exclusive "
+            "(issue 75 root fix): --from-saved loads a Phase 1 bridge "
+            "snapshot, which cannot be combined with the DRKG data path. "
+            "Drop --data-source drkg, or drop --from-saved."
+        )
+    if _from_phase1 and _data_source == "drkg":
+        # ``main()`` would silently override this to phase1, but a loud
+        # error is safer for an operator who passed contradictory flags.
+        return (
+            "--from-phase1 and --data-source drkg are mutually exclusive "
+            "(issue 75 root fix): --from-phase1 is an explicit synonym "
+            "for --data-source phase1. Drop one of the flags."
+        )
     return None
 
 
@@ -1125,7 +1206,8 @@ def _check_v1_launch_criteria(results: dict) -> dict:
         # to accept missing sources (since the toy fixture doesn't have
         # them). In production, no_critical_source_failure is strict.
         import os as _os
-        _dev_mode = _os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() not in ("prod", "production", "stage", "staging")
+        # P2-035 ROOT FIX (v107): default changed from "dev" to "production".
+        _dev_mode = _os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() not in ("prod", "production", "stage", "staging")
         _min_sources = int(_os.environ.get("DRUGOS_DEV_MIN_SOURCES", "2")) if _dev_mode else 7
         criteria["all_sources_loaded"] = sources_loaded >= _min_sources
         criteria["sources_loaded_count"] = sources_loaded
@@ -1273,7 +1355,8 @@ def _check_v1_launch_criteria(results: dict) -> dict:
     # "67-node toy graph masquerading as a real KG" failure mode while
     # allowing the toy fixture to pass for smoke tests).
     import os as _os_v36
-    _dev_mode_v36 = _os_v36.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() not in (
+    # P2-035 ROOT FIX (v107): default changed from "dev" to "production".
+    _dev_mode_v36 = _os_v36.environ.get("DRUGOS_ENVIRONMENT", "production").lower() not in (
         "prod", "production", "stage", "staging",
     )
     try:
@@ -1437,6 +1520,91 @@ def _check_v1_launch_criteria(results: dict) -> dict:
         and criteria.get("chemberta_features_used", True)
     )
 
+    # v109 ROOT FIX (P2-039): when launch is blocked, surface a CLEAR
+    # human-readable reason listing WHICH criteria failed and WHY. The
+    # previous code set ``criteria["passed"] = False`` but did not
+    # include a ``failure_reasons`` list — operators had to read the
+    # raw criteria dict and reverse-engineer which check failed. The
+    # audit caught this as a MEDIUM-severity UX bug: a pipeline with
+    # best_val_auc=-1.0 (step11 crashed AND step11b skipped) was blocked
+    # but the error message didn't say "step11 crashed, step11b skipped,
+    # so no AUC was computed".
+    failure_reasons: List[str] = []
+    if not criteria["all_sources_loaded"]:
+        failure_reasons.append(
+            f"all_sources_loaded=False: only {criteria.get('sources_loaded_count', 0)}/"
+            f"{criteria.get('min_sources_required', 7)} sources loaded. "
+            f"Bridge sources: {criteria.get('bridge_docx_sources', [])}."
+        )
+    if not criteria["positive_pairs_sufficient"]:
+        failure_reasons.append(
+            f"positive_pairs_sufficient=False: only {criteria.get('positive_pairs', 0)} "
+            f"positive pairs (need >= {MIN_POSITIVE_PAIRS})."
+        )
+    if not criteria["negative_pairs_sufficient"]:
+        failure_reasons.append(
+            f"negative_pairs_sufficient=False: only {criteria.get('negative_pairs', 0)} "
+            f"negative pairs (need >= {MIN_NEGATIVE_PAIRS})."
+        )
+    if not criteria["auc_meets_threshold"]:
+        _bv = criteria.get("best_val_auc", -1.0)
+        _ho = criteria.get("held_out_auc", -1.0)
+        _target = criteria.get("target_auc", 0.85)
+        _why = []
+        if _bv is None or _bv <= 0:
+            _why.append(
+                f"best_val_auc={_bv} (step11 crashed or did not run — "
+                f"no validation AUC was computed)"
+            )
+        elif _bv < _target:
+            _why.append(f"best_val_auc={_bv:.4f} < target {_target:.2f}")
+        if _ho is None or _ho <= 0:
+            _why.append(
+                f"held_out_auc={_ho} (step11 crashed or step11b skipped — "
+                f"no held-out AUC was computed; check step11.error and "
+                f"step11b.skipped/step11b.error in the pipeline results)"
+            )
+        elif _ho < _target:
+            _why.append(f"held_out_auc={_ho:.4f} < target {_target:.2f}")
+        failure_reasons.append(
+            "auc_meets_threshold=False: " + "; ".join(_why)
+        )
+    if not criteria["model_saved_to_disk"]:
+        failure_reasons.append(
+            "model_saved_to_disk=False: step11 did not save a model "
+            "artifact (check step11.error in the pipeline results)."
+        )
+    if not criteria["no_critical_source_failure"]:
+        failure_reasons.append(
+            f"no_critical_source_failure=False: critical failures in "
+            f"sources: {criteria.get('critical_failure_sources', [])}."
+        )
+    if not criteria["graph_size_meets_threshold"]:
+        failure_reasons.append(
+            f"graph_size_meets_threshold=False: {criteria.get('n_nodes', 0)} "
+            f"nodes / {criteria.get('n_edges', 0)} edges (need >= "
+            f"{criteria.get('min_nodes_required', 500_000)} nodes AND >= "
+            f"{criteria.get('min_edges_required', 6_000_000)} edges)."
+        )
+    if not criteria.get("split_method_is_safe", False):
+        failure_reasons.append(
+            f"split_method_is_safe=False: split_method="
+            f"{criteria.get('split_method', '')!r} is not leakage-safe "
+            f"(require node_disjoint or temporal)."
+        )
+    if not criteria.get("chemberta_features_used", True):
+        failure_reasons.append(
+            "chemberta_features_used=False: Graph Transformer trained on "
+            "random Xavier features (cannot learn molecular structure)."
+        )
+    criteria["failure_reasons"] = failure_reasons
+    if failure_reasons:
+        logger.error(
+            "V1 LAUNCH CRITERIA: BLOCKED. %d failure(s):\n  - %s",
+            len(failure_reasons),
+            "\n  - ".join(failure_reasons),
+        )
+
     # v26 ROOT FIX (Issue C-1): the v25 "DEV_SMOKE_TEST override" used to
     # flip ``criteria["passed"] = True`` even when
     # ``auc_meets_threshold=False``, which is the user's #1 complaint —
@@ -1594,12 +1762,28 @@ def _run_step_with_deps(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
         if step_num == 2:
             r1 = step1_load_data(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
             if r1.get("fatal"):
                 logger.critical("Step 1 failed (fatal): %s", r1.get("fatal_reason"))
@@ -1618,6 +1802,14 @@ def _run_step_with_deps(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
             if r1.get("fatal"):
                 logger.critical("Step 1 failed (fatal): %s", r1.get("fatal_reason"))
@@ -1652,6 +1844,14 @@ def _run_step_with_deps(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
             if r1.get("fatal"):
                 logger.critical("Step 1 failed (fatal): %s", r1.get("fatal_reason"))
@@ -1663,6 +1863,14 @@ def _run_step_with_deps(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
             if r1.get("fatal"):
                 logger.critical("Step 1 failed (fatal): %s", r1.get("fatal_reason"))
@@ -1687,6 +1895,14 @@ def _run_step_with_deps(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
             if r1.get("fatal"):
                 logger.critical("Step 1 failed (fatal): %s", r1.get("fatal_reason"))
@@ -1698,6 +1914,14 @@ def _run_step_with_deps(
                 getattr(args, "data_source", "phase1"),
                 args.skip_download,
                 getattr(args, "phase1_dir", None),
+                getattr(args, "skip_phase1_validation", False),
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so --from-saved / --save-graph work in single-
+                # step mode too (read via getattr with safe defaults
+                # so older unit tests constructing a partial args
+                # namespace don't crash).
+                from_saved_path=getattr(args, "from_saved", None),
+                save_graph_path=getattr(args, "save_graph", None),
             )
             if r1.get("fatal"):
                 logger.critical("Step 1 failed (fatal): %s", r1.get("fatal_reason"))
@@ -1879,8 +2103,210 @@ def step1_load_drkg(skip_download: bool = False) -> dict:
 # path (e.g. for large-scale training that needs DRKG's 5.87M triples).
 
 
+# v108 ROOT FIX (issue 74): Phase 1 source-key → schema file_key map.
+# Each Phase 2 source key (as used in step1_load_phase1's ``name_map``)
+# maps to the corresponding top-level key in
+# ``phase1/pipelines/schema/v1.json``'s ``"properties"`` object. Sources
+# without a schema entry (interactions, indications, omim_susceptibility)
+# are SKIP-WITH-WARN — the bridge has no published Phase 1 contract for
+# those files, so we cannot fail validation on them.
+_PHASE1_SOURCE_TO_SCHEMA_FILE_KEY: Dict[str, str] = {
+    "drugs": "drugbank_drugs.csv",
+    "chembl_drugs": "drugs.csv",  # chembl pipeline emits drugs.csv (or chembl_drugs.csv alias); schema entry is "drugs.csv"
+    "chembl_activities": "chembl_activities_clean.csv",
+    "uniprot_proteins": "proteins.csv",
+    "string_ppi": "protein_protein_interactions.csv",
+    "disgenet_gda": "gene_disease_associations.csv",
+    "omim_gda": "omim_gene_disease_associations.csv",
+    "pubchem_enrichment": "pubchem_enrichment.csv",
+}
+
+
+def _validate_phase1_output(staged_data: Dict[str, Any]) -> Dict[str, Any]:
+    """v108 ROOT FIX (issue 74): validate Phase 1 staged CSVs against
+    the Phase 1 contract via ``BasePipeline.validate_output(df)``.
+
+    Previously, ``step1_load_phase1`` returned a HARD-CODED
+    ``{"passed": True, "triples": len(df)}`` validation dict — Phase
+    1's ``BasePipeline.validate_output(df)`` (defined at
+    ``phase1/pipelines/base_pipeline.py:2466``) was NEVER invoked from
+    Phase 2, and ``phase1_bridge.py`` has ZERO references to
+    ``validate_output|validate_schema|phase1_contract``. A
+    ``drugbank_drugs.csv`` with a malformed InChIKey column would
+    silently pass Phase 2's "validation" gate and load corrupt data
+    into the KG (the exact failure mode Phase 1's validate_output was
+    written to catch — see P1-047 root-fix docstring at line 2506).
+    This function closes that gap by ACTUALLY calling the Phase 1
+    contract validator on each staged DataFrame.
+
+    Parameters
+    ----------
+    staged_data : dict[str, pandas.DataFrame]
+        Mapping from Phase 2 source key (e.g. ``"drugs"``,
+        ``"chembl_activities"``, ``"string_ppi"``, ``"indications"``)
+        to the staged DataFrame read from the corresponding Phase 1
+        processed CSV. ``None`` values (source CSV not present in this
+        run) are tolerated and recorded as ``skipped``. Source keys
+        not in ``_PHASE1_SOURCE_TO_SCHEMA_FILE_KEY`` are SKIP-WITH-WARN
+        (their ``passed`` is True but ``skipped`` carries the reason).
+
+    Returns
+    -------
+    dict
+        Keys:
+        - ``passed``: bool — True iff every schema-mapped source
+          validated without errors.
+        - ``errors``: list[str] — flat list of per-source error
+          messages (each prefixed by ``[<src_key> (<file_key>)]``).
+        - ``triples``: int — total rows across all staged DataFrames
+          (mirrors the legacy ``triples`` key in
+          step1_load_phase1's return dict for backward compat).
+        - ``per_source``: dict[str, dict] — per-source result with
+          ``passed``, ``errors``, ``rows``, and either ``file_key``
+          (when validated) or ``skipped`` (when skipped).
+
+    Fail-closed contract
+    --------------------
+    If the Phase 1 contract cannot be imported (Phase 1 package
+    missing, schema file unreadable, BasePipeline raises during
+    instantiation, validate_output itself raises), this function
+    returns ``{"passed": False, ...}`` so the caller can abort the
+    pipeline. The ONLY way to continue past a failed validation is
+    the explicit ``--skip-phase1-validation`` CLI flag (handled by
+    the caller, NOT this function).
+    """
+    # Lazy import inside the function to avoid circular imports
+    # (phase2.drugos_graph imports phase1.pipelines.base_pipeline —
+    # if base_pipeline ever imports anything from phase2, we'd get
+    # an ImportError at module load time without this lazy guard).
+    try:
+        from phase1.pipelines.base_pipeline import BasePipeline
+    except Exception as exc:
+        # Fail-closed: Phase 1 contract not importable.
+        return {
+            "passed": False,
+            "errors": [f"Phase 1 contract not importable: {exc}"],
+            "triples": 0,
+            "per_source": {},
+        }
+
+    # Cache the validator subclass on the function so we only pay the
+    # __init_subclass__ source-name WARNING once per process (otherwise
+    # the WARN log "Unrecognized source_name 'phase1_validation'" would
+    # fire on every call — noisy, even though harmless).
+    if not hasattr(_validate_phase1_output, "_ValidatorCls"):
+        class _Phase1ContractValidator(BasePipeline):
+            """Minimal concrete BasePipeline subclass used ONLY to call
+            ``validate_output(df)``. The three abstract methods
+            (download/clean/load) are stubbed as NotImplementedError —
+            they are NEVER called during validation (we only invoke
+            ``validate_output`` which is a non-abstract method on
+            BasePipeline). ``source_name`` is set to a sentinel not in
+            VALID_SOURCE_NAMES — BasePipeline.__init_subclass__ will
+            WARN once but NOT raise (verified at base_pipeline.py:872).
+            """
+
+            source_name = "phase1_validation"
+
+            def download(self):  # pragma: no cover -- never called
+                raise NotImplementedError(
+                    "Phase 2 contract validator does not download"
+                )
+
+            def clean(self, raw_path):  # pragma: no cover -- never called
+                raise NotImplementedError(
+                    "Phase 2 contract validator does not clean"
+                )
+
+            def load(self, df, session=None):  # pragma: no cover -- never called
+                raise NotImplementedError(
+                    "Phase 2 contract validator does not load"
+                )
+
+        _validate_phase1_output._ValidatorCls = _Phase1ContractValidator
+
+    ValidatorCls = _validate_phase1_output._ValidatorCls
+
+    all_errors: List[str] = []
+    per_source: Dict[str, Dict[str, Any]] = {}
+    total_rows = 0
+    all_passed = True
+
+    for src_key, df in (staged_data or {}).items():
+        # Tolerate missing DataFrames (source CSV not present this run).
+        if df is None:
+            per_source[src_key] = {
+                "passed": True,
+                "errors": [],
+                "rows": 0,
+                "skipped": "no DataFrame (source CSV not present)",
+            }
+            continue
+        try:
+            n_rows = int(len(df))
+        except TypeError:
+            n_rows = 0
+        total_rows += n_rows
+
+        file_key = _PHASE1_SOURCE_TO_SCHEMA_FILE_KEY.get(src_key)
+        if not file_key:
+            # No schema mapping for this source key — skip with WARN
+            # recorded in per_source so operators can see WHY a source
+            # wasn't validated.
+            per_source[src_key] = {
+                "passed": True,
+                "errors": [],
+                "rows": n_rows,
+                "skipped": "no schema mapping for source key (Phase 1 contract has no entry)",
+            }
+            continue
+
+        try:
+            # Instantiate the validator and override processed_filename
+            # so BasePipeline._get_processed_filename() returns the
+            # schema file_key (not the default "<source_name>.csv").
+            validator = ValidatorCls()
+            validator.processed_filename = file_key
+            is_valid, errors = validator.validate_output(df)
+        except Exception as exc:
+            # Fail-closed: a validator crash is treated as a validation
+            # failure so the operator MUST investigate (or override via
+            # --skip-phase1-validation).
+            is_valid = False
+            errors = [f"validate_output crashed: {exc}"]
+
+        per_source[src_key] = {
+            "passed": bool(is_valid),
+            "errors": list(errors) if errors else [],
+            "rows": n_rows,
+            "file_key": file_key,
+        }
+        if not is_valid:
+            all_passed = False
+            for e in (errors or []):
+                all_errors.append(f"[{src_key} ({file_key})] {e}")
+
+    return {
+        "passed": all_passed,
+        "errors": all_errors,
+        "triples": total_rows,
+        "per_source": per_source,
+    }
+
+
 def step1_load_phase1(
     phase1_processed_dir: Optional[Path | str] = None,
+    skip_phase1_validation: bool = False,
+    # v108 ROOT FIX (issue 75): new input-mode flags. Both default to
+    # None so existing call sites (which don't pass these) are
+    # unaffected. ``from_saved_path`` is set when ``--from-saved PATH``
+    # was passed — it SKIPS the Phase 1 bridge and loads a previously-
+    # saved RecordingGraphBuilder snapshot from PATH instead.
+    # ``save_graph_path`` is set when ``--save-graph PATH`` was passed —
+    # it saves the recorder state to PATH AFTER the bridge populates it
+    # (and BEFORE step 2 consumes it).
+    from_saved_path: Optional[Path | str] = None,
+    save_graph_path: Optional[Path | str] = None,
 ) -> dict:
     """Step 1 (alternative): Load Phase 1 outputs via the phase1_bridge.
 
@@ -1900,11 +2326,59 @@ def step1_load_phase1(
       - ``input_checksums``: per-file SHA-256 checksums.
       - ``bridge_summary``: the bridge's own summary dict (for logging).
 
+    v108 ROOT FIX (issue 74): the ``validation`` key is NO LONGER
+    hard-coded to ``{"passed": True, "triples": len(df)}``. The
+    function now calls ``_validate_phase1_output(staged_data)`` which
+    invokes Phase 1's ``BasePipeline.validate_output(df)`` on every
+    staged source CSV (drugs, chembl_activities, string_ppi, etc.).
+    If validation FAILS, the function raises ``DrugOSDataError`` so
+    the pipeline ABORTS before building the KG with corrupt data. The
+    only override is the explicit ``--skip-phase1-validation`` CLI
+    flag (passed in here as ``skip_phase1_validation=True``).
+
+    v108 ROOT FIX (issue 75): two new optional flags.
+    ``from_saved_path`` (CLI: ``--from-saved PATH``) SKIPS the Phase 1
+    bridge entirely and loads a previously-saved
+    ``RecordingGraphBuilder`` snapshot from PATH (produced by a prior
+    ``--save-graph PATH`` run). The loaded builder is passed directly
+    to step 2 — saving minutes of bridge runtime during iterative KG
+    debugging. Phase 1 contract validation is also skipped when
+    loading from a snapshot (it was already performed when the snapshot
+    was first created). ``save_graph_path`` (CLI: ``--save-graph PATH``)
+    saves the recorder state to PATH AFTER the bridge has populated it
+    (and BEFORE step 2 consumes it), so a future ``--from-saved PATH``
+    invocation can reload the snapshot. Both default to None.
+
     Parameters
     ----------
     phase1_processed_dir : path-like, optional
         Phase 1 processed_data directory. Defaults to the bridge's
-        DEFAULT_PHASE1_PROCESSED_DIR.
+        DEFAULT_PHASE1_PROCESSED_DIR. Ignored when ``from_saved_path``
+        is set (the snapshot is the sole data source in that mode).
+    skip_phase1_validation : bool, default False
+        v108 ROOT FIX (issue 74): when True, log a WARN and continue
+        even if Phase 1 contract validation fails. EMERGENCY DEV USE
+        ONLY — production runs MUST leave this False so corrupt Phase
+        1 data is rejected before KG construction. Ignored when
+        ``from_saved_path`` is set (validation is skipped entirely in
+        that mode).
+    from_saved_path : path-like, optional
+        v108 ROOT FIX (issue 75): when set, SKIP the Phase 1 bridge
+        and load a previously-saved ``RecordingGraphBuilder`` snapshot
+        from this path. The loaded builder is passed directly to
+        step 2. Phase 1 contract validation is also skipped (it was
+        performed at save time). ``input_checksums`` records only the
+        snapshot file's SHA-256 (the original Phase 1 CSVs are not
+        re-read in this mode).
+    save_graph_path : path-like, optional
+        v108 ROOT FIX (issue 75): when set, save the
+        ``RecordingGraphBuilder`` state to this path AFTER the bridge
+        has populated it (and BEFORE step 2 consumes it). A future
+        ``--from-saved PATH`` invocation can reload this snapshot and
+        skip step 1. Format is auto-detected from the file extension
+        (``.json`` → JSON, ``.parquet`` → Parquet). No effect when
+        ``from_saved_path`` is also set (loading an existing snapshot,
+        no point saving it again).
 
     Returns
     -------
@@ -1915,7 +2389,17 @@ def step1_load_phase1(
     """
     _configure_logging()
     logger.info("=" * 60)
-    logger.info("STEP 1 (PHASE1): Loading Phase 1 outputs via bridge")
+    # v108 ROOT FIX (issue 75): adjust the step-1 banner to reflect
+    # the active input mode (bridge vs from-saved) so operators can
+    # tell at a glance whether the (slow) Phase 1 bridge is running.
+    if from_saved_path is not None:
+        logger.info(
+            "STEP 1 (PHASE1): Loading saved RecordingGraphBuilder "
+            "snapshot from %s (SKIPPING Phase 1 bridge) — issue 75",
+            from_saved_path,
+        )
+    else:
+        logger.info("STEP 1 (PHASE1): Loading Phase 1 outputs via bridge")
     logger.info("=" * 60)
     t0 = time.time()
 
@@ -1929,17 +2413,69 @@ def step1_load_phase1(
     )
 
     pdir = Path(phase1_processed_dir) if phase1_processed_dir else DEFAULT_PHASE1_PROCESSED_DIR
-    logger.info("Phase 1 processed_data: %s", pdir)
+    if from_saved_path is None:
+        # Only log the Phase 1 dir when we're actually going to read
+        # from it (the from_saved path doesn't touch pdir).
+        logger.info("Phase 1 processed_data: %s", pdir)
 
-    # Use a RecordingGraphBuilder here so step1 is purely in-memory and
-    # doesn't require a Neo4j connection. If the user wants to load into
-    # Neo4j, that's step3's job — step3 calls DrugOSGraphBuilder directly.
-    recorder = RecordingGraphBuilder()
-    bridge_result = run_phase1_to_phase2(
-        phase1_processed_dir=pdir,
-        builder=recorder,
-    )
-    summary = bridge_result["summary"]
+    # v108 ROOT FIX (issue 75): if --from-saved PATH was passed, SKIP
+    # the Phase 1 bridge entirely and load the previously-saved
+    # RecordingGraphBuilder snapshot from PATH. The snapshot was
+    # produced by a prior --save-graph PATH run; it contains the exact
+    # node_loads / edge_loads / dead_letter / _node_ids_by_label state
+    # that the bridge would have produced. This lets operators iterate
+    # on step 2+ without re-running the (slow) Phase 1 bridge on every
+    # invocation.
+    if from_saved_path is not None:
+        logger.info(
+            "ISSUE-75: --from-saved %s — loading RecordingGraphBuilder "
+            "snapshot, SKIPPING Phase 1 bridge.",
+            from_saved_path,
+        )
+        recorder = RecordingGraphBuilder.load(from_saved_path)
+        # Synthesize a summary from the loaded recorder (the bridge
+        # isn't available to produce one). Mirror the keys that
+        # downstream code reads: nodes_loaded, edges_loaded,
+        # edge_types_present, sources_read, errors.
+        _nodes_loaded = sum(
+            len(load.get("nodes", [])) for load in recorder.node_loads
+        )
+        _edges_loaded = sum(
+            len(load.get("edges", [])) for load in recorder.edge_loads
+        )
+        _edge_types_present = sorted({
+            load.get("rel_type") for load in recorder.edge_loads
+            if load.get("rel_type")
+        })
+        summary = {
+            "nodes_loaded": _nodes_loaded,
+            "edges_loaded": _edges_loaded,
+            "edge_types_present": _edge_types_present,
+            # sources_read is unknown from a saved snapshot — record
+            # an empty list so downstream code that iterates over it
+            # (e.g. _check_v1_launch_criteria's bridge-source counter)
+            # doesn't crash. The snapshot itself is the lineage
+            # artifact in this mode.
+            "sources_read": [],
+            "errors": [],
+        }
+        # The bridge_staged field is not available from a saved
+        # snapshot (Phase1StagedData isn't serialized). Downstream
+        # code that reads bridge_staged (step 4) falls back to its
+        # normal path (re-reading the CSV) — acceptable in from-saved
+        # mode, where the snapshot's primary win is skipping step 1.
+        bridge_result = {"summary": summary, "staged": None}
+    else:
+        # Use a RecordingGraphBuilder here so step1 is purely in-memory
+        # and doesn't require a Neo4j connection. If the user wants to
+        # load into Neo4j, that's step3's job — step3 calls
+        # DrugOSGraphBuilder directly.
+        recorder = RecordingGraphBuilder()
+        bridge_result = run_phase1_to_phase2(
+            phase1_processed_dir=pdir,
+            builder=recorder,
+        )
+        summary = bridge_result["summary"]
     if summary["errors"]:
         logger.error("Phase 1 bridge reported errors: %s", summary["errors"])
     if summary["nodes_loaded"] == 0:
@@ -2139,16 +2675,169 @@ def step1_load_phase1(
         "chembl_activities": ["chembl_activities_clean.csv"],
         "omim_susceptibility": ["omim_gene_disease_susceptibility.csv"],
     }
-    input_checksums = {}
-    for key, fnames in name_map.items():
-        if isinstance(fnames, str):
-            fnames = [fnames]
-        for fname in fnames:
-            p = pdir / fname
-            if p.exists():
-                from .phase1_bridge import _sha256_of_file
-                input_checksums[fname] = _sha256_of_file(p)
-                break  # only checksum the first matching filename
+    # v108 ROOT FIX (issue 75): when loading from a saved snapshot
+    # (--from-saved PATH), the Phase 1 source CSVs are NOT read (the
+    # snapshot is the sole data source). Skip both the input-checksums
+    # loop AND the Phase 1 contract validation (the snapshot was
+    # already validated at save time, when the prior run went through
+    # _validate_phase1_output). Compute a minimal validation_result
+    # + input_checksums so downstream code reading
+    # result["validation"]["passed"] and result["input_checksums"]
+    # continues to work.
+    if from_saved_path is not None:
+        from .phase1_bridge import _sha256_of_file
+        input_checksums = {
+            str(from_saved_path): _sha256_of_file(Path(from_saved_path)),
+        }
+        validation_result = {
+            "passed": True,
+            "errors": [],
+            "triples": len(df),
+            "per_source": {
+                "_skipped": (
+                    "loaded from saved RecordingGraphBuilder snapshot "
+                    "(--from-saved); Phase 1 contract validation was "
+                    "performed at save time (issue 75 root fix)"
+                ),
+            },
+        }
+        logger.info(
+            "ISSUE-75: skipped Phase 1 contract validation (loaded "
+            "from saved snapshot — validation was performed at save "
+            "time). input_checksums covers only the snapshot file.",
+        )
+    else:
+        # ── Normal path: compute checksums over Phase 1 source CSVs ──
+        input_checksums = {}
+        for key, fnames in name_map.items():
+            if isinstance(fnames, str):
+                fnames = [fnames]
+            for fname in fnames:
+                p = pdir / fname
+                if p.exists():
+                    from .phase1_bridge import _sha256_of_file
+                    input_checksums[fname] = _sha256_of_file(p)
+                    break  # only checksum the first matching filename
+
+        # v108 ROOT FIX (issue 74): ACTUALLY validate the staged Phase 1
+        # source CSVs against the Phase 1 contract
+        # (``BasePipeline.validate_output(df)`` at
+        # phase1/pipelines/base_pipeline.py:2466) BEFORE returning. The
+        # previous code returned a HARD-CODED
+        # ``{"passed": True, "triples": len(df)}`` validation dict — Phase
+        # 1's validate_output was NEVER invoked from Phase 2, so a
+        # drugbank_drugs.csv with a malformed InChIKey column would
+        # silently pass Phase 2's "validation" gate and load corrupt data
+        # into the KG.
+        #
+        # We re-read each Phase 1 source CSV into a DataFrame here (the
+        # bridge already read them but stores them only as
+        # Phase1StagedData node/edge lists — not as keyed-by-source
+        # DataFrames — so we cannot reuse the bridge's read). The
+        # name_map above already lists every candidate filename per
+        # source, so we walk it a second time to build the staged_data
+        # dict that _validate_phase1_output expects.
+        staged_data: Dict[str, Any] = {}
+        for key, fnames in name_map.items():
+            if isinstance(fnames, str):
+                fnames = [fnames]
+            for fname in fnames:
+                p = pdir / fname
+                if p.exists():
+                    try:
+                        if p.suffix == ".gz":
+                            staged_data[key] = pd.read_csv(
+                                p, compression="gzip", low_memory=False,
+                            )
+                        else:
+                            staged_data[key] = pd.read_csv(p, low_memory=False)
+                    except Exception as read_exc:
+                        # Tolerate per-source read failures — record as
+                        # None so _validate_phase1_output marks the source
+                        # as ``skipped`` (rather than crashing step 1 on
+                        # a single corrupt CSV). The Phase 1 bridge itself
+                        # raised earlier if a REQUIRED CSV was missing, so
+                        # reaching here means the CSV is optional OR
+                        # corrupt-but-present — either way, log + skip.
+                        logger.warning(
+                            "Could not read %s for Phase 1 contract "
+                            "validation (issue 74): %s — source '%s' will "
+                            "be marked as skipped in the validation report.",
+                            p, read_exc, key,
+                        )
+                        staged_data[key] = None
+                    break  # only read the first matching filename
+
+        validation_result = _validate_phase1_output(staged_data)
+
+        if not validation_result["passed"]:
+            if skip_phase1_validation:
+                # EMERGENCY DEV OVERRIDE — explicit opt-in via the CLI
+                # flag ``--skip-phase1-validation``. Log a loud WARN so
+                # the operator cannot miss that corrupt Phase 1 data is
+                # about to flow into the KG. Production runs MUST NOT set
+                # this flag.
+                logger.warning(
+                    "ISSUE-74 ROOT FIX: Phase 1 contract validation FAILED "
+                    "but --skip-phase1-validation is set — continuing "
+                    "despite invalid data. THIS IS AN EMERGENCY DEV "
+                    "OVERRIDE; DO NOT USE IN PRODUCTION. Per-source "
+                    "errors (first 10): %s",
+                    validation_result["errors"][:10],
+                )
+            else:
+                # Fail-closed: abort step 1 BEFORE the KG is built with
+                # corrupt data. Use DrugOSDataError so the typed-exception
+                # handlers in run_full_pipeline / _run_step_with_deps can
+                # distinguish "Phase 1 contract violation" from generic
+                # Python crashes.
+                from .exceptions import DrugOSDataError
+                logger.error(
+                    "ISSUE-74 ROOT FIX: Phase 1 contract validation "
+                    "FAILED — aborting step 1 (fail-closed). Per-source "
+                    "validation report: %s. To override (emergency dev "
+                    "use only), pass --skip-phase1-validation.",
+                    validation_result["per_source"],
+                )
+                _err_summary = "; ".join(validation_result["errors"][:5])
+                if len(validation_result["errors"]) > 5:
+                    _err_summary += (
+                        f" ... ({len(validation_result['errors'])} total errors)"
+                    )
+                raise DrugOSDataError(
+                    f"Phase 1 contract validation failed (issue 74 root "
+                    f"fix): {_err_summary}"
+                )
+
+    # v108 ROOT FIX (issue 75): if --save-graph PATH was passed, save
+    # the RecordingGraphBuilder state to PATH now (after the bridge has
+    # populated it OR after we loaded it from a snapshot — but skip the
+    # save when we JUST loaded from a snapshot, since re-saving an
+    # unchanged snapshot is wasteful and could mask the original save's
+    # lineage). A future --from-saved PATH invocation can reload this
+    # snapshot and skip step 1.
+    if save_graph_path is not None and from_saved_path is None:
+        try:
+            recorder.save(save_graph_path)
+            logger.info(
+                "ISSUE-75: saved RecordingGraphBuilder snapshot to %s "
+                "(--save-graph). A future run with --from-saved %s can "
+                "reload this snapshot and skip step 1.",
+                save_graph_path, save_graph_path,
+            )
+        except Exception as save_exc:
+            # The save is best-effort — failure to save the snapshot
+            # does NOT fail the pipeline (the operator can re-run with
+            # --save-graph after fixing the underlying issue). Log an
+            # ERROR so the operator knows the snapshot is NOT available
+            # for future --from-saved invocations.
+            logger.error(
+                "ISSUE-75: failed to save RecordingGraphBuilder snapshot "
+                "to %s (--save-graph): %s. Continuing — the pipeline will "
+                "still complete, but the snapshot is NOT available for "
+                "future --from-saved invocations.",
+                save_graph_path, save_exc,
+            )
 
     elapsed = time.time() - t0
     logger.info(
@@ -2166,11 +2855,25 @@ def step1_load_phase1(
             "edges_loaded": summary["edges_loaded"],
             "edge_types_present": summary["edge_types_present"],
             "sources_read": summary["sources_read"],
+            # v108 ROOT FIX (issue 74): record the validation result
+            # in the audit trail so operators can verify the Phase 1
+            # contract was actually enforced (not hard-coded True).
+            "phase1_contract_validation_passed": validation_result["passed"],
+            "phase1_contract_validation_sources": len(
+                validation_result["per_source"]
+            ),
+            "phase1_contract_validation_errors": len(
+                validation_result["errors"]
+            ),
         },
     )
     return {
         "df": df,
-        "validation": {"passed": True, "triples": len(df)},
+        # v108 ROOT FIX (issue 74): replace the hard-coded
+        # ``{"passed": True, "triples": len(df)}`` with the ACTUAL
+        # Phase 1 contract validation result. Downstream code that
+        # reads ``result["validation"]["passed"]`` now gets the truth.
+        "validation": validation_result,
         "elapsed": elapsed,
         "input_checksums": input_checksums,
         "bridge_summary": summary,
@@ -2213,6 +2916,15 @@ def step1_load_data(
     data_source: str = "phase1",
     skip_download: bool = False,
     phase1_processed_dir: Optional[Path | str] = None,
+    skip_phase1_validation: bool = False,
+    # v108 ROOT FIX (issue 75): new input-mode flags. Both default to
+    # None so existing call sites (which don't pass these) are
+    # unaffected. ``from_saved_path`` is set when ``--from-saved PATH``
+    # was passed; ``save_graph_path`` is set when ``--save-graph PATH``
+    # was passed. Both are forwarded to ``step1_load_phase1`` (ignored
+    # on the drkg branch).
+    from_saved_path: Optional[Path | str] = None,
+    save_graph_path: Optional[Path | str] = None,
 ) -> dict:
     """Step 1 dispatcher: select data source (phase1 | drkg).
 
@@ -2220,9 +2932,30 @@ def step1_load_data(
     consuming Phase 1 outputs via the bridge. Pass ``data_source="drkg"``
     to fall back to the legacy DRKG-download path (e.g. for large-scale
     training that needs DRKG's 5.87M triples).
+
+    v108 ROOT FIX (issue 74): ``skip_phase1_validation`` is forwarded
+    to ``step1_load_phase1`` so the CLI flag
+    ``--skip-phase1-validation`` can override the fail-closed contract
+    validation. Ignored when ``data_source == "drkg"``.
+
+    v108 ROOT FIX (issue 75): ``from_saved_path`` and ``save_graph_path``
+    are forwarded to ``step1_load_phase1`` so the CLI flags
+    ``--from-saved PATH`` and ``--save-graph PATH`` work end-to-end.
+    ``from_saved_path`` skips the Phase 1 bridge and loads a previously-
+    saved ``RecordingGraphBuilder`` snapshot. ``save_graph_path`` saves
+    the recorder state after the bridge runs. Both are ignored when
+    ``data_source == "drkg"``.
     """
     if data_source == "phase1":
-        return step1_load_phase1(phase1_processed_dir)
+        return step1_load_phase1(
+            phase1_processed_dir,
+            skip_phase1_validation=skip_phase1_validation,
+            # v108 ROOT FIX (issue 75): forward the new input-mode
+            # flags so step1_load_phase1 can load a saved snapshot or
+            # save the recorder state.
+            from_saved_path=from_saved_path,
+            save_graph_path=save_graph_path,
+        )
     elif data_source == "drkg":
         return step1_load_drkg(skip_download)
     else:
@@ -4006,18 +4739,50 @@ def step7_additional_sources(
         # DRUGOS_STRICT_CLINICALTRIALS=1), surface as a critical_failure
         # flag so the V1 launch criteria hard-fails. Default behavior
         # (warn-and-continue) is preserved for backward compat.
+        #
+        # v107 ROOT FIX (ISSUE-P2-054): the previous strict-mode path
+        # only set ``results["clinicaltrials_critical_failure"] = True``
+        # but did NOT raise — the pipeline continued running, and the
+        # critical_failure flag was only checked at V1 launch
+        # verification (which may not run for dev iterations). This
+        # meant the KG was built with ZERO ``tested_for`` edges from
+        # ClinicalTrials, and the RL ranker's clinical-evidence tier
+        # was empty — drugs that failed Phase III were treated the
+        # same as drugs never tested. ROOT FIX: in production mode
+        # (DRUGOS_ENV=production OR DRUGOS_STRICT=1 OR
+        # DRUGOS_STRICT_CLINICALTRIALS=1), RAISE the exception after
+        # recording the flag, so the pipeline fails loudly at the
+        # point of failure rather than producing a silently-corrupt KG.
         _ct_strict = (
             os.environ.get("DRUGOS_STRICT", "") == "1"
             or os.environ.get("DRUGOS_STRICT_CLINICALTRIALS", "") == "1"
+            or os.environ.get("DRUGOS_ENV", "").lower() == "production"
         )
         if _ct_strict:
             logger.error(
-                "ClinicalTrials ingestion FAILED in strict mode — marking "
-                "critical_failure (will block V1 launch): %s", e
+                "ClinicalTrials ingestion FAILED in strict/production "
+                "mode — marking critical_failure (will block V1 launch) "
+                "and RAISING to abort the pipeline. The clinical "
+                "evidence dimension is patient-safety-critical: drugs "
+                "that failed Phase III must NOT be treated the same as "
+                "drugs never tested. Error: %s. v107 ISSUE-P2-054 root "
+                "fix.",
+                e,
             )
             results["clinicaltrials_critical_failure"] = True
+            results["clinicaltrials_error"] = str(e)
+            # v107: re-raise so the pipeline aborts. The
+            # critical_failure flag is also set so that if the
+            # exception is caught upstream, the V1 verifier still
+            # sees the failure.
+            raise
         else:
-            logger.warning("ClinicalTrials ingestion failed: %s", e)
+            logger.warning(
+                "ClinicalTrials ingestion failed (dev mode — "
+                "warn-and-continue). Set DRUGOS_STRICT=1 or "
+                "DRUGOS_ENV=production to abort on failure. Error: %s",
+                e,
+            )
         results["clinicaltrials_error"] = str(e)
 
     # ─── 7f: DisGeNET (BUG-SCI-03 FIX — missing project source) ───────────
@@ -5031,6 +5796,31 @@ def step9_build_pyg(
     #   Layer 3: HF_TOKEN missing OR encode_smiles failed → was
     #            silent, now raises.
     strict_features = os.environ.get("DRUGOS_STRICT_FEATURES", "1") == "1"
+    # P2-020 ROOT FIX (v107): in production mode, FORCE strict_features=True
+    # regardless of DRUGOS_STRICT_FEATURES. The previous code allowed
+    # DRUGOS_STRICT_FEATURES=0 in production, which silently fell back to
+    # random Xavier features when ChemBERTa failed — corrupting the GNN's
+    # molecular structure learning (AUC reflected transductive memorisation,
+    # not molecular structure). The audit's patient-safety gate requires
+    # that in production, ChemBERTa failure ALWAYS raises (never falls back).
+    # The MLflow tag CHEMBERTA_DISABLED=true is insufficient — operators
+    # who don't monitor MLflow tags have no idea the model trained on
+    # random features. ROOT FIX: in production, ignore DRUGOS_STRICT_FEATURES=0
+    # and force strict_features=True.
+    _is_prod_p2_020 = os.environ.get(
+        "DRUGOS_ENVIRONMENT", "production"
+    ).lower() in ("prod", "production")
+    if _is_prod_p2_020 and not strict_features:
+        logger.error(
+            "P2-020 ROOT FIX: DRUGOS_STRICT_FEATURES=0 is set but "
+            "DRUGOS_ENVIRONMENT=production. Forcing strict_features=True "
+            "to prevent silent ChemBERTa fallback to random Xavier "
+            "features. ChemBERTa failure will RAISE "
+            "FeatureFailureError in production. Set "
+            "DRUGOS_ENVIRONMENT=dev to allow the random-Xavier fallback "
+            "(dev fixtures only)."
+        )
+        strict_features = True
     hf_token = (
         os.environ.get("HF_TOKEN")
         or os.environ.get("HUGGING_FACE_HUB_TOKEN")
@@ -5303,6 +6093,42 @@ def step9_build_pyg(
                     ),
                 },
             )
+            # P2-020 ROOT FIX (forensic, TM5): the 4 sibling branches
+            # (disabled_by_env / transformers_not_importable /
+            # hf_token_missing_gated_model / no_drug_records) all set
+            # the MLflow tags CHEMBERTA_DISABLED=true +
+            # CHEMBERTA_FAILURE_REASON + FEATURE_FALLBACK +
+            # MOLECULAR_STRUCTURE_LEARNED + log_params. THIS branch
+            # (encode_failed — the most common production failure
+            # mode: HF Hub unreachable, model deleted, network
+            # partition) did NOT. Operators monitoring the MLflow
+            # dashboard saw a "RUNNING" run with no tags indicating
+            # failure — they had no idea the model was training on
+            # random Xavier features. The issue title explicitly
+            # calls this out: "The only signal is an MLflow tag
+            # CHEMBERTA_DISABLED=true. Operators who don't monitor
+            # MLflow tags have no idea the model is training on
+            # random features." ROOT FIX: add the same MLflow tag
+            # block as the 4 sibling branches so the encode_failed
+            # path is also observable in the MLflow UI.
+            try:
+                from .mlflow_tracker import MLflowTracker as _MLFT_p2_020
+                _t = _MLFT_p2_020()
+                _t.start_run(run_name=f"chemberta_disabled_step9_{int(time.time())}")
+                _t.set_tag("CHEMBERTA_DISABLED", "true")
+                _t.set_tag("CHEMBERTA_FAILURE_REASON", "encode_failed")
+                _t.set_tag("FEATURE_FALLBACK", "random_xavier")
+                _t.set_tag("MOLECULAR_STRUCTURE_LEARNED", "false")
+                _t.set_tag("CHEMBERTA_EXCEPTION_TYPE", type(exc).__name__)
+                _t.log_params({
+                    "chemberta_used": False,
+                    "chemberta_failure_reason": "encode_failed",
+                    "compound_feature_source": "random_xavier",
+                    "chemberta_exception_type": type(exc).__name__,
+                })
+                _t.end_run()
+            except Exception:
+                pass  # MLflow tagging is best-effort, never fatal
             _strict_raise("encode_failed", exc)
 
     # v72 ROOT FIX (P2C-016): record chemberta_features_used on the
@@ -5343,14 +6169,63 @@ def step9_build_pyg(
             ("train", train_data), ("val", val_data), ("test", test_data),
         ]:
             # Record chemberta lineage on split data too.
+            # v107 ROOT FIX (ISSUE-P2-049): the previous code did
+            # ``try: _sdata.__chemberta_features_used__ = ...; ... except
+            # Exception: pass`` — silently swallowing ALL errors. If the
+            # attribute couldn't be set (PyG version issue, HeteroData
+            # subclass that overrides __setattr__), the split files
+            # didn't have the lineage flag. Downstream V1 launch
+            # verification can't confirm whether the model used real
+            # molecular features (ChemBERTa) or random fallback features.
+            # ROOT FIX: log the exception at WARNING, AND write a
+            # companion ``.lineage.json`` file next to the split file so
+            # the lineage is preserved even if attribute-setting fails.
             try:
                 _sdata.__chemberta_features_used__ = bool(chemberta_used)
                 _sdata.__chemberta_failure_reason__ = chemberta_failure_reason
-            except Exception:
-                pass
+            except Exception as _attr_exc:
+                logger.warning(
+                    "Step 9: could not set __chemberta_features_used__ "
+                    "on %s split HeteroData (%s: %s). Writing companion "
+                    ".lineage.json file instead. v107 ISSUE-P2-049.",
+                    _sname, type(_attr_exc).__name__, _attr_exc,
+                )
             _split_path = pyg_builder.save_heterodata(
                 _sdata, filename=f"heterodata_split_{_sname}.pt",
             )
+            # v107 ISSUE-P2-049: ALWAYS write a companion .lineage.json
+            # file next to the split file. This is the authoritative
+            # lineage record — the HeteroData attribute is a convenience
+            # for in-process consumers, but the .lineage.json file
+            # survives PyG version upgrades, serialization roundtrips,
+            # and cross-process verification (the V1 launch verifier
+            # reads this file to confirm ChemBERTa features were used).
+            try:
+                _lineage_path = _split_path.with_suffix(
+                    _split_path.suffix + ".lineage.json"
+                )
+                import json as _json_v107
+                _lineage_payload = {
+                    "split": _sname,
+                    "chemberta_features_used": bool(chemberta_used),
+                    "chemberta_failure_reason": (
+                        chemberta_failure_reason or None
+                    ),
+                    "source_split_file": str(_split_path.name),
+                    "v107_issue_p2_049_fix": True,
+                }
+                _lineage_path.write_text(
+                    _json_v107.dumps(_lineage_payload, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception as _lineage_exc:
+                logger.error(
+                    "Step 9: FAILED to write companion .lineage.json "
+                    "for %s split (%s: %s). V1 launch verification "
+                    "cannot confirm ChemBERTa feature usage. v107 "
+                    "ISSUE-P2-049.",
+                    _sname, type(_lineage_exc).__name__, _lineage_exc,
+                )
             split_paths[_sname] = str(_split_path)
         logger.info(
             "Step 9: node_disjoint_split produced 3 GNN-safe split files "
@@ -5361,11 +6236,44 @@ def step9_build_pyg(
             split_paths.get("test", "?"),
         )
     except Exception as _split_exc:
-        logger.warning(
-            "Step 9: node_disjoint_split failed (%s) — step11/step11b "
-            "will fall back to inline split. (P2C-012)",
-            _split_exc, exc_info=True,
-        )
+        # P2-028 ROOT FIX (v107): the previous code logged a WARNING and
+        # continued — step11/step11b then fell back to an INLINE split
+        # (stratified-random triple split, NOT node-disjoint). The
+        # fallback has entity-level LEAKAGE (same drug in train and
+        # test), inflating AUC. The V1 launch criterion may pass for
+        # the wrong reason. ROOT FIX: in production mode, RAISE instead
+        # of warning — force the operator to investigate. In dev mode,
+        # preserve the legacy lenient behavior (so dev fixtures with
+        # tiny graphs that can't be node-disjoint-split still work).
+        _is_prod_p2_028 = os.environ.get(
+            "DRUGOS_ENVIRONMENT", "production"
+        ).lower() in ("prod", "production")
+        if _is_prod_p2_028:
+            logger.error(
+                "P2-028 ROOT FIX: node_disjoint_split FAILED in "
+                "production (%s). The fallback inline split has "
+                "entity-level leakage (same drug in train and test) "
+                "which inflates AUC — the V1 launch criterion may "
+                "pass for the wrong reason. RAISING to force "
+                "investigation. Set DRUGOS_ENVIRONMENT=dev to allow "
+                "the leaky fallback (dev fixtures only).",
+                _split_exc, exc_info=True,
+            )
+            raise RuntimeError(
+                f"P2-028 ROOT FIX: node_disjoint_split failed in "
+                f"production: {_split_exc}. The fallback inline split "
+                f"has entity-level leakage — refusing to continue. "
+                f"Set DRUGOS_ENVIRONMENT=dev to allow the leaky "
+                f"fallback (dev fixtures only)."
+            ) from _split_exc
+        else:
+            logger.warning(
+                "Step 9: node_disjoint_split failed (%s) — step11/step11b "
+                "will fall back to inline split. (P2C-012) NOTE: the "
+                "inline split has entity-level leakage — AUC may be "
+                "inflated. This is dev-mode only; production RAISES.",
+                _split_exc, exc_info=True,
+            )
 
     summary = pyg_builder.summarize_heterodata(data)
     summary = dict(summary) if isinstance(summary, dict) else summary
@@ -5826,6 +6734,52 @@ def step11_train_transe(
                     drug_year_lookup[str(_did)] = int(_year)
                     break
 
+    # P2-019 ROOT FIX (v107 forensic): the audit found that if
+    # ``drug_records`` doesn't carry ``approval_year`` (e.g. ChEMBL-only
+    # path, or DrugBank records without parsed approval year),
+    # ``approval_years`` is empty. ``temporal_split_pairs`` then falls
+    # back to random split (if dev mode) or raises (if production). In
+    # dev mode, the TransE model trains on a random split — temporal
+    # leakage. The V1 launch AUC is evaluated on a random split. Future
+    # drug approvals appear in train. AUC is inflated.
+    # ROOT FIX: in production mode (DRUGOS_ENVIRONMENT=production), RAISE
+    # if approval_years is empty after this lookup. The operator must
+    # either (a) ensure Phase 1 populates approval_year on every
+    # drug_record, or (b) explicitly set DRUGOS_ENVIRONMENT=dev to
+    # acknowledge the random-split fallback for smoke tests. This
+    # mirrors the P2-013 / P2-006 / P2-011 production-refusal pattern.
+    _p2_019_env = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
+    _p2_019_is_prod = _p2_019_env in ("prod", "production")
+    if _p2_019_is_prod and not drug_year_lookup:
+        # Local import — DrugOSDataError lives in .exceptions.
+        from .exceptions import DrugOSDataError as _P2_019_DrugOSDataError
+        raise _P2_019_DrugOSDataError(
+            "P2-019 ROOT FIX: step11_train_transe cannot build "
+            "approval_years from drug_records — no drug_record has an "
+            "approval_year field. temporal_split_pairs would fall back "
+            "to a random split, causing temporal leakage (future drug "
+            "approvals in train, inflated V1 launch AUC). Ensure Phase 1 "
+            "populates approval_year on every drug_record (DrugBank "
+            "approval_year field, or ChEMBL max_phase==4 fallback). For "
+            "dev/CI smoke tests, set DRUGOS_ENVIRONMENT=dev to "
+            "acknowledge the random-split fallback. (P2-019 root fix, v107)",
+            context={
+                "function": "step11_train_transe",
+                "error": "missing_approval_year",
+                "n_drug_records": len(drug_records) if drug_records else 0,
+                "production_mode": _p2_019_is_prod,
+            },
+        )
+    if not drug_year_lookup and not _p2_019_is_prod:
+        logger.warning(
+            "P2-019 ROOT FIX: step11_train_transe has no approval_year "
+            "data (DRUGOS_ENVIRONMENT=%s). In dev mode, "
+            "temporal_split_pairs will fall back to a random split — "
+            "this is for smoke tests only. The V1 launch AUC must NOT "
+            "be evaluated on this split. (P2-019 root fix, v107)",
+            _p2_019_env,
+        )
+
     # Collect (drug_id, disease_id) -> year for treats triples.
     approval_years: Dict[Tuple[str, str], int] = {}
     treats_triple_indices: List[int] = []
@@ -6196,13 +7150,53 @@ def step11_train_transe(
         # leaks (drugs in test also appear in train). It's kept only as
         # a last-resort fallback for tiny datasets where node-disjoint
         # split would leave val/test empty.
+        #
+        # P2-028 ROOT FIX (forensic, TM5, defense-in-depth): step9's
+        # node_disjoint_split already RAISES in production (lines
+        # 5522-5542), so this leaky fallback is only reachable in dev
+        # mode. However, defense-in-depth requires that step11 ALSO
+        # refuse to use this leaky split in production — if a future
+        # code change makes step9's split silently succeed but produce
+        # empty val/test sets (e.g. graph with 1 drug), step11 would
+        # fall through to THIS branch and silently train on a leaky
+        # split. ROOT FIX: in production, RAISE RuntimeError if this
+        # branch is reached. The V1 launch criterion '>0.85 AUC on
+        # held-out drug-disease pairs' is structurally unverifiable on
+        # a leaky split — the held-out AUC is a random-split proxy
+        # that does NOT measure generalization. In dev mode, preserve
+        # the legacy lenient behavior for tiny fixtures.
+        _is_prod_p2_028_defense = os.environ.get(
+            "DRUGOS_ENVIRONMENT", "production"
+        ).lower() in ("prod", "production")
+        if _is_prod_p2_028_defense:
+            logger.error(
+                "P2-028 ROOT FIX (defense-in-depth): step11 reached "
+                "the leaky stratified-random fallback split in "
+                "PRODUCTION mode. Both node_disjoint_split and "
+                "temporal_split failed or produced empty val/test "
+                "sets. This split has entity-level leakage (same drug "
+                "in train and test) — AUC will be inflated and the "
+                "V1 launch criterion '>0.85 AUC' is structurally "
+                "unverifiable. RAISING to force investigation. Set "
+                "DRUGOS_ENVIRONMENT=dev to allow the leaky fallback "
+                "(dev fixtures only)."
+            )
+            raise RuntimeError(
+                "P2-028 ROOT FIX (defense-in-depth): step11 leaky "
+                "stratified-random fallback split reached in production. "
+                "Both node_disjoint_split and temporal_split failed. "
+                "The fallback has entity-level leakage — refusing to "
+                "train on a leaky split. Set DRUGOS_ENVIRONMENT=dev to "
+                "allow (dev fixtures only)."
+            )
         logger.warning(
             "Step 11: using stratified random split (temporal split not "
             "available — no approval_year data, or fewer than half of "
             "treats triples had an approval_year). The DOCX V1 launch "
             "criterion '>0.85 AUC on held-out drug-disease pairs' is "
             "therefore structurally unverifiable in this run; the "
-            "held-out AUC reported below is a random-split proxy."
+            "held-out AUC reported below is a random-split proxy. "
+            "(P2-028: dev mode only — production RAISES.)"
         )
         _by_rel: Dict[int, List[int]] = {}
         for _i, _r in enumerate(rels):
@@ -7993,10 +8987,56 @@ def step11b_train_graph_transformer(
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             if scheduler is not None:
+                # v107 ROOT FIX (ISSUE-P2-045 / P2-032): the previous code did
+                # ``try: scheduler.step() except Exception: pass``, which
+                # swallowed ALL exceptions. ReduceLROnPlateau.step() raises
+                # ``ValueError`` if the metric is NaN (degenerate batch),
+                # and ``TypeError`` if the metric has the wrong type. Both
+                # of those are recoverable — we want to log them and skip
+                # the LR update for this step. But a ``RuntimeError``
+                # (e.g. CUDA error, scheduler not initialized) indicates a
+                # real bug that should surface, NOT be silently swallowed.
+                # Swallowing RuntimeErrors left the LR frozen at its
+                # initial value indefinitely — HGT training silently
+                # failed to converge, AUC was lower than expected, and
+                # the V1 launch criterion (>0.85 AUC) silently failed.
+                #
+                # ROOT FIX (P2-032 + ISSUE-P2-045): catch ONLY
+                # TypeError/ValueError (the expected scheduler-specific
+                # exceptions). Log them at WARNING so operators see
+                # degenerate batches. For any other exception type, log
+                # at ERROR and RE-RAISE so the training loop fails loudly
+                # instead of running with a frozen LR. Also detect NaN
+                # metrics explicitly and log them at ERROR (a NaN metric
+                # is a model-health issue, not a scheduler issue).
                 try:
                     scheduler.step()
-                except Exception:
-                    pass
+                except (TypeError, ValueError) as _sched_exc:
+                    # Check if the cause is a NaN metric — that's a
+                    # model-health issue worth flagging at ERROR level.
+                    _msg = str(_sched_exc).lower()
+                    if "nan" in _msg or "not finite" in _msg:
+                        logger.error(
+                            "HGT scheduler.step() raised %s: %s — the "
+                            "validation metric is NaN. This indicates a "
+                            "degenerate batch or model divergence (grad "
+                            "explosion after clip). The LR update is "
+                            "SKIPPED for this step, but training "
+                            "continues. If this fires repeatedly, "
+                            "investigate gradient norms and batch "
+                            "composition. v107 ISSUE-P2-045 / P2-032.",
+                            type(_sched_exc).__name__, _sched_exc,
+                        )
+                    else:
+                        logger.warning(
+                            "HGT scheduler.step() raised %s: %s — "
+                            "skipping LR update for this step. v107 "
+                            "ISSUE-P2-045 / P2-032.",
+                            type(_sched_exc).__name__, _sched_exc,
+                        )
+                # NOTE: any other exception (RuntimeError, etc.) is NOT
+                # caught — it propagates up and aborts training, which
+                # is the correct behavior for unexpected failures.
             epoch_loss += loss.item()
 
         # Validation AUC (every 5 epochs OR the final epoch).
@@ -8416,9 +9456,10 @@ def step11b_train_graph_transformer(
     # file so the launch criteria correctly report
     # model_saved_to_disk=False. In dev, we save WITH a marker so
     # operators can inspect the (admittedly garbage) model for debugging.
+    # P2-035 ROOT FIX (v107): default changed from "dev" to "production".
     _chemberta_disabled_in_prod = (
         chemberta_disabled
-        and os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower() in ("prod", "production")
+        and os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() in ("prod", "production")
     )
     if _chemberta_disabled_in_prod:
         logger.error(
@@ -8684,6 +9725,15 @@ def run_full_pipeline(
     resume_after: Optional[float] = None,
     data_source: str = "phase1",
     phase1_processed_dir: Optional[Path | str] = None,
+    skip_phase1_validation: bool = False,
+    # v108 ROOT FIX (issue 75): new input-mode flags. Both default to
+    # None so existing call sites (which don't pass these) are
+    # unaffected. ``from_saved_path`` is set when ``--from-saved PATH``
+    # was passed; ``save_graph_path`` is set when ``--save-graph PATH``
+    # was passed. Both are forwarded to ``step1_load_data`` →
+    # ``step1_load_phase1``.
+    from_saved_path: Optional[Path | str] = None,
+    save_graph_path: Optional[Path | str] = None,
 ) -> dict:
     """Execute the complete Week 2 graph construction pipeline.
 
@@ -8715,6 +9765,35 @@ def run_full_pipeline(
     phase1_processed_dir : path-like, optional
         Phase 1 processed_data directory (only used when
         ``data_source="phase1"``).
+    skip_phase1_validation : bool, default False
+        v108 ROOT FIX (issue 74): when True, the pipeline logs a WARN
+        and continues even if Phase 1 contract validation
+        (``BasePipeline.validate_output``) fails on any staged source
+        CSV. EMERGENCY DEV USE ONLY — production runs MUST leave this
+        False so corrupt Phase 1 data is rejected before KG
+        construction. Forwarded to ``step1_load_data`` →
+        ``step1_load_phase1``.
+    from_saved_path : path-like, optional
+        v108 ROOT FIX (issue 75): when set, ``step1_load_phase1``
+        SKIPS the Phase 1 bridge entirely and loads a previously-saved
+        ``RecordingGraphBuilder`` snapshot from this path (produced by
+        a prior ``save_graph_path`` run). The loaded builder is passed
+        directly to step 2 (build_mappings). Phase 1 contract
+        validation is also skipped (it was already performed when the
+        snapshot was first created). ``data_source`` is forced to
+        ``"phase1"`` regardless of the ``data_source`` argument
+        (the snapshot was built from Phase 1 data). Mutually exclusive
+        with ``data_source="drkg"`` (enforced by
+        ``_validate_neo4j_cli_combos``).
+    save_graph_path : path-like, optional
+        v108 ROOT FIX (issue 75): when set, ``step1_load_phase1``
+        saves the ``RecordingGraphBuilder`` state to this path AFTER
+        the bridge has populated it (and BEFORE step 2 consumes it).
+        A future ``from_saved_path`` invocation can reload this
+        snapshot and skip step 1. Format is auto-detected from the
+        file extension (``.json`` → JSON, ``.parquet`` → Parquet).
+        No effect when ``from_saved_path`` is also set (loading an
+        existing snapshot, no point saving it again).
 
     Returns
     -------
@@ -8804,6 +9883,14 @@ def run_full_pipeline(
         try:
             r1 = step1_load_data(
                 data_source, skip_download, phase1_processed_dir,
+                skip_phase1_validation=skip_phase1_validation,
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags so step1_load_phase1 can either load a saved
+                # RecordingGraphBuilder snapshot (--from-saved PATH)
+                # or save the recorder state after the bridge runs
+                # (--save-graph PATH).
+                from_saved_path=from_saved_path,
+                save_graph_path=save_graph_path,
             )
             results["step1"] = {k: v for k, v in r1.items() if k not in ("df", "entity_maps", "edge_maps", "edge_props_lookup", "node_props_lookup", "bridge_staged")}
             if r1.get("fatal"):
@@ -8892,6 +9979,13 @@ def run_full_pipeline(
                 data_source,
                 skip_download=True,
                 phase1_processed_dir=phase1_processed_dir,
+                skip_phase1_validation=skip_phase1_validation,
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags on the resume-cache-miss path too, so
+                # --from-saved / --save-graph continue to work after a
+                # checkpoint resume that misses the disk cache.
+                from_saved_path=from_saved_path,
+                save_graph_path=save_graph_path,
             )
             df = r1["df"]
             _prebuilt_entity_maps = r1.get("entity_maps")
@@ -9509,7 +10603,10 @@ def run_full_pipeline(
         # (default), the escape hatch is allowed but logs a loud
         # warning. This makes the escape hatch dev-only by default,
         # closing the patient-safety hole.
-        _env_mode = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower()
+        # P2-035 ROOT FIX (v107): default changed from "dev" to "production".
+        # A production deployment that forgets to set DRUGOS_ENVIRONMENT
+        # now gets production behavior — the escape hatch is REFUSED.
+        _env_mode = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower()
         _is_production = (_env_mode in ("production", "prod"))
         _allow_launch_fail = (
             os.environ.get("DRUGOS_ALLOW_LAUNCH_FAIL", "") == "1"
@@ -9660,16 +10757,78 @@ def run_full_pipeline(
         logger.debug("Failed to write audit entry: %s", e)
 
     # Write lineage manifest (GAP-LIN-01)
-    try:
-        from .config import write_lineage_manifest
-        input_checksums = results.get("step1", {}).get("input_checksums", {})
-        lineage_path = write_lineage_manifest(
-            PROCESSED_DIR / "lineage_manifest.json",
-            input_checksums=input_checksums,
+    # v107 ROOT FIX (ISSUE-P2-041): the lineage manifest IS the FDA 21
+    # CFR Part 11 audit trail — it records which inputs (file hashes,
+    # source versions, fetch timestamps) produced this KG build. Losing
+    # it means a regulator cannot verify which inputs produced the
+    # current KG, breaking the compliance chain. The previous code
+    # wrapped the write in ``except Exception: logger.debug(...)``,
+    # silently dropping the failure. Operators never saw the broken
+    # audit trail. ROOT FIX:
+    #   (1) Log at ERROR level (not debug) so it surfaces in production.
+    #   (2) Retry with exponential backoff (3 attempts: 0.5s, 1s, 2s).
+    #       Transient FS errors (NFS hiccup, disk full for 1s) recover.
+    #   (3) In production mode (DRUGOS_ENV=production OR DRUGOS_STRICT=1),
+    #       re-raise after retries exhausted so the pipeline fails loudly
+    #       instead of producing an unauditable KG. In dev mode, log the
+    #       error and continue (dev environments may not have a writable
+    #       audit directory).
+    import time as _time_v107
+    _LINEAGE_MAX_RETRIES = 3
+    _LINEAGE_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+    _lineage_written = False
+    _lineage_last_exc: Exception | None = None
+    for _lineage_attempt in range(_LINEAGE_MAX_RETRIES):
+        try:
+            from .config import write_lineage_manifest
+            input_checksums = results.get("step1", {}).get("input_checksums", {})
+            lineage_path = write_lineage_manifest(
+                PROCESSED_DIR / "lineage_manifest.json",
+                input_checksums=input_checksums,
+            )
+            logger.info("Lineage manifest saved to %s", lineage_path)
+            _lineage_written = True
+            break
+        except Exception as e:
+            _lineage_last_exc = e
+            if _lineage_attempt < _LINEAGE_MAX_RETRIES - 1:
+                logger.warning(
+                    "Lineage manifest write attempt %d/%d failed (%s: %s) — "
+                    "retrying in %.1fs. v107 ISSUE-P2-041.",
+                    _lineage_attempt + 1, _LINEAGE_MAX_RETRIES,
+                    type(e).__name__, e,
+                    _LINEAGE_BACKOFF_SECONDS[_lineage_attempt],
+                )
+                _time_v107.sleep(_LINEAGE_BACKOFF_SECONDS[_lineage_attempt])
+            else:
+                logger.error(
+                    "Lineage manifest write FAILED after %d attempts "
+                    "(last error: %s: %s). FDA 21 CFR Part 11 audit "
+                    "trail is INCOMPLETE — regulators cannot verify "
+                    "which inputs produced this KG build. v107 "
+                    "ISSUE-P2-041 ROOT FIX.",
+                    _LINEAGE_MAX_RETRIES,
+                    type(e).__name__, e,
+                )
+    if not _lineage_written:
+        _is_prod = (
+            os.environ.get("DRUGOS_ENV", "").lower() == "production"
+            or os.environ.get("DRUGOS_STRICT", "") == "1"
         )
-        logger.info("Lineage manifest saved to %s", lineage_path)
-    except Exception as e:
-        logger.debug("Failed to write lineage manifest: %s", e)
+        if _is_prod:
+            raise RuntimeError(
+                f"Lineage manifest write failed after "
+                f"{_LINEAGE_MAX_RETRIES} attempts — FDA 21 CFR Part 11 "
+                f"audit trail cannot be guaranteed in production mode. "
+                f"Last error: {_lineage_last_exc!r}. v107 ISSUE-P2-041."
+            ) from _lineage_last_exc
+        # Dev mode: record the failure in results so downstream
+        # verification can detect the missing audit trail.
+        results["lineage_manifest_failure"] = (
+            f"{type(_lineage_last_exc).__name__}: {_lineage_last_exc}"
+            if _lineage_last_exc
+            else "unknown"
+        )
 
     return results
 
@@ -9747,6 +10906,84 @@ def main() -> None:
              "--data-source phase1). Defaults to the bridge's "
              "DEFAULT_PHASE1_PROCESSED_DIR.",
     )
+    # v108 ROOT FIX (issue 74): explicit opt-in flag for emergency
+    # dev use only. When set, the pipeline logs a WARN and continues
+    # even if Phase 1 contract validation
+    # (BasePipeline.validate_output at
+    # phase1/pipelines/base_pipeline.py:2466) FAILS on any staged
+    # source CSV. Default is False (fail-closed) so corrupt Phase 1
+    # data is rejected BEFORE KG construction. Production runs MUST
+    # NOT set this flag.
+    parser.add_argument(
+        "--skip-phase1-validation",
+        action="store_true",
+        default=False,
+        help="EMERGENCY DEV USE ONLY — bypass Phase 1 contract "
+             "validation (BasePipeline.validate_output). When set, "
+             "the pipeline logs a WARN and continues even if a "
+             "staged Phase 1 CSV fails validation (missing required "
+             "columns, malformed InChIKey, out-of-range scores, "
+             "etc.). Default is False (fail-closed: step 1 raises "
+             "DrugOSDataError on any validation failure). Production "
+             "runs MUST NOT set this flag (issue 74 root fix).",
+    )
+    # v108 ROOT FIX (issue 75): add --from-phase1 / --from-saved /
+    # --save-graph flags so the entry point (__main__.py) supports
+    # BOTH loading fresh Phase 1 data AND resuming from a previously-
+    # saved RecordingGraphBuilder snapshot. The previous code only
+    # exposed ``--data-source phase1|drkg`` — there was NO way to
+    # load a saved builder JSON (RecordingGraphBuilder.save/.load
+    # exist in phase1_bridge.py:876/948 but were NEVER invoked from
+    # __main__ or run_pipeline). This made iterative KG debugging
+    # painful: every run re-ran the entire Phase 1 bridge (~minutes)
+    # even when only step 2+ changed. The new flags are ADDITIVE:
+    # ``--data-source phase1|drkg`` continues to work unchanged.
+    #
+    # Mutually exclusive group: ``--from-phase1`` and ``--from-saved``
+    # cannot be combined (one says "load fresh Phase 1 data", the
+    # other says "skip step 1 entirely and load a snapshot").
+    # ``--data-source drkg`` cannot be combined with ``--from-saved``
+    # (manual check in ``_validate_neo4j_cli_combos`` — can't be in
+    # the mutex group because it's a value of ``--data-source``, not
+    # its own flag).
+    _issue75_mx = parser.add_mutually_exclusive_group()
+    _issue75_mx.add_argument(
+        "--from-phase1",
+        action="store_true",
+        default=False,
+        help="v108 ROOT FIX (issue 75): synonym for --data-source "
+             "phase1. When set, forces data_source='phase1' "
+             "regardless of --data-source. Mutually exclusive with "
+             "--from-saved. Default is False (use --data-source to "
+             "choose instead).",
+    )
+    _issue75_mx.add_argument(
+        "--from-saved",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="v108 ROOT FIX (issue 75): load a previously-saved "
+             "RecordingGraphBuilder snapshot from PATH (produced by "
+             "a prior --save-graph PATH run). SKIPS step 1 (Phase 1 "
+             "bridge) entirely — the loaded builder is passed "
+             "directly to step 2. Mutually exclusive with "
+             "--from-phase1 and --data-source drkg. Use --save-graph "
+             "PATH on a fresh run to produce the snapshot.",
+    )
+    parser.add_argument(
+        "--save-graph",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="v108 ROOT FIX (issue 75): AFTER step 1 completes "
+             "(Phase 1 bridge run), save the RecordingGraphBuilder "
+             "state to PATH so a future --from-saved PATH invocation "
+             "can reload it without re-running the bridge. Format is "
+             "auto-detected from the file extension (.json → JSON, "
+             ".parquet → Parquet). Optional — no effect when "
+             "--from-saved is also set (loading an existing "
+             "snapshot, no point saving it again).",
+    )
     args = parser.parse_args()
 
     # GAP-CONF-02: Validate config on startup
@@ -9759,6 +10996,32 @@ def main() -> None:
     combo_error = _validate_neo4j_cli_combos(args)
     if combo_error:
         parser.error(combo_error)
+
+    # v108 ROOT FIX (issue 75): reconcile --from-phase1 / --from-saved
+    # with --data-source. ``--from-phase1`` forces data_source="phase1"
+    # regardless of ``--data-source`` (override with a WARN log so the
+    # operator knows the explicit synonym won). ``--from-saved`` also
+    # forces data_source="phase1" (the saved snapshot was produced by
+    # a Phase 1 bridge run). The mutex group already prevents
+    # ``--from-phase1 + --from-saved``; the manual check in
+    # ``_validate_neo4j_cli_combos`` already rejected
+    # ``--from-saved + --data-source drkg``, so reaching here with
+    # ``args.from_saved`` set means ``args.data_source`` is "phase1"
+    # (or "drkg" was rejected upstream).
+    if args.from_phase1 and args.data_source != "phase1":
+        logger.warning(
+            "ISSUE-75: --from-phase1 was set AND --data-source=%s — "
+            "forcing data_source='phase1' (--from-phase1 wins as the "
+            "explicit synonym).",
+            args.data_source,
+        )
+        args.data_source = "phase1"
+    if args.from_saved is not None:
+        # ``--from-saved`` always implies data_source="phase1" (the
+        # snapshot was built from Phase 1 data). ``_validate_neo4j_cli_
+        # combos`` already rejected ``--from-saved + --data-source drkg``,
+        # so this is a no-op when data_source is already "phase1".
+        args.data_source = "phase1"
 
     if args.step is not None:
         # BUG-DES-02 FIX: Use clean _run_step_with_deps instead of
@@ -9778,6 +11041,22 @@ def main() -> None:
                 resume_after=args.resume,
                 data_source=args.data_source,
                 phase1_processed_dir=args.phase1_dir,
+                # v108 ROOT FIX (issue 74): forward the emergency-dev
+                # override flag to run_full_pipeline → step1_load_data
+                # → step1_load_phase1 so Phase 1 contract validation
+                # can be bypassed at the operator's explicit risk.
+                skip_phase1_validation=args.skip_phase1_validation,
+                # v108 ROOT FIX (issue 75): forward the new input-mode
+                # flags. ``from_saved_path`` is None unless
+                # ``--from-saved PATH`` was passed (in which case
+                # step1_load_phase1 loads the snapshot instead of
+                # running the bridge). ``save_graph_path`` is None
+                # unless ``--save-graph PATH`` was passed (in which
+                # case step1_load_phase1 saves the recorder to PATH
+                # AFTER the bridge populates it). Both are None by
+                # default, so existing invocations are unaffected.
+                from_saved_path=args.from_saved,
+                save_graph_path=args.save_graph,
             )
         except V1LaunchCriteriaFailed as exc:
             # v21 ROOT FIX (Audit Chain 12): the typed exception from

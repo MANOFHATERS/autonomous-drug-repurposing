@@ -18,6 +18,14 @@ Design rules (audit issues D6-006, D1-002):
     re-formatting strings.
   * No third-party dependencies -- stdlib only.
 
+v108 ROOT FIX (issue 77): the historical base class is ``DrugOSDataError``.
+External audits and Phase 3 callers refer to it as ``DrugosGraphError``.
+We now expose ``DrugosGraphError`` as a TRUE subclass (not a bare alias) so
+that ``except DrugosGraphError`` catches every exception in this module
+while ``except DrugOSDataError`` continues to work for legacy callers.
+Both names refer to the same hierarchy root and remain interchangeable
+for catch purposes. New code should use ``DrugosGraphError``.
+
 Fixes: D6-006 (wrap raw URLError), D1-002 (Loader Protocol error contract),
        D5-005/D5-007 (data-integrity guard errors).
 """
@@ -27,7 +35,8 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 __all__: list[str] = [
-    "DrugOSDataError",
+    "DrugosGraphError",  # v108 (issue 77): canonical base class name
+    "DrugOSDataError",   # backward-compat alias for DrugosGraphError
     "UniProtDownloadError",
     "UniProtParseError",
     "UniProtDataIntegrityError",
@@ -272,12 +281,18 @@ __all__: list[str] = [
 ]
 
 
-class DrugOSDataError(Exception):
-    """Base class for all DrugOS data-pipeline errors.
+class DrugosGraphError(Exception):
+    """Canonical base class for all drugos_graph pipeline errors.
 
-    All loader-specific exceptions subclass this so that a caller can
-    write ``except DrugOSDataError`` to catch any pipeline failure while
-    still letting unrelated bugs propagate.
+    v108 ROOT FIX (issue 77): audits confirmed that some legacy exceptions
+    inherited from ``Exception`` directly, breaking ``except DrugosGraphError``
+    catch-all handling. This class is now the SINGLE root of the entire
+    drugos_graph exception hierarchy. All loader-specific exceptions
+    subclass it (transitively via ``DrugOSDataError``).
+
+    ``DrugOSDataError`` is retained as a backward-compatibility alias
+    that subclasses this root, so existing ``except DrugOSDataError``
+    blocks continue to work unchanged.
 
     Attributes
     ----------
@@ -297,9 +312,38 @@ class DrugOSDataError(Exception):
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         base = super().__str__()
-        if self.context:
-            return f"{base} | context={self.context}"
-        return base
+        if not self.context:
+            return base
+        return f"{base} | context={self.context}"
+
+
+# Backward-compatibility alias: DrugOSDataError subclasses DrugosGraphError
+# so existing ``except DrugOSDataError`` blocks catch the same hierarchy.
+# New code should catch ``DrugosGraphError`` per the audit fix.
+class DrugOSDataError(DrugosGraphError):
+    """Legacy base class name; use :class:`DrugosGraphError` in new code.
+
+    Subclassed (rather than aliased) so that ``isinstance(e, DrugOSDataError)``
+    and ``isinstance(e, DrugosGraphError)`` both return True for every
+    exception in this module. The two names are interchangeable for catch
+    purposes; DrugOSDataError is retained because dozens of existing callers
+    import it explicitly.
+
+    Like :class:`DrugosGraphError`, this class accepts a ``context`` keyword
+    argument (a dict of structured key/value pairs describing the failure —
+    URL, accession, line number, parser version, etc.). The ``context``
+    attribute is always present (possibly empty) and is the SOLE structured-
+    data channel between the exception site and the dead-letter writer /
+    structured logger.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message, context=context)
 
 
 class UniProtDownloadError(DrugOSDataError):

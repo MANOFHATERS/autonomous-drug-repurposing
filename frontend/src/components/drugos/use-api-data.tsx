@@ -249,9 +249,20 @@ export function useLiteratureSearch(query: string, minLength = 3) {
 }
 
 /**
- * Fetch the knowledge graph for a drug or disease via the real
- * /api/knowledge-graph endpoint. Returns 503 if the KG service is not
- * deployed (KG_SERVICE_URL not set) — we surface that honestly.
+ * FE-027 ROOT FIX: Fetch the knowledge graph subgraph for a drug or disease
+ * via the real /api/knowledge-graph endpoint.
+ *
+ * Previously: the hook short-circuited when no drug/disease was provided,
+ * so the KG explorer showed a blank graph on initial load. It also only
+ * handled the `{ nodes, edges }` subgraph response shape — but the stats
+ * endpoint (no params) returns `{ sources, nodeCount, edgeCount, ... }`.
+ *
+ * Fix: The hook ALWAYS fires. When drug/disease are provided, it calls
+ * `GET /api/knowledge-graph?drug=X&disease=Y` which returns `{ nodes, edges }`
+ * (subgraph). When no params are provided, it calls `GET /api/knowledge-graph`
+ * which returns stats — we normalize stats to `{ nodes: [], edges: [] }` so
+ * the KG explorer doesn't crash. The stats can be fetched separately via
+ * `api.getKnowledgeGraphStats()` if needed.
  */
 export function useKnowledgeGraph(params: { drug?: string; disease?: string }) {
   const [state, setState] = useState<
@@ -260,10 +271,6 @@ export function useKnowledgeGraph(params: { drug?: string; disease?: string }) {
 
   const paramsKey = JSON.stringify(params);
   useEffect(() => {
-    if (!params.drug && !params.disease) {
-      setState({ data: null, loading: false, error: null });
-      return;
-    }
     let cancelled = false;
     setState({ data: null, loading: true, error: null });
     const qs = new URLSearchParams();
@@ -283,6 +290,14 @@ export function useKnowledgeGraph(params: { drug?: string; disease?: string }) {
             message: body?.message || `Request failed with status ${res.status}`,
             status: res.status,
           } as ApiError;
+        }
+        // FE-027: Normalize the stats response (no params) to the subgraph
+        // shape. The stats endpoint returns { sources, nodeCount, edgeCount,
+        // ... } which is NOT { nodes, edges }. We normalize so the
+        // KnowledgeGraphScreen always gets the expected shape.
+        if (body && 'sources' in body && !('nodes' in body)) {
+          // Stats response — normalize to empty graph with metadata
+          return { nodes: [], edges: [], _stats: body } as { nodes: any[]; edges: any[] };
         }
         return body as { nodes: any[]; edges: any[] };
       })
@@ -663,6 +678,30 @@ export function useApiList<T>(
   const [error, setError] = useState<ApiError | null>(null);
   const [refetchCounter, setRefetchCounter] = useState(0);
 
+  // FE-026 ROOT FIX: stale-closure risk. The previous code called `fetcher()`
+  // inside useEffect but did NOT include `fetcher` in the deps array — so if
+  // the caller passed an inline arrow function that closed over changing
+  // state, the effect would keep calling the FIRST render's fetcher forever.
+  //
+  // We CANNOT add `fetcher` to the deps directly because callers almost
+  // always pass a fresh closure every render, which would cause the effect
+  // to re-fire on every render → infinite loop.
+  //
+  // The correct pattern (per React docs on useRef): store the fetcher in a
+  // ref and update it inside a deps-less useEffect. React's docs say "Do not
+  // write or read ref.current during rendering" — so we update it in an
+  // effect (which runs AFTER render). The effect has no deps array, so it
+  // runs after every render, keeping the ref synced to the latest fetcher.
+  // This is O(1) (a property assignment) and does NOT trigger a re-render.
+  // The actual fetch effect below uses [depsKey, refetchToken, refetchCounter]
+  // so it only re-fires when the caller's declared deps change — and when it
+  // does fire, it calls `fetcherRef.current()` which is always the latest.
+  const fetcherRef = useRef(fetcher);
+  useEffect(() => {
+    fetcherRef.current = fetcher;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  });
+
   // We deliberately stringify deps to avoid identity churn. The linter
   // can't statically verify that `fetcher` is stable, so we ignore it.
   const depsKey = JSON.stringify(deps);
@@ -672,7 +711,7 @@ export function useApiList<T>(
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetcher()
+    fetcherRef.current()
       .then((result) => {
         if (!cancelled) {
           setData(result);

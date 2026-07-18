@@ -1,15 +1,76 @@
-# Phase 4: RL Hypothesis Ranker
-# ==============================
-# R-035 root fix: this file did not exist. Phase 4 deps were only listed
-# in the top-level requirements.txt, inconsistent with Phase 1/2 which
-# have their own requirements.txt. rl/rl_drug_ranker.py defines
-# DrugRankingEnv(gym.Env) at class-definition time, so gymnasium MUST be
-# installed before the module can be imported. stable-baselines3 is
-# lazy-imported inside the ranker only when train_agent() is actually
-# called.
-gymnasium>=0.29
-stable-baselines3>=2.2
-pandas>=2.1.4
-numpy>=1.26.3
-torch>=2.0
-scikit-learn>=1.3
+# Phase 4: RL Hypothesis Ranker — Production Requirements
+# ========================================================
+# R-035 root fix: this file existed but was missing several MANDATORY
+# production dependencies. The Phase 4 Docker image (Dockerfile.ml) installs
+# the ROOT requirements.txt (which has all deps), but `pip install -r
+# rl/requirements.txt` in a dev/CI venv was missing biopython, pyyaml,
+# fastapi, and uvicorn — causing import failures in rl/rl_drug_ranker.py,
+# rl/service.py, and the literature cross-check.
+#
+# P4-044 ROOT FIX (Teammate 8 v117): added the four missing MANDATORY deps.
+# All pins include upper bounds to match the root requirements.txt pattern
+# (IN-018 fix) and the Dockerfile.ml pinned versions.
+#
+# All bounds match or are stricter than the root requirements.txt to
+# prevent version drift between dev (`pip install -r rl/requirements.txt`)
+# and Docker (which installs the root requirements.txt).
+
+# ─── RL training ───────────────────────────────────────────────────────────
+# gymnasium: required at MODULE IMPORT TIME by rl/rl_drug_ranker.py
+# (DrugRankingEnv inherits from gym.Env at class-definition time, so
+# gymnasium CANNOT be lazy-imported).
+gymnasium>=0.29,<1.0
+
+# stable-baselines3: lazy-imported inside train_agent() only when PPO
+# training is actually invoked. Listed here so a fresh `pip install -r
+# rl/requirements.txt` produces a runnable ranker (the CLI's `train`
+# subcommand would otherwise fail with ModuleNotFoundError).
+stable-baselines3>=2.2,<3.0
+
+# ─── Data manipulation ─────────────────────────────────────────────────────
+pandas>=2.1.4,<3.0
+numpy>=1.26.3,<2.0
+scikit-learn>=1.9.0,<2.0
+
+# ─── Deep learning (CPU-only by default; GPU via Dockerfile.gpu) ──────────
+torch>=2.13.0,<3.0
+
+# ─── P4-044 ROOT FIX: MANDATORY production deps that were missing ─────────
+# biopython: MANDATORY for the V1 launch criterion "≥5 literature-supported
+# predictions" (DOCX §8). rl/rl_drug_ranker.py::literature_crosscheck uses
+# Bio.Entrez to query PubMed. Without biopython, the scientific_validation
+# gate now FAILS (not skips) — see rl/scientific_thresholds.py
+# MIN_LITERATURE_SUPPORTED. The Dockerfile.ml pins ==1.83; the root
+# requirements.txt pins >=1.83,<2.0. We match the root pin.
+biopython>=1.83,<2.0
+
+# pyyaml: MANDATORY for load_reward_weights_for_tenant() in
+# rl/rl_drug_ranker.py. Without it, the per-tenant reward-weights loader
+# raises ImportError at call time, breaking the P4-005 multi-tenant
+# feature (rl/reward_weights.yaml + reward_weights.{tenant_id}.yaml).
+pyyaml>=6.0.3,<7.0
+
+# fastapi + uvicorn: MANDATORY for rl/service.py (the Phase 4 HTTP API
+# served by the phase4-rl compose service). Without these, the
+# `uvicorn scripts.rl_api:app` command in docker-compose.yml fails
+# immediately. The Dockerfile.ml pins fastapi==0.110.3 and
+# uvicorn[standard]==0.29.0; we use the root requirements.txt's looser
+# bounds for dev flexibility.
+fastapi>=0.139.2,<1.0
+uvicorn[standard]>=0.27,<1.0
+
+# ─── Indirect but explicitly pinned for reproducibility ────────────────────
+# prometheus-client: imported by rl/rl_drug_ranker.py for the
+# RL_RANKER_PREDICTIONS counter (institutional-grade observability).
+# Without it, the counter is silently a no-op (try/except import).
+prometheus-client>=0.25.0,<1.0
+
+# psutil: imported by rl/rl_drug_ranker.py for system metrics in the
+# scientific_validation report. Without it, the report's memory/CPU
+# fields are silently omitted.
+psutil>=5.9,<7.0
+
+# certifi: required by Bio.Entrez HTTPS calls to PubMed. Without it,
+# biopython uses the system CA bundle (which may be missing in slim
+# Docker images), causing SSL verification failures.
+certifi>=2026.6.17

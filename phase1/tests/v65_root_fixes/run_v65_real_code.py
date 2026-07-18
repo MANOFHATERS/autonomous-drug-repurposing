@@ -230,8 +230,12 @@ check("verify .env.example ships STRING_MIN_COMBINED_SCORE=700", check_env_examp
 print("\n[12] Phase 1 -> Phase 2 bridge")
 def check_bridge():
     # Add phase2 to path and import the bridge.
+    # v114 round 5 FORENSIC ROOT FIX: use targeted remove, not pop(0).
     phase2_root = _PHASE1_ROOT.parent / "phase2"
-    sys.path.insert(0, str(phase2_root))
+    _phase2_path = str(phase2_root)
+    _added_by_us = _phase2_path not in sys.path
+    if _added_by_us:
+        sys.path.insert(0, _phase2_path)
     try:
         import drugos_graph.phase1_bridge as bridge
         # Verify key entry points exist.
@@ -240,7 +244,11 @@ def check_bridge():
         assert hasattr(bridge, "load_into_graph")
         assert hasattr(bridge, "run_phase1_to_phase2")
     finally:
-        sys.path.pop(0)
+        if _added_by_us:
+            try:
+                sys.path.remove(_phase2_path)
+            except ValueError:
+                pass
 check("import phase2.drugos_graph.phase1_bridge + verify 4 entry points exist", check_bridge)
 
 # --- Summary ---

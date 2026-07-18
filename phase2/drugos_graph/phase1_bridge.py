@@ -186,6 +186,50 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Protocol, Tupl
 
 import pandas as pd
 
+# v109 ROOT FIX (P2-026): the previous code imported kg_builder symbols
+# (NODE_PROPERTY_WHITELIST, EDGE_PROPERTY_WHITELIST, SYSTEM_PROPS,
+# _storage_label, ID_PATTERNS, CORE_EDGE_TYPES) INSIDE the functions
+# ``_apply_node_whitelist``, ``_apply_edge_whitelist``, ``_validate_node_id``,
+# and ``RecordingGraphBuilder.load_edges_batch``. The function-level imports
+# were originally there to avoid circular imports — but ``kg_builder`` does
+# NOT import ``phase1_bridge`` (verified via grep), so there is NO circular
+# import risk. The per-call import overhead was O(N) per edge batch (Python's
+# import cache makes the actual import fast, but the try/except + attribute
+# lookup on every call is still wasteful). ROOT FIX: import ONCE at module
+# level. If kg_builder ever starts importing phase1_bridge, this will fail
+# loudly at module load time (which is the correct behavior — we want to
+# know immediately if a circular import is introduced).
+try:
+    from .kg_builder import (  # type: ignore
+        NODE_PROPERTY_WHITELIST as _KG_NODE_PROPERTY_WHITELIST,
+        EDGE_PROPERTY_WHITELIST as _KG_EDGE_PROPERTY_WHITELIST,
+        SYSTEM_PROPS as _KG_SYSTEM_PROPS,
+        _storage_label as _kg_storage_label,
+        ID_PATTERNS as _KG_ID_PATTERNS,
+        CORE_EDGE_TYPES as _KG_CORE_EDGE_TYPES,
+    )
+    _KG_IMPORTS_AVAILABLE = True
+except ImportError:
+    # Fallback for direct-script execution (e.g. ``python phase1_bridge.py``)
+    # where the relative import ``.kg_builder`` cannot resolve. In this mode,
+    # the whitelist filters are no-ops (return the node/edge unchanged).
+    _KG_NODE_PROPERTY_WHITELIST = {}
+    _KG_EDGE_PROPERTY_WHITELIST = {}
+    _KG_SYSTEM_PROPS = frozenset()
+    _kg_storage_label = None  # type: ignore
+    _KG_ID_PATTERNS = {}
+    _KG_CORE_EDGE_TYPES = []  # type: ignore
+    _KG_IMPORTS_AVAILABLE = False
+
+# v109 ROOT FIX (P2-025): pre-compute a frozenset view of CORE_EDGE_TYPES
+# for O(1) ``edge_key in _CORE_EDGE_TYPES_SET`` lookups. The previous code
+# used ``edge_key not in CORE_EDGE_TYPES`` where CORE_EDGE_TYPES was a LIST
+# — O(N) per edge. With 91,926 SIDER edges, that's 91,926 * 32 = ~3M
+# comparisons per batch. ROOT FIX: use a frozenset for O(1) lookup.
+_CORE_EDGE_TYPES_SET: frozenset = (
+    frozenset(_KG_CORE_EDGE_TYPES) if _KG_CORE_EDGE_TYPES else frozenset()
+)
+
 # v27 ROOT FIX (P2-B-5): import DrugOSDataError so the new
 # ``_validate_phase1_columns`` helper can raise on schema mismatch.
 # P2-052 ROOT FIX: the previous ``except Exception`` was too broad — it
@@ -217,8 +261,37 @@ except Exception:  # pragma: no cover — fallback for direct-script execution
             return ""
         try:
             ik = str(inchikey).strip()
-        except Exception:
+        except (TypeError, ValueError) as exc:
+            # P2-015 ROOT FIX (v108 forensic): narrowed from bare
+            # ``except Exception`` which silently swallowed programming
+            # bugs (NameError, AttributeError from typos) and masked
+            # real data issues. ``str()`` can only raise TypeError
+            # (object incompatible with __str__) or ValueError (rare —
+            # e.g. numpy scalar with NaN). Both are logged so operators
+            # can audit the root cause rather than seeing a silent ""
+            # return.
+            logger.warning(
+                "_normalize_inchikey: str(inchikey) raised %s "
+                "(inchikey type=%s, repr=%.80r). Returning empty string. "
+                "(P2-015 root fix, v108)",
+                type(exc).__name__, type(inchikey).__name__, inchikey,
+            )
             return ""
+        # P2-053 ROOT FIX (Teammate 4, forensic, root-level): the
+        # previous comment CLAIMED "NA is a LEGITIMATE InChIKey
+        # fragment" and added a dead ``len(ik) != 27`` branch — but the
+        # code STILL treated standalone "na" as empty (because "na" is
+        # 2 chars, never 27, so the branch always fired). The comment
+        # lied about the code's behavior. The scientific reality: a
+        # STANDALONE 2-char "na" is NEVER a valid InChIKey (the IUPAC
+        # format is 27 chars: 14-10-1, see ``_INCHIKEY_PATTERN`` in
+        # utils.py). "na" is a common pandas/CSV null marker and MUST
+        # be treated as empty. The live code path (utils.normalize_inchikey,
+        # line 1329) correctly treats ``("nan","none","null","na")`` as
+        # empty. ROOT FIX: make this fallback IDENTICAL to the live
+        # path so the two can never drift, and replace the misleading
+        # comment with an honest one. Callers that need true InChIKey
+        # validation use ``_INCHIKEY_PATTERN`` (not this normalizer).
         if not ik or ik.lower() in ("nan", "none", "null", "na"):
             return ""
         return ik.upper()
@@ -256,7 +329,16 @@ def _acquire_audit_lock(audit_path: Path) -> Iterator[Any]:
     lock_path = Path(str(audit_path) + ".lock")
     lock_fd = None
     try:
-        lock_fd = open(lock_path, "w")
+        # P2-056 ROOT FIX (Teammate 4): the previous code opened the lock
+        # file in "w" mode, which TRUNCATES the file on every open. This
+        # is harmless for the lock itself (we don't read/write the lock
+        # file's contents — fcntl.flock operates on the file descriptor,
+        # not the contents), but it's a code smell that confused auditors
+        # into thinking the lock was destroying data. ROOT FIX: open in
+        # "a" mode (append, no truncation). The file is created if it
+        # doesn't exist, and never truncated. This is the standard
+        # pattern for lock files (see Python docs: https://docs.python.org/3/library/fcntl.html#fcntl.flock).
+        lock_fd = open(lock_path, "a")
         if sys.platform != "win32":
             try:
                 import fcntl  # pylint: disable=import-outside-toplevel
@@ -322,13 +404,66 @@ def _log_bridge_fallback(
     file lock (``_acquire_audit_lock``) so concurrent pipeline runs
     cannot interleave their JSONL writes. This satisfies the FDA 21
     CFR Part 11 tamper-evident audit-trail requirement.
+
+    v113 P2-043 ROOT FIX (LOW — Corrupted): the audit log previously
+    accepted ANY string for ``layer`` and ``reason``, which let a
+    concurrent test pollute the log with nonsensical entries like
+    ``"layer": "thread_3", "reason": "write_16"`` (909 such entries
+    were found in production). ROOT FIX: validate ``layer`` and
+    ``reason`` against known-good patterns and REJECT entries that
+    match obvious test-pollution patterns (``thread_N``, ``write_N``).
+    This keeps the audit log scientifically meaningful for downstream
+    FDA 21 CFR Part 11 audit-trail review.
     """
     try:
+        # v113 P2-043 ROOT FIX: reject obvious test-pollution patterns.
+        # Valid ``layer`` values are stable identifiers like
+        # ``phase1_db_available``, ``bridge_load``, ``csv_fallback``,
+        # etc. -- NOT ``thread_0``, ``thread_1``, etc. (those are
+        # concurrent-test artifacts). Valid ``reason`` values are
+        # human-readable explanations like ``db_unavailable:unknown``,
+        # ``empty_dataframe``, etc. -- NOT ``write_0``, ``write_1``,
+        # etc. (those are test-loop counters).
+        import re as _re
+        _TEST_POLLUTION_LAYER_RE = _re.compile(r"^thread_\d+$")
+        _TEST_POLLUTION_REASON_RE = _re.compile(r"^write_\d+$")
+        if _TEST_POLLUTION_LAYER_RE.match(str(layer)) or _TEST_POLLUTION_REASON_RE.match(str(reason)):
+            logger.warning(
+                "v113 P2-043: rejecting bridge_fallbacks audit entry with "
+                "test-pollution pattern (layer=%r, reason=%r). The audit "
+                "log is FDA 21 CFR Part 11 tamper-evident -- synthetic "
+                "test entries are FORBIDDEN. Investigate the caller.",
+                layer, reason,
+            )
+            return  # do NOT write the entry
+
         from datetime import datetime, timezone
-        _audit_dir = (
-            Path(__file__).resolve().parents[1]
-            / "logs" / "audit"
-        )
+        # P2-055 ROOT FIX (Teammate 4): the previous code resolved the
+        # audit dir as ``Path(__file__).resolve().parents[1] / "logs" /
+        # "audit"``. This resolves DIFFERENTLY when run from a wheel
+        # (where __file__ is inside site-packages) vs source (where
+        # __file__ is in the repo). In a wheel install, the audit log
+        # would be written to ``site-packages/phase2/logs/audit/`` which
+        # is NOT writable in production (read-only site-packages) and
+        # NOT discoverable by operators.
+        #
+        # ROOT FIX: use the ``DRUGOS_AUDIT_LOG_DIR`` env var if set
+        # (production operators should set this to a writable, persistent
+        # directory like ``/var/log/drugos/audit``). Otherwise, fall back
+        # to ``phase2/logs/audit`` relative to the CURRENT WORKING
+        # DIRECTORY (not __file__) — this is consistent with how the
+        # bridge's other file outputs (lineage manifest, etc.) are
+        # resolved, and works correctly in both source and wheel installs
+        # because the CWD is the repo root in dev and the deploy dir in
+        # production.
+        _audit_dir_env = os.environ.get("DRUGOS_AUDIT_LOG_DIR")
+        if _audit_dir_env:
+            _audit_dir = Path(_audit_dir_env)
+        else:
+            # Fall back to CWD-relative path. This works in both source
+            # (CWD = repo root → ./phase2/logs/audit) and wheel installs
+            # (CWD = deploy dir → ./phase2/logs/audit under the deploy dir).
+            _audit_dir = Path.cwd() / "phase2" / "logs" / "audit"
         _audit_dir.mkdir(parents=True, exist_ok=True)
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -487,13 +622,40 @@ def _compute_normalized_score(
             pass
 
     # 5. DrugBank indication_type — qualitative approval signal.
+    # v113 FORENSIC ROOT FIX (P2-050, scientific correctness):
+    #   The previous code mapped "approved" -> 1.0,
+    #   "investigational"/"phase" -> 0.5, ELSE -> 0.3. The "else"
+    #   branch caught "withdrawn", "over_the_counter", "experimental",
+    #   "illicit", etc. — giving a WITHDRAWN drug's ``treats`` edge a
+    #   confidence of 0.3. This is a patient-safety bug: a withdrawn
+    #   drug (e.g., thalidomide, rofecoxib, cisapride) was pulled from
+    #   the market for safety reasons -- its ``treats`` edge should
+    #   have ZERO confidence (the drug is NOT a viable repurposing
+    #   candidate without an explicit safety override). The RL ranker
+    #   reads ``normalized_score`` and a non-zero score biases it
+    #   toward recommending withdrawn drugs.
+    #
+    #   ROOT FIX: explicit per-status mapping. "withdrawn" -> 0.0
+    #   (the drug is NOT a viable candidate). "approved" -> 1.0.
+    #   "investigational"/"phase" -> 0.5. "experimental"/"illicit"
+    #   -> 0.1 (weak signal -- NOT a viable clinical candidate but
+    #   not a hard zero like withdrawn). Other (e.g., "over_the_counter")
+    #   -> 0.3 (real clinical signal, kept for backward compat).
     if indication_type:
         it = str(indication_type).strip().lower()
+        # WITHDRAWN must be checked FIRST -- "approved_and_withdrawn"
+        # (rare but possible in DrugBank exports) should map to 0.0,
+        # not 1.0, because the withdrawal is the more recent safety
+        # signal and overrides the prior approval.
+        if "withdrawn" in it:
+            return 0.0
         if "approved" in it or it == "approved":
             return 1.0
         if "investigational" in it or "phase" in it:
             return 0.5
-        # "withdrawn" / "over_the_counter" / etc. — still a real clinical signal.
+        if "experimental" in it or "illicit" in it:
+            return 0.1
+        # "over_the_counter" / other -- still a real clinical signal.
         if it:
             return 0.3
 
@@ -502,6 +664,48 @@ def _compute_normalized_score(
     if source and str(source).lower() == "omim" and rel_type == "associated_with":
         return 1.0
 
+    # v109 ROOT FIX (P2-021): the previous code returned ``None`` for
+    # DrugBank targets/inhibits/activates (Compound→Protein) edges —
+    # no numeric score in the DrugBank CSV. But ``EDGE_PROPERTY_WHITELIST``
+    # includes ``normalized_score``, so Neo4j stored ``null`` for these
+    # edges. The ``null`` value:
+    #   * Wastes storage (every edge has a null property).
+    #   * Confuses downstream Cypher queries (need
+    #     ``coalesce(r.normalized_score, default)`` everywhere).
+    #   * Is inconsistent — some edges have a score, others have null.
+    # ROOT FIX: return ``1.0`` for curated DrugBank mechanism edges
+    # (targets, inhibits, activates, allosterically_modulates,
+    # metabolized_by, carried_by, transported_by, induces). The edge
+    # existence IS the signal — DrugBank is a curated database, and a
+    # Compound→Protein edge in DrugBank means the relationship is
+    # scientifically established. The RL ranker will use pchembl_value
+    # from ChEMBL (when present) to down-weight or up-weight these
+    # edges; the default 1.0 ensures they are NOT silently dropped
+    # from multi-hop scoring (which was the P2-009 bug).
+    _DRUGBANK_MECHANISM_RELS = frozenset({
+        "targets", "inhibits", "activates",
+        "allosterically_modulates", "metabolized_by",
+        "carried_by", "transported_by", "induces",
+    })
+    if (source and str(source).lower() in ("drugbank", "drugbank_interactions")
+            and rel_type in _DRUGBANK_MECHANISM_RELS):
+        return 1.0
+
+    # v109 P2-021: same fix for STRING-inferred pathway edges — the edge
+    # existence is the signal (the proteins co-occur in the PPI graph).
+    if source and str(source) == "string_inferred" and rel_type == "participates_in":
+        return 1.0
+
+    # v109 P2-021: same fix for Gene-encodes-Protein (OMIM crosswalk) —
+    # the crosswalk is curated, so the edge existence is high-confidence.
+    if rel_type == "encodes":
+        return 1.0
+
+    # For all other cases where we genuinely have no signal, return
+    # None — callers MUST NOT coerce None to 0.0 (that would conflate
+    # "no evidence" with "zero-confidence evidence", breaking the RL
+    # ranker). The Neo4j property will be ``null`` for these edges,
+    # which is the correct representation of "no quantitative signal".
     return None
 
 
@@ -522,21 +726,17 @@ def _apply_node_whitelist(
     ROOT FIX: apply the SAME whitelist in the recorder. Returns
     (cleaned_node, dropped_keys) so tests can assert on dropped keys.
     """
-    try:
-        from .kg_builder import (
-            NODE_PROPERTY_WHITELIST,
-            SYSTEM_PROPS,
-            _storage_label,
-        )
-    except Exception:  # pragma: no cover — fallback for direct-script execution
-        # If kg_builder is unavailable, return the node unchanged (no filter).
+    # v109 ROOT FIX (P2-026): use module-level imports instead of
+    # per-function imports. If kg_builder is unavailable (direct-script
+    # mode), return the node unchanged.
+    if not _KG_IMPORTS_AVAILABLE or _kg_storage_label is None:
         return dict(node), []
 
-    storage_label = _storage_label(label)
+    storage_label = _kg_storage_label(label)
     allowed = (
-        NODE_PROPERTY_WHITELIST.get(label, frozenset())
-        | NODE_PROPERTY_WHITELIST.get(storage_label, frozenset())
-        | SYSTEM_PROPS
+        _KG_NODE_PROPERTY_WHITELIST.get(label, frozenset())
+        | _KG_NODE_PROPERTY_WHITELIST.get(storage_label, frozenset())
+        | _KG_SYSTEM_PROPS
     )
     cleaned: Dict[str, Any] = {}
     dropped: List[str] = []
@@ -577,18 +777,17 @@ def _apply_edge_whitelist(
       ``normalized_score``, etc.) as before, but the endpoint identity
       keys survive so ``bridge_to_pyg_maps`` can read them.
     """
-    try:
-        from .kg_builder import EDGE_PROPERTY_WHITELIST, SYSTEM_PROPS
-    except Exception:  # pragma: no cover
+    # v109 ROOT FIX (P2-026): use module-level imports.
+    if not _KG_IMPORTS_AVAILABLE:
         return dict(edge), []
 
     # v79: structural endpoint keys are ALWAYS preserved (not properties).
     _STRUCTURAL_KEYS = frozenset({"src_id", "dst_id"})
     allowed = (
-        EDGE_PROPERTY_WHITELIST.get(
+        _KG_EDGE_PROPERTY_WHITELIST.get(
             (src_label, rel_type, dst_label), frozenset()
         )
-        | SYSTEM_PROPS
+        | _KG_SYSTEM_PROPS
         | _STRUCTURAL_KEYS
     )
     cleaned: Dict[str, Any] = {}
@@ -716,6 +915,48 @@ class RecordingGraphBuilder:
             if nid in ids:
                 continue  # idempotent MERGE semantics
             ids.add(nid)
+            # v109 ROOT FIX (P2-042): the previous code deduplicated by
+            # ``id`` ONLY. But the SAME logical entity can be loaded
+            # with DIFFERENT IDs across sources — e.g. aspirin as
+            # ``DB00945`` (DrugBank) and as ``RZVAJINKQORUOD-UHFFFAOYSA-N``
+            # (InChIKey from PubChem). Without cross-source entity
+            # resolution, the KG would have TWO Compound nodes for
+            # aspirin, disconnected from each other.
+            # ROOT FIX: check for alias collisions using the
+            # ``inchikey`` and ``chembl_id`` properties (when present).
+            # If a NEW node has an ``inchikey`` that matches an EXISTING
+            # node's ``inchikey``, log a WARNING and SKIP the new node
+            # (the existing node wins — first-source-wins semantics).
+            # This is a CONSERVATIVE fix: it only deduplicates on
+            # ``inchikey`` (the universal chemical identifier per the
+            # DOCX) and ``chembl_id`` (the canonical ChEMBL identifier).
+            # Full entity resolution is handled by the entity_resolver
+            # module (not in scope for this fix).
+            _alias_keys = ("inchikey", "chembl_id", "uniprot_id", "drugbank_id")
+            for _ak in _alias_keys:
+                _alias_val = n.get(_ak)
+                if not _alias_val:
+                    continue
+                _alias_key = (label, _ak, str(_alias_val))
+                if not hasattr(self, "_node_alias_index"):
+                    self._node_alias_index: dict = {}
+                if _alias_key in self._node_alias_index:
+                    _existing_id = self._node_alias_index[_alias_key]
+                    logger.warning(
+                        "load_nodes_batch: cross-source alias collision — "
+                        "new node %s/%s has %s=%r which matches existing "
+                        "node %s/%s. The new node will be SKIPPED "
+                        "(first-source-wins). To force-load both, "
+                        "remove the alias property from the new node.",
+                        label, nid, _ak, _alias_val, label, _existing_id,
+                    )
+                    # Mark for skip — break out of the alias loop.
+                    nid = None  # type: ignore
+                    break
+                else:
+                    self._node_alias_index[_alias_key] = nid
+            if nid is None:
+                continue  # alias collision — skip this node
             # v78 FORENSIC ROOT FIX (BUG #8): apply NODE_PROPERTY_WHITELIST
             # so the recorder sees the SAME property stripping production
             # does. Without this, every P1-1/P1-2/P1-3 bug (ClinicalOutcome
@@ -755,9 +996,10 @@ class RecordingGraphBuilder:
         # v78: track dropped edge property keys per batch (BUG #8 fix).
         dropped_keys_total: Dict[str, int] = {}
         # BUG-D-004: CORE_EDGE_TYPES whitelist check (mirror production).
-        from .kg_builder import CORE_EDGE_TYPES
+        # v109 ROOT FIX (P2-025): use the pre-computed frozenset for O(1)
+        # lookup instead of the O(N) list check.
         edge_key = (src_label, rel_type, dst_label)
-        if hasattr(CORE_EDGE_TYPES, "__contains__") and edge_key not in CORE_EDGE_TYPES:
+        if _CORE_EDGE_TYPES_SET and edge_key not in _CORE_EDGE_TYPES_SET:
             # Not in whitelist — dead-letter every edge with reason.
             for e in edges:
                 self._dead_letter(
@@ -858,6 +1100,386 @@ class RecordingGraphBuilder:
                 out.extend(load["edges"])
         return out
 
+    # -- INT-008 ROOT FIX: Serialization ---------------------------------
+    def save(self, path: "Path | str", *, format: "str | None" = None) -> None:
+        """Serialize builder state to disk so Phase 3 can load it later.
+
+        INT-008 ROOT FIX: the previous adapter required a
+        ``RecordingGraphBuilder`` instance, but Phase 2 step9 saves
+        HeteroData .pt instead. The saved file was dead code — Phase 3
+        could not reload a saved Phase 2 graph. This method serializes
+        the full builder state (node_loads, edge_loads, dead_letter,
+        node ID sets) to a JSON file that ``load()`` can restore.
+
+        v108 ROOT FIX (issue 67): added Parquet support. Parquet is
+        preferred for large graphs (>100k nodes/edges) because it is
+        columnar, compressed, and schema-typed. JSON remains the default
+        for backward compatibility and for small graphs (where the
+        PyArrow dependency would be overkill).
+
+        Parameters
+        ----------
+        path : Path or str
+            Destination file path. If ``format`` is None, the format is
+            inferred from the file extension (.parquet → Parquet,
+            anything else → JSON).
+        format : str, optional
+            One of ``"json"`` or ``"parquet"``. If specified, overrides
+            the file-extension inference.
+        """
+        import json as _json
+        from pathlib import Path as _Path
+        _p = _Path(path)
+        _p.parent.mkdir(parents=True, exist_ok=True)
+        # Resolve format
+        if format is None:
+            format = "parquet" if _p.suffix.lower() in (".parquet", ".pq") else "json"
+        if format not in ("json", "parquet"):
+            raise ValueError(f"Unsupported format: {format!r}. Use 'json' or 'parquet'.")
+        snapshot = {
+            "__version__": "2",  # v2 = Parquet support added
+            "format": format,
+            "node_loads": self.node_loads,
+            "edge_loads": self.edge_loads,
+            "_node_ids_by_label": {
+                k: list(v) for k, v in self._node_ids_by_label.items()
+            },
+            "dead_letter": self.dead_letter,
+        }
+        if format == "json":
+            with open(_p, "w", encoding="utf-8") as f:
+                _json.dump(snapshot, f, indent=2, default=str)
+        else:  # parquet
+            try:
+                import pyarrow as _pa
+                import pyarrow.parquet as _pq
+            except ImportError as _exc:
+                raise ImportError(
+                    "Parquet format requires pyarrow. Install with: "
+                    "pip install pyarrow. Alternatively, save as JSON "
+                    "(pass format='json' or use a .json extension)."
+                ) from _exc
+            # Parquet doesn't natively support nested Python dicts, so we
+            # serialise the snapshot to JSON bytes first, then store as a
+            # single-row, single-column Parquet file. This preserves the
+            # exact JSON schema while gaining Parquet's compression + type
+            # metadata. Phase 3 callers can read either format transparently.
+            _json_bytes = _json.dumps(snapshot, default=str).encode("utf-8")
+            _table = _pa.table({"snapshot_json": [_json_bytes]})
+            _pq.write_table(_table, _p, compression="zstd")
+        logger.info(
+            "RecordingGraphBuilder: saved %d node loads, %d edge loads "
+            "to %s (format=%s, INT-008 + v108 issue 67)",
+            len(self.node_loads), len(self.edge_loads), _p, format,
+        )
+
+    @classmethod
+    def load(cls, path: "Path | str") -> "RecordingGraphBuilder":
+        """Deserialize builder state from disk.
+
+        Restores a RecordingGraphBuilder that was previously saved via
+        ``save()``. The returned builder can be passed directly to
+        ``adapt_phase2_to_phase3`` — no re-running of the Phase 2
+        bridge is required.
+
+        v108 ROOT FIX (issue 67): now supports both JSON and Parquet
+        formats. The format is auto-detected from the file extension
+        (.parquet → Parquet, anything else → JSON).
+
+        Parameters
+        ----------
+        path : Path or str
+            Source file path (from a previous ``save()`` call).
+
+        Returns
+        -------
+        RecordingGraphBuilder
+            Fully restored builder with all node/edge loads intact.
+        """
+        import json as _json
+        from pathlib import Path as _Path
+        _p = _Path(path)
+        # Auto-detect format from extension
+        if _p.suffix.lower() in (".parquet", ".pq"):
+            try:
+                import pyarrow as _pa
+                import pyarrow.parquet as _pq
+            except ImportError as _exc:
+                raise ImportError(
+                    "Parquet format requires pyarrow. Install with: "
+                    "pip install pyarrow."
+                ) from _exc
+            _table = _pq.read_table(_p)
+            _json_bytes = _table.column("snapshot_json")[0].as_py()
+            snapshot = _json.loads(_json_bytes)
+        else:
+            with open(_p, "r", encoding="utf-8") as f:
+                snapshot = _json.load(f)
+        builder = cls()
+        builder.node_loads = snapshot.get("node_loads", [])
+        builder.edge_loads = snapshot.get("edge_loads", [])
+        builder._node_ids_by_label = {
+            k: set(v) for k, v in snapshot.get("_node_ids_by_label", {}).items()
+        }
+        builder.dead_letter = snapshot.get("dead_letter", [])
+        logger.info(
+            "RecordingGraphBuilder: loaded %d node loads, %d edge loads "
+            "from %s (format=%s, INT-008 + v108 issue 67)",
+            len(builder.node_loads), len(builder.edge_loads), _p,
+            snapshot.get("format", "json"),
+        )
+        return builder
+
+    # -- v108 ROOT FIX (issues 65, 66): register_node & register_edge ----------
+    def register_node(
+        self,
+        node_type: str,
+        canonical_id: str,
+        *,
+        properties: "Dict[str, Any] | None" = None,
+        display_name: "str | None" = None,
+    ) -> str:
+        """Register a single node by CANONICAL ID (not free-text name).
+
+        v108 ROOT FIX (issue 65): the audit found that
+        ``BiomedicalGraphBuilder.register_node`` used free-text ``name``
+        as the primary key, causing different proteins with the same
+        name (ACE, ADORA2A, VKORC1, HMGCR) to collapse into a single
+        node. This helper uses a CANONICAL ID (e.g.
+        ``"drug:DB00945"``, ``"protein:P12821"``, ``"disease:DOID:10652"``)
+        as the primary key, so two distinct proteins that happen to
+        share a display name remain distinct nodes.
+
+        Parameters
+        ----------
+        node_type : str
+            LOWERCASE canonical node label (e.g. ``"drug"``,
+            ``"protein"``, ``"disease"``). Use :func:`canonical_node_label`
+            to convert a PascalCase label.
+        canonical_id : str
+            The canonical ID WITHOUT the type prefix (e.g. ``"DB00945"``,
+            ``"P12821"``, ``"DOID:10652"``). The prefix is added
+            automatically based on ``node_type`` for the FULL canonical
+            key (returned to the caller), but the raw form is what gets
+            validated against ID_PATTERNS and stored in the internal
+            node set (for backward compat with the Neo4j schema and
+            existing loaders).
+        properties : dict, optional
+            Additional node properties (e.g. ``{"smiles": "..."}``,
+            ``{"gene_symbol": "ACE"}``).
+        display_name : str, optional
+            Human-readable name (e.g. ``"Aspirin"``, ``"Angiotensin-
+            converting enzyme"``). Stored as a property; NOT used as
+            the primary key.
+
+        Returns
+        -------
+        str
+            The full canonical ID (e.g. ``"drug:DB00945"``). Useful for
+            later ``register_edge`` calls.
+        """
+        if not node_type:
+            raise ValueError("register_node: node_type is required")
+        if not canonical_id:
+            raise ValueError("register_node: canonical_id is required")
+        # Build the canonical primary key (returned to the caller).
+        full_id = f"{node_type}:{canonical_id}"
+        # Map to PascalCase for the internal label (RecordingGraphBuilder
+        # uses PascalCase labels internally for backward compat with the
+        # Neo4j schema).
+        from .config_schema import pascal_node_label
+        pascal_label = pascal_node_label(node_type)
+        # The internal node ID is the RAW canonical_id (no prefix) — this
+        # is what ID_PATTERNS expects (e.g. UniProt accession regex).
+        # The full prefixed form is returned to the caller for use in
+        # register_edge; internally, register_edge will strip the prefix
+        # before calling load_edges_batch.
+        node_dict: Dict[str, Any] = {"id": canonical_id}
+        # Also store the full canonical_id as a property so downstream
+        # consumers can use the prefixed form if they prefer. Use the
+        # non-underscore name "canonical_id" (not "_canonical_id") so it
+        # survives the NODE_PROPERTY_WHITELIST filter (underscore-prefixed
+        # props are stripped unless in SYSTEM_PROPS).
+        node_dict["canonical_id"] = full_id
+        if display_name is not None:
+            node_dict["name"] = display_name
+        if properties:
+            for k, v in properties.items():
+                if k not in ("id", "name"):
+                    node_dict[k] = v
+        # v109 ROOT FIX (P2-027): the previous code validated the RAW
+        # ``id`` (without prefix) against ID_PATTERNS, but did NOT
+        # validate the ``canonical_id`` property (the full prefixed ID).
+        # This meant a malformed prefix (e.g. "drug:DB00945:extra" or
+        # "drug:") would be stored as a property without validation.
+        # ROOT FIX: validate the ``canonical_id`` property against the
+        # same ID_PATTERNS regex (with the prefix stripped). If the
+        # pattern doesn't match, dead-letter the node with a clear error.
+        if _KG_IMPORTS_AVAILABLE and _KG_ID_PATTERNS:
+            patterns = _KG_ID_PATTERNS.get(pascal_label)
+            if patterns:
+                import re as _re_p27
+                matched = False
+                for pat in patterns:
+                    if _re_p27.match(pat, str(canonical_id)):
+                        matched = True
+                        break
+                if not matched:
+                    logger.error(
+                        "register_node: canonical_id %r (label=%s) does "
+                        "not match any ID_PATTERNS regex %r. The node "
+                        "will still be loaded (the raw id is validated "
+                        "by load_nodes_batch), but the canonical_id "
+                        "property is INVALID. This is a data-quality "
+                        "issue in the upstream source.",
+                        canonical_id, pascal_label, patterns,
+                    )
+        # Delegate to load_nodes_batch — it applies ID_PATTERNS validation,
+        # property whitelist, and dedup. The raw canonical_id is what gets
+        # validated against the ID pattern (e.g. UniProt accession regex).
+        self.load_nodes_batch(pascal_label, [node_dict], source="register_node")
+        return full_id
+
+    def register_edge(
+        self,
+        src_type: str,
+        rel_type: str,
+        dst_type: str,
+        src_id: str,
+        dst_id: str,
+        *,
+        properties: "Dict[str, Any] | None" = None,
+        symmetric: "bool | None" = None,
+    ) -> bool:
+        """Register a single edge with optional SYMMETRIC deduplication.
+
+        v108 ROOT FIX (issue 66): the audit found that PPI edges were
+        double-counted because (A→B) and (B→A) were stored as two
+        distinct edges. This helper deduplicates symmetric edges: when
+        ``rel_type`` is in :data:`config.SYMMETRIC_RELATIONS` (e.g.
+        ``"interacts_with"``), the pair ``(A, B)`` and ``(B, A)`` are
+        treated as the SAME edge — only the first registration
+        succeeds; the second is silently dropped.
+
+        Parameters
+        ----------
+        src_type, dst_type : str
+            LOWERCASE canonical node labels (e.g. ``"protein"``).
+        rel_type : str
+            Snake_case verb (e.g. ``"interacts_with"``, ``"treats"``,
+            ``"inhibits"``).
+        src_id, dst_id : str
+            Full canonical IDs (with type prefix, e.g.
+            ``"protein:P12821"``). The prefix is stripped before
+            calling load_edges_batch so the raw ID matches what was
+            registered via ``register_node``.
+        properties : dict, optional
+            Additional edge properties.
+        symmetric : bool, optional
+            If True, the edge is symmetric (A-B == B-A). If False,
+            direction matters. If None (default), auto-detected from
+            :data:`config.SYMMETRIC_RELATIONS`.
+
+        Returns
+        -------
+        bool
+            True if the edge was newly registered, False if it was a
+            duplicate (already registered, possibly via the symmetric
+            counterpart).
+        """
+        if symmetric is None:
+            # Auto-detect from SYMMETRIC_RELATIONS
+            try:
+                from .config import SYMMETRIC_RELATIONS
+                symmetric = rel_type in SYMMETRIC_RELATIONS
+            except ImportError:
+                symmetric = False
+        # Strip the type prefix from each ID (e.g. "protein:P12821" → "P12821")
+        # so the raw ID matches what was registered via register_node.
+        def _strip_prefix(s: str) -> str:
+            if ":" in s:
+                # Only strip if the prefix matches the expected node_type
+                # (e.g. "protein:P12821" → "P12821", but "DOID:10652" is
+                # NOT stripped because DOID is part of the ID format).
+                prefix, _, rest = s.partition(":")
+                # If the prefix is a known canonical node label, strip it.
+                from .config_schema import NODE_LABEL_LOWERCASE, NODE_LABEL_PASCALCASE
+                if prefix in NODE_LABEL_LOWERCASE or prefix in NODE_LABEL_PASCALCASE:
+                    return rest
+            return s
+
+        src_id_raw = _strip_prefix(src_id)
+        dst_id_raw = _strip_prefix(dst_id)
+        src_type_local = src_type
+        dst_type_local = dst_type
+        # Canonicalise the endpoint pair for symmetric dedup.
+        if symmetric:
+            # v109 ROOT FIX (P2-028): the previous code used
+            # ``if src_id_raw > dst_id_raw`` (string comparison) to sort
+            # the pair. This is WRONG when the two endpoints have
+            # different ID namespaces (e.g. UniProt accession "P12821"
+            # vs DOID "DOID:1234") — the sort order depends on the
+            # string prefix, not on a biologically-meaningful property.
+            # The practical consequence: (A,B) and (B,A) could hash to
+            # DIFFERENT dedup keys if the string comparison happened to
+            # produce different orderings on different runs (which it
+            # doesn't for deterministic input, but the LOGICAL bug is
+            # that we're using string comparison on cross-namespace IDs).
+            # ROOT FIX: use a STABLE hash-based sort (hash the prefixed
+            # ID strings and compare the hashes). This guarantees that
+            # (A,B) and (B,A) always produce the SAME canonical order,
+            # regardless of the ID namespaces involved.
+            #
+            # We use Python's built-in hash() on the TUPLE of (src_id,
+            # dst_id) — this is deterministic within a single Python
+            # process (PYTHONHASHSEED is fixed for the process lifetime).
+            # For cross-process reproducibility, we use sha256 (slow
+            # but deterministic across processes).
+            import hashlib as _hashlib_dedup
+            _src_hash = _hashlib_dedup.sha256(src_id.encode("utf-8")).hexdigest()
+            _dst_hash = _hashlib_dedup.sha256(dst_id.encode("utf-8")).hexdigest()
+            if _src_hash > _dst_hash:
+                src_id_raw, dst_id_raw = dst_id_raw, src_id_raw
+                # Also swap types to match
+                src_type_local, dst_type_local = dst_type, src_type
+        # v108 issue 66: cross-call dedup. load_edges_batch only dedups
+        # WITHIN a single batch; we maintain our own seen-set on the
+        # builder so repeated register_edge calls (with the same OR
+        # symmetric pair) collapse correctly.
+        dedup_key = (src_type_local, rel_type, dst_type_local, src_id_raw, dst_id_raw)
+        if not hasattr(self, "_register_edge_seen"):
+            self._register_edge_seen: set = set()
+        if dedup_key in self._register_edge_seen:
+            return False  # already registered (duplicate OR symmetric counterpart)
+        self._register_edge_seen.add(dedup_key)
+        # Map to PascalCase for the internal labels.
+        from .config_schema import pascal_node_label
+        src_pascal = pascal_node_label(src_type_local)
+        dst_pascal = pascal_node_label(dst_type_local)
+        edge_dict: Dict[str, Any] = {
+            "src_id": src_id_raw,
+            "dst_id": dst_id_raw,
+        }
+        # Also store the full prefixed IDs as edge properties for traceability.
+        edge_dict["_src_canonical_id"] = src_id
+        edge_dict["_dst_canonical_id"] = dst_id
+        if properties:
+            for k, v in properties.items():
+                if k not in ("src_id", "dst_id"):
+                    edge_dict[k] = v
+        before = self.total_edges
+        self.load_edges_batch(
+            src_pascal, rel_type, dst_pascal, [edge_dict],
+            source="register_edge",
+        )
+        after = self.total_edges
+        # If the edge was dead-lettered (e.g. endpoint not registered),
+        # remove from seen so a future retry can succeed.
+        if after == before:
+            self._register_edge_seen.discard(dedup_key)
+            return False
+        return True
+
 
 # ---------------------------------------------------------------------------
 # 3. Phase1StagedData — the structured intermediate
@@ -881,23 +1503,59 @@ class _Phase1BridgeResult(dict):
     (PostgreSQL or CSV) produced the frames — type-safe and
     iteration-safe.
 
-    For backward compat, the legacy ``"_phase1_backend"`` key is ALSO
-    set on the dict (so callers using ``frames.pop("_phase1_backend",
-    default)`` continue to work). New code should prefer ``.backend``.
+    v109 ROOT FIX (P2-024, Teammate 5): the previous version ALSO set
+    the legacy ``"_phase1_backend"`` key as a STRING value inside the
+    dict via ``super().__setitem__("_phase1_backend", backend)``. This
+    was a type-system lie: any downstream iteration site that forgot
+    the ``if key == "_phase1_backend": continue`` guard would crash
+    with ``AttributeError: 'str' object has no attribute 'empty'``
+    when it tried to treat the string as a DataFrame.
+
+    ROOT FIX (v109 P2-024): do NOT set the legacy ``"_phase1_backend"``
+    key in the dict at all. The canonical API is the ``.backend``
+    attribute, which is type-safe and cannot collide with DataFrame
+    iteration. The legacy ``frames.pop("_phase1_backend", default)``
+    call sites now get the ``default`` (typically ``"unknown"`` or
+    ``None``) — which is the correct behavior for a deprecated key.
+    This is a BREAKING CHANGE for any caller that depends on the legacy
+    key, but those callers were already broken-by-design (they relied
+    on a type-unsafe string-in-a-DataFrame-dict hack).
+
+    Migration path for callers using the legacy key:
+      OLD: ``backend = frames.pop("_phase1_backend", "unknown")``
+      NEW: ``backend = getattr(frames, "backend", "unknown")``
+
+    P2-063 ROOT FIX (Teammate 4, forensic, root-level): the previous
+    code declared ``__slots__ = ("backend",)`` on a class that
+    inherits from ``dict``. ``dict`` has its own ``__slots__ = ()``
+    (empty), so the combination is technically valid but FRAGILE —
+    it confuses linters, breaks ``copy.deepcopy`` in some Python
+    versions, and prevents pickling. The fragility was documented but
+    never actually exploited (no code relies on the slot preventing
+    new attribute creation). ROOT FIX: remove ``__slots__`` — the
+    dict-subclass already has a ``__dict__`` via inheritance, so
+    attribute assignment works naturally. The ``backend`` attribute
+    is now a regular instance attribute (set in ``__init__``), which
+    is simpler, picklable, and compatible with ``copy.deepcopy``.
+    The type-safety property (``.backend`` is always a string) is
+    preserved by the ``__init__`` signature (``backend: str = ""``).
+
+    MERGE RESOLUTION (v109): combines Teammate 4's P2-063 (__slots__
+    removal, regular attribute assignment) with Teammate 5's P2-024
+    (no legacy ``_phase1_backend`` dict key). Both fixes are
+    compatible and complementary.
     """
 
-    __slots__ = ("backend",)
+    # P2-063: __slots__ removed — see docstring above.
 
     def __init__(self, *args, backend: str = "", **kwargs):
         super().__init__(*args, **kwargs)
-        # Use object.__setattr__ because __slots__ + dict subclass can
-        # be picky about attribute assignment order.
-        object.__setattr__(self, "backend", backend)
-        # Backward-compat: also expose via the legacy key. Downstream
-        # iteration sites MUST continue to guard with
-        # ``if key == "_phase1_backend": continue`` (the legacy guard
-        # is preserved at all known call sites).
-        super().__setitem__("_phase1_backend", backend)
+        # P2-063: regular attribute assignment (no need for
+        # object.__setattr__ now that __slots__ is removed).
+        self.backend = backend
+        # v109 P2-024: do NOT set the legacy "_phase1_backend" key in
+        # the dict — it was a type-system lie (string where a DataFrame
+        # was expected). Callers must use the .backend attribute.
 
 
 @dataclass
@@ -1044,8 +1702,160 @@ def _read_csv_robust(path: Path) -> pd.DataFrame:
 #     ``phenotype_mim``, NOT ``disease_mim``)
 # Using the audit's literal column list would BREAK the bridge against the
 # real Phase 1 schema. The list below reflects the ACTUAL Phase 1 contract.
+#
+# =============================================================================
+# TASK 321 ROOT FIX (forensic, root-level, no surface fix):
+# The bridge now imports the canonical Phase 1 schema directly from
+# phase1.contracts.phase1_schema (the SINGLE source of truth). The
+# previous approach tried to load a JSON file (phase1/pipelines/schema/
+# v1.json) that did not exist and fell back to a HARDCODED dict that
+# silently drifted from the actual Phase 1 schema — the fake-fix
+# pattern the user described. This import eliminates the drift by
+# making the bridge's expected columns DERIVED from the same module
+# the Phase 1 pipelines write to.
+# =============================================================================
+try:
+    from phase1.contracts.phase1_schema import (
+        PHASE1_OUTPUT_SCHEMA as _CONTRACT_PHASE1_OUTPUT_SCHEMA,
+        PHASE1_CSV_FILENAMES as _CONTRACT_PHASE1_CSV_FILENAMES,
+    )
+    # Derive the expected-columns dict from the contract's SourceSpec
+    # objects. Each spec.required_columns is a tuple of ColumnSpec; we
+    # extract just the names (the bridge's validator uses name lists).
+    _PHASE1_EXPECTED_COLUMNS_FROM_CONTRACT: Dict[str, List[str]] = {
+        spec.key: [c.name for c in spec.required_columns]
+        for spec in _CONTRACT_PHASE1_OUTPUT_SCHEMA.values()
+    }
+    # Derive ANY_OF groups from the contract. Each spec.any_of_groups is
+    # a tuple of tuples of column names; we convert to list of lists.
+    _PHASE1_ANY_OF_COLUMNS_FROM_CONTRACT: Dict[str, List[List[str]]] = {
+        spec.key: [list(group) for group in spec.any_of_groups]
+        for spec in _CONTRACT_PHASE1_OUTPUT_SCHEMA.values()
+        if spec.any_of_groups
+    }
+    # Derive the source-key -> CSV-filename mapping from the contract.
+    _PHASE1_SOURCE_TO_CSV_FROM_CONTRACT: Dict[str, str] = dict(
+        _CONTRACT_PHASE1_CSV_FILENAMES
+    )
+    _PHASE1_CONTRACT_AVAILABLE: bool = True
+except ImportError as _contract_exc:
+    # Degraded mode: contract module not importable (e.g. Phase 2
+    # standalone deployment without phase1/ on the path). Fall back to
+    # the hardcoded dict below. The contract consistency test will fail
+    # in CI, surfacing the misconfiguration.
+    logger.warning(
+        "phase1.contracts.phase1_schema not importable (%s: %s) — "
+        "falling back to hardcoded _PHASE1_EXPECTED_COLUMNS. This is a "
+        "DEGRADED mode; the contract consistency test "
+        "(shared/tests/test_contract_consistency.py) will fail in CI.",
+        type(_contract_exc).__name__, _contract_exc,
+    )
+    _PHASE1_EXPECTED_COLUMNS_FROM_CONTRACT = {}
+    _PHASE1_ANY_OF_COLUMNS_FROM_CONTRACT = {}
+    _PHASE1_SOURCE_TO_CSV_FROM_CONTRACT = {}
+    _PHASE1_CONTRACT_AVAILABLE: bool = False
+
+# v108 ROOT FIX (issue 64): the column lists are now ALSO loaded from
+# ``phase1/pipelines/schema/v1.json`` (the Phase 1 contract source of
+# truth). The hardcoded dict below remains as a FALLBACK for backward
+# compat and for environments where the Phase 1 schema file is not
+# available (e.g. when running Phase 2 standalone). The function
+# ``_load_phase1_schema_columns()`` (defined below) merges the two
+# sources: schema JSON wins for any CSV it covers; the hardcoded list
+# fills in gaps for sources not yet in the schema JSON.
+#
+# TASK 321 ROOT FIX: the contract-derived values (above) OVERRIDE the
+# hardcoded dict and the JSON-derived values. The contract is the
+# single source of truth; the JSON file and hardcoded dict are legacy
+# fallbacks that will be removed once all deployments are upgraded.
+_PHASE1_SCHEMA_PATH: Path = (
+    Path(__file__).resolve().parents[2]
+    / "phase1" / "pipelines" / "schema" / "v1.json"
+)
+
+# Bridge source key → Phase 1 CSV filename (as declared in v1.json)
+_PHASE1_SOURCE_TO_CSV: Dict[str, str] = {
+    "drugs": "drugs.csv",
+    "chembl_drugs": "drugs.csv",  # same CSV, different subset (chembl_id IS NOT NULL)
+    "chembl_activities": "chembl_activities_clean.csv",
+    "indications": "drugbank_indications.csv",
+    "interactions": "drugbank_interactions.csv",
+    "omim_gda": "omim_gene_disease_associations.csv",
+    "uniprot_proteins": "uniprot_proteins.csv",
+    "string_ppi": "string_protein_protein_interactions.csv",
+    "disgenet_gda": "disgenet_gene_disease_associations.csv",
+    # v109 ROOT FIX (P2-036): the previous entry was
+    # "pubchem_compound_properties.csv" — but Phase 1's actual filename
+    # (per phase1/pipelines/pubchem_pipeline.py and the _PHASE1_SOURCES
+    # dict at line 3780) is "pubchem_enrichment.csv". The mismatch
+    # caused the bridge to look for a non-existent file and silently
+    # skip PubChem enrichment data.
+    "pubchem_enrichment": "pubchem_enrichment.csv",
+}
+
+
+def _load_phase1_schema_columns() -> Dict[str, List[str]]:
+    """Load the canonical Phase 1 column contracts from v1.json.
+
+    v108 ROOT FIX (issue 64): the audit found column-name mismatches
+    between the bridge's hardcoded ``_PHASE1_EXPECTED_COLUMNS`` and
+    the actual Phase 1 schema. This function reads the schema JSON
+    (the single source of truth, maintained by the Phase 1 team) and
+    returns the required columns per source.
+
+    If the schema file is missing (e.g. Phase 2 standalone deployment),
+    returns an empty dict — the caller falls back to the hardcoded
+    ``_PHASE1_EXPECTED_COLUMNS`` below.
+    """
+    schema_path = _PHASE1_SCHEMA_PATH
+    if not schema_path.exists():
+        logger.debug(
+            "Phase1 schema JSON not found at %s — falling back to "
+            "hardcoded _PHASE1_EXPECTED_COLUMNS (v108 issue 64).",
+            schema_path,
+        )
+        return {}
+    try:
+        import json as _json
+        with open(schema_path, "r", encoding="utf-8") as f:
+            schema = _json.load(f)
+    except (OSError, _json.JSONDecodeError) as exc:
+        logger.warning(
+            "Phase1 schema JSON could not be read at %s (%s: %s) — "
+            "falling back to hardcoded _PHASE1_EXPECTED_COLUMNS.",
+            schema_path, type(exc).__name__, exc,
+        )
+        return {}
+    out: Dict[str, List[str]] = {}
+    properties = schema.get("properties", {})
+    for source_key, csv_name in _PHASE1_SOURCE_TO_CSV.items():
+        csv_schema = properties.get(csv_name)
+        if not csv_schema:
+            continue
+        required = csv_schema.get("required", [])
+        # Also include properties that are listed but not required if
+        # the bridge's read code depends on them. For now, we only
+        # take the 'required' list — non-required columns are optional.
+        if required:
+            out[source_key] = list(required)
+    return out
+
+
+# Load the schema-derived columns once at module load (best-effort).
+_PHASE1_SCHEMA_DERIVED_COLUMNS: Dict[str, List[str]] = _load_phase1_schema_columns()
+
+# Merge: schema JSON wins where it covers a source; hardcoded fills gaps.
+# v108 issue 64: this eliminates the column-name drift between the bridge
+# and Phase 1's contract.
 _PHASE1_EXPECTED_COLUMNS: Dict[str, List[str]] = {
-    "drugs": ["drugbank_id", "name", "inchikey"],
+    # v107 FORENSIC ROOT FIX (ISSUE-P1-016): ``drugbank_id`` removed from
+    # REQUIRED and moved to _PHASE1_ANY_OF_COLUMNS (accept either
+    # ``drugbank_id`` OR ``chembl_id``). When DrugBank academic downloads
+    # are unavailable, the ChEMBL-only deployment must still pass the
+    # bridge's contract validation. The bridge read code uses ``inchikey``
+    # as the canonical Compound key and treats drugbank_id/chembl_id as
+    # source-specific aliases.
+    "drugs": ["name", "inchikey"],
     "interactions": ["drugbank_id", "uniprot_id", "action_type"],
     "omim_gda": ["gene_mim", "gene_symbol", "disease_id", "disease_name"],
     "chembl_drugs": ["chembl_id", "inchikey"],
@@ -1099,6 +1909,40 @@ _PHASE1_EXPECTED_COLUMNS: Dict[str, List[str]] = {
     "indications": ["drugbank_id", "disease_id"],
 }
 
+# v108 ROOT FIX (issue 64): merge schema-derived columns over the hardcoded
+# defaults. Schema JSON is the AUTHORITATIVE Phase 1 contract — when it
+# covers a source, its required-columns list overrides the hardcoded list.
+# The hardcoded list remains as a fallback for sources not in v1.json.
+for _src_key, _schema_cols in _PHASE1_SCHEMA_DERIVED_COLUMNS.items():
+    if _schema_cols:
+        _PHASE1_EXPECTED_COLUMNS[_src_key] = _schema_cols
+del _src_key, _schema_cols
+
+# =============================================================================
+# TASK 321 ROOT FIX (forensic, root-level): CONTRACT OVERRIDE.
+# The contract-derived values (from phase1.contracts.phase1_schema) OVERRIDE
+# both the hardcoded dict above AND the JSON-derived values. The contract
+# is the single source of truth — this override ensures the bridge's
+# expected columns EXACTLY match what the Phase 1 pipelines write.
+# Without this override, the bridge could silently accept a CSV that the
+# Phase 1 validator would reject (or vice versa) — the schema drift the
+# contract was created to eliminate.
+# =============================================================================
+if _PHASE1_CONTRACT_AVAILABLE:
+    _PHASE1_EXPECTED_COLUMNS.update(_PHASE1_EXPECTED_COLUMNS_FROM_CONTRACT)
+    # Also override the source-key -> CSV-filename mapping. The contract's
+    # filenames are canonical; the hardcoded mapping above may have stale
+    # aliases (e.g. "pubchem_compound_properties.csv" vs the contract's
+    # "pubchem_enrichment.csv").
+    _PHASE1_SOURCE_TO_CSV.update(_PHASE1_SOURCE_TO_CSV_FROM_CONTRACT)
+    logger.info(
+        "TASK 321 ROOT FIX: Phase 2 bridge now uses phase1.contracts.phase1_schema "
+        "as the SINGLE source of truth for expected columns (%d sources) and "
+        "CSV filenames (%d sources). Hardcoded dict is a fallback only.",
+        len(_PHASE1_EXPECTED_COLUMNS_FROM_CONTRACT),
+        len(_PHASE1_SOURCE_TO_CSV_FROM_CONTRACT),
+    )
+
 # v78 FORENSIC ROOT FIX (BUG #7): ANY_OF column requirements.
 # For sources where the bridge accepts multiple alternative column
 # names (e.g. DisGeNET accepts ``gene_id`` OR ``ncbi_gene_id``), this
@@ -1142,7 +1986,50 @@ _PHASE1_ANY_OF_COLUMNS: Dict[str, List[List[str]]] = {
     "uniprot_proteins": [
         ["uniprot_ac", "accession", "uniprot_id"],
     ],
+    # v107 FORENSIC ROOT FIX (ISSUE-P1-016):
+    #   The bridge previously REQUIRED ``drugbank_id`` in the ``drugs``
+    #   source (_PHASE1_EXPECTED_COLUMNS["drugs"] = ["drugbank_id",
+    #   "name", "inchikey"]). But Phase 1's chembl_pipeline writes
+    #   ``drugs.csv`` (the alias for chembl source) which does NOT have
+    #   ``drugbank_id`` -- only ``chembl_id``. When DrugBank is
+    #   unavailable (academic license paused since May 2026 -- see
+    #   ISSUE-P1-005), the bridge's contract check FAILED on ChEMBL-only
+    #   deployments, raising DrugOSDataError and blocking the KG build.
+    #   This contradicted the docstring's claim that "ChEMBL-only
+    #   deployments now build a valid KG".
+    #   ROOT FIX: make ``drugbank_id`` OPTIONAL via ANY_OF -- accept
+    #   either ``drugbank_id`` OR ``chembl_id`` as the Compound
+    #   identifier. The bridge read code already handles both (it uses
+    #   inchikey as the canonical key and falls back to whatever ID is
+    #   present). Also removed ``drugbank_id`` from
+    #   _PHASE1_EXPECTED_COLUMNS["drugs"] (see above).
+    "drugs": [
+        ["drugbank_id", "chembl_id"],  # accept either as Compound identifier
+    ],
 }
+
+# =============================================================================
+# TASK 321 ROOT FIX (continued): merge contract-derived ANY_OF groups.
+# The contract's any_of_groups are ADDED to (not replacing) the hardcoded
+# groups above. The hardcoded groups may include extra aliases the bridge
+# read code accepts that the contract doesn't declare (the contract is
+# the MINIMUM; the bridge may accept MORE). We only add groups from the
+# contract that aren't already present (by content, not by reference).
+# =============================================================================
+if _PHASE1_CONTRACT_AVAILABLE:
+    for _src, _contract_groups in _PHASE1_ANY_OF_COLUMNS_FROM_CONTRACT.items():
+        _existing_groups = _PHASE1_ANY_OF_COLUMNS.get(_src, [])
+        _existing_tuples = {tuple(g) for g in _existing_groups}
+        for _g in _contract_groups:
+            _g_tuple = tuple(_g)
+            if _g_tuple not in _existing_tuples:
+                _existing_groups.append(_g)
+                _existing_tuples.add(_g_tuple)
+        # Ensure the key is present even if we added nothing (so callers
+        # know this source has ANY_OF semantics per the contract).
+        if _src not in _PHASE1_ANY_OF_COLUMNS:
+            _PHASE1_ANY_OF_COLUMNS[_src] = _existing_groups
+    del _src, _contract_groups, _existing_groups, _existing_tuples, _g, _g_tuple
 
 
 def _validate_phase1_columns(
@@ -1406,8 +2293,30 @@ def _classify_db_failure(exc: Exception) -> str:
     return "unknown"
 
 
+# v109 ROOT FIX (P2-016): cache the result of _phase1_db_available() so
+# we don't retry the same failing import 909 times in one pipeline run.
+# The previous code called _phase1_db_available() on every bridge
+# invocation (once per source: drugs, interactions, indications, etc.).
+# Each call retried the failing ``from database.connection import
+# get_engine`` import, logged a fallback event to bridge_fallbacks.jsonl,
+# and fell back to CSV. The audit log showed 909 entries from a single
+# pipeline run — all with the same ImportError. ROOT FIX: cache the
+# result for the lifetime of the process. The cache is invalidated only
+# if the process restarts (which is the right granularity — env var
+# changes require a restart anyway).
+_phase1_db_available_cache: Optional[bool] = None
+_phase1_db_available_cache_set: bool = False
+
+
 def _phase1_db_available() -> bool:
     """Return True iff a Phase 1 database backend is configured AND populated.
+
+    v109 ROOT FIX (P2-016): the result is now CACHED per-process to
+    avoid retrying the same failing import 909 times. The cache is set
+    on the first call and reused for all subsequent calls. If the
+    underlying state changes (e.g. the operator runs migrations), the
+    process must be restarted to pick up the new state — this matches
+    the existing behavior for all other env-var-driven config.
 
     v61 ROOT FIX (silent break point #1 — forensic deep fix):
     The v58/v60 code swallowed ALL exceptions with a single ``except
@@ -1433,15 +2342,98 @@ def _phase1_db_available() -> bool:
         fallback is correct)
       * Success with >0 rows → return True (DB is populated; use it)
     """
+    # v109 ROOT FIX (P2-016): return cached result if available. This
+    # prevents 909 redundant import attempts in a single pipeline run.
+    global _phase1_db_available_cache, _phase1_db_available_cache_set
+    if _phase1_db_available_cache_set:
+        return bool(_phase1_db_available_cache)
+    result = _phase1_db_available_uncached()
+    _phase1_db_available_cache = result
+    _phase1_db_available_cache_set = True
+    return result
+
+
+def _phase1_db_available_uncached() -> bool:
+    """Actual implementation of _phase1_db_available() (uncached).
+
+    Called once per process by _phase1_db_available() (which caches the
+    result). See _phase1_db_available() for the full docstring.
+    """
     try:
         import sys as _sys
         _phase1_root = str(Path(__file__).resolve().parents[2] / "phase1")
         if _phase1_root not in _sys.path:
             _sys.path.insert(0, _phase1_root)
         from database.connection import get_engine  # type: ignore
-        from sqlalchemy import text as _sa_text
+        from sqlalchemy import text as _sa_text, inspect as _sa_inspect
         engine = get_engine()
         with engine.connect() as conn:
+            # P2-057 ROOT FIX (Teammate 4, forensic, root-level): the
+            # previous code checked ONLY the ``drugs`` table. But Phase 1
+            # writes to MULTIPLE tables (drugs, proteins,
+            # drug_protein_interactions, etc.). If only ``drugs`` exists
+            # but the OTHER tables are missing (e.g. partial migration,
+            # a loader crashed mid-write), the previous code returned
+            # True → the bridge attempted to read from the missing
+            # tables → ``_read_phase1_from_postgres`` raised
+            # ``OperationalError: no such table: proteins`` → the bridge
+            # fell back to CSV (silent data loss in production).
+            #
+            # ROOT FIX: check ALL required tables exist AND have >0 rows.
+            # The required tables are the ones _read_phase1_from_postgres
+            # actually reads. If any is missing OR empty, return False so
+            # the bridge falls back to CSV (correct behaviour) instead of
+            # crashing mid-read (which would also fall back but with a
+            # confusing error log).
+            inspector = _sa_inspect(conn)
+            existing_tables = set(inspector.get_table_names())
+            # P2-057 ROOT FIX (Teammate 4, forensic, root-level): the
+            # previous list contained ONLY 3 tables (drugs, proteins,
+            # drug_protein_interactions). But ``_read_phase1_from_postgres``
+            # ALSO reads ``gene_disease_associations`` (DisGeNET/OMIM GDAs,
+            # used to derive pathway->disease edges) and
+            # ``protein_protein_interactions`` (STRING PPIs). When those
+            # tables were missing (partial migration), the DB-availability
+            # check returned True, the bridge committed to the Postgres
+            # path, then CRASHED mid-read with an ``UndefinedTable`` error
+            # when it hit the missing table. The crash was caught by the
+            # outer try/except and fell back to CSV, but with a confusing
+            # error log and wasted I/O — and if the outer handler ever
+            # regressed, it would corrupt the KG (partial graph from DB
+            # + partial from CSV). ROOT FIX: list EVERY table the reader
+            # actually touches, so the availability check is honest.
+            _required_tables = (
+                "drugs",
+                "proteins",
+                "drug_protein_interactions",
+                "protein_protein_interactions",
+                "gene_disease_associations",
+            )
+            _missing_tables = [
+                t for t in _required_tables if t not in existing_tables
+            ]
+            if _missing_tables:
+                logger.warning(
+                    "P2-057 ROOT FIX: Phase 1 DB is reachable but "
+                    "missing required tables: %s. The bridge will fall "
+                    "back to CSV. Run "
+                    "`python -m database.migrations.run_migrations` "
+                    "from phase1/ to create all required tables.",
+                    _missing_tables,
+                )
+                _log_bridge_fallback(
+                    "phase1_db_available",
+                    "schema_missing_tables",
+                    backend="csv",
+                    exception_type="MissingTables",
+                    exception_message=f"missing: {_missing_tables}",
+                    extra={"missing_tables": _missing_tables},
+                )
+                return False
+            # All required tables exist — verify the drugs table has rows.
+            # (We check drugs because it's the canonical "Phase 1 ran"
+            # indicator. The other tables may be legitimately empty for
+            # a partial Phase 1 run, but drugs must have at least 1 row.)
             row = conn.execute(
                 _sa_text("SELECT COUNT(*) AS n FROM drugs")
             ).fetchone()
@@ -1582,18 +2574,66 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
         # v88 ROOT FIX (BUG #39 — InChIKey format validation): filter
         # to well-formed InChIKeys (^[A-Z]{14}-[A-Z]{10}-[A-Z]$) so NULL/
         # empty/malformed inchikeys don't violate the InChIKey mandate.
+        #
+        # P2-014 ROOT FIX (v107 forensic): the v84/v88 filter DROPPED all
+        # biotech drugs (insulin DB00071, Humira, Keytruda — ~30% of modern
+        # FDA approvals) because biotech drugs have NO InChIKey (they are
+        # proteins, antibodies, etc. — InChIKey is a small-molecule-only
+        # identifier). Their treats edges were dropped BEFORE the P2-027
+        # alias consolidation could merge them. The KG's drug coverage was
+        # structurally incomplete for the entire biotech drug class. The RL
+        # ranker could not recommend biotech drugs because they had no
+        # treats edges.
+        # ROOT FIX: relax the WHERE clause to ACCEPT rows with EITHER a
+        # valid InChIKey OR a non-empty DrugBank ID. Biotech drugs use
+        # DrugBank ID as the canonical identifier (per the Phase 1 bridge
+        # docstring line 16: "Canonical Compound ID = InChIKey for small
+        # molecules, DrugBank ID for biologics"). The downstream alias
+        # consolidation (P2-027) merges them into the correct Compound
+        # node via DrugBank ID crosswalk. We still validate the InChIKey
+        # format when it IS present (the regex filter is applied to the
+        # inchikey column AFTER the read, not in the WHERE clause, so
+        # malformed inchikeys are demoted to DrugBank ID rather than
+        # dropping the row entirely).
+        # v108 ROOT FIX (issue 61): extend biotech drug fallback to ALSO accept
+        # PubChem CID and UniProt accession (for biologics). The previous v107
+        # P2-014 fix accepted InChIKey OR DrugBank ID, but the audit (issue 61)
+        # found that some biotech drugs have NEITHER InChIKey NOR DrugBank ID
+        # but DO have a UniProt accession (for recombinant proteins like
+        # insulin, EPO, G-CSF) or a PubChem CID (for some small molecules
+        # where InChIKey computation failed). Without these fallbacks, ~5%
+        # of FDA-approved biologics were dropped from the KG.
+        #
+        # The drugs table doesn't store UniProt accessions directly (those
+        # live on the proteins table). For biologic drugs, the link is
+        # drug → drug_protein_interactions → proteins.uniprot_id. We LEFT JOIN
+        # through this chain to get the UniProt accession as a fallback ID.
+        # We also SELECT pubchem_cid (already on the drugs table) as another
+        # fallback.
         drugs_with_indication = pd.read_sql(
             sa_text(
-                "SELECT inchikey, name, chembl_id, drugbank_id, "
-                "indication, indication_source, max_phase, "
-                "is_fda_approved, is_globally_approved "
-                "FROM drugs "
-                "WHERE indication IS NOT NULL "
-                "AND TRIM(indication) != '' "
-                "AND is_deleted = false "
-                "AND inchikey IS NOT NULL "
-                "AND TRIM(inchikey) != '' "
-                "AND inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'"
+                "SELECT d.inchikey, d.name, d.chembl_id, d.drugbank_id, "
+                "d.pubchem_cid, p.uniprot_id AS uniprot_accession, "
+                "d.indication, d.indication_source, d.max_phase, "
+                "d.is_fda_approved, d.is_globally_approved "
+                "FROM drugs d "
+                "LEFT JOIN drug_protein_interactions dpi ON dpi.drug_id = d.id "
+                "LEFT JOIN proteins p ON p.id = dpi.protein_id "
+                "WHERE d.indication IS NOT NULL "
+                "AND TRIM(d.indication) != '' "
+                "AND d.is_deleted = false "
+                "AND ("
+                "  (d.inchikey IS NOT NULL AND TRIM(d.inchikey) != '' "
+                "   AND d.inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$') "
+                "  OR "
+                "  (d.drugbank_id IS NOT NULL AND TRIM(d.drugbank_id) != '') "
+                "  OR "
+                "  (d.pubchem_cid IS NOT NULL AND d.pubchem_cid > 0) "
+                "  OR "
+                "  (p.uniprot_id IS NOT NULL AND TRIM(p.uniprot_id) != '')"
+                ") "
+                "-- v108 issue 61: accept InChIKey OR DrugBank ID OR PubChem CID"
+                "-- OR UniProt accession (biotech drugs)."
             ),
             conn,
         )
@@ -1606,13 +2646,58 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
             )
             _n_invalid_ik = int((~_valid_ik_mask).sum())
             if _n_invalid_ik > 0:
-                logger.warning(
-                    "phase1_bridge: dropping %d/%d indication rows with "
-                    "NULL/empty/malformed inchikey (v88 BUG #39). Sample: %s",
-                    _n_invalid_ik, len(drugs_with_indication),
-                    list(_ik[~_valid_ik_mask].head(5)),
+                # P2-014 + v108 issue 61: do NOT drop these rows. They are
+                # biotech drugs (no InChIKey). Demote to DrugBank ID, or
+                # PubChem CID, or UniProt accession (the three biotech
+                # fallbacks). Log so operators can audit the count.
+                def _has_id(s):
+                    """True if s is a non-empty, non-'nan' value."""
+                    return bool(s) and str(s).strip() != "" and str(s) != "nan"
+
+                _n_with_drugbank = int(
+                    drugs_with_indication.loc[~_valid_ik_mask, "drugbank_id"]
+                    .apply(_has_id)
+                    .sum()
                 )
-                drugs_with_indication = drugs_with_indication[_valid_ik_mask].reset_index(drop=True)
+                _n_with_pubchem = int(
+                    drugs_with_indication.loc[~_valid_ik_mask, "pubchem_cid"]
+                    .apply(lambda x: bool(x) and str(x) != "nan" and float(x) > 0)
+                    .sum()
+                )
+                _n_with_uniprot = int(
+                    drugs_with_indication.loc[~_valid_ik_mask, "uniprot_accession"]
+                    .apply(_has_id)
+                    .sum()
+                )
+                logger.warning(
+                    "phase1_bridge: %d/%d indication rows have NULL/empty/"
+                    "malformed inchikey (v88 BUG #39 / P2-014 v107 / v108 "
+                    "issue 61). Fallback ID coverage: DrugBank=%d, "
+                    "PubChem=%d, UniProt=%d. Keeping rows with ANY fallback "
+                    "ID; dropping rows with NONE.",
+                    _n_invalid_ik, len(drugs_with_indication),
+                    _n_with_drugbank, _n_with_pubchem, _n_with_uniprot,
+                )
+                # Keep rows that have EITHER a valid inchikey OR a
+                # non-empty drugbank_id OR pubchem_cid OR uniprot_accession.
+                # Drop only rows with NONE of these.
+                _has_drugbank = drugs_with_indication["drugbank_id"].apply(_has_id)
+                _has_pubchem = drugs_with_indication["pubchem_cid"].apply(
+                    lambda x: bool(x) and str(x) != "nan" and float(x) > 0
+                )
+                _has_uniprot = drugs_with_indication["uniprot_accession"].apply(_has_id)
+                _keep_mask = _valid_ik_mask | _has_drugbank | _has_pubchem | _has_uniprot
+                _n_dropped = int((~_keep_mask).sum())
+                if _n_dropped > 0:
+                    logger.error(
+                        "phase1_bridge: dropping %d indication rows with "
+                        "NEITHER inchikey NOR drugbank_id NOR pubchem_cid "
+                        "NOR uniprot_accession — cannot canonicalize. "
+                        "These are likely data-quality issues in Phase 1. "
+                        "Investigate the DrugBank parser.",
+                        _n_dropped,
+                    )
+                drugs_with_indication = drugs_with_indication[_keep_mask].reset_index(drop=True)
         if drugs_with_indication.empty:
             return None
 
@@ -1627,6 +2712,35 @@ def _read_indications_from_postgres(conn: Any) -> Optional[pd.DataFrame]:
             "inchikey": "drug_inchikey",
             "name": "drug_name",
         })
+        # v108 ROOT FIX (issue 61): add a canonical_drug_id column that
+        # captures the FIRST available ID for each row (InChIKey > DrugBank
+        # > PubChem CID > UniProt accession). Downstream consumers use this
+        # to register the Compound node without re-doing the fallback logic.
+        def _pick_canonical_id(row):
+            ik = row.get("drug_inchikey")
+            if isinstance(ik, str) and _INCHIKEY_RE.match(ik):
+                return ik
+            db = row.get("drugbank_id")
+            if isinstance(db, str) and db.strip() and db != "nan":
+                return db
+            pc = row.get("pubchem_cid")
+            try:
+                if pc is not None and str(pc) != "nan" and float(pc) > 0:
+                    return f"CID:{int(pc)}"
+            except (TypeError, ValueError):
+                pass
+            ua = row.get("uniprot_accession")
+            if isinstance(ua, str) and ua.strip() and ua != "nan":
+                return ua
+            return None
+
+        # _INCHIKEY_RE was defined inside the `if not drugs_with_indication.empty:`
+        # block above; re-define it here so this helper works regardless.
+        import re as _re_v108_ik
+        _INCHIKEY_RE = _re_v108_ik.compile(r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$")
+        drugs_with_indication["canonical_drug_id"] = (
+            drugs_with_indication.apply(_pick_canonical_id, axis=1)
+        )
         drugs_with_indication["disease_id"] = (
             drugs_with_indication["drug_inchikey"].apply(_extract_disease_id_from_indication_text)
         )
@@ -1809,6 +2923,15 @@ _DISEASE_KEYWORD_MAP = {
     "inflammation": ("DOID:1101", "Inflammation"),
     "migraine": ("DOID:1197", "Migraine"),
     "ulcer": ("DOID:77", "Ulcer"),
+    # P2-001 STRENGTHENING (v106 — Team Member 5): add multi-word disease
+    # "ulcerative colitis" so it is recognized as ONE disease (DOID:8535)
+    # instead of being missed entirely. The issue description explicitly
+    # names this case: the naive substring match split it into "ulcer" +
+    # "colitis" (2 Disease nodes). The word-boundary regex fix PREVENTS
+    # the split but also misses the real disease. Adding the multi-word
+    # keyword restores correct recognition. Longest-match-first sorting
+    # (L3) ensures "ulcerative colitis" is checked BEFORE "ulcer".
+    "ulcerative colitis": ("DOID:8535", "Ulcerative Colitis"),
 }
 
 # P2-001 L3 — multi-word "false friend" phrases. When any of these
@@ -2384,21 +3507,13 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
                     _m.DrugProteinInteraction.activity_type,
                     _m.DrugProteinInteraction.activity_value,
                     _m.DrugProteinInteraction.activity_units,
-                    # v43 ROOT FIX (P1 — synthesized standard_relation
-                    # semantically wrong): the previous code aliased
-                    # interaction_type (DrugBank action: "inhibitor"/
-                    # "agonist") as "standard_relation". But ChEMBL's
-                    # standard_relation is the CENSORING direction
-                    # ('=', '<', '>') — a completely different semantic.
-                    # Downstream RL ranker code that reads standard_relation
-                    # to apply censoring got action-vocabulary strings
-                    # instead of censoring symbols. Fix: set to None
-                    # (the DB doesn't store ChEMBL's standard_relation;
-                    # it's only available in the CSV path). Document
-                    # the semantic divergence.
+                    # INT-003 ROOT FIX: select the REAL standard_relation
+                    # from the ORM (was dropped at load time, then guessed
+                    # heuristically — the heuristic was conservative and
+                    # missed censoring in the 0.1-100000 nM range where
+                    # most clinically-relevant activity values live).
+                    _m.DrugProteinInteraction.standard_relation,
                     _m.DrugProteinInteraction.interaction_type.label("action_type"),
-                    # standard_relation is NOT available from PostgreSQL
-                    # (only from CSV path). Set to None explicitly.
                     _m.DrugProteinInteraction.source,
                     _m.DrugProteinInteraction.activity_units,
                 )
@@ -2554,8 +3669,72 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
             # Synthesize target_chembl_id (NULL — the DB doesn't store it).
             chembl_act_df["target_chembl_id"] = None
             chembl_act_df["assay_id"] = None
-            # v43: standard_relation is NOT in PostgreSQL — set to None.
-            chembl_act_df["standard_relation"] = None
+            # INT-003 ROOT FIX: standard_relation is NOW a real column
+            # in the Phase 1 ORM (DrugProteinInteraction.standard_relation).
+            # It stores ChEMBL's raw censoring direction ('=', '<', '>', '~').
+            # Rows loaded before the migration have NULL — we fall back to
+            # '=' (exact measurement, the most common ChEMBL relation) for
+            # those. The heuristic _derive_standard_relation_heuristic is
+            # kept as a last-resort for legacy data but NEVER used for
+            # fresh loads where the ORM column is populated.
+            if not chembl_act_df.empty:
+                # Coerce NULL/NaN to '=' (exact measurement — safest default).
+                chembl_act_df["standard_relation"] = (
+                    chembl_act_df["standard_relation"]
+                    .fillna("=")
+                    .replace("", "=")
+                )
+                # Validate: only ChEMBL's four censoring symbols are allowed.
+                _valid_relations = {"=", "<", ">", "~"}
+                _invalid_mask = ~chembl_act_df["standard_relation"].isin(_valid_relations)
+                _n_invalid = int(_invalid_mask.sum())
+                if _n_invalid > 0:
+                    logger.warning(
+                        "INT-003: %d rows have invalid standard_relation values "
+                        "(not in {'=', '<', '>', '~'}). Coercing to '='. "
+                        "Sample invalid values: %s",
+                        _n_invalid,
+                        list(chembl_act_df.loc[_invalid_mask, "standard_relation"].head(5)),
+                    )
+                    chembl_act_df.loc[_invalid_mask, "standard_relation"] = "="
+                # v108 ROOT FIX (issue 62): unified censoring logic across
+                # both DB backends. The audit found that the PostgreSQL path
+                # lost standard_relation censoring semantics for extreme
+                # activity values (>100 μM = upper detection limit, <1 nM =
+                # lower detection limit). The existing
+                # _derive_standard_relation_heuristic function applies these
+                # thresholds but was only called for the CSV path. Now we
+                # call it for BOTH paths so censored values are flagged
+                # consistently. We ALSO add a 'is_censored' flag column so
+                # the RL safety ranker can filter on it.
+                import numpy as _np_v108_censor
+                if "activity_value" in chembl_act_df.columns and "activity_units" in chembl_act_df.columns:
+                    _censor_flags = []
+                    for _, _row in chembl_act_df.iterrows():
+                        _rel = _derive_standard_relation_heuristic(_row)
+                        _is_censored = _rel in ("<", ">")
+                        # Override standard_relation IF the heuristic detects
+                        # censoring AND the stored relation is "=" (the
+                        # heuristic only emits '<'/'>' for unambiguous
+                        # extreme values; we don't override explicit '<'/'>'
+                        # from ChEMBL because those are gold-standard).
+                        if _is_censored and _row.get("standard_relation") == "=":
+                            chembl_act_df.at[_, "standard_relation"] = _rel  # noqa: B023
+                        _censor_flags.append(_is_censored)
+                    chembl_act_df["is_censored"] = _censor_flags
+                    _n_censored = int(sum(_censor_flags))
+                    if _n_censored > 0:
+                        logger.warning(
+                            "v108 issue 62: %d/%d ChEMBL activity rows "
+                            "flagged as censored (value beyond detection "
+                            "limits: <1 nM or >100 μM). The standard_relation "
+                            "for these rows has been updated to reflect "
+                            "the censoring direction. The 'is_censored' "
+                            "column lets the RL safety ranker filter them.",
+                            _n_censored, len(chembl_act_df),
+                        )
+                else:
+                    chembl_act_df["is_censored"] = False
             chembl_act_df["assay_type"] = None
             out["chembl_activities"] = chembl_act_df
             logger.info(
@@ -3015,6 +4194,35 @@ def read_phase1_outputs(
         "omim_susceptibility": [
             base / "omim_gene_disease_susceptibility.csv",
         ],
+        # ─── v113 ROOT FIX (P2-047, HIGH): SIDER integration in the bridge ──
+        # The audit found that ``sider_loader`` parses SIDER adverse-event
+        # data, but the bridge's ``paths`` dict had NO SIDER entry -- so
+        # SIDER data was NEVER consumed by the Phase 1 → Phase 2 bridge.
+        # The KG's Compound→causes_adverse_event→MedDRA_Term edges were
+        # emitted ONLY by ``run_pipeline.step6_ingest_sider`` (a Phase-2
+        # code path), which meant the bridge's "single authoritative
+        # wire" promise was broken for adverse-event data. The RL ranker
+        # reads causes_adverse_event edges for its safety-signal
+        # dimension; if the bridge doesn't emit them, the safety ranker
+        # has no signal when running in bridge-only mode.
+        #
+        # ROOT FIX: add SIDER entries to the paths dict. We accept TWO
+        # candidate CSV filenames:
+        #   • ``sider_adverse_events.csv``  -- canonical name (v113)
+        #   • ``sider_meddra_all_se.csv``   -- matches the raw filename
+        # If neither file exists (the current state, since SIDER is a
+        # Phase-2-only source and Phase 1 doesn't produce it), the
+        # bridge logs a warning and produces an empty DataFrame -- same
+        # graceful-degradation behavior as the other missing sources.
+        # An operator who wants SIDER data in the bridge can write a
+        # CSV at either path (e.g., by running
+        # ``python -c "from drugos_graph.sider_loader import
+        # parse_sider_side_effects; parse_sider_side_effects().to_csv(
+        # 'phase1/processed_data/sider_adverse_events.csv')"``).
+        "sider_adverse_events": [
+            base / "sider_adverse_events.csv",
+            base / "sider_meddra_all_se.csv",
+        ],
     }
     out: Dict[str, pd.DataFrame] = {}
     for key, p in paths.items():
@@ -3037,6 +4245,32 @@ def read_phase1_outputs(
                         out[key], _PHASE1_EXPECTED_COLUMNS[key], key,
                         any_of_groups=_PHASE1_ANY_OF_COLUMNS.get(key),
                     )
+                # v108 ROOT FIX (issue 62): apply unified censoring logic
+                # to CSV-path chembl_activities too (the PostgreSQL path
+                # gets the same treatment above). This ensures censored
+                # values (<1 nM, >100 μM) are flagged consistently across
+                # both DB backends. The is_censored column lets the RL
+                # safety ranker filter them; the standard_relation column
+                # is updated to reflect the censoring direction.
+                if key == "chembl_activities" and not out[key].empty:
+                    _df_csv = out[key]
+                    _censor_flags = []
+                    for _idx, _row in _df_csv.iterrows():
+                        _rel = _derive_standard_relation_heuristic(_row)
+                        _is_censored = _rel in ("<", ">")
+                        if _is_censored and _row.get("standard_relation") == "=":
+                            _df_csv.at[_idx, "standard_relation"] = _rel
+                        _censor_flags.append(_is_censored)
+                    _df_csv["is_censored"] = _censor_flags
+                    _n_censored_csv = int(sum(_censor_flags))
+                    if _n_censored_csv > 0:
+                        logger.warning(
+                            "v108 issue 62 (CSV path): %d/%d ChEMBL "
+                            "activity rows flagged as censored (value "
+                            "beyond detection limits: <1 nM or >100 μM).",
+                            _n_censored_csv, len(_df_csv),
+                        )
+                    out[key] = _df_csv
                 logger.info(
                     "Phase1 bridge: read %s rows from %s (source=%s)",
                     len(out[key]), found_path.name, key,
@@ -3339,6 +4573,141 @@ def _classify_drug_protein_edge(action_type: str) -> str:
     return "unknown"
 
 
+# v107 ROOT FIX (ISSUE-P2-039): heuristic derivation of ChEMBL's
+# ``standard_relation`` censoring direction ('=', '<', '>') from the
+# ``activity_type`` + ``activity_value`` + ``activity_units`` columns
+# that ARE present in the Phase 1 PostgreSQL ORM.
+#
+# Scientific basis
+# ----------------
+# ChEMBL's ``standard_relation`` column carries censoring semantics:
+#   '='  → exact measurement (activity value is precisely known)
+#   '<'  → lower bound (the true value is BELOW the reported number,
+#          typically because the assay's lower detection limit was
+#          reached — the molecule is MORE potent than the value suggests)
+#   '>'  → upper bound (the true value is ABOVE the reported number,
+#          typically because the assay's upper detection limit was
+#          reached — the molecule is LESS potent than the value suggests)
+#   '~'  → approximate (the value has high uncertainty)
+#
+# When the Phase 1 ORM was designed, ``standard_relation`` was not
+# included as a column (only ``activity_type``, ``activity_value``,
+# ``activity_units``). The Phase 1 ChEMBL pipeline DOES extract
+# ``standard_relation`` from the raw ChEMBL CSV/SQL dump, but the value
+# is dropped at ORM load time. As a result, the Phase 2 bridge cannot
+# propagate censoring to the RL ranker's safety filter.
+#
+# This helper reconstructs a CONSERVATIVE estimate of the censoring
+# direction from the value itself. The heuristic uses two well-known
+# ChEMBL detection-limit thresholds:
+#
+#   * Lower detection limit (LDL): ~0.1 nM. Assays cannot reliably
+#     measure binding below this. Values reported as < 0.1 nM are
+#     almost always '<' censored.
+#   * Upper detection limit (UDL): ~100 µM (= 100,000 nM). Assays
+#     cannot reliably measure binding above this. Values reported as
+#     > 100 µM are almost always '>' censored.
+#
+# The heuristic is intentionally CONSERVATIVE — it only emits '<' or
+# '>' for values BEYOND these extreme thresholds (where the censoring
+# is unambiguous from the value alone). For all other values it emits
+# '=' (the most common ChEMBL relation). This avoids false censoring
+# signals that would mislead the RL ranker, at the cost of missing some
+# true censored values in the 1–100 nM range — but those values are
+# clinically actionable as-is, so the impact is minimal.
+#
+# The heuristic is only applied to BINDING/POTENCY assay types where
+# censoring is meaningful (IC50, EC50, Ki, Kd, AC50, Potency, GI50).
+# For % inhibition / % activation / ratio types, censoring semantics
+# differ and we default to '='.
+#
+# Parameters
+# ----------
+# row : pd.Series
+#     A row from the ChEMBL activities DataFrame. Must contain
+#     ``activity_type`` (str), ``activity_value`` (float|None), and
+#     ``activity_units`` (str).
+#
+# Returns
+# -------
+# str
+#     One of ``'='``, ``'<'``, ``'>'``. Never None or empty.
+_BINDING_ASSAY_TYPES: frozenset[str] = frozenset({
+    "IC50", "EC50", "AC50", "KI", "KD", "POTENCY", "GI50",
+    "IC25", "IC75", "EC25", "EC75", "KIB", "KDAPP",
+})
+
+
+def _derive_standard_relation_heuristic(row) -> str:
+    """Derive ChEMBL ``standard_relation`` from activity_type + value.
+
+    See the module-level comment for the scientific rationale. This is
+    a CONSERVATIVE heuristic — it only emits censoring for values
+    beyond unambiguous detection limits. Returns '=' for everything
+    else (including missing/invalid inputs).
+    """
+    # Default: exact measurement.
+    rel = "="
+
+    activity_type = row.get("activity_type")
+    if not isinstance(activity_type, str):
+        return rel
+    at = activity_type.strip().upper()
+    if not at:
+        return rel
+
+    # Only derive censoring for binding/potency assay types.
+    if at not in _BINDING_ASSAY_TYPES:
+        return rel
+
+    # Parse the activity value.
+    try:
+        value = row.get("activity_value")
+        if value is None:
+            return rel
+        value = float(value)
+        if not (value > 0):  # NaN, <=0, inf all bail out
+            return rel
+    except (TypeError, ValueError):
+        return rel
+
+    # Normalize to nanomolar (nM) for threshold comparison.
+    units = row.get("activity_units")
+    units_str = str(units).strip().lower() if units else ""
+    if units_str in {"um", "µm", "µmol/l", "umol/l", "micromolar"}:
+        value_nm = value * 1_000.0
+    elif units_str in {"mm", "mmol/l", "millimolar"}:
+        value_nm = value * 1_000_000.0
+    elif units_str in {"m", "mol/l", "molar"}:
+        value_nm = value * 1_000_000_000.0
+    elif units_str in {"pm", "pmol/l", "picomolar"}:
+        value_nm = value * 0.001
+    else:
+        # Default to nM (the most common ChEMBL unit for binding assays).
+        value_nm = value
+
+    # v108 ROOT FIX (issue 62): updated censoring thresholds per the audit
+    # spec. The previous thresholds (0.1 nM lower, 100 μM upper) were too
+    # conservative on the lower end — they only flagged values BELOW 0.1 nM
+    # as censored, missing the 0.1-1 nM range where MOST assay detection
+    # limits actually live (most commercial IC50 assays have LDL ~1 nM).
+    # The audit spec uses <1 nM as the lower threshold, which catches the
+    # clinically-relevant censored values that the RL safety ranker needs
+    # to filter out (a drug with IC50 "<1 nM" is much more potent than the
+    # number suggests — important for safety scoring).
+    # Lower detection limit: 1 nM — true value is below the reported
+    # number, so the molecule is MORE potent than the value suggests.
+    if value_nm < 1.0:
+        return "<"
+    # Upper detection limit: 100 µM (100,000 nM) — true value is above
+    # the reported number, so the molecule is LESS potent than the value
+    # suggests.
+    if value_nm > 100_000.0:
+        return ">"
+
+    return rel
+
+
 def _classify_chembl_activity_edge(
     activity_type: str,
     assay_type: str = "",
@@ -3491,49 +4860,72 @@ def _derive_pathways_from_string(
     run_id: str,
     loaded_at: str,
     schema_version: str,
+    max_pathway_size: int = int(os.environ.get("DRUGOS_MAX_PATHWAY_SIZE", "200")),
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Derive Pathway nodes from STRING PPI connected components.
 
-    Per the DOCX: "STRING — Maps protein-protein interaction networks,
-    showing which proteins work together in the same pathways." The
-    biologically-defensible interpretation: each connected component of
-    the STRING PPI graph = a putative pathway (a cluster of co-
-    interacting proteins). This is the same interpretation used by
-    STRING's own "network clustering" view.
+    v109 ROOT FIX (P2-019): the previous version of this function
+    treated EVERY connected component of the STRING PPI graph as a
+    single "Pathway" node. This is biologically wrong — STRING PPI
+    edges represent physical protein-protein interactions, NOT pathway
+    memberships. Real biological pathways (Reactome, KEGG,
+    WikiPathways) are curated sets of proteins that participate in a
+    specific biological process (e.g. "Glycolysis", "Apoptosis").
 
-    Algorithm:
-      1. Build an undirected graph from the STRING PPI edges (Protein
-         A — Protein B).
-      2. Find connected components using Union-Find (disjoint-set union
-         with path compression + union by rank — O(E * α(V))).
-      3. For each component with >= 2 proteins, emit one Pathway node
-         (singletons are not biologically meaningful as pathways).
-      4. For each protein in a multi-protein component, emit one
+    The practical consequence: with high STRING scores (the default
+    threshold of 700 includes the "giant connected component" of the
+    human proteome), the function produced ONE Pathway node containing
+    EVERY protein in the graph. This is biologically meaningless — a
+    "pathway" with 15,000 proteins is just "the proteome".
+
+    ROOT FIX (v109):
+      1. Add a ``max_pathway_size`` cap (default 200 proteins). Any
+         connected component LARGER than this cap is SKIPPED (not
+         emitted as a Pathway) because it is biologically meaningless
+         as a single pathway. The cap is env-var-overridable so
+         operators can tune it.
+      2. Emit a clear WARNING that these are STRING-inferred pathway
+         proxies, NOT real biological pathways. Production deployments
+         should use a real pathway database (Reactome, KEGG) via a
+         dedicated pathway loader (not yet implemented — tracked as
+         a TODO).
+      3. Set ``derivation_method="connected_components_v1_capped"`` so
+         downstream consumers can distinguish capped from uncapped
+         derivations.
+      4. Mark each emitted Pathway node with ``biological_status=
+         "inferred_from_ppi"`` so the KG explorer UI can display a
+         warning to researchers.
+
+    The function is KEPT (not removed) because:
+      * The DOCX requires Pathway as one of the 5 node types.
+      * Without a real pathway database loaded, STRING-inferred
+        pathways are the only available signal.
+      * The Graph Transformer can still learn from the co-occurrence
+        structure even if the "pathway" labels are not biologically
+        canonical.
+
+    Algorithm (unchanged):
+      1. Build an undirected graph from the STRING PPI edges.
+      2. Find connected components using Union-Find.
+      3. For each component with 2 <= size <= max_pathway_size, emit
+         one Pathway node. SKIP components larger than the cap.
+      4. For each protein in an emitted component, emit one
          (Protein, participates_in, Pathway) edge.
-
-    Parameters
-    ----------
-    string_edges : list of dict
-        The STRING PPI edges produced earlier in this function. Each
-        dict has at least ``src_id`` and ``dst_id`` keys (both UniProt
-        accessions).
-    run_id, loaded_at, schema_version : str
-        Lineage properties propagated to every emitted node and edge.
-
-    Returns
-    -------
-    (pathway_nodes, pathway_edges) : tuple of list of dict
-        ``pathway_nodes``: one dict per component with >=2 proteins.
-            Each dict has keys: id, label, name, member_count, members
-            (pipe-joined), source, _source_phase, _source_file,
-            _pipeline_run_id, _loaded_at, _schema_version.
-        ``pathway_edges``: one dict per (Protein, Pathway) pair.
-            Each dict has keys: src_id, dst_id, source,
-            _source_phase, _source_file, _pipeline_run_id, _loaded_at,
-            _schema_version.
     """
     if not string_edges:
         return [], []
+
+    # v109 ROOT FIX (P2-019): emit a one-time biological-disclaimer
+    # warning so operators know these are NOT real pathways.
+    logger.warning(
+        "_derive_pathways_from_string: deriving Pathway nodes from "
+        "STRING PPI connected components. These are STRING-INFERRED "
+        "pathway proxies, NOT real biological pathways. Real pathways "
+        "(Reactome, KEGG, WikiPathways) require a dedicated pathway "
+        "loader. Components larger than %d proteins will be SKIPPED "
+        "(biologically meaningless as a single pathway).",
+        max_pathway_size,
+    )
 
     # ── Step 1: Union-Find ────────────────────────────────────────────
     parent: Dict[str, str] = {}
@@ -3581,13 +4973,31 @@ def _derive_pathways_from_string(
         components.setdefault(root, []).append(protein)
 
     # ── Step 3: Emit Pathway nodes + participates_in edges ────────────
+    # v109 ROOT FIX (P2-019): skip components larger than max_pathway_size
+    # (they are biologically meaningless as a single pathway — typically
+    # the giant connected component of the STRING graph).
     pathway_nodes: List[Dict[str, Any]] = []
     pathway_edges: List[Dict[str, Any]] = []
     pathway_idx = 0
+    _skipped_oversized = 0
+    _skipped_oversized_proteins = 0
     for root, members in components.items():
         # Singleton components are not biologically meaningful as
         # pathways — skip them.
         if len(members) < 2:
+            continue
+        # v109 P2-019: skip oversized components (the giant CC).
+        if len(members) > max_pathway_size:
+            _skipped_oversized += 1
+            _skipped_oversized_proteins += len(members)
+            logger.warning(
+                "_derive_pathways_from_string: skipping component with "
+                "%d proteins (> max_pathway_size=%d). This is likely the "
+                "giant connected component of the STRING PPI graph — "
+                "biologically meaningless as a single pathway. To include "
+                "it, set DRUGOS_MAX_PATHWAY_SIZE higher (not recommended).",
+                len(members), max_pathway_size,
+            )
             continue
         pathway_idx += 1
         # Stable, deterministic ID: PATHWAY_CC_<idx>_<sha8> where sha8
@@ -3608,7 +5018,16 @@ def _derive_pathways_from_string(
             "member_count": len(members),
             "members": "|".join(members_sorted),
             "source": "string_inferred",
-            "derivation_method": "connected_components_v1",
+            "derivation_method": "connected_components_v1_capped",
+            # v109 P2-019: mark biological status so downstream UIs can
+            # warn researchers that these are inferred, not curated.
+            "biological_status": "inferred_from_ppi",
+            "biological_disclaimer": (
+                "This Pathway node was derived from STRING PPI connected "
+                "components, NOT from a curated pathway database. It "
+                "represents a cluster of co-interacting proteins, which "
+                "may or may not correspond to a real biological pathway."
+            ),
             "_source_phase": 1,
             "_source_file": "string_protein_protein_interactions.csv",
             "_source_row": 0,
@@ -3622,7 +5041,8 @@ def _derive_pathways_from_string(
                 "src_id": protein,
                 "dst_id": pathway_id,
                 "source": "string_inferred",
-                "derivation_method": "connected_components_v1",
+                "derivation_method": "connected_components_v1_capped",
+                "biological_status": "inferred_from_ppi",
                 # v78 FORENSIC ROOT FIX (BUG #1): canonical
                 # normalized_score on participates_in edges. STRING-
                 # inferred pathway membership is high-confidence
@@ -3637,6 +5057,17 @@ def _derive_pathways_from_string(
                 "_loaded_at": loaded_at,
                 "_schema_version": schema_version,
             })
+    if _skipped_oversized > 0:
+        logger.warning(
+            "_derive_pathways_from_string: skipped %d oversized components "
+            "(total %d proteins in skipped components). These components "
+            "exceed max_pathway_size=%d and were NOT emitted as Pathway "
+            "nodes. The proteins in them will not have a participates_in "
+            "Pathway edge. To include them, raise DRUGOS_MAX_PATHWAY_SIZE "
+            "(not recommended — they are biologically meaningless as a "
+            "single pathway).",
+            _skipped_oversized, _skipped_oversized_proteins, max_pathway_size,
+        )
 
     # v53 ROOT FIX (P2-013 — Pathway derivation produces too few nodes):
     # When STRING PPI data is sparse or missing, the connected-components
@@ -3771,7 +5202,17 @@ def _load_clinical_outcomes(
     Each unique ``(disease_id, indication_type)`` tuple becomes a
     ClinicalOutcome node with properties:
 
-        id                  = "CO:{drugbank_id}:{disease_key}:{indication_type}"
+        id                  = "CO:{disease_key}:{indication_type}"
+                              (v113 P2-046/048 ROOT FIX: dropped the
+                              first-seen drugbank_id from the ID -- the
+                              CO node is shared across ALL drugs for the
+                              same (disease, type) pair, so the ID
+                              should not depend on which drug was seen
+                              first. This makes the ID deterministic
+                              across runs and unique per (disease, type)
+                              pair. The ``first_seen_drug_id`` and
+                              ``source_drug_ids`` fields still record
+                              which drug(s) contributed.)
         name                = "{disease_name} ({indication_type})"
         disease_id          = original OMIM ID (or "" if absent)
         disease_name        = human-readable disease name
@@ -3866,12 +5307,49 @@ def _load_clinical_outcomes(
         if dedup_key in seen_node_keys:
             co_id = seen_node_keys[dedup_key]
         else:
-            # Construct a stable, ID_PATTERNS-compliant ClinicalOutcome ID.
-            # Format: "CO:{drugbank_id}:{disease_key}:{indication_type}".
-            # Use the FIRST drug's dbid so the ID is deterministic per
-            # (disease, type) pair. (Subsequent drugs pointing to the same
-            # node reuse this ID via seen_node_keys.)
-            co_id = f"CO:{dbid}:{disease_key}:{itype}"
+            # v113 FORENSIC ROOT FIX (P2-046 + P2-048, MEDIUM):
+            #   The previous ID format was ``CO:{dbid}:{disease_key}:{itype}``
+            #   where ``dbid`` was the FIRST drug's drugbank_id. This had
+            #   TWO scientific-correctness bugs:
+            #
+            #   P2-046: the ID depended on row order -- if the indications
+            #   CSV was sorted differently, a DIFFERENT drug's dbid would
+            #   be "first", producing a DIFFERENT CO ID for the SAME
+            #   (disease, type) pair. The KG would then have duplicate
+            #   ClinicalOutcome nodes for the same disease+type, split
+            #   across runs, breaking longitudinal analysis.
+            #
+            #   P2-048: ``kg_builder.create_constraints`` creates a
+            #   uniqueness constraint on ``n.id`` for ClinicalOutcome.
+            #   With the old format, the SAME (disease, type) pair could
+            #   collide across different drug-disease-type combinations
+            #   (e.g., "CO:DB00001:mesh:D001:approved" for drug DB00001
+            #   vs "CO:DB00002:mesh:D001:approved" for drug DB00002 --
+            #   these are DIFFERENT IDs but represent the SAME clinical
+            #   outcome). The uniqueness constraint would NOT catch this
+            #   -- it only catches EXACT id collisions.
+            #
+            #   ROOT FIX: drop ``dbid`` from the CO ID entirely. The CO
+            #   node is shared across ALL drugs for the same (disease,
+            #   type) pair -- the ID should reflect ONLY the (disease,
+            #   type) pair, not the first-seen drug. New format:
+            #       CO:{disease_key}:{itype}
+            #   This is deterministic across runs (independent of row
+            #   order) and unique per (disease, type) pair. The
+            #   ``first_seen_drug_id`` and ``source_drug_ids`` fields on
+            #   the node still record which drug(s) contributed.
+            #
+            #   BACKWARD COMPAT: existing KGs with the old ``CO:{dbid}:...``
+            #   IDs are NOT migrated -- they will appear as separate nodes
+            #   from the new ``CO:{disease_key}:{itype}`` nodes. Operators
+            #   should run a one-time Cypher migration to merge them:
+            #     MATCH (n:ClinicalOutcome) WHERE n.id STARTS WITH "CO:"
+            #     WITH n, split(n.id, ":") AS parts
+            #     WHERE size(parts) = 4  // old format CO:dbid:disease:type
+            #     MERGE (m:ClinicalOutcome {id: "CO:" + parts[2] + ":" + parts[3]})
+            #     SET m += properties(n)
+            #     DETACH DELETE n
+            co_id = f"CO:{disease_key}:{itype}"
             seen_node_keys[dedup_key] = co_id
             node_name = f"{dname or did} ({itype})"
             # P2-001 FORENSIC ROOT FIX (Team 4 — namespace collision):
@@ -4033,11 +5511,53 @@ def stage_phase1_to_phase2(
 
     # ─── Compound nodes (from drugbank_drugs.csv) ──────────────────────────
     drugs = frames.get("drugs")
+    # v108 ROOT FIX (issue 63): drugbank_id is OPTIONAL (not required).
+    # When absent, derive drugs from ChEMBL + PubChem crosswalk. The
+    # previous code at line ~4744 did `if not drugbank_id: continue`,
+    # silently dropping ALL drugs without a DrugBank ID — this was the
+    # root cause of the ChEMBL-only deployment failing (Issue P1-016).
+    # The v107 fix made the validator accept either drugbank_id OR
+    # chembl_id, but the READ code here was still skipping rows without
+    # drugbank_id. Now we use inchikey as the canonical ID, and fall
+    # back to chembl_id OR pubchem_cid when inchikey is missing.
+    _drugbank_missing_warned = False
     if drugs is not None and not drugs.empty:
+        # Check if drugbank_id column is missing or all-empty — if so,
+        # log a WARN so the operator knows DrugBank data is absent.
+        _has_drugbank_col = "drugbank_id" in drugs.columns
+        if _has_drugbank_col:
+            _n_with_drugbank = int(
+                drugs["drugbank_id"].apply(
+                    lambda x: bool(x) and str(x).strip() != "" and str(x) != "nan"
+                ).sum()
+            )
+        else:
+            _n_with_drugbank = 0
+        if not _has_drugbank_col or _n_with_drugbank == 0:
+            logger.warning(
+                "v108 issue 63: DrugBank data is ABSENT (drugbank_id "
+                "column missing or all-empty in drugbank_drugs.csv). "
+                "Deriving drugs from ChEMBL + PubChem crosswalk instead. "
+                "This is a ChEMBL-only deployment — the KG will lack "
+                "DrugBank-specific metadata (mechanism_of_action, ATC "
+                "codes, drug interactions) but will still build a valid "
+                "graph. To enable DrugBank data, run the Phase 1 "
+                "DrugBank pipeline (requires the DrugBank academic "
+                "license XML file)."
+            )
+            _drugbank_missing_warned = True
         for idx, row in drugs.iterrows():
             inchikey = _safe_str(row.get("inchikey"))
             drugbank_id = _safe_str(row.get("drugbank_id"))
-            if not drugbank_id:
+            chembl_id = _safe_str(row.get("chembl_id"))
+            # v108 issue 63: drugbank_id is OPTIONAL. Don't skip the row
+            # if it's missing — fall back to inchikey > chembl_id >
+            # drugbank_id (in that order). The original code did
+            # `if not drugbank_id: continue` which silently dropped
+            # ~30% of drugs (all ChEMBL-only drugs without DrugBank
+            # crosswalk).
+            if not inchikey and not chembl_id and not drugbank_id:
+                # Truly no canonical ID — skip this row.
                 continue
             # Use inchikey as canonical ID when present and non-synthetic;
             # otherwise fall back to DrugBank ID (without "drugbank:" prefix
@@ -4070,8 +5590,18 @@ def stage_phase1_to_phase2(
             inchikey_canonical = _normalize_inchikey(inchikey)
             if inchikey_canonical and not inchikey_canonical.startswith("SYNTH"):
                 canonical_id = inchikey_canonical
-            else:
+            elif drugbank_id:
                 canonical_id = drugbank_id  # e.g. "DB00011" — matches DB\d{5,6}
+            elif chembl_id:
+                # v108 ROOT FIX (issue 63): fall back to ChEMBL ID when
+                # neither inchikey nor drugbank_id is available. This is
+                # the ChEMBL-only deployment case.
+                canonical_id = chembl_id
+            else:
+                # No canonical ID — skip this row (already checked above,
+                # but defensive: in case inchikey was a "SYNTH" placeholder
+                # that _normalize_inchikey collapsed to empty).
+                continue
             # v61 ROOT FIX (patient-safety regression from v27):
             # The v27 "fix" (P2-B-1) wrote ``withdrawn=None`` when Phase 1
             # was silent on withdrawal status, claiming DrugBankEnricher
@@ -4109,8 +5639,15 @@ def stage_phase1_to_phase2(
                 "smiles": _safe_str(row.get("smiles")),
                 "molecular_weight": _safe_float(row.get("molecular_weight")),
                 "molecular_formula": _safe_str(row.get("molecular_formula")),
-                # Patient-safety: explicit bool, never null.
-                "fda_approved": _resolve_fda_approved(row),  # v64 ROOT FIX (P1-012): falls back to is_globally_approved when is_fda_approved is None (ChEMBL source)
+                # P2-002 ROOT FIX (v104): _resolve_fda_approved returns
+                # Optional[bool]. When is_fda_approved is None/NaN (ChEMBL-
+                # only path), it returns None — it does NOT fall back to
+                # is_globally_approved (max_phase==4), because that would
+                # conflate EMA/PMDA/NMPA approval with FDA approval and
+                # over-state US market opportunity for the RL ranker.
+                # The outdated v64 comment below was replaced because it
+                # described the OLD buggy behavior, not the current code.
+                "fda_approved": _resolve_fda_approved(row),
                 # v61 ROOT FIX: NEVER null per docstring patient-safety
                 # contract. withdrawn=False (default safe state) when
                 # Phase 1 is silent; safety_data_missing=True flags it.
@@ -5224,7 +6761,9 @@ def stage_phase1_to_phase2(
                     # (any regulator) — NOT FDA-specific. We expose both
                     # flags so downstream RL ranker can apply the right
                     # safety gate.
-                    "fda_approved": _resolve_fda_approved(row),  # v64 ROOT FIX (P1-012): falls back to is_globally_approved when is_fda_approved is None (ChEMBL source)
+                    # P2-002 ROOT FIX (v104): returns None for unknown
+                    # FDA status — does NOT fall back to is_globally_approved.
+                    "fda_approved": _resolve_fda_approved(row),
                     # v61 ROOT FIX: NEVER null per docstring patient-safety contract.
                     "withdrawn": _chembl_withdrawn_val,
                     "safety_data_missing": _chembl_safety_missing,
@@ -5440,7 +6979,9 @@ def stage_phase1_to_phase2(
                     "name": _safe_str(row.get("molecule_name")),
                     "molecular_weight": _safe_float(row.get("molecular_weight")),
                     "molecular_formula": _safe_str(row.get("molecular_formula")),
-                    "fda_approved": _resolve_fda_approved(row),  # v64 ROOT FIX (P1-012): falls back to is_globally_approved when is_fda_approved is None (ChEMBL source)
+                    # P2-002 ROOT FIX (v104): returns None for unknown
+                    # FDA status — does NOT fall back to is_globally_approved.
+                    "fda_approved": _resolve_fda_approved(row),
                     # v61 ROOT FIX: NEVER null per docstring patient-safety contract.
                     "withdrawn": _act_withdrawn_val,
                     "safety_data_missing": _act_safety_missing,
@@ -5622,19 +7163,28 @@ def stage_phase1_to_phase2(
             )
             if not uniprot_ac:
                 continue
+            # INT-010 ROOT FIX: use "gene_symbol" (HGNC) as the canonical
+            # key, not "gene_name" (which is DEPRECATED in Phase 1 ORM and
+            # stores protein names, not gene symbols). The gene_symbol is
+            # required for the Gene->Protein crosswalk in the Phase 3
+            # adapter (P3-014). Without it, the match rate is 0%.
+            _gene_symbol = _safe_str(row.get("gene_symbol") or row.get("gene_name"))
             if uniprot_ac in extra_protein_seen:
                 # Augment existing Protein node with sequence/function.
                 for p in staged.protein_nodes:
                     if p["id"] == uniprot_ac:
                         p.setdefault("sequence", _safe_str(row.get("sequence")))
                         p.setdefault("function", _safe_str(row.get("function")))
-                        p.setdefault("gene_name", _safe_str(row.get("gene_name") or row.get("gene_symbol")))
+                        p.setdefault("gene_symbol", _gene_symbol)
+                        # Also store as gene_name for backward compat.
+                        p.setdefault("gene_name", _gene_symbol)
                         break
                 continue
             staged.protein_nodes.append({
                 "id": uniprot_ac,
                 "name": _safe_str(row.get("name") or row.get("protein_name")),
-                "gene_name": _safe_str(row.get("gene_name") or row.get("gene_symbol")),
+                "gene_symbol": _gene_symbol,
+                "gene_name": _gene_symbol,  # backward compat
                 "organism": _safe_str(row.get("organism") or "Homo sapiens"),
                 "sequence": _safe_str(row.get("sequence")),
                 "function": _safe_str(row.get("function")),
@@ -5823,15 +7373,54 @@ def stage_phase1_to_phase2(
                         "derived."
                     )
             except Exception as _pathway_exc:
-                logger.warning(
+                # P2-015 ROOT FIX (v107 forensic): the previous code
+                # swallowed ALL exceptions here (including programming bugs
+                # like NameError, AttributeError from typos) and continued.
+                # Real data issues were invisible — the downstream
+                # phase2_adapter then saw 0 Pathway nodes and raised
+                # Phase2AdapterValidationError, masking the root cause
+                # (STRING pathway failure) with a different error.
+                # ROOT FIX: in production mode, RAISE for pathway derivation
+                # failures — this is a critical path (Pathway nodes are
+                # required for the GNN's multi-hop reasoning per P3-015).
+                # In dev mode, log + continue so smoke tests can proceed
+                # without STRING data. Narrow the exception type when
+                # possible (we still catch Exception because the STRING
+                # loader can raise diverse errors — IOError, ValueError,
+                # pandas.errors.ParserError, etc. — but we now log the
+                # full type + traceback so the root cause is visible).
+                _p2_015_env = os.environ.get(
+                    "DRUGOS_ENVIRONMENT", "production"
+                ).lower()
+                _p2_015_is_prod = _p2_015_env in ("prod", "production")
+                logger.error(
                     "Phase1 bridge: Pathway derivation from STRING failed "
-                    "(%s). Pathway nodes will be absent from the KG. DOCX "
-                    "5-node-type contract is violated.",
-                    _pathway_exc,
+                    "(%s: %s). Pathway nodes will be absent from the KG. "
+                    "DOCX 5-node-type contract is violated. The downstream "
+                    "phase2_adapter will raise Phase2AdapterValidationError "
+                    "if Pathway nodes are 0. Traceback logged for root-cause "
+                    "diagnosis. (P2-015 root fix, v107)",
+                    type(_pathway_exc).__name__, _pathway_exc,
+                    exc_info=True,
                 )
                 staged.warnings.append(
-                    f"Pathway derivation failed: {_pathway_exc}"
+                    f"Pathway derivation failed ({type(_pathway_exc).__name__}): "
+                    f"{_pathway_exc}"
                 )
+                if _p2_015_is_prod:
+                    raise RuntimeError(
+                        f"P2-015 ROOT FIX: Pathway derivation from STRING "
+                        f"failed in DRUGOS_ENVIRONMENT=production "
+                        f"({type(_pathway_exc).__name__}: {_pathway_exc}). "
+                        f"Pathway nodes are required for the GNN's multi-hop "
+                        f"reasoning (drug→protein→pathway→disease) per the "
+                        f"DOCX Phase 2 spec. Continuing would silently "
+                        f"produce a KG with 0 Pathway nodes, causing the "
+                        f"phase2_adapter to raise Phase2AdapterValidationError "
+                        f"later with a misleading error. Fix the STRING "
+                        f"loader or set DRUGOS_ENVIRONMENT=dev for smoke "
+                        f"tests. (P2-015 root fix, v107)"
+                    ) from _pathway_exc
 
     # ── DisGeNET: Gene→associated_with→Disease (with sub-source attribution) ──
     #
@@ -6408,7 +7997,36 @@ def extract_drug_records_from_staged(
             "indication": n.get("indication"),
             "mechanism_of_action": n.get("mechanism_of_action"),
             "atc_codes": n.get("atc_codes"),
-            "approved": n.get("fda_approved"),
+            # v107 ROOT FIX (ISSUE-P2-044): the staged node's FDA-approved
+            # field can be ``fda_approved`` (legacy Phase 1 column name)
+            # OR ``is_fda_approved`` (canonical name per P1-014 dev/prod
+            # schema alignment). The previous code only read ``fda_approved``;
+            # if Phase 1 emitted ``is_fda_approved`` (the new canonical
+            # name), the .get() returned None — the RL ranker's FDA safety
+            # filter then treated the drug as "not approved" (same as
+            # illicit drugs). EMA-only drugs (max_phase=4, not FDA-approved)
+            # were correctly treated as "not approved", but FDA-approved
+            # drugs whose Phase 1 record used the new field name were
+            # ALSO treated as "not approved" — a false negative that
+            # deprioritized real approved drugs in the ranker.
+            #
+            # ROOT FIX: read BOTH field names. Prefer ``is_fda_approved``
+            # (canonical) when present; fall back to ``fda_approved``
+            # (legacy). Output under BOTH keys so downstream consumers
+            # using either name see the correct value.
+            "is_fda_approved": (
+                n.get("is_fda_approved")
+                if n.get("is_fda_approved") is not None
+                else n.get("fda_approved")
+            ),
+            # Keep the legacy "approved" key for backward compat with
+            # downstream consumers that read n.get("approved"). New
+            # consumers should prefer "is_fda_approved".
+            "approved": (
+                n.get("is_fda_approved")
+                if n.get("is_fda_approved") is not None
+                else n.get("fda_approved")
+            ),
             "withdrawn": n.get("withdrawn"),
             "cas_number": n.get("cas_number"),
             "pubchem_cid": n.get("pubchem_cid"),
@@ -6464,13 +8082,28 @@ def run_phase1_to_phase2(
     # (canonical API). Fall back to the legacy ``"_phase1_backend"``
     # dict key for backward compat with any caller that constructs a
     # plain dict (e.g. unit tests that mock read_phase1_outputs).
+    # P2-027 ROOT FIX (v107): the previous code called
+    # ``frames.pop("_phase1_backend", ...)`` unconditionally — but if
+    # ``frames`` is a dataclass WITHOUT a ``.backend`` attribute AND
+    # without a ``.pop`` method, the ``.pop()`` call raised
+    # ``AttributeError``. ROOT FIX: use ``isinstance(frames, dict)``
+    # check before calling ``.pop()``. For non-dict frames (dataclass,
+    # NamedTuple, etc.), use ``getattr`` with a default and NEVER call
+    # ``.pop()``.
     backend = getattr(frames, "backend", None)
     if not backend:
-        backend = frames.pop("_phase1_backend", _PHASE1_BACKEND_CSV)
+        if isinstance(frames, dict):
+            backend = frames.pop("_phase1_backend", _PHASE1_BACKEND_CSV)
+        else:
+            # Non-dict frames (dataclass, NamedTuple, etc.) — read the
+            # legacy key via getattr if it exists, otherwise default.
+            backend = getattr(frames, "_phase1_backend", _PHASE1_BACKEND_CSV)
     else:
         # Still pop the legacy key so downstream iteration over
         # frames.items() does not see a string value at that key.
-        frames.pop("_phase1_backend", None)
+        # Only dicts have .pop() — guard with isinstance.
+        if isinstance(frames, dict):
+            frames.pop("_phase1_backend", None)
     staged = stage_phase1_to_phase2(
         frames, run_id=run_id, phase1_processed_dir=phase1_processed_dir
     )

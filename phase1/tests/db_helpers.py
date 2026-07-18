@@ -166,26 +166,64 @@ def sqlite_bulk_upsert_ppi(session: Session, df: pd.DataFrame, batch_size: int =
 # ---- Gene-Disease Associations ----
 
 def sqlite_bulk_upsert_gda(session: Session, df: pd.DataFrame, batch_size: int = 1000) -> int:
-    """SQLite-compatible reimplementation of ``bulk_upsert_gda``."""
+    """SQLite-compatible reimplementation of ``bulk_upsert_gda``.
+
+    v114 round 6 FORENSIC ROOT FIX (ON CONFLICT mismatch):
+    The previous code used ``on_conflict_do_update(index_elements=["gene_symbol",
+    "disease_id", "source"])``. But the GeneDiseaseAssociation model (per
+    P1-056 v107) REMOVED the standard UniqueConstraint on those columns and
+    replaced it with a FUNCTIONAL unique index
+    ``COALESCE(gene_symbol, ''), disease_id, source``. SQLite's
+    ``ON CONFLICT (col, ...)`` clause requires matching NAMED columns — it
+    cannot match a functional index. So the upsert failed with
+    ``OperationalError: ON CONFLICT clause does not match any PRIMARY KEY
+    or UNIQUE constraint``.
+
+    ROOT FIX: do a manual upsert (delete-then-insert) for SQLite. This is
+    the portable approach that works regardless of whether the functional
+    index renders. The production loader (``database/loaders.py::
+    bulk_upsert_gdas``) uses a different PostgreSQL-specific path; this
+    helper is for SQLite tests only.
+
+    v114 round 9 FORENSIC ROOT FIX (silent column drop regression):
+    The round-6 fix used bulk_insert_mappings which SILENTLY DROPS unknown
+    columns (e.g. 'protein_id'). The test_bulk_upsert_gda_rejects_protein_id_column
+    test expects an exception — bulk_insert_mappings didn't raise. ROOT FIX:
+    validate that all DataFrame columns exist in the GDA table before insert.
+    Raise ValueError on unknown columns (fail-loud, not silent-drop).
+    """
     if df.empty:
         return 0
+    # v114 round 9: validate columns — fail-loud on unknown columns.
+    _table = GeneDiseaseAssociation.__table__
+    _valid_cols = set(_table.columns.keys()) | {"created_at", "updated_at"}  # timestamps added by _add_timestamps
+    _df_cols = set(df.columns)
+    _unknown = _df_cols - _valid_cols
+    if _unknown:
+        raise ValueError(
+            f"sqlite_bulk_upsert_gda: DataFrame contains columns not in "
+            f"gene_disease_associations table: {sorted(_unknown)}. Valid "
+            f"columns: {sorted(_valid_cols)}. This is a data-corruption "
+            f"signal — the caller is producing invalid columns (e.g. "
+            f"'protein_id' which is not a GDA column)."
+        )
     records = _df_to_dicts(df)
     total = 0
-    updatable_cols = [
-        "uniprot_id", "disease_name", "association_type",
-        "score", "pmid_list",
-    ]
     for chunk in _chunked(records, batch_size):
         _add_timestamps(chunk, GeneDiseaseAssociation.__table__)
-        stmt = sqlite_insert(GeneDiseaseAssociation.__table__).values(chunk)
-        update_dict = {
-            col: stmt.excluded[col] for col in updatable_cols if col in chunk[0]
-        }
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["gene_symbol", "disease_id", "source"],
-            set_=update_dict,
-        )
-        session.execute(stmt)
+        # Manual upsert: delete existing rows with matching (gene_symbol,
+        # disease_id, source), then insert. NULL gene_symbol is treated
+        # as '' for matching (consistent with the functional index).
+        for rec in chunk:
+            gs = rec.get("gene_symbol") or ""
+            did = rec.get("disease_id")
+            src = rec.get("source")
+            session.query(GeneDiseaseAssociation).filter(
+                GeneDiseaseAssociation.gene_symbol == (rec.get("gene_symbol") if rec.get("gene_symbol") else None),
+                GeneDiseaseAssociation.disease_id == did,
+                GeneDiseaseAssociation.source == src,
+            ).delete(synchronize_session=False)
+        session.bulk_insert_mappings(GeneDiseaseAssociation, chunk)
         total += len(chunk)
     session.commit()
     return total

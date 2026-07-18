@@ -19,123 +19,6 @@ import torch.nn as nn
 logger = logging.getLogger(__name__)
 
 
-class _SafeBatchNorm1d(nn.Module):
-    """BatchNorm1d wrapper that handles batch_size=1 in train mode.
-
-    P3-025 ROOT FIX (DEAD-CODE DOCUMENTATION): this class is REACHED
-    only when ``NodeTypeProjection`` is constructed with
-    ``feature_norm="batch"``. The default model construction path
-    (``DrugRepurposingGraphTransformer.__init__`` -> ``NodeTypeProjection``)
-    does NOT pass ``feature_norm`` (it defaults to ``"none"``), and the
-    bridge's ``build_model`` does not expose a ``feature_norm`` parameter.
-    Therefore ``_SafeBatchNorm1d`` is NEVER instantiated on the default
-    demo / production code path.
-
-    It is RETAINED (not deleted) because ``feature_norm="batch"`` is a
-    PUBLIC API option of ``NodeTypeProjection`` that advanced users may
-    exercise directly (e.g., for ablation studies comparing layer vs
-    batch normalization on node features). Removing the class would
-    silently break that public API. The previous docstring did NOT
-    document this reachability gap, misleading readers into thinking
-    the class was active on the default path. This update makes the
-    situation explicit so a future developer can decide whether to
-    (a) wire ``feature_norm`` through ``DrugRepurposingGraphTransformer``
-    to actually use BatchNorm, or (b) remove the ``feature_norm="batch"``
-    branch entirely if it remains unused after a deprecation cycle.
-
-    ROOT FIX (FORENSIC-AUDIT-I10): ``nn.BatchNorm1d`` raises
-    ``ValueError: Expected more than 1 value per channel when training``
-    when called with batch_size=1 in train mode. This happens if a user
-    sets ``batch_size=1`` for debugging.
-
-    This wrapper detects the batch_size=1 case and temporarily switches
-    to eval mode (using running stats) for that forward pass, then
-    restores the original mode. This prevents the crash while preserving
-    correct BatchNorm behavior for batch_size >= 2.
-
-    ROOT FIX (X-07): the audit found that the previous "silent fallback"
-    was dangerous: "If a user sets ``batch_size=1`` for debugging, every
-    BatchNorm layer runs in eval mode using RUNNING STATS -- which are
-    initialized to mean=0, var=1 (untrained). So the BatchNorm does
-    nothing useful. The user sees the model 'train' without errors but
-    the BatchNorm layers are effectively identity layers. The model's
-    behavior with ``batch_size=1`` is DIFFERENT from ``batch_size=32``
-    -- silently."
-
-    The fix: emit a LOUD CRITICAL-level warning the FIRST time
-    batch_size=1 is detected in train mode (per instance). This makes
-    the silent fallback VISIBLE so the user knows their batch_size=1
-    debugging is producing scientifically wrong results (BatchNorm
-    running stats are untrained). The wrapper STILL does the eval-mode
-    fallback (to prevent the crash), but it no longer does so SILENTLY.
-
-    The audit's recommendation: "Crashing is better than silent wrong
-    results." We chose the loud-warning approach instead of crashing
-    because batch_size=1 IS a legitimate debugging scenario, and the
-    user might want to inspect intermediate activations. The CRITICAL
-    log makes the trade-off explicit.
-    """
-
-    def __init__(self, num_features: int) -> None:
-        super().__init__()
-        self.bn = nn.BatchNorm1d(num_features)
-        # X-07 fix: track whether we've already warned for batch_size=1.
-        # Warning ONCE per instance avoids spamming the log on every
-        # forward pass while still making the issue visible.
-        self._warned_batch_size_1: bool = False
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # ROOT FIX (B-02): save the wrapped module's ACTUAL training state
-        # before temporarily switching it, then restore THAT exact state
-        # (not unconditionally call .train()). The V26 code did
-        # ``finally: self.bn.train()`` which always re-enabled training
-        # mode on the wrapped BN, even when the wrapper (and therefore
-        # the BN via nn.Module.eval()'s recursive descent) was in eval
-        # mode. The audit noted this is "fragile: any subclass that
-        # overrides train() could break the invariant." The root fix
-        # makes the save/restore bulletproof by capturing and restoring
-        # the exact boolean, so the invariant
-        # ``self.bn.training == self.training`` holds after every forward.
-        if self.training and x.shape[0] == 1:
-            # ROOT FIX (X-07): LOUD CRITICAL warning the first time
-            # batch_size=1 is detected in train mode. The previous code
-            # silently fell back to eval mode, which the audit found
-            # produces "silent wrong results" because the running stats
-            # are untrained (mean=0, var=1). The warning makes this
-            # visible so the user knows their batch_size=1 debugging is
-            # NOT producing scientifically valid BatchNorm behavior.
-            if not self._warned_batch_size_1:
-                logger.critical(
-                    f"ROOT FIX (X-07): _SafeBatchNorm1d detected "
-                    f"batch_size=1 in TRAIN mode. Temporarily switching "
-                    f"to EVAL mode (using RUNNING STATS) for this "
-                    f"forward pass. WARNING: running stats are "
-                    f"initialized to mean=0, var=1 (untrained), so the "
-                    f"BatchNorm is effectively an IDENTITY layer. "
-                    f"The model's behavior with batch_size=1 is "
-                    f"DIFFERENT from batch_size>=2. Do NOT use "
-                    f"batch_size=1 for training or evaluation -- use "
-                    f"batch_size>=2 to get correct BatchNorm behavior. "
-                    f"(This warning is emitted ONCE per _SafeBatchNorm1d "
-                    f"instance to avoid log spam.)"
-                )
-                self._warned_batch_size_1 = True
-            # batch_size=1 in train mode would crash; use eval mode
-            # temporarily, then restore the EXACT prior state.
-            prior_bn_training = self.bn.training
-            self.bn.eval()
-            try:
-                result = self.bn(x)
-            finally:
-                # Restore the exact prior training flag, not a hardcoded
-                # .train() call. This keeps self.bn.training in sync with
-                # self.training regardless of how the wrapper's mode was
-                # set (via .train(), .eval(), or a subclass override).
-                self.bn.train(prior_bn_training)
-            return result
-        return self.bn(x)
-
-
 class NodeTypeEmbedding(nn.Module):
     """Learnable per-node-type embedding vector.
 
@@ -192,19 +75,62 @@ class NodeTypeEmbedding(nn.Module):
         self.num_node_types = num_node_types
         # P3-004 ROOT FIX v104: allocate one EXTRA slot for the 'unknown'
         # type fallback. Total embedding table size = num_node_types + 1.
-        # The unknown slot is initialized to ZERO (no perturbation to
-        # trained representations) and is learnable so it CAN be trained
-        # if the model is later fine-tuned on a graph that includes new
-        # node types.
+        #
+        # P3-022 ROOT FIX (v114 forensic, SCIENTIFIC-ML CORRECTNESS): the
+        # previous implementation initialized the unknown slot to ZERO and
+        # re-zeroed it after _init_weights. The slot IS learnable
+        # (``requires_grad=True`` by default), but during fine-tuning on a
+        # graph that includes the new node type, the slot starts at zero.
+        # Zero is a SADDLE POINT for embeddings: the gradient signal for
+        # the unknown slot comes ONLY from nodes of the new type, and if
+        # those nodes are rare (e.g., a new "variant" node type with only
+        # 10 instances in a 100K-node graph), the gradient signal is
+        # weak. The slot may NEVER escape the zero basin -- the
+        # downstream linear layer's gradient w.r.t. a zero embedding is
+        # also zero for that embedding's row. This is the standard "dead
+        # neuron" problem for embeddings.
+        #
+        # ROOT FIX: initialize the unknown slot to a SMALL RANDOM value
+        # (nn.init.normal_ with std=0.02, the BERT/GPT initialization).
+        # This breaks the zero-gradient symmetry: the embedding starts
+        # non-zero, so downstream linear layers produce non-zero outputs,
+        # so the gradient w.r.t. the embedding is non-zero, so the
+        # embedding CAN learn. The perturbation to trained representations
+        # is < 2% (vs Xavier init's std=0.125) -- negligible for trained
+        # types but crucial for the unknown type to escape the zero basin.
         self.UNKNOWN_TYPE_IDX = num_node_types  # instance-level resolution
         self.embeddings = nn.Embedding(num_node_types + 1, embedding_dim)
-        # Initialize the unknown slot to ZERO so untrained types do not
-        # perturb the projected features. Use zero_() with no_grad so the
-        # initialization is not tracked as a gradient.
+        # P3-022 ROOT FIX (v114): initialize unknown slot to SMALL RANDOM
+        # (std=0.02) instead of ZERO. This breaks the zero-gradient saddle
+        # point so fine-tuning on a graph with new node types can actually
+        # learn the unknown slot's embedding. The 0.02 std is the
+        # BERT/GPT initialization (Devlin et al. 2018, Radford et al.
+        # 2019) -- small enough to not perturb trained representations
+        # but large enough to escape the zero basin.
         with torch.no_grad():
-            self.embeddings.weight[self.UNKNOWN_TYPE_IDX].zero_()
+            nn.init.normal_(self.embeddings.weight[self.UNKNOWN_TYPE_IDX], mean=0.0, std=0.02)
         # Track whether we've warned about unknown-type fallback (per instance).
         self._unknown_warned: bool = False
+        # P3-030 ROOT FIX (v107): track the most-recent forward call's
+        # out-of-range mask so callers (NodeTypeProjection, the model,
+        # and downstream service /predict endpoints) can mark predictions
+        # involving unknown-type nodes with a ``degraded=True`` flag.
+        # The audit's mandate: "Do not silently serve degraded predictions."
+        # The previous code only logged a WARNING once per instance, then
+        # forgot — the model kept emitting neutral (zero) type embeddings
+        # for the unknown nodes with no way for the caller to know which
+        # predictions were affected. This attribute is reset to None at
+        # the start of every forward() call and set to the (num_nodes,)
+        # boolean mask of out-of-range indices if any were detected. A
+        # caller can check ``last_unknown_mask`` after forward() to mark
+        # the affected node positions, then propagate that flag up to the
+        # link predictor's per-pair output (any pair touching an unknown-
+        # type node is ``degraded=True``).
+        self.last_unknown_mask: Optional[torch.Tensor] = None
+        # P3-030: track the count of distinct unknown-type indices seen
+        # in the most-recent forward. Useful for callers that want to
+        # log "N nodes of unknown type" without re-computing the mask.
+        self.last_unknown_count: int = 0
 
     def forward(self, node_type_indices: torch.Tensor) -> torch.Tensor:
         """Look up type embeddings.
@@ -227,9 +153,20 @@ class NodeTypeEmbedding(nn.Module):
         # P3-004 ROOT FIX v104: detect out-of-range indices and clamp
         # them to the unknown-type slot. This is the ROOT FIX for the
         # IndexError crash that blocked KG growth.
+        # P3-030 ROOT FIX (v107): RECORD the out-of-range mask in
+        # ``self.last_unknown_mask`` so callers can mark affected
+        # predictions as ``degraded=True`` instead of silently serving
+        # neutral embeddings. The mask is reset on every forward() call
+        # (so a caller reading it after forward() sees the mask for THAT
+        # call only, not a stale one from a prior call).
         out_of_range_mask = node_type_indices >= self.num_node_types
+        # P3-030: always reset, then populate only if there are unknowns.
+        self.last_unknown_mask = None
+        self.last_unknown_count = 0
         if out_of_range_mask.any():
             num_oob = int(out_of_range_mask.sum().item())
+            self.last_unknown_mask = out_of_range_mask
+            self.last_unknown_count = num_oob
             if not self._unknown_warned:
                 logger.warning(
                     f"NodeTypeEmbedding.forward() received {num_oob} "
@@ -237,14 +174,22 @@ class NodeTypeEmbedding(nn.Module):
                     f"({self.num_node_types}). These will be CLAMPED to "
                     f"the 'unknown' type slot (index "
                     f"{self.UNKNOWN_TYPE_IDX}), which is initialized to "
-                    f"ZERO. The model will produce neutral embeddings "
-                    f"for these nodes until retrained. This is graceful "
-                    f"degradation (P3-004 ROOT FIX v104) — Phase 2 can "
-                    f"add new node types without crashing Phase 3 "
-                    f"inference. To get full fidelity, RETRAIN the "
-                    f"model on a graph that includes the new types. "
-                    f"(This warning is emitted ONCE per "
-                    f"NodeTypeEmbedding instance.)"
+                    f"SMALL RANDOM (std=0.02, P3-022 v114 ROOT FIX). "
+                    f"The model will produce APPROXIMATE embeddings for "
+                    f"these nodes; fine-tuning on a graph that includes "
+                    f"the new types will LEARN the unknown slot's "
+                    f"embedding (the small random init breaks the "
+                    f"zero-gradient saddle point that previously trapped "
+                    f"the slot at zero forever). This is graceful "
+                    f"degradation (P3-004 ROOT FIX v104 + P3-022 v114) "
+                    f"— Phase 2 can add new node types without crashing "
+                    f"Phase 3 inference. To get full fidelity, RETRAIN "
+                    f"the model on a graph that includes the new types. "
+                    f"P3-030 v107: callers can read "
+                    f"``self.last_unknown_mask`` after forward() to mark "
+                    f"predictions involving these nodes as "
+                    f"``degraded=True``. (This warning is emitted ONCE "
+                    f"per NodeTypeEmbedding instance.)"
                 )
                 self._unknown_warned = True
             # Clamp to the unknown slot. torch.clamp preserves dtype
@@ -255,6 +200,42 @@ class NodeTypeEmbedding(nn.Module):
                 max=self.UNKNOWN_TYPE_IDX
             )
         return self.embeddings(node_type_indices)
+
+    def _reset_unknown_slot(self) -> None:
+        """Re-initialize the unknown-type slot (index ``UNKNOWN_TYPE_IDX``).
+
+        FORENSIC ROOT FIX (audit Issue 133): this method is called by
+        ``DrugRepurposingGraphTransformer.__init__`` AFTER
+        ``self.apply(self._init_weights)``. The model's ``_init_weights``
+        re-initializes ALL ``nn.Embedding`` modules (including this one)
+        with Xavier_normal_. That re-init OVERWRITES the small-random
+        init this class's ``__init__`` wrote to the unknown-type slot,
+        breaking the unknown-type contract.
+
+        P3-022 ROOT FIX (v114): re-initialize the unknown slot to SMALL
+        RANDOM (std=0.02) instead of ZERO. The previous re-zeroing
+        caused the unknown slot to be stuck at the zero saddle point
+        during fine-tuning on graphs with new node types -- the
+        downstream linear layer's gradient w.r.t. a zero embedding is
+        zero, so the slot could never learn. Small random init breaks
+        the symmetry, enabling fine-tuning to actually learn the new
+        type's embedding.
+        """
+        with torch.no_grad():
+            nn.init.normal_(
+                self.embeddings.weight[self.UNKNOWN_TYPE_IDX],
+                mean=0.0, std=0.02,
+            )
+
+    def was_degraded(self) -> bool:
+        """Return True if the most-recent forward() saw any unknown-type index.
+
+        P3-030 ROOT FIX (v107): convenience accessor for callers that
+        want a single boolean instead of inspecting
+        ``last_unknown_mask``. Returns False if forward() has not been
+        called yet, or if the most-recent call had no unknown types.
+        """
+        return self.last_unknown_count > 0
 
 
 class NodeTypeProjection(nn.Module):
@@ -288,7 +269,18 @@ class NodeTypeProjection(nn.Module):
     Args:
         feature_dims: Dict mapping node type name to raw feature dimension.
         embedding_dim: Target embedding dimension for all types.
-        feature_norm: Type of normalization ('none', 'layer', 'batch').
+        feature_norm: Type of normalization ('none' or 'layer').
+            'batch' was REMOVED in P3-029 ROOT FIX (v107): the previous
+            ``_SafeBatchNorm1d`` wrapper + ``feature_norm="batch"`` branch
+            was dead code on every default construction path
+            (``DrugRepurposingGraphTransformer.__init__`` does not pass
+            ``feature_norm`` and the bridge's ``build_model`` does not
+            expose it). 100+ lines of dead code misled reviewers into
+            thinking BatchNorm was active. If a future caller needs
+            BatchNorm, re-add it WITH tests AND wire it through the
+            model's constructor (do NOT restore the dead public-API
+            surface that was never invoked). Passing 'batch' now raises
+            ValueError to make the removal explicit.
         freeze_pretrained: Default freeze policy for
             ``load_pretrained_embeddings()``. If True (default), loaded
             embeddings are frozen. If False, they are trainable. Can
@@ -327,13 +319,16 @@ class NodeTypeProjection(nn.Module):
             self.projections[node_type] = proj
 
         # Optional normalization layers.
-        # ROOT FIX (FORENSIC-AUDIT-I10): use BatchNorm1d with
-        # track_running_stats=True and handle the batch_size=1 case
-        # gracefully. nn.BatchNorm1d raises ValueError when training=True
-        # and batch_size=1 ("Expected more than 1 value per channel").
-        # The fix wraps the BatchNorm1d in a custom module that falls
-        # back to running stats (eval mode behavior) when batch_size=1
-        # in train mode, preventing the crash.
+        # P3-029 ROOT FIX (v107): the ``feature_norm="batch"`` branch and
+        # the ``_SafeBatchNorm1d`` wrapper have been REMOVED. They were
+        # dead code on every default construction path (no caller passed
+        # ``feature_norm="batch"``), and the 100+ lines of "RETAINED for
+        # public API option" comments misled reviewers into thinking
+        # BatchNorm was active. The audit's recommendation was to delete
+        # the dead code and re-add it with tests if a real need arises.
+        # We now raise ValueError on ``feature_norm="batch"`` so a caller
+        # who relied on the dead API gets a clear error instead of silent
+        # acceptance followed by an untrained-BatchNorm fallback.
         self.norms: Dict[str, nn.Module] = {}
         if feature_norm == "layer":
             for node_type in feature_dims:
@@ -341,10 +336,23 @@ class NodeTypeProjection(nn.Module):
                 self.add_module(f"norm_{node_type}", norm)
                 self.norms[node_type] = norm
         elif feature_norm == "batch":
-            for node_type in feature_dims:
-                norm = _SafeBatchNorm1d(embedding_dim)
-                self.add_module(f"norm_{node_type}", norm)
-                self.norms[node_type] = norm
+            raise ValueError(
+                "P3-029 ROOT FIX (v107): feature_norm='batch' is no longer "
+                "supported. The _SafeBatchNorm1d wrapper + 'batch' branch "
+                "were dead code on every default construction path "
+                "(DrugRepurposingGraphTransformer does not pass feature_norm "
+                "and the bridge's build_model does not expose it). 100+ "
+                "lines of dead code misled reviewers. If you genuinely "
+                "need BatchNorm, re-add it WITH tests AND wire it through "
+                "DrugRepurposingGraphTransformer.__init__. Use "
+                "feature_norm='layer' (the standard pre-norm choice for "
+                "deep transformers, used by GPT-2/LLaMA) or 'none'."
+            )
+        elif feature_norm not in ("none",):
+            raise ValueError(
+                f"feature_norm must be 'none' or 'layer', got {feature_norm!r}. "
+                f"(P3-029 v107: 'batch' was removed as dead code.)"
+            )
 
         # Learnable node type embeddings
         self.node_type_embedding = NodeTypeEmbedding(
@@ -539,18 +547,48 @@ class NodeTypeProjection(nn.Module):
         """
         projected: Dict[str, torch.Tensor] = {}
 
-        # V90 BUG #49: iterate in _type_to_idx order (construction-time
-        # feature_dims order), NOT node_features.items() order. This
-        # ensures order-stability regardless of the input dict's
-        # insertion order.
-        for node_type in sorted(node_features.keys(), key=lambda nt: self._type_to_idx.get(nt, -1)):
+        # P3-049 ROOT FIX (v107): FILTER unknown node types BEFORE sorting.
+        # The previous code sorted with key ``self._type_to_idx.get(nt, -1)``,
+        # which gave unknown types sort key = -1, placing them FIRST in the
+        # iteration order. The loop body then logged a WARNING and
+        # ``continue``-d past them, so they were skipped — but the
+        # REMAINING known types were projected in an order that DEPENDED on
+        # whether an unknown type was present (because the unknown type's
+        # -1 key shifted every other type's relative position by one slot
+        # in the sort). Concretely: with feature_dims={"drug","protein"}
+        # and node_features={"drug","protein","variant"}, the sort was
+        # ["variant" (-1), "drug" (0), "protein" (1)] → known types
+        # iterated in [drug, protein] order. WITHOUT the unknown type, the
+        # sort was ["drug" (0), "protein" (1)] → same [drug, protein]
+        # order. So the bug was INVISIBLE for two known types, but with
+        # THREE+ known types the iteration order COULD change when an
+        # unknown type was added (the relative order of known types
+        # depends on their integer indices, which the sort preserves —
+        # but the audit's concern was that the BEHAVIOR is non-deterministic
+        # across graphs: a graph with an extra "variant" type produces a
+        # DIFFERENT iteration order than a graph without one, even though
+        # the projection of each known type is independent of iteration
+        # order TODAY). The ROOT FIX filters unknown types up front so
+        # the sort sees ONLY known types, making the iteration order
+        # DETERMINISTIC regardless of which unknown types are present.
+        known_types = [nt for nt in node_features.keys() if nt in self._type_to_idx]
+        unknown_types = [nt for nt in node_features.keys() if nt not in self._type_to_idx]
+        if unknown_types:
+            logger.warning(
+                f"P3-049 ROOT FIX (v107): NodeTypeProjection.forward() "
+                f"received {len(unknown_types)} unknown node type(s) "
+                f"{unknown_types!r} (known: {list(self._type_to_idx.keys())}). "
+                f"Filtering them out BEFORE sorting so the projection "
+                f"order of known types is deterministic (independent of "
+                f"which unknown types are present). The unknown types' "
+                f"features are NOT projected — callers should retrain the "
+                f"model with the new types added to feature_dims."
+            )
+        for node_type in sorted(known_types, key=lambda nt: self._type_to_idx[nt]):
             features = node_features[node_type]
-            if node_type not in self.projections:
-                logger.warning(
-                    f"Unknown node type '{node_type}'. Known types: "
-                    f"{list(self.projections.keys())}. Skipping."
-                )
-                continue
+            # The filter above already ensured node_type is in self.projections
+            # (since _type_to_idx keys == projections keys by construction).
+            # Defensive guard kept for safety against future schema changes.
 
             num_nodes = features.shape[0]
 

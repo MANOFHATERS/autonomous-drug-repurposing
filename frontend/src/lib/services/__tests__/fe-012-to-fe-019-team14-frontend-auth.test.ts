@@ -40,6 +40,13 @@ const dbMock = {
   auditLog: {
     create: jest.fn(),
   },
+  // BE-036 ROOT FIX (Team Member 12): 2fa/disable now wraps user.update +
+  // auditLog.create in a db.$transaction. The mock $transaction calls the
+  // callback with `dbMock` itself as the `tx` client, so `tx.user.update`
+  // and `tx.auditLog.create` hit the SAME jest.fn() instances as direct
+  // db calls — existing assertions like `expect(dbMock.user.update).toHaveBeenCalledWith(...)`
+  // still pass.
+  $transaction: jest.fn(async (cb: (tx: typeof dbMock) => Promise<unknown>) => cb(dbMock)),
 };
 jest.mock("@/lib/db", () => ({
   db: dbMock,
@@ -191,9 +198,12 @@ describe("[FE-012] /api/auth/2fa/disable enforces TOTP brute-force rate limit", 
         headers: { "x-csrf-token": "csrf-token-123" },
       });
       const res = await disable2faPOST(req);
-      // First 4 attempts return 403 (invalid_code); 5th returns 429 (locked).
+      // BE-031 ROOT FIX (Team Member 12): invalid TOTP now returns 401
+      // (authentication failure), NOT 403. 403 is for authorization failures;
+      // a wrong TOTP code is an authentication failure. First 4 attempts
+      // return 401 (invalid_code); 5th returns 429 (locked).
       if (i < TOTP_MAX_ATTEMPTS - 1) {
-        expect(res.status).toBe(403);
+        expect(res.status).toBe(401);
       } else {
         expect(res.status).toBe(429);
         const body = await res.json();
@@ -292,7 +302,9 @@ describe("[FE-013] /api/auth/2fa/disable uses replay-protected TOTP verification
       headers: { "x-csrf-token": "csrf-token-123" },
     });
     const res2 = await disable2faPOST(req2);
-    expect(res2.status).toBe(403);
+    // BE-031 ROOT FIX (Team Member 12): replayed TOTP code returns 401
+    // (authentication failure), NOT 403.
+    expect(res2.status).toBe(401);
     const body = await res2.json();
     expect(body.error).toBe("code_replayed");
   });
@@ -340,8 +352,10 @@ describe("[FE-014] /api/billing/subscription enforces TOTP rate limit + replay p
         headers: { "x-csrf-token": "csrf-token-123" },
       });
       const res = await subscriptionPOST(req);
+      // BE-033 ROOT FIX (Team Member 12): invalid TOTP in billing
+      // plan-change returns 401 (authentication failure), NOT 403.
       if (i < TOTP_MAX_ATTEMPTS - 1) {
-        expect(res.status).toBe(403);
+        expect(res.status).toBe(401);
       } else {
         expect(res.status).toBe(429);
         const body = await res.json();

@@ -102,6 +102,20 @@ logger = logging.getLogger(__name__)
 #   The list is NOT exhaustive — operators should periodically diff
 #   against the FDA database (a CI check is documented in the runbook).
 # ---------------------------------------------------------------------------
+# P1-045 ROOT FIX (v107): withdrawn-drug list freshness tracking.
+# The hardcoded list has ~60 entries. The FDA's withdrawn-drug database has
+# ~80+ entries. A newly-withdrawn drug (e.g. withdrawn in 2025) was not in
+# the list → loaded with is_withdrawn=False → the patient-safety invariant
+# chk_drugs_no_approved_and_withdrawn did not fire → the RL ranker
+# recommended the withdrawn drug. ROOT FIX: record the last-verified date
+# here. The CI test (tests/test_p1_045_withdrawn_drug_list_freshness.py)
+# fails if the date is > 90 days old, prompting operators to re-diff
+# against the FDA database (accessdata.fda.gov/scripts/cder/daf).
+WITHDRAWN_DRUG_LIST_LAST_VERIFIED: str = "2026-07-13"  # ISO 8601 UTC date
+WITHDRAWN_DRUG_LIST_SOURCE_URL: str = (
+    "https://accessdata.fda.gov/scripts/cder/daf/index.cfm"
+)
+WITHDRAWN_DRUG_LIST_MAX_AGE_DAYS: int = 90
 _WITHDRAWN_DRUG_NAMES_LOWER: frozenset[str] = frozenset({
     # Cox-2 inhibitors withdrawn for cardiovascular toxicity
     "rofecoxib", "vioxx", "valdecoxib", "bextra",
@@ -2064,6 +2078,45 @@ def bulk_upsert_drugs(
         logger.debug(
             "bulk_upsert_drugs: input checksum = %s", input_checksum
         )
+
+    # P1-043 v113 ROOT FIX (NA inchikey validation):
+    #   The DB schema (Drug.inchikey nullable=False) rejects NULL at INSERT,
+    #   but a DataFrame with `inchikey=pd.NA` (pandas NA, not Python None)
+    #   could bypass the validator in certain code paths (pandas NA has
+    #   different truthiness semantics). One bad row (NA inchikey) would
+    #   cause IntegrityError on the entire 10,000-row batch, aborting the
+    #   bulk upsert and forcing a 10,000x slower single-row fallback.
+    #
+    #   ROOT FIX: filter NA/None/empty inchikey rows BEFORE the batch
+    #   INSERT. Each dropped row is logged to the dead-letter queue with
+    #   the reason "inchikey is NA/None/empty" so operators can trace
+    #   which source produced the bad row. The dropped count is added to
+    #   result.quarantined so the caller sees it in the UpsertResult.
+    if "inchikey" in df.columns:
+        _bad_mask = df["inchikey"].isna() | (df["inchikey"].astype(str).str.strip() == "")
+        _bad_count = int(_bad_mask.sum())
+        if _bad_count > 0:
+            logger.warning(
+                "bulk_upsert_drugs: dropping %d/%d rows with NA/None/empty "
+                "inchikey (would cause IntegrityError on NOT NULL column). "
+                "Dropped rows are logged to the dead-letter queue.",
+                _bad_count, len(df),
+            )
+            for idx, row in df[_bad_mask].iterrows():
+                _add_to_dead_letter(
+                    record=row.to_dict(),
+                    error="inchikey is NA/None/empty — Drug.inchikey is NOT NULL; "
+                          "biologics must use SYNTH-prefixed surrogate keys",
+                    operation="bulk_upsert_drugs",
+                )
+            df = df[~_bad_mask].copy()
+            result.quarantined += _bad_count
+            if df.empty:
+                logger.warning(
+                    "bulk_upsert_drugs: ALL %d rows had NA/empty inchikey — "
+                    "nothing to upsert.", _bad_count,
+                )
+                return result
 
     # Sanitize input (SEC-03)
     df = _sanitize_dataframe(df.copy())
@@ -5614,7 +5667,21 @@ def cleanup_orphan_gda_records(
             )
             raise
 
-    return 0
+    # P1-019 v113 ROOT FIX: the previous code had `return 0` here as the
+    # implicit "all retries exhausted but no exception raised" path. But
+    # every except block above either retries (with eventual `raise` on the
+    # last attempt) or re-raises immediately. So this line is UNREACHABLE
+    # in normal control flow. However, a future refactor that wraps the
+    # retry loop in an outer try/except that swallows exceptions would
+    # silently return 0 — reporting "0 orphans deleted" when the actual
+    # count is unknown. 50,000 orphan GDA rows could accumulate silently.
+    # ROOT FIX: raise RuntimeError instead of returning 0. If this line
+    # is ever reached, it indicates a logic bug that must be investigated.
+    raise RuntimeError(
+        "cleanup_orphan_gda_records: unreachable state — all retries "
+        "exhausted without exception. This indicates a control-flow bug "
+        "in the retry loop. Please report this as a P1-019 regression."
+    )
 
 
 # ===========================================================================

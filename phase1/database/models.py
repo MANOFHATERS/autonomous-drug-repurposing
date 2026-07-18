@@ -57,11 +57,19 @@ from sqlalchemy import (
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
-from database.base import Base, IDMixin, SoftDeleteMixin, TimestampMixin
+# v117 ROOT FIX (P1-011 + schema_version dual-import): convert bare imports
+# to absolute `phase1.*` paths. The bare form (`from database.base import ...`)
+# only worked when phase1/__init__.py had added phase1/ to sys.path, AND it
+# created a SECOND module object (`database.base` vs `phase1.database.base`)
+# when both import paths were exercised in the same process — causing
+# `InvalidRequestError: Table 'schema_version' is already defined` because
+# the model classes were registered against two different Base/MetaData
+# objects. The absolute import resolves to a single canonical module.
+from phase1.database.base import Base, IDMixin, SoftDeleteMixin, TimestampMixin
 
-# SCHEMA_VERSION is defined in database.base (the single source of truth).
+# SCHEMA_VERSION is defined in phase1.database.base (the single source of truth).
 # Re-export it here so callers can import it from either location.
-from database.base import SCHEMA_VERSION  # noqa: F401 -- re-exported for callers
+from phase1.database.base import SCHEMA_VERSION  # noqa: F401 -- re-exported for callers
 
 # ---------------------------------------------------------------------------
 # Module logger (LOG-01, LOG-02)
@@ -397,8 +405,33 @@ def _validate_uniprot_id(value: Optional[str]) -> Optional[str]:
     # v22: CHEMBL_TGT_ prefix is a Phase 2 synthetic ID for ChEMBL
     # targets without UniProt AC. Accept it explicitly here (not in the
     # UniProt regex -- it is NOT a UniProt accession).
+    # v107 FORENSIC ROOT FIX (ISSUE-P1-011):
+    #   The previous code ACCEPTED ``CHEMBL_TGT_*`` prefixed IDs as valid
+    #   UniProt accessions, storing them in ``proteins.uniprot_id``. But
+    #   ChEMBL target IDs and UniProt accessions are DIFFERENT identifier
+    #   systems. Conflating them meant a ``CHEMBL_TGT_12345`` value landed
+    #   in ``proteins.uniprot_id`` and was treated as a UniProt accession
+    #   by downstream joins. Cross-source protein resolution joins
+    #   ``proteins.uniprot_id`` against UniProt's canonical accession set
+    #   -- a ``CHEMBL_TGT_*`` value never matches a real UniProt accession,
+    #   producing orphan proteins and broken Gene->encodes->Protein edges.
+    #   The KG had phantom proteins.
+    #   ROOT FIX: REJECT ``CHEMBL_TGT_*`` here. ChEMBL target IDs must be
+    #   stored in a SEPARATE ``chembl_target_id`` column (which the schema
+    #   already supports via the ``chembl_activities`` table's
+    #   ``target_chembl_id`` column). The ``uniprot_id`` column must
+    #   contain ONLY real UniProt accessions (or NULL when the protein
+    #   has no known UniProt mapping -- in that case the loader should
+    #   skip the row or use a synthetic ID in a dedicated column).
     if base.upper().startswith("CHEMBL_TGT_"):
-        return value
+        raise ValueError(
+            f"Invalid UniProt accession: '{value}'. "
+            f"CHEMBL_TGT_* prefixed IDs are ChEMBL target IDs, NOT UniProt "
+            f"accessions. Store ChEMBL target IDs in the chembl_target_id "
+            f"column, not in uniprot_id. Conflating these identifier "
+            f"systems breaks cross-source protein resolution and creates "
+            f"phantom protein nodes in the KG."
+        )
     if _UNIPROT_RE.match(base):
         return value
     # v34 ROOT FIX (CRITICAL #3): previously accepted TEST-prefixed IDs
@@ -439,17 +472,28 @@ def _validate_uniprot_id(value: Optional[str]) -> Optional[str]:
     #        test-fixture IDs that should be accepted are TEST-prefixed
     #        (explicit, self-documenting). Real UniProt accessions are
     #        always 6+ chars and match the strict regex above.
-    import os as _os
-    _env = _os.environ.get("DRUGOS_ENVIRONMENT", "prod").lower()
-    _allow_test = _env in ("dev", "development", "test", "ci")
-    if _allow_test and value.upper().startswith("TEST"):
-        return value
+    # P1-028 v113 ROOT FIX: the previous code accepted TEST-prefixed UniProt
+    # IDs (e.g. TEST001) in dev/test/ci environments. But the DB CHECK
+    # constraint (migration 016) enforces the canonical UniProt regex
+    # `^[OPQ][0-9][A-Z0-9]{3}[0-9]$` OR `^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$`
+    # — which TEST001 does NOT match. So the Python validator passed the
+    # value, the loader built an INSERT, and the DB rejected it with
+    # CheckViolation. Tests passed on SQLite (no CHECK enforced) but FAILED
+    # on PostgreSQL integration tests (CHECK enforced).
+    #
+    # ROOT FIX: remove the TEST-prefix acceptance ENTIRELY. Test fixtures
+    # MUST use real UniProt accessions (e.g. P04637 for TP53, P00533 for
+    # EGFR). This eliminates the dev/prod asymmetry. The
+    # DRUGOS_ENVIRONMENT check is removed — there is no longer any
+    # environment where TEST-prefixed IDs are valid.
     raise ValueError(
         f"Invalid UniProt accession: '{value}'. "
         "Must match pattern like P69999 or Q9Y6K9. "
-        "Test-fixture IDs (TEST... prefix only) are rejected "
-        "in production/staging environments (set DRUGOS_ENVIRONMENT=dev "
-        "to allow TEST-prefixed fixtures)."
+        "P1-028 v113: TEST-prefixed fixture IDs are NO LONGER accepted in "
+        "any environment (they violated the DB CHECK constraint on "
+        "PostgreSQL). Test fixtures MUST use real UniProt accessions "
+        "(e.g. P04637 for TP53, P00533 for EGFR, Q9Y6K9 for a generic "
+        "test protein)."
     )
 
 
@@ -530,6 +574,12 @@ class SchemaVersion(Base, IDMixin):
     version.
     """
     __tablename__ = "schema_version"
+    # v117 ROOT FIX: extend_existing=True so that if the module is ever
+    # imported under two names (database.models vs phase1.database.models),
+    # SQLAlchemy reuses the existing Table instead of raising
+    # InvalidRequestError. Defense-in-depth alongside the meta-path finder
+    # in phase1/__init__.py.
+    __table_args__ = {"extend_existing": True}
 
     version: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
     applied_at: Mapped[datetime.datetime] = mapped_column(
@@ -770,6 +820,25 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # -- validators --
     @validates("inchikey")
     def _validate_inchikey(self, key: str, value: Optional[str]) -> Optional[str]:
+        # P1-007 v113 ROOT FIX: Drug.inchikey is nullable=False, unique=True.
+        # The shared _validate_inchikey() function returns None for None input
+        # (because it's also used by nullable columns like
+        # DrugCandidate.canonical_inchikey). But for Drug, a None or empty
+        # string would pass the Python validator and then fail at INSERT with
+        # a confusing IntegrityError. ROOT FIX: reject None and empty strings
+        # HERE with a clear ValueError naming the SYNTH-prefix convention for
+        # biologics. This gives developers an actionable error message instead
+        # of a cryptic NOT NULL constraint violation.
+        if value is None or (isinstance(value, str) and value.strip() == ""):
+            raise ValueError(
+                "Drug.inchikey cannot be NULL or empty. The Drug table "
+                "requires a non-NULL InChIKey for every record. Biologics "
+                "(antibodies, proteins, cell therapies) that cannot have a "
+                "real InChIKey MUST use a SYNTH-prefixed surrogate key "
+                "(e.g. 'SYNTH-ANTIBODY-TRASTUZUMAB'). See "
+                "entity_resolution.drug_resolver._create_canonical_entry "
+                "for the SYNTH-key generation logic."
+            )
         return _validate_inchikey(value)
 
     @validates("max_phase")
@@ -871,8 +940,27 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         #   schema changes. Same pattern applied to ``is_withdrawn``
         #   below (patient-safety signal -- an unknown withdrawal status
         #   must not silently become "not withdrawn").
+        # v107 FORENSIC ROOT FIX (ISSUE-P1-009):
+        #   The ORM CHECK was ``is_fda_approved IS NOT NULL AND
+        #   is_fda_approved IN (0, 1)`` -- rejecting NULL. But migration
+        #   013 alters the column to nullable and adds ``is_fda_approved
+        #   IS NULL OR is_fda_approved IN (TRUE, FALSE)`` -- allowing
+        #   NULL = "unknown FDA status" (the v93 patient-safety fix for
+        #   EMA-only drugs). Dev/test SQLite DBs (via
+        #   ``Base.metadata.create_all()``) rejected NULL inserts, while
+        #   prod DBs (migration-created) allowed them. The loader's
+        #   ``_pre_validate_drugs`` coerced None->False to satisfy the
+        #   dev DB constraint, silently reverting the v93 fix. EMA-only
+        #   drugs (max_phase=4, not FDA-approved) were stored as
+        #   ``is_fda_approved=False`` -- same as confirmed-not-approved
+        #   drugs. The RL ranker's FDA safety filter treated them
+        #   identically. Tests passed on dev, prod had the fix -- dev/prod
+        #   asymmetry.
+        #   ROOT FIX: align the ORM CHECK with migration 013 -- allow NULL
+        #   (unknown FDA status) OR (0, 1). Remove the ``IS NOT NULL``
+        #   predicate.
         CheckConstraint(
-            "is_fda_approved IS NOT NULL AND is_fda_approved IN (0, 1)",
+            "is_fda_approved IS NULL OR is_fda_approved IN (0, 1)",
             name="chk_drugs_is_fda_approved",
         ),
         # [DQ-04] Name minimum length
@@ -1008,11 +1096,26 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         # [CODE-06] Removed redundant explicit index on inchikey
         Index("idx_drugs_chembl", "chembl_id"),
         Index("idx_drugs_drugbank", "drugbank_id"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     # [INT-05] Serialization helper
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary with proper type coercion."""
+        """Convert to dictionary with proper type coercion.
+
+        v107 FORENSIC ROOT FIX (ISSUE-P1-010):
+          The previous to_dict() omitted patient-safety-critical fields:
+          ``is_globally_approved`` (max_phase==4 = global approval signal),
+          ``groups`` (DrugBank groups string used to derive is_withdrawn),
+          ``indication`` (free-text indication), and ``indication_source``
+          (drugbank_xml / chembl_max_phase / rxnorm). If the frontend reads
+          to_dict() for drug listings, the safety filter UI cannot display
+          the global approval flag or the withdrawn-drug groups string. A
+          withdrawn killer drug (Vioxx, Baycol) was indistinguishable from
+          an active drug in the API response. ROOT FIX: add all four
+          missing fields so the API response carries the full safety
+          surface area.
+        """
         return {
             "id": self.id,
             "inchikey": self.inchikey,
@@ -1024,6 +1127,11 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
             "molecular_weight": float(self.molecular_weight) if self.molecular_weight is not None else None,
             "smiles": self.smiles,
             "is_fda_approved": self.is_fda_approved,
+            # v107 P1-010: added missing patient-safety fields
+            "is_globally_approved": self.is_globally_approved,
+            "groups": self.groups,
+            "indication": self.indication,
+            "indication_source": self.indication_source,
             "max_phase": self.max_phase,
             "drug_type": self.drug_type,
             "mechanism_of_action": self.mechanism_of_action,
@@ -1208,7 +1316,69 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
 
     @validates("gene_symbol")
     def _validate_gene_symbol(self, key: str, value: Optional[str]) -> Optional[str]:
-        return _validate_gene_symbol(value)
+        # v107 ROOT FIX (ISSUE-P1-026 — GDA vs Protein gene-symbol regex
+        # inconsistency): the previous code delegated to the module-level
+        # ``_validate_gene_symbol`` which uses the LOOSE
+        # ``_GENE_SYMBOL_RE`` (``^[A-Za-z][A-Za-z0-9\-]{0,49}$`` — accepts
+        # Title-Case mouse/rat/yeast symbols like ``Tp53``, ``Brca1``).
+        # Meanwhile the GDA validator (line ~1942) uses the STRICT
+        # ``_HUMAN_GENE_SYMBOL_RE`` (``^[A-Z][A-Z0-9\-]{0,49}$`` — ALL CAPS).
+        # This cross-table inconsistency created a SILENT data-loss path:
+        # a non-human protein (e.g. from a misconfigured UniProt query
+        # without the ``organism_id:9606`` filter) passed the Protein
+        # validator with ``gene_symbol='Tp53'``, but the corresponding
+        # GDA row was REJECTED by the GDA validator — the KG ended up
+        # with a Protein node and NO GDA edges, silently breaking the
+        # drug→protein→gene→disease multi-hop pattern for that protein.
+        #
+        # ROOT FIX: align the Protein validator with the GDA validator
+        # by using ``_HUMAN_GENE_SYMBOL_RE``. This is consistent with:
+        #   1. The system's human-only design — UniProt pipeline queries
+        #      ``organism_id:9606`` (line ~219 of uniprot_pipeline.py
+        #      already imports ``CANONICAL_HGNC_GENE_SYMBOL_REGEX`` which
+        #      is uppercase-only), DrugBank applies ``filter_organism_humans``,
+        #      and STRING validates the ``9606.`` ENSP prefix.
+        #   2. The v89 ROOT FIX (BUG #25) that made the GDA validator
+        #      strict — closing the v21/v89 gap that the audit found.
+        # Non-human proteins now raise ValueError at the ORM layer with
+        # a clear message — they are quarantined to the dead-letter queue
+        # instead of silently dropping their GDA edges later.
+        if value is None:
+            return value
+        value = value.strip()
+        # v117 ROOT FIX (P1-027): use the permissive ``_GENE_SYMBOL_RE``
+        # (``^[A-Za-z][A-Za-z0-9\-]{0,50}$``) instead of the strict
+        # ``_HUMAN_GENE_SYMBOL_RE`` (ALL-CAPS only). The previous strict
+        # regex REJECTED non-human ortholog gene symbols (mouse Tp53,
+        # rat Brca1, yeast GAL4) that UniProt may emit for model-organism
+        # records. The platform's primary use case is human drug repurposing
+        # (FDA-approved drugs, human protein targets), but the secondary
+        # use case — conserved-pathway drug repurposing — REQUIRES non-human
+        # orthologs to trace evolutionary conservation of drug targets
+        # across species. The docx explicitly lists this as a Phase 2 KG
+        # capability. Rejecting non-human symbols at the DB layer silently
+        # destroyed the Protein node's gene_symbol, breaking the
+        # Gene→encodes→Protein edge and any downstream multi-hop
+        # drug→protein→gene→disease path through that gene.
+        #
+        # The strict ``_HUMAN_GENE_SYMBOL_RE`` is RETAINED for the GDA
+        # validator (DisGeNET/OMIM data is documented human-only), so
+        # cross-table consistency is preserved for the human GDA subset.
+        # Non-human proteins that DO appear in a GDA row are filtered by
+        # the GDA validator (which is correct — DisGeNET is human-only).
+        if _GENE_SYMBOL_RE.match(value):
+            return value
+        raise ValueError(
+            f"Invalid gene symbol for Protein: '{value}'. "
+            "Gene symbols must start with a letter and contain only "
+            "letters, digits, or hyphens (1-50 chars). This accepts BOTH "
+            "human ALL-CAPS symbols (BRCA1, FGFR3, TP53) AND non-human "
+            "Title-Case ortholog symbols (Tp53, Brca1, GAL4) for "
+            "conserved-pathway drug repurposing. The strict ALL-CAPS "
+            "check is applied only at the GDA layer (DisGeNET/OMIM are "
+            "documented human-only). If this protein is from a non-human "
+            "UniProt record, ensure the organism_id is recorded."
+        )
 
     @validates("sequence")
     def _validate_sequence(self, key: str, value: Optional[str]) -> Optional[str]:
@@ -1286,6 +1456,7 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         # [PERF-04] Removed idx_proteins_gene_name (deprecated column)
         Index("idx_proteins_gene_symbol", "gene_symbol"),
         Index("idx_proteins_string_id", "string_id"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     # [ARCH-06] Unified PPI accessor
@@ -1422,6 +1593,15 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
     activity_units: Mapped[Optional[str]] = mapped_column(
         String(20), nullable=True,
     )
+    # INT-003 ROOT FIX: ChEMBL's standard_relation carries censoring semantics
+    # ('=', '<', '>', '~') that distinguish exact measurements from bounds.
+    # Previously dropped at ORM load time, causing the RL ranker to treat
+    # IC50 > 100uM (weak binder) the same as IC50 = 1nM (potent inhibitor).
+    # This column stores the raw ChEMBL relation so the Phase 2 bridge can
+    # propagate it without heuristic guessing.
+    standard_relation: Mapped[Optional[str]] = mapped_column(
+        String(5), nullable=True,
+    )
     source: Mapped[Optional[str]] = mapped_column(
         String(SOURCE_LENGTH), nullable=True,
     )
@@ -1468,6 +1648,12 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
         CheckConstraint(
             "activity_value IS NULL OR activity_value > 0",
             name="chk_dpi_activity_value_positive",
+        ),
+        # INT-003 ROOT FIX: validate standard_relation is a valid ChEMBL censoring direction.
+        CheckConstraint(
+            "standard_relation IS NULL OR standard_relation IN "
+            "('=', '<', '>', '~')",
+            name="chk_dpi_standard_relation",
         ),
         # v43 ROOT FIX (Chain 8 -- 8 missing CHECK constraints in ORM):
         # The SQL migration 001 has chk_dpi_activity_type, chk_dpi_activity_units,
@@ -1532,6 +1718,7 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
         Index("idx_dpi_protein", "protein_id"),
         Index("idx_dpi_protein_interaction", "protein_id", "interaction_type"),
         Index("idx_dpi_drug_interaction", "drug_id", "interaction_type"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     # [LOG-02] Enhanced __repr__ with diagnostic fields
@@ -1697,6 +1884,7 @@ class ProteinProteinInteraction(Base, IDMixin, TimestampMixin):
         ),
         Index("idx_ppi_protein_a", "protein_a_id"),
         Index("idx_ppi_protein_b", "protein_b_id"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     # [SCI-03] Normalized score for ML consumption
@@ -1999,10 +2187,22 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         # The application-level dedup in ``database/loaders.py::
         # bulk_upsert_gdas`` (v93 fix) ALSO drops duplicate NULL-gene
         # rows before insert as a defense-in-depth measure.
-        UniqueConstraint(
-            "gene_symbol", "disease_id", "source",
-            name="uq_gda_gene_disease_source",
-        ),
+        #
+        # P1-056 ROOT FIX (v107): REMOVED the duplicate standard
+        # ``UniqueConstraint("gene_symbol", "disease_id", "source")``.
+        # The previous code had BOTH a standard UniqueConstraint AND a
+        # functional nullsafe Index(unique=True). On PostgreSQL, BOTH
+        # were created — the second is a functional index that duplicates
+        # the first for non-NULL gene_symbol. On SQLite, the functional
+        # index may not render — the dedup relies on the application-
+        # level ``bulk_upsert_gdas``. The standard UniqueConstraint is
+        # REDUNDANT with the nullsafe functional index for non-NULL
+        # gene_symbols, and INSUFFICIENT for NULL gene_symbols (because
+        # NULLs are distinct in a standard UNIQUE constraint). ROOT FIX:
+        # keep ONLY the nullsafe functional index (which handles both
+        # NULL and non-NULL cases) and rely on the application-level
+        # dedup as defense-in-depth for SQLite dev/test where functional
+        # indexes may not render.
         # Functional UNIQUE index for NULL gene_symbol dedup (portable).
         # v93 ROOT FIX (P1-026): COALESCE(gene_symbol, '') normalizes
         # NULL -> '' so two NULL-gene rows with the same (disease_id,
@@ -2152,6 +2352,7 @@ class GeneDiseaseAssociation(Base, IDMixin, TimestampMixin):
         # already enforces uniqueness on (gene_symbol, disease_id, source)
         # on both SQLite and PostgreSQL, with NULLS DISTINCT semantics on
         # PostgreSQL 15+ (the project's minimum supported version).
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:
@@ -2286,6 +2487,7 @@ class EntityMapping(Base, IDMixin, TimestampMixin):
             "match_confidence IS NULL OR (match_confidence >= 0.0 AND match_confidence <= 1.0)",
             name="chk_entity_mapping_confidence_range",
         ),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:
@@ -2366,6 +2568,7 @@ class DeadLetterGDA(Base, IDMixin, TimestampMixin):
         Index("idx_dlgda_pipeline_run_id", "pipeline_run_id"),
         Index("idx_dlgda_gene_symbol", "gene_symbol"),
         Index("idx_dlgda_disease_id", "disease_id"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:
@@ -2477,6 +2680,7 @@ class AuditLog(Base, IDMixin):
         Index("idx_audit_log_table_name", "table_name"),
         Index("idx_audit_log_operation", "operation"),
         Index("idx_audit_log_changed_at", "changed_at"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:
@@ -2559,8 +2763,10 @@ class PipelineRun(Base, IDMixin, TimestampMixin):
     __table_args__ = (
         # [DES-07] Source must be a known pipeline
         CheckConstraint(
-            "source IN ('chembl', 'drugbank', 'uniprot', 'string', "
-            "'disgenet', 'omim', 'pubchem')",
+            # P1-023 v113 ROOT FIX: add drugbank_open, chembl_activities,
+            # omim_susceptibility to match migration 001's extended whitelist.
+            "source IN ('chembl', 'drugbank', 'drugbank_open', 'uniprot', 'string', "
+            "'disgenet', 'omim', 'omim_susceptibility', 'pubchem', 'chembl_activities')",
             name="chk_pipeline_runs_source",
         ),
         # [DQ-08] Duration must be non-negative
@@ -2608,6 +2814,7 @@ class PipelineRun(Base, IDMixin, TimestampMixin):
         Index("idx_pr_source", "source"),
         Index("idx_pr_status", "status"),
         Index("idx_pr_run_date", "run_date"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:
@@ -2899,6 +3106,7 @@ class PubChemCompoundProperty(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         ),
         # [LIN-10] Index for pipeline-run traceability queries.
         Index("idx_pubchem_props_run_id", "pipeline_run_id"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:
@@ -2985,6 +3193,7 @@ class RejectedRecord(Base, IDMixin):
         ),
         Index("ix_rejected_records_source_table", "source_table"),
         Index("ix_rejected_records_source_pipeline", "source_pipeline"),
+        {"extend_existing": True},  # v117 ROOT FIX: dual-import defense
     )
 
     def __repr__(self) -> str:

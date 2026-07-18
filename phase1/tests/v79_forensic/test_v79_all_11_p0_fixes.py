@@ -13,7 +13,7 @@ P0-A5: reload_settings() module-level constants
 P0-B1: drugbank_indications DOID-vs-OMIM mismatch
 P0-B2: Master DAG load_chembl/load_drugbank/load_uniprot tasks
 P0-B3: CHEMBL_TARGET_TYPES filter
-P0-B4: _clean_embedded_samples bypassing _write_structured_indications
+P0-B4: _clean_dev_samples bypassing _write_structured_indications
 P0-B5: Embedded sample missing indication_type column
 P0-B6: DisGeNET preserve_direction semantic contract
 """
@@ -154,7 +154,7 @@ def test_p0_a5_reload_settings_real_diff():
 
 def test_p0_b1_embedded_sample_has_omim_ids():
     """P0-B1: embedded_drugbank_indications has OMIM disease IDs where mappings exist."""
-    from pipelines._embedded_samples import embedded_drugbank_indications
+    from pipelines._dev_samples import embedded_drugbank_indications
     df = embedded_drugbank_indications()
     omim_rows = df[df["disease_id"].str.startswith("OMIM:", na=False)]
     assert "OMIM:137160" in df["disease_id"].values, (
@@ -195,8 +195,8 @@ def test_p0_b3_chembl_target_types_filter_applied():
     print("  [PASS] P0-B3: CHEMBL_TARGET_TYPES filter applied in _resolve_target_accessions")
 
 
-def test_p0_b4_clean_embedded_samples_documented():
-    """P0-B4: _clean_embedded_samples curated-fixture contract documented."""
+def test_p0_b4_clean_dev_samples_documented():
+    """P0-B4: _clean_dev_samples curated-fixture contract documented."""
     db_src = (_PHASE1 / "pipelines" / "drugbank_pipeline.py").read_text()
     assert "v79 FORENSIC ROOT FIX (P0-B4" in db_src, (
         "P0-B4 FAIL: root fix documentation not found in drugbank_pipeline.py"
@@ -204,12 +204,12 @@ def test_p0_b4_clean_embedded_samples_documented():
     assert "CURATED FIXTURE" in db_src or "curated-fixture" in db_src, (
         "P0-B4 FAIL: curated-fixture contract not documented"
     )
-    print("  [PASS] P0-B4: _clean_embedded_samples curated-fixture contract documented")
+    print("  [PASS] P0-B4: _clean_dev_samples curated-fixture contract documented")
 
 
 def test_p0_b5_embedded_sample_has_indication_type():
     """P0-B5: embedded_drugbank_indications has indication_type column."""
-    from pipelines._embedded_samples import embedded_drugbank_indications
+    from pipelines._dev_samples import embedded_drugbank_indications
     df = embedded_drugbank_indications()
     assert "indication_type" in df.columns, (
         f"P0-B5 FAIL: indication_type column missing. Columns: {list(df.columns)}"
@@ -262,7 +262,7 @@ def main():
         test_p0_b1_embedded_sample_has_omim_ids,
         test_p0_b2_master_dag_has_load_tasks,
         test_p0_b3_chembl_target_types_filter_applied,
-        test_p0_b4_clean_embedded_samples_documented,
+        test_p0_b4_clean_dev_samples_documented,
         test_p0_b5_embedded_sample_has_indication_type,
         test_p0_b6_disgenet_preserve_direction_false,
     ]

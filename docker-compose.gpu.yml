@@ -1,0 +1,65 @@
+# =============================================================================
+# docker-compose.gpu.yml — GPU override for phase3-trainer + phase4-rl
+# =============================================================================
+# v116 ROOT FIX (Teammate 15, issue IN-006):
+#   The DOCX V1 launch criteria require "AWS/GCP GPU". This override file
+#   adds deploy.resources.reservations.devices (Docker Compose v2 GPU syntax)
+#   and switches phase3-trainer to Dockerfile.gpu (CUDA torch).
+#
+#   The base docker-compose.yml stays CPU-only so CI/dev laptops work. Apply
+#   GPU mode with:
+#     docker-compose -f docker-compose.yml -f docker-compose.gpu.yml \
+#       --profile full-stack up -d
+#
+#   Requires the NVIDIA Container Toolkit installed on the host:
+#     https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#
+#   Verify with: docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
+# =============================================================================
+services:
+  phase3-trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    deploy:
+      resources:
+        limits: { memory: 16g, cpus: '8' }
+        reservations:
+          memory: 4g
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      GT_DEVICE: cuda
+      OMP_NUM_THREADS: "4"
+
+  phase3-gt-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    deploy:
+      resources:
+        limits: { memory: 4g, cpus: '4' }
+        reservations:
+          memory: 1g
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      GT_DEVICE: cuda
+
+  phase4-rl:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    deploy:
+      resources:
+        limits: { memory: 4g, cpus: '4' }
+        reservations:
+          memory: 1g
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

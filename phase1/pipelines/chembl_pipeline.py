@@ -118,6 +118,18 @@ import gzip
 import json
 import logging
 
+# v107 FORENSIC ROOT FIX (ISSUE-P1-008):
+#   The logger was previously defined at line 331 (AFTER the
+#   _extra_activity_types block at line ~278 which calls logger.warning()).
+#   If the env var CHEMBL_ACTIVITY_TYPES contained any value not in the ORM
+#   ActivityType enum (e.g. a typo like "ICT50"), the warning call raised
+#   NameError: name 'logger' is not defined -- crashing the ChEMBL pipeline
+#   at import time. The operator saw a confusing stack trace instead of
+#   the intended "P1-031: CHEMBL_ACTIVITY_TYPES contains invalid value".
+#   ROOT FIX: define the logger IMMEDIATELY after `import logging` so any
+#   module-level code that uses it has access.
+logger = logging.getLogger(__name__)
+
 # v16 SF-4: requests is needed for narrow exception handling in
 # _resolve_target_accessions. Previously a broad ``except Exception``
 # hid patient-safety-critical API contract changes as warnings.
@@ -328,7 +340,8 @@ from sqlalchemy.exc import (  # noqa: E402
     SQLAlchemyError,
 )
 
-logger = logging.getLogger(__name__)
+# v107 P1-008: logger is now defined at the top of the module (right after
+# `import logging`). The previous duplicate definition here is removed.
 
 
 # ---------------------------------------------------------------------------
@@ -2614,8 +2627,10 @@ class ChEMBLPipeline(BasePipeline):
         """
         import pandas as _pd
         samples = [
+            # v108 FORENSIC ROOT FIX (ISSUE-P1-003): was CHEMBL112
+            # (Acetaminophen, NOT Aspirin). Aspirin = CHEMBL25.
             {
-                "chembl_id": "CHEMBL112",
+                "chembl_id": "CHEMBL25",
                 "name": "Aspirin",
                 "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O",
                 "inchikey": "BSYNRYMUTXBXSQ-UHFFFAOYSA-N",
@@ -2627,8 +2642,10 @@ class ChEMBLPipeline(BasePipeline):
                 "indication_source": "manual",
                 "mechanism_of_action": "Cyclooxygenase inhibitor",
             },
+            # v108 FORENSIC ROOT FIX (ISSUE-P1-003): was CHEMBL21
+            # (Dexfenfluramine, NOT Acetaminophen). Acetaminophen = CHEMBL112.
             {
-                "chembl_id": "CHEMBL21",
+                "chembl_id": "CHEMBL112",
                 "name": "Acetaminophen",
                 "smiles": "CC1=CC=C(O)C=C1O",
                 "inchikey": "RZVAJINKPMORJF-UHFFFAOYSA-N",
@@ -2640,8 +2657,10 @@ class ChEMBLPipeline(BasePipeline):
                 "indication_source": "manual",
                 "mechanism_of_action": "Cyclooxygenase inhibitor (central)",
             },
+            # v108 FORENSIC ROOT FIX (ISSUE-P1-003): was CHEMBL705
+            # (not Ibuprofen). Ibuprofen = CHEMBL521.
             {
-                "chembl_id": "CHEMBL705",
+                "chembl_id": "CHEMBL521",
                 "name": "Ibuprofen",
                 "smiles": "CC(C)CC1=CC=C(C=C1)CC(C(=O)O)C",
                 "inchikey": "HEFNNWSXXWATIW-UHFFFAOYSA-N",
@@ -2653,8 +2672,10 @@ class ChEMBLPipeline(BasePipeline):
                 "indication_source": "manual",
                 "mechanism_of_action": "Non-selective COX inhibitor",
             },
+            # v108 FORENSIC ROOT FIX (ISSUE-P1-003): was CHEMBL521
+            # (Ibuprofen, NOT Caffeine). Caffeine = CHEMBL113.
             {
-                "chembl_id": "CHEMBL521",
+                "chembl_id": "CHEMBL113",
                 "name": "Caffeine",
                 "smiles": "CN1C=NC2=C1C(=O)N(C(=O)N2C)C",
                 "inchikey": "RYYVLZVUVIJVGH-UHFFFAOYSA-N",
@@ -2667,7 +2688,9 @@ class ChEMBLPipeline(BasePipeline):
                 "mechanism_of_action": "Adenosine receptor antagonist",
             },
             {
-                "chembl_id": "CHEMBL503",
+                # v108 FORENSIC ROOT FIX (ISSUE-P1-003): was CHEMBL503
+                # (Dihydroergotamine). Diazepam = CHEMBL12.
+                "chembl_id": "CHEMBL12",
                 "name": "Diazepam",
                 "smiles": "ClC1=CC2=C(C=C1)C(=NCC(=O)N2C3=CC=CC=C3)C",
                 "inchikey": "AAOVKBJEBZCEQK-UHFFFAOYSA-N",
@@ -2680,7 +2703,9 @@ class ChEMBLPipeline(BasePipeline):
                 "mechanism_of_action": "GABA-A receptor positive allosteric modulator",
             },
             {
-                "chembl_id": "CHEMBL2114647",
+                # v108 FORENSIC ROOT FIX (ISSUE-P1-003): was CHEMBL2114647
+                # (does not exist in ChEMBL). Warfarin = CHEMBL1464.
+                "chembl_id": "CHEMBL1464",
                 "name": "Warfarin",
                 "smiles": "CC(=O)CC(C1=CC=CC=C1)C2=C(C3=CC=CC=C3OC2=O)O",
                 "inchikey": "PJVWKTKQMONHTF-UHFFFAOYSA-N",
@@ -2693,7 +2718,9 @@ class ChEMBLPipeline(BasePipeline):
                 "mechanism_of_action": "Vitamin K epoxide reductase inhibitor",
             },
             {
-                "chembl_id": "CHEMBL546",
+                # v108 FORENSIC ROOT FIX (ISSUE-P1-003): was CHEMBL546
+                # (Ethinylestradiol). Metformin = CHEMBL1431.
+                "chembl_id": "CHEMBL1431",
                 "name": "Metformin",
                 "smiles": "CN(C)C(=N)N=C(N)N",
                 "inchikey": "XZWYZXLIPXDOLR-UHFFFAOYSA-N",
@@ -2706,7 +2733,9 @@ class ChEMBLPipeline(BasePipeline):
                 "mechanism_of_action": "AMPK activator; mitochondrial complex I inhibitor",
             },
             {
-                "chembl_id": "CHEMBL1085",
+                # v108 FORENSIC ROOT FIX (ISSUE-P1-003): was CHEMBL1085
+                # (Levonorgestrel). Atorvastatin = CHEMBL1487.
+                "chembl_id": "CHEMBL1487",
                 "name": "Atorvastatin",
                 "smiles": "CC(C1=C(C(=CC=C1)C)C2=CC=CC=C2C(=O)NC3CC4=C(C=C(C=C4CC3)F)C(=O)O)C(C)C",
                 "inchikey": "XUKUURHRXDUEBC-UHFFFAOYSA-N",
@@ -2719,7 +2748,9 @@ class ChEMBLPipeline(BasePipeline):
                 "mechanism_of_action": "HMG-CoA reductase inhibitor",
             },
             {
-                "chembl_id": "CHEMBL2318659",
+                # v108 FORENSIC ROOT FIX (ISSUE-P1-003): was CHEMBL2318659.
+                # Captopril = CHEMBL1560.
+                "chembl_id": "CHEMBL1560",
                 "name": "Captopril",
                 "smiles": "CC(C)C1CC2C(SC1)C(=O)NC2C(=O)O",
                 "inchikey": "BNRQQXFRAQNPGX-UHFFFAOYSA-N",
@@ -2732,7 +2763,9 @@ class ChEMBLPipeline(BasePipeline):
                 "mechanism_of_action": "ACE inhibitor",
             },
             {
-                "chembl_id": "CHEMBL586447",
+                # v108 FORENSIC ROOT FIX (ISSUE-P1-003): was CHEMBL586447.
+                # Lisinopril = CHEMBL419213.
+                "chembl_id": "CHEMBL419213",
                 "name": "Lisinopril",
                 "smiles": "CCCCC(C)C1C(=O)N2CCCC2C(=O)N1CC(C(=O)O)N",
                 "inchikey": "RJXRWZVZAQXBEZ-UHFFFAOYSA-N",

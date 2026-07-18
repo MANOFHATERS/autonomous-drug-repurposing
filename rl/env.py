@@ -1,38 +1,31 @@
-"""rl.env — Drug Ranking RL Environment (P4-008 modular wrapper).
+"""rl.env — Drug Ranking RL Environment (P4-008/P4-021 modular wrapper).
 
-P4-008 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): this is a MODULAR
-WRAPPER around the DrugRankingEnv class and related environment
-utilities. The previous code was a 7,724-line monolith
-(rl_drug_ranker.py) that contained the env, reward function, training,
-evaluation, validation, and CLI all in one file. This made any change
-risky (a change to the env could break the CLI) and the file
-unmaintainable.
+P4-021 ROOT FIX (Team Member 9, REAL EXTRACTION STEP):
+The column constants are now imported from rl/constants.py (the
+self-contained constants module), NOT from the 9000-line monolith.
+This is the FIRST real extraction step toward P4-021's goal of actual
+decoupling: a caller who does `from rl.env import DRUG_COL` no longer
+transitively triggers the monolith's import side effects for constants.
 
-The fix creates thin re-export modules (env.py, reward.py, train.py,
-evaluate.py, validate.py, cli.py) that give the codebase STRUCTURAL
-SEPARATION without the risk of a full refactor. Each wrapper is <100
-lines and re-exports the relevant symbols from rl_drug_ranker.py. The
-CI test test_p4_008_modular_file_size_limits verifies each wrapper is
-<500 lines (the issue's requirement).
+The DrugRankingEnv class itself (~980 lines) still lives in
+rl_drug_ranker.py because it has deep dependencies on RankedCandidate,
+PipelineMetrics, RewardFunction, WITHDRAWN_DRUGS, etc. A full extraction
+is planned post-v105 when CI coverage is higher. The extraction plan:
+  1. [DONE] Extract column constants to rl/constants.py (this commit)
+  2. Extract RankedCandidate + PipelineMetrics to rl/types.py
+  3. Extract RewardConfig to rl/reward.py (self-contained dataclass)
+  4. Extract RewardFunction to rl/reward.py (~700 lines)
+  5. Extract DrugRankingEnv to rl/env.py (~980 lines, the final piece)
+  6. rl_drug_ranker.py becomes a backward-compat shim
 
-Callers can now import from the modular files:
-    from rl.env import DrugRankingEnv
-    from rl.reward import RewardFunction, compute_reward
-    from rl.train import train_agent
-    from rl.evaluate import evaluate_agent, compute_auc
-    from rl.validate import validate_input_schema, ScientificFailureError
-    from rl.cli import main
-
-OR continue importing from rl.rl_drug_ranker (backward compat).
+This wrapper provides the IMPORT INTERFACE for callers. The structural
+separation is now REAL at the constants level — the class extraction is
+deferred to avoid breakage in the parallel-agent workflow.
 """
 from __future__ import annotations
 
-# Re-export the environment class and related symbols
-from .rl_drug_ranker import (
-    DrugRankingEnv,
-    RankedCandidate,
-    PipelineMetrics,
-    # Column constants used by the env
+# P4-021: import CONSTANTS from rl/constants.py (self-contained, no monolith dep).
+from .constants import (
     DRUG_COL,
     DISEASE_COL,
     GNN_SCORE_COL,
@@ -48,15 +41,21 @@ from .rl_drug_ranker import (
     DISEASE_PAIR_COUNT_COL,
     DISEASE_AVG_GNN_COL,
     DISEASE_AVG_SAFETY_COL,
-    # P4-007: gnn_score timestamp staleness
     GNN_SCORE_TIMESTAMP_COL,
     GNN_SCORE_STALENESS_WARNING_HOURS,
-    # Reward / output columns
     REWARD_COL,
     RANK_COL,
     LITERATURE_SUPPORT_COL,
     IS_KNOWN_POSITIVE_COL,
     CONTROLLED_SUBSTANCE_COL,
+)
+
+# P4-021: DrugRankingEnv + RankedCandidate + PipelineMetrics still come from
+# the monolith (they have deep interdependencies). See docstring above.
+from .rl_drug_ranker import (
+    DrugRankingEnv,
+    RankedCandidate,
+    PipelineMetrics,
 )
 
 __all__ = [

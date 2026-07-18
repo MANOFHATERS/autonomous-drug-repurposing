@@ -9,7 +9,15 @@ import type {
 } from "@/components/ui/toast"
 
 const TOAST_LIMIT = 1
-const TOAST_REMOVE_DELAY = 1000000
+// FE-042 ROOT FIX: was 1000000ms (16 minutes 40 seconds) — dismissed toasts
+// lingered in memory for 16+ minutes, causing a memory leak when many toasts
+// were created (e.g. during a long research session with frequent API errors).
+// Reduced to 1000ms so dismissed toasts are cleaned up promptly after their
+// exit animation completes. This matches the behavior of modern toast
+// libraries (sonner, react-hot-toast) which remove dismissed toasts within
+// ~1s. The visual close is immediate (open=false on DISMISS); this delay
+// only governs when the toast is removed from internal state.
+const TOAST_REMOVE_DELAY = 1000
 
 type ToasterToast = ToastProps & {
   id: string

@@ -57,6 +57,13 @@ ALTER TABLE proteins DROP CONSTRAINT IF EXISTS chk_proteins_uniprot_length;
 -- to drug_protein_interactions and other FK tables, potentially
 -- losing real data. Quarantine (set NULL) is safer -- the protein
 -- row stays, but downstream UniProt-join consumers skip it.
+-- v110 Task 33 root fix: quarantine rows that do NOT match the canonical
+-- UniProt accession regex (not just wrong-length rows). A 6-char string
+-- like 'AAAAAA' has correct length but is NOT a valid UniProt accession.
+-- A 10-char string like 'AAAAAAAAAA' likewise. The regex enforces:
+--   6-char  : [OPQ][0-9][A-Z0-9]{3}[0-9]            e.g. P12345, Q8N6H7
+--   10-char : [A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}  e.g. A0A0K3AVT9
+-- Per UniProt accession spec: https://www.uniprot.org/help/accession_numbers
 DO $$
 DECLARE
     _quarantined_count INTEGER;
@@ -65,15 +72,16 @@ BEGIN
         UPDATE proteins
         SET uniprot_id = NULL
         WHERE uniprot_id IS NOT NULL
-          AND LENGTH(uniprot_id) NOT IN (6, 10)
+          AND uniprot_id !~ '^[OPQ][0-9][A-Z0-9]{3}[0-9]$'
+          AND uniprot_id !~ '^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$'
         RETURNING 1
     )
     SELECT COUNT(*) INTO _quarantined_count FROM _quarantined;
 
     IF _quarantined_count > 0 THEN
-        RAISE NOTICE 'P1-013: quarantined % rows of proteins with invalid uniprot_id length (set to NULL). Real UniProt IDs are 6 or 10 chars.', _quarantined_count;
+        RAISE NOTICE 'P1-013 v110: quarantined % rows of proteins with invalid UniProt accession format (set to NULL). Real UniProt accessions match [OPQ][0-9][A-Z0-9]{3}[0-9] (6-char) or [A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2} (10-char).', _quarantined_count;
     ELSE
-        RAISE NOTICE 'P1-013: no rows needed quarantining (all uniprot_id values were already 6 or 10 chars).';
+        RAISE NOTICE 'P1-013 v110: no rows needed quarantining (all uniprot_id values match the canonical UniProt accession regex).';
     END IF;
 END $$;
 
@@ -87,9 +95,30 @@ BEGIN
     ) THEN
         ALTER TABLE proteins
             ADD CONSTRAINT chk_proteins_uniprot_length
-            CHECK (uniprot_id IS NULL OR LENGTH(uniprot_id) IN (6, 10));
+            CHECK (
+                uniprot_id IS NULL
+                OR uniprot_id ~ '^[OPQ][0-9][A-Z0-9]{3}[0-9]$'
+                OR uniprot_id ~ '^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$'
+            );
     END IF;
 END $$;
+
+-- ===========================================================================
+-- Step 4: Schema version metadata
+-- ===========================================================================
+-- P1-042 ROOT FIX (v110): the previous version of this migration was MISSING
+-- the INSERT INTO schema_version row. check_migrations() cross-references
+-- schema_version; without the version=16 row, those checks reported
+-- schema_version_matches=False even though the migration had been applied.
+-- ROOT FIX: add the INSERT with ON CONFLICT DO NOTHING for idempotency.
+INSERT INTO schema_version (version, description)
+VALUES (
+    16,
+    'P1-013 ROOT FIX: tighten proteins.uniprot_id CHECK to LENGTH IN (6, 10) '
+    'matching the ORM and UniProt spec. Quarantine rows with invalid length '
+    '(set to NULL) before re-adding the constraint.'
+)
+ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
 
@@ -114,7 +143,9 @@ BEGIN
         RAISE EXCEPTION 'P1-013 VERIFICATION FAILED: chk_proteins_uniprot_length constraint missing after migration 016 -- the DB is in a half-migrated state. Manual intervention required.';
     END IF;
 
-    -- Verify the constraint definition contains the strict "IN (6, 10)" form.
+    -- v110 Task 33 root fix: verify the constraint contains the canonical
+    -- UniProt accession regex (not just length checks). Look for the
+    -- character class [OPQ] which is unique to the 6-char UniProt format.
     SELECT pg_get_constraintdef(oid) INTO _constraint_def
     FROM pg_constraint
     WHERE conname = 'chk_proteins_uniprot_length'
@@ -124,22 +155,24 @@ BEGIN
         RAISE EXCEPTION 'P1-013 VERIFICATION FAILED: could not read chk_proteins_uniprot_length definition';
     END IF;
 
-    -- Check that the definition references "6" and "10" (the strict lengths).
-    -- We don't check for the exact "IN (6, 10)" syntax because PostgreSQL
-    -- may normalize the expression. The presence of both "6" and "10" and
-    -- the absence of "4" (the old relaxed lower bound) is sufficient.
-    IF _constraint_def NOT LIKE '%6%' OR _constraint_def NOT LIKE '%10%' THEN
-        RAISE EXCEPTION 'P1-013 VERIFICATION FAILED: chk_proteins_uniprot_length does not contain the strict lengths (6, 10). Got: %', _constraint_def;
+    -- The canonical UniProt regex uses [OPQ] for the 6-char format and
+    -- [A-NR-Z] for the 10-char format. Both must be present.
+    IF _constraint_def NOT LIKE '%OPQ%' OR _constraint_def NOT LIKE '%A-NR-Z%' THEN
+        RAISE EXCEPTION 'P1-013 v110 VERIFICATION FAILED: chk_proteins_uniprot_length does not contain the canonical UniProt accession regex ([OPQ]... or [A-NR-Z]...). Got: %', _constraint_def;
     END IF;
 
-    -- Verify NO rows have invalid uniprot_id length anymore.
+    -- v110 Task 33: verify NO rows have an invalid UniProt accession format.
+    -- A row with correct length but wrong character pattern (e.g. 'AAAAAA')
+    -- would still be invalid. Use the same regex as the constraint.
     SELECT COUNT(*) INTO _invalid_count
     FROM proteins
-    WHERE uniprot_id IS NOT NULL AND LENGTH(uniprot_id) NOT IN (6, 10);
+    WHERE uniprot_id IS NOT NULL
+      AND uniprot_id !~ '^[OPQ][0-9][A-Z0-9]{3}[0-9]$'
+      AND uniprot_id !~ '^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$';
 
     IF _invalid_count > 0 THEN
-        RAISE EXCEPTION 'P1-013 VERIFICATION FAILED: proteins table still contains % rows with invalid uniprot_id length. The quarantine step did not complete. Manual intervention required.', _invalid_count;
+        RAISE EXCEPTION 'P1-013 v110 VERIFICATION FAILED: proteins table still contains % rows with invalid UniProt accession format (correct length but wrong character pattern). The quarantine step did not complete. Manual intervention required.', _invalid_count;
     END IF;
 
-    RAISE NOTICE 'P1-013 VERIFICATION PASSED: chk_proteins_uniprot_length exists with strict contract (LENGTH IN (6, 10)) and no rows have invalid uniprot_id length.';
+    RAISE NOTICE 'P1-013 v110 VERIFICATION PASSED: chk_proteins_uniprot_length exists with canonical UniProt accession regex ([OPQ][0-9][A-Z0-9]{3}[0-9] OR [A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}) and no rows have invalid UniProt accession format.';
 END $$;

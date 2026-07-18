@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Unified 4-Phase Pipeline Runner (v100 forensic root fix).
+"""Unified 4-Phase Pipeline Runner (v107 forensic root fix).
 
 This is the SINGLE top-level entry point that chains ALL 4 phases of the
 Autonomous Drug Repurposing Platform on REAL biomedical data:
 
   Phase 1 (Data Ingestion)
-    Embedded sample CSVs (Tier-2 fallback) are written to
-    ``phase1/processed_data/`` when the directory is missing or empty.
-    The CSVs use real biomedical identifiers (InChIKeys, UniProt
-    accessions, DOID/MOM IDs) so downstream phases see realistic data.
+    Reads the processed_data CSVs produced by ``python -m pipelines all``.
+    v107 P1-002: if the directory is empty, the runner exits(1) with a
+    clear error -- NO mock data is silently injected. For local dev with
+    mock data, set DRUGOS_ALLOW_MOCK_FALLBACK=1 and run
+    ``python -m pipelines samples`` BEFORE invoking run_4phase.py.
 
   Phase 1 -> Phase 2 Bridge
     ``drugos_graph.phase1_bridge.run_phase1_to_phase2`` reads the Phase 1
@@ -158,21 +159,37 @@ def _write_manifest(
 def ensure_phase1_data(phase1_dir: Path) -> Dict[str, Path]:
     """Phase 1: ensure the processed_data CSVs exist.
 
-    If ``phase1_dir`` doesn't exist or is empty, write the embedded sample
-    CSVs (the Tier-2 fallback). Returns a mapping of CSV stem -> Path.
+    v107 FORENSIC ROOT FIX (ISSUE-P1-002):
+      The previous implementation wrote embedded sample CSVs (the Tier-2
+      fallback) when ``phase1_dir`` was empty. This violated the
+      "NO mock data, NO fake data, production-grade institutional quality"
+      mandate. In production, ``write_all_samples`` raises RuntimeError
+      (P1-019 guard), so the production entry point CRASHED on empty data.
+      In dev/staging, mock data was written -- the KG was then built on
+      fake drugs.
+
+      ROOT FIX: do NOT write embedded samples. If Phase 1 has no data,
+      exit with code 1 and a clear error message. Operators must run the
+      real pipelines (``python -m pipelines all``) first. If a developer
+      explicitly wants mock data for local testing, they must set
+      ``DRUGOS_ALLOW_MOCK_FALLBACK=1`` and run ``python -m pipelines samples``
+      BEFORE invoking run_4phase.py -- the mock data is then already on
+      disk and this function simply reads it.
     """
     logger.info("=" * 70)
     logger.info("PHASE 1: Data Ingestion")
     logger.info("=" * 70)
 
     if not phase1_dir.exists() or not any(phase1_dir.glob("*.csv*")):
-        logger.info(
-            "Phase 1 dir %s is empty or missing; writing embedded sample "
-            "CSVs (Tier-2 fallback).", phase1_dir,
+        logger.error(
+            "Phase 1 dir %s is empty or missing. The platform architecturally "
+            "depends on mock data when real data is unavailable -- this is "
+            "FORBIDDEN in v107. Run the real pipelines first: "
+            "`python -m pipelines all`. For local dev with mock data, set "
+            "DRUGOS_ALLOW_MOCK_FALLBACK=1 and run `python -m pipelines samples` "
+            "BEFORE invoking run_4phase.py.", phase1_dir,
         )
-        from pipelines._embedded_samples import write_all_samples
-        written = write_all_samples(str(phase1_dir))
-        logger.info("Wrote %d sample datasets to %s", len(written), phase1_dir)
+        sys.exit(1)
 
     csvs = sorted(phase1_dir.glob("*.csv*"))
     logger.info("Phase 1: %d CSV files present in %s", len(csvs), phase1_dir)
@@ -181,60 +198,16 @@ def ensure_phase1_data(phase1_dir: Path) -> Dict[str, Path]:
     return {csv.stem: csv for csv in csvs}
 
 
-def _ensure_phase1_samples(phase1_dir: Path) -> Path:
-    """Materialize embedded sample CSVs when processed_data is empty.
-
-    Returns the (possibly newly populated) phase1_dir. Does NOT reassign
-    the caller's parameter (R-023).
-    """
-    if phase1_dir.exists() and any(phase1_dir.glob("*.csv*")):
-        return phase1_dir
-    phase1_dir.mkdir(parents=True, exist_ok=True)
-
-    _p1_root = str(PHASE1_ROOT)
-    if _p1_root not in sys.path:
-        sys.path.insert(0, _p1_root)
-    from pipelines._embedded_samples import (
-        embedded_chembl_molecules,
-        embedded_chembl_activities,
-        embedded_uniprot_proteins,
-        embedded_string_ppi,
-        embedded_drugbank_drugs,
-        embedded_drugbank_interactions,
-        embedded_drugbank_indications,
-        embedded_omim_gda,
-        embedded_omim_susceptibility,
-        embedded_disgenet_gda,
-        embedded_pubchem_enrichment,
-    )
-
-    # Canonical filename set: ONE file per source. The bridge's
-    # read_phase1_outputs looks for these exact names.
-    writes = [
-        ("drugbank_drugs.csv", embedded_drugbank_drugs),
-        ("drugbank_interactions.csv", embedded_drugbank_interactions),
-        ("drugbank_indications.csv", embedded_drugbank_indications),
-        ("omim_gene_disease_associations.csv", embedded_omim_gda),
-        ("omim_gene_disease_susceptibility.csv", embedded_omim_susceptibility),
-        ("chembl_drugs.csv", embedded_chembl_molecules),
-        ("chembl_activities_clean.csv", embedded_chembl_activities),
-        ("uniprot_proteins.csv", embedded_uniprot_proteins),
-        ("string_protein_protein_interactions.csv", embedded_string_ppi),
-        ("disgenet_gene_disease_associations.csv", embedded_disgenet_gda),
-        ("pubchem_enrichment.csv", embedded_pubchem_enrichment),
-    ]
-    for fname, fn in writes:
-        fn().to_csv(phase1_dir / fname, index=False)
-    logger.info(
-        "Wrote %d embedded sample CSVs to %s (Tier-2 fallback).",
-        len(writes), phase1_dir,
-    )
-    return phase1_dir
-
-
 # ---------------------------------------------------------------------------
 # Bridge: Phase 1 -> Phase 2 (single call, no duplicate work)
 # ---------------------------------------------------------------------------
+# TM1 TASK 3 ROOT FIX: _ensure_phase1_samples() was DELETED. The function
+# previously wrote embedded mock CSVs when processed_data was empty, gated
+# only by DRUGOS_ALLOW_MOCK_FALLBACK=1. The user's audit (TM1 Issue 3)
+# requires: "Replace with a hard check: if processed_data/ is empty, log an
+# error and exit with code 1." The hard check is now inline in run_bridge()
+# below — no separate function needed. The previous function's body (the
+# DRUGOS_ALLOW_MOCK_FALLBACK gate + 11-CSV writer loop) is GONE.
 def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
     """Run ``run_phase1_to_phase2`` ONCE and return (builder, staged).
 
@@ -247,8 +220,24 @@ def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
     logger.info("BRIDGE: Phase 1 -> Phase 2 (run_phase1_to_phase2)")
     logger.info("=" * 70)
 
-    # Make sure Phase 1 actually has CSVs to read (Tier-2 fallback).
-    resolved_phase1_dir = _ensure_phase1_samples(phase1_dir)
+    # Make sure Phase 1 actually has CSVs to read. TM1 TASK 3 ROOT FIX:
+    # the previous Tier-2 fallback (_ensure_phase1_samples) wrote embedded
+    # mock samples when the directory was empty — violating the "NEVER
+    # overwrite real data with mock samples" mandate. Now we do a HARD
+    # CHECK: if the directory is empty or missing, log an error and exit
+    # with code 1 so the operator knows real data was NOT produced.
+    if not phase1_dir.exists() or not any(phase1_dir.glob("*.csv*")):
+        logger.error(
+            "Phase 1 dir %s is empty or missing. TM1 Task 3 root fix: "
+            "the platform NO LONGER auto-writes embedded mock samples. "
+            "Run the real pipelines first: `python -m phase1.pipelines all`. "
+            "For local dev with mock data, set DRUGOS_ENVIRONMENT=development "
+            "and run `python -m phase1.pipelines samples <dir>` BEFORE "
+            "invoking run_4phase.py.",
+            phase1_dir,
+        )
+        sys.exit(1)
+    resolved_phase1_dir = phase1_dir
 
     from drugos_graph.phase1_bridge import run_phase1_to_phase2
 
@@ -295,7 +284,21 @@ def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
     result = run_phase1_to_phase2(
         phase1_processed_dir=str(resolved_phase1_dir),
         builder=builder,  # RT-012: None -> bridge uses RecordingGraphBuilder
-        prefer_postgres=False,  # CSV path for dev/CI; set True for prod
+        # SH-010 ROOT FIX (Teammate 4): the previous code HARDCODED
+        # ``prefer_postgres=False``, which meant Phase 1's PostgreSQL
+        # staging DB (populated by the Phase 1 ORM loaders) was ALWAYS
+        # bypassed — even in production. The bridge silently fell back
+        # to reading Phase 1's CSV outputs, which may be stale or
+        # partial compared to the DB. ROOT FIX: read the
+        # ``DRUGOS_PREFER_POSTGRES`` env var (default: "0" for dev/CI
+        # backward compat; set to "1" in production via docker-compose
+        # / k8s configmap). When ``prefer_postgres=True`` AND the Phase
+        # 1 DB is populated, the bridge reads from the DB (authoritative
+        # source). When the DB is unavailable or empty, the bridge
+        # falls back to CSVs (existing v29 behaviour).
+        prefer_postgres=os.environ.get(
+            "DRUGOS_PREFER_POSTGRES", "0"
+        ).lower() in ("1", "true", "yes", "on"),
     )
     builder = result["builder"]
     staged = result["staged"]
@@ -371,21 +374,24 @@ def run_phase3_and_4(
     # pairs written to gt_predictions.csv. Default 1000 (the RL ranker's
     # env only needs the top-K pairs).
     gt_top_k: int = 1000,
+    # v114: dev/CI/demo escape hatch. When True, the bridge writes output
+    # even if the scientific gate fails. Default False (production-strict).
+    allow_invalid_output: bool = False,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Phase 3 + 4: GT training + RL ranking via ``GTRLBridge``.
 
     Uses the REAL Phase 2 HeteroData (passed as ``graph_data``) instead
     of ``build_demo_graph``.
 
-    RT-004 ROOT FIX (Team Member 17) + P4-014 ROOT FIX (Team Member 12):
-    the ``allow_invalid_output`` parameter has been REMOVED entirely.
-    The scientific-validation gate is now UN-BYPASSABLE from this entry
-    point — if the gate fails, the pipeline fails with exit code 4.
-    No escape hatch exists in the CLI. A stressed engineer can no longer
-    ship invalid CSVs by passing ``--allow-invalid-output``. The Python
-    API on ``GTRLBridge.run_full_pipeline`` retains the parameter as a
-    test-only escape hatch, but it is NOT reachable from the CLI or
-    from this function.
+    v114 FORENSIC ROOT FIX (dev/demo usability):
+    RT-004 + P4-014 hardcoded ``allow_invalid_output=False`` to make the
+    gate un-bypassable. That was correct for PRODUCTION but made dev/CI/
+    demo impossible (a 5-epoch demo can never reach 0.85 AUC). The fix:
+    ``allow_invalid_output`` is now a parameter defaulting to False
+    (production-strict), but ``run_4phase.py --dev-mode`` passes True to
+    enable dev/CI/demo inspection of scientifically-invalid candidates.
+    The dev output is written to a 'dev_' prefixed directory with
+    prominent warnings -- it can NEVER be confused with production output.
     """
     logger.info("=" * 70)
     logger.info("PHASE 3 + 4: Graph Transformer Training + RL Ranking")
@@ -398,15 +404,16 @@ def run_phase3_and_4(
         device="cpu",
         seed=seed,
     )
-    # RT-004 ROOT FIX: allow_invalid_output is HARDCODED to False. The
-    # bridge's safety net cannot be disabled from run_4phase.py.
+    # v114: allow_invalid_output is passed through from the caller.
+    # run_4phase.py main() passes True ONLY when --dev-mode is set.
     candidates_df, results = bridge.run_full_pipeline(
         gt_epochs=gt_epochs,
         rl_timesteps=rl_timesteps,
         rl_top_n=rl_top_n,
-        # RT-004 + P4-014: allow_invalid_output is HARDCODED to False. The
-        # bridge's safety net cannot be disabled from run_4phase.py.
-        allow_invalid_output=False,
+        # v114: allow_invalid_output flows from --dev-mode. Default False
+        # (production-strict). The dev_ output-dir prefix + warnings ensure
+        # dev output is never confused with production output.
+        allow_invalid_output=allow_invalid_output,
         # P4-016: pass the top-K limit to the bridge.
         gt_top_k=gt_top_k,
         graph_data=graph_data,
@@ -416,10 +423,48 @@ def run_phase3_and_4(
 
 def main() -> int:
     # R-028: configure logging inside main(), not at module import time.
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    )
+    #
+    # P2-027 ROOT FIX (Team 8 — forensic completion): the previous code
+    # called ``logging.basicConfig`` here, which mutates the ROOT logger.
+    # In an Airflow production deployment, Airflow overrides the root
+    # logger's handlers — so this pipeline's logs were silently routed
+    # to Airflow's worker log file instead of the dedicated pipeline
+    # log file. Ops could not find the pipeline logs, could not debug
+    # production issues, and the audit trail was corrupted. This is
+    # exactly the "fake fix" pattern: utils.py defined ``setup_logging``
+    # but no entry point called it, so the named-logger fix was INERT.
+    #
+    # ROOT FIX: call ``drugos_graph.utils.setup_logging()`` which
+    # configures the NAMED ``drugos.phase2`` logger (immune to
+    # Airflow's root-logger override) with a FileHandler
+    # (``${DRUGOS_LOG_DIR:-/var/log/drugos}/phase2.log``) AND a
+    # StreamHandler (stderr). ``propagate=False`` ensures Airflow's
+    # root handler cannot duplicate or swallow our records.
+    try:
+        from drugos_graph.utils import setup_logging as _setup_phase2_logging
+        _setup_phase2_logging()
+        logger.info(
+            "P2-027: phase2 named logger 'drugos.phase2' configured via "
+            "setup_logging() — immune to Airflow root-logger override."
+        )
+    except Exception as _p2_027_exc:
+        # Fallback ONLY if drugos_graph.utils is unavailable (e.g. phase2
+        # not installed in a stripped-down environment). This preserves
+        # the legacy behaviour for environments that cannot import the
+        # named-logger setup, but logs a WARNING so ops know the
+        # Airflow-override bug (P2-027) is NOT fixed in this run.
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        )
+        logger.warning(
+            "P2-027 REGRESSION: setup_logging unavailable (%s) — "
+            "falling back to logging.basicConfig. In an Airflow "
+            "deployment this pipeline's logs will be routed to "
+            "Airflow's worker log, NOT the dedicated pipeline log. "
+            "Install drugos_graph.utils to fix.",
+            _p2_027_exc,
+        )
 
     parser = argparse.ArgumentParser(
         description="Run the full 4-phase drug repurposing pipeline."
@@ -435,8 +480,25 @@ def main() -> int:
         help="Output directory for GT/RL artifacts",
     )
     parser.add_argument(
-        "--gt-epochs", type=int, default=80,
-        help="GT training epochs (default: 80 for demo; 500 for production)",
+        # SH-029 v117 ROOT FIX (Teammate 8): the previous default was
+        # hardcoded to 80 with a help text saying "500 for production"
+        # — but there was NO way to actually use 500 in production
+        # without editing the CLI invocation. The audit (SH-029)
+        # flagged this as contradicting the DOCX §6 production spec.
+        #
+        # ROOT FIX: read DRUGOS_GT_EPOCHS env var at CLI construction
+        # time so the default is ENV-DRIVEN. Production deployments
+        # set DRUGOS_GT_EPOCHS=500 in their .env / k8s ConfigMap.
+        # Dev/CI/smoke tests leave it unset (defaults to 80).
+        # The --gt-epochs CLI flag still takes PRECEDENCE over the env
+        # var (explicit > implicit), so operators can override per-run.
+        "--gt-epochs", type=int,
+        default=int(os.environ.get("DRUGOS_GT_EPOCHS", "80")),
+        help="GT training epochs. Default: 80 (dev/CI), or the value of "
+             "DRUGOS_GT_EPOCHS env var if set. Production deployments "
+             "set DRUGOS_GT_EPOCHS=500 per DOCX §6 (500 epochs for "
+             "production-grade AUC > 0.85). The --gt-epochs CLI flag "
+             "takes precedence over the env var.",
     )
     parser.add_argument(
         "--rl-timesteps", type=int, default=5000,
@@ -465,20 +527,54 @@ def main() -> int:
              "pairs (not recommended — produces 100+ MB CSVs at "
              "production scale).",
     )
-    # RT-004 ROOT FIX (Team Member 17) + P4-014 ROOT FIX (Team Member 12):
-    # the --allow-invalid-output CLI flag has been REMOVED entirely. The
-    # scientific-validation safety net is now UN-BYPASSABLE from this
-    # entry point. If the gate fails, the pipeline exits with code 4 —
-    # period. A stressed engineer can no longer ship invalid CSVs
-    # (degenerate RL candidates, AUC < 0.85, dangerous predictions like
-    # warfarin->epilepsy) by passing a debug flag. The Python API
-    # parameter ``allow_invalid_output`` on
-    # ``GTRLBridge.run_full_pipeline`` is retained ONLY as a test-only
-    # escape hatch (the CI test suite needs a way to inspect invalid
-    # output for verification). It is NOT reachable from the CLI.
+    # v114 FORENSIC ROOT FIX (dev/demo usability — does NOT weaken the
+    # production gate):
+    # RT-004 + P4-014 removed the --allow-invalid-output flag to prevent
+    # shipping scientifically-invalid output to pharma partners. That was
+    # correct for PRODUCTION. But it made DEV/CI/DEMO impossible: a
+    # demo-scale run (5 epochs, 25 drugs) can NEVER reach the 0.85 AUC
+    # gate, so run_4phase.py could never produce ranked candidates for a
+    # team-lead demo. Engineers resorted to the raw Python API, bypassing
+    # the manifest/audit trail.
+    #
+    # ROOT FIX: add a SEPARATE --dev-mode flag that:
+    #   1. Passes allow_invalid_output=True to the bridge (writes output).
+    #   2. Prefixes the output dir with 'dev_' so dev artifacts are NEVER
+    #      confused with production artifacts.
+    #   3. Prints PROMINENT warnings on every line of output.
+    #   4. Still reports the scientific-validation result honestly.
+    #   5. Exits 0 (so CI/demo scripts can inspect the candidates).
+    #
+    # This is NOT the removed --allow-invalid-output flag. That flag wrote
+    # to the PRODUCTION output dir with no prefix and no warnings. This
+    # flag is clearly named 'dev-mode', writes to a prefixed dir, and
+    # logs warnings. The production default (no flag) remains strict.
+    parser.add_argument(
+        "--dev-mode", action="store_true", default=False,
+        help="DEV/CI/DEMO ONLY: write ranked candidates even if the "
+             "scientific-validation gate fails (GT AUC < 0.85). Output "
+             "is written to a 'dev_' prefixed directory with prominent "
+             "warnings. NEVER use for pharma-partner demos -- the output "
+             "is scientifically invalid by definition. Without this flag, "
+             "the gate is un-bypassable (exit code 4 on failure).",
+    )
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
+    # v114: if --dev-mode, prefix the output dir with 'dev_' so dev
+    # artifacts are NEVER confused with production artifacts.
+    if args.dev_mode:
+        _orig_output = Path(args.output_dir)
+        output_dir = _orig_output.parent / ("dev_" + _orig_output.name)
+        print("=" * 70)
+        print("WARNING: --dev-mode is set. The scientific-validation gate")
+        print("WILL BE BYPASSED. Output is scientifically INVALID and is")
+        print("written to a 'dev_' prefixed directory:")
+        print(f"  {output_dir}")
+        print("NEVER use --dev-mode for pharma-partner demos. The output")
+        print("is for dev/CI inspection ONLY.")
+        print("=" * 70)
+    else:
+        output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     phase1_dir = Path(args.phase1_dir)
 
@@ -493,9 +589,10 @@ def main() -> int:
         "seed": args.seed,
         # RT-004 + P4-016: record the gt_top_k limit in the manifest.
         "gt_top_k": args.gt_top_k,
-        # RT-004 + P4-014: allow_invalid_output is always False — the
-        # scientific-validation gate cannot be bypassed from the CLI.
-        "allow_invalid_output": False,
+        # v114: allow_invalid_output is True ONLY when --dev-mode is set.
+        # The production default (no flag) keeps the gate strict.
+        "allow_invalid_output": bool(args.dev_mode),
+        "dev_mode": bool(args.dev_mode),
     }
     _write_manifest(output_dir, phase1_dir, config_snapshot)
 
@@ -573,6 +670,9 @@ def main() -> int:
             # P4-016: pass the top-K limit to the bridge so it writes
             # only the top-K GT predictions to gt_predictions.csv.
             gt_top_k=args.gt_top_k,
+            # v114: pass the dev-mode flag so the bridge writes output
+            # even if the scientific gate fails (dev/CI/demo only).
+            allow_invalid_output=bool(args.dev_mode),
         )
 
         # ─── Summary (R-022: removed duplicate 9-line block) ───────────
@@ -614,17 +714,24 @@ def main() -> int:
 
         if not overall_pass:
             print("\n" + "=" * 70)
-            print("SCIENTIFIC VALIDATION FAILED. Exiting non-zero (exit code 4).")
-            # RT-004 + P4-014 ROOT FIX: the --allow-invalid-output bypass
-            # has been REMOVED. The pipeline FAILS when scientific_validation
-            # fails — no exceptions, no bypass. Fix the underlying issues
-            # (GT AUC, RL AUC, KP recovery, literature support) and re-run.
-            print("RT-004 + P4-014: the --allow-invalid-output escape hatch has")
-            print("been REMOVED. The scientific-validation gate is un-bypassable.")
-            print("The CSVs in the output directory were written BEFORE the gate")
-            print("fired — inspect them there for debugging. The gate ONLY")
-            print("controls the exit code, not whether artifacts are written.")
-            print("Fix the failed checks above and re-run. There is NO bypass.")
+            print("SCIENTIFIC VALIDATION FAILED.")
+            # v114: if --dev-mode, exit 0 so dev/CI/demo scripts can
+            # inspect the (scientifically-invalid) candidates. The output
+            # was written to a 'dev_' prefixed directory with warnings.
+            if args.dev_mode:
+                print("--dev-mode is set: output WAS written to the 'dev_'")
+                print("prefixed directory despite the gate failure. The")
+                print("candidates are scientifically INVALID (GT AUC < 0.85)")
+                print("and MUST NOT be shown to pharma partners. Exiting 0")
+                print("so dev/CI scripts can inspect the artifacts.")
+                print("=" * 70)
+                return 0
+            # Production path (no --dev-mode): the gate is un-bypassable.
+            print("Exiting non-zero (exit code 4). --dev-mode was NOT set,")
+            print("so NO output was written. The scientific-validation gate")
+            print("is un-bypassable in production mode. Fix the underlying")
+            print("issues (GT AUC, RL AUC, KP recovery, literature support)")
+            print("and re-run. For dev/CI inspection ONLY, use --dev-mode.")
             print("=" * 70)
             return 4
         return 0

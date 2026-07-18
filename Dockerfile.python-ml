@@ -1,0 +1,102 @@
+# =============================================================================
+# Dockerfile.python-ml — Canonical Python ML BASE image (CI / dev only)
+# =============================================================================
+# v116 ROOT FIX (Teammate 15, issues IN-013/IN-014):
+#   IN-013 (MEDIUM): this image is NO LONGER referenced by phase2/drugos_graph/
+#       Dockerfile (which is now self-contained — FROM python:3.11-slim).
+#       docker-compose uses Dockerfile.ml for phase2/3/4 (version alignment).
+#       This image remains as a CI/dev convenience for running pytest without
+#       reinstalling torch every time. Build explicitly:
+#         docker build -f Dockerfile.python-ml -t drugos-python-ml:2.0.0 .
+#   IN-014 (MEDIUM): REMOVED pytest + pytest-cov from the base image. They
+#       are DEV deps (in requirements-dev.txt) and must NOT ship in a base
+#       image that other production Dockerfiles inherit from. The previous
+#       version shipped pytest in the production phase2 image via
+#       `FROM drugos-python-ml:latest` — attack-surface bloat + the
+#       `py` package CVE chain.
+#   Compound fix: aligned torch to 2.2.0 (matching Dockerfile.ml) — the
+#       previous version used 2.2.2+cpu while Dockerfile.ml used 2.2.0+cpu,
+#       causing an ABI mismatch when phase2 inherited this image.
+#
+# Build:
+#   docker build -f Dockerfile.python-ml -t drugos-python-ml:2.0.0 .
+# =============================================================================
+FROM python:3.14-slim
+
+# IN-012: pin pip for reproducibility.
+RUN pip install --no-cache-dir --upgrade \
+    pip==24.2 \
+    setuptools==75.1.0 \
+    wheel==0.44.0
+
+# ─── Build deps + runtime libs (single layer) ────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    libpq-dev \
+    libxml2-dev \
+    libxslt1-dev \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# IN-012: reproducibility env vars.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=0
+
+# ─── PyTorch CPU build (aligned to 2.2.0 — matches Dockerfile.ml) ───────
+RUN pip install --no-cache-dir \
+    "torch==2.2.0+cpu" \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# ─── PyTorch Geometric + extensions (built against torch 2.2.0) ─────────
+RUN pip install --no-cache-dir \
+    "torch-geometric==2.5.3" \
+    "torch-scatter==2.1.2+pt22cpu" \
+    "torch-sparse==0.6.18+pt22cpu" \
+    -f https://data.pyg.org/whl/torch-2.2.0+cpu.html
+
+# ─── Scientific Python stack (Phase 1 + Phase 2 + Phase 3 + Phase 4) ────
+# IN-014: NO pytest / pytest-cov — those are in requirements-dev.txt only.
+RUN pip install --no-cache-dir \
+    "rdkit==2024.3.5" \
+    "pandas==2.1.4" \
+    "numpy==1.26.4" \
+    "scikit-learn==1.4.2" \
+    "networkx==3.2.1" \
+    "transformers==4.40.2" \
+    "stable-baselines3==2.3.0" \
+    "gymnasium==0.29.1" \
+    "biopython==1.83" \
+    "mlflow==2.15.1" \
+    "fastapi==0.110.3" \
+    "uvicorn[standard]==0.29.0" \
+    "pydantic==2.7.1" \
+    "psycopg2-binary==2.9.9" \
+    "sqlalchemy==2.0.30" \
+    "neo4j==5.20.0" \
+    "requests==2.31.0" \
+    "rapidfuzz==3.9.0" \
+    "python-dotenv==1.0.1" \
+    "lxml==5.2.1" \
+    "filelock==3.14.0" \
+    "pyarrow==15.0.2" \
+    "pyyaml==6.0.1" \
+    "certifi==2024.2.2" \
+    "prometheus-client==0.20.0" \
+    "psutil==5.9.8"
+
+# ─── Default entrypoint — python shell, no service ───────────────────────
+WORKDIR /opt/repo
+# IN-012: uid 10001 (not 1000) to avoid host uid collisions.
+RUN useradd -m -u 10001 drugos && chown -R drugos:drugos /opt/repo
+USER drugos
+
+# This image is a CI/dev BASE image. docker-compose does NOT use it (it uses
+# Dockerfile.ml for phase2/3/4). Build explicitly for CI:
+#   docker build -f Dockerfile.python-ml -t drugos-python-ml:2.0.0 .
+CMD ["python3"]

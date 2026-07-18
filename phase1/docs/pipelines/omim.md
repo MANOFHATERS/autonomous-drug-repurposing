@@ -175,8 +175,8 @@ Score is a function of `(mapping_key, num_pmids, evidence_strength)`:
 base = SCORE_BY_MAPPING_KEY.get(mapping_key, 0.4)
        # mk=3 → 0.9 (molecular basis known)
        # mk=4 → 0.8 (contiguous gene syndrome)
-       # mk=2 → 0.6 (phenotype mapped)
-       # mk=1 → 0.5 (wild-type gene mapped)
+       # mk=2 → 0.25 (phenotype mapped, weak tier per Piñero 2020)
+       # mk=1 → 0.2 (wild-type gene mapped, weak tier per Piñero 2020)
 pmid_bonus = min(0.05 * log1p(num_pmids), 0.08)        # cap at +0.08
 evidence_bonus = min(evidence_strength * 0.05, 0.05)   # cap at +0.05
 score = clip(base + pmid_bonus + evidence_bonus, 0.0, 1.0)
@@ -275,8 +275,8 @@ registered in `CONFIG_REGISTRY`. Key settings:
 | `OMIM_MAX_PAGINATION_PAGES` | `1000` | Upper bound on pagination pages |
 | `OMIM_CONFIRMED_SCORE` | `0.9` | Base score for mk=3 |
 | `OMIM_CONTIGUOUS_SCORE` | `0.8` | Base score for mk=4 |
-| `OMIM_PHENOTYPE_MAPPED_SCORE` | `0.6` | Base score for mk=2 |
-| `OMIM_GENE_MAPPED_SCORE` | `0.5` | Base score for mk=1 |
+| `OMIM_PHENOTYPE_MAPPED_SCORE` | `0.25` | Base score for mk=2 (Piñero 2020 weak tier) |
+| `OMIM_GENE_MAPPED_SCORE` | `0.2` | Base score for mk=1 (Piñero 2020 weak tier) |
 | `OMIM_USER_AGENT` | `drug-repurposing-pipeline/omim (...)` | User-Agent header |
 | `OMIM_API_KEY_FORMAT_RE` | `^[a-f0-9-]{36}$` | UUID format regex |
 | `OMIM_MAX_AGE_DAYS` | `30` | Max cached-download age |

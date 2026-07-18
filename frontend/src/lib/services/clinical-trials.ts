@@ -11,6 +11,8 @@
  * legally required to be registered here.
  */
 
+import { monitoredFetch } from "@/lib/external-api-monitor";
+
 const CTGOV_BASE = "https://clinicaltrials.gov/api/v2";
 
 export interface ClinicalTrial {
@@ -130,7 +132,10 @@ export async function searchClinicalTrials(params: {
   }
 
   const url = `${CTGOV_BASE}/studies?${urlParams.toString()}`;
-  const res = await fetch(url, {
+  // Task 260: monitored for observability — every CT.gov call is logged
+  // with URL, duration, and status so operators can detect slow or
+  // degraded upstream responses.
+  const res = await monitoredFetch("ctgov", url, {
     headers: { Accept: "application/json" },
     next: { revalidate: 3600 }, // 1 hour cache
   });

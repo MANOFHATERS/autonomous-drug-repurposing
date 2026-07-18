@@ -1,0 +1,211 @@
+# =============================================================================
+# Dependabot configuration — Autonomous Drug Repurposing Platform
+# =============================================================================
+# v118 IN-019 ROOT FIX (Teammate 16 — Infrastructure): the audit found that
+# the repo had ZERO Dependabot configuration. Dependabot is GitHub's
+# built-in dependency monitoring service — it automatically opens PRs when
+# a dependency has a security vulnerability or when a new version is
+# released. For a pharma patient-safety platform, this is critical:
+#
+#   - A CVE in a Python transitive dep (urllib3, pillow, etc.) ships to
+#     production undetected without Dependabot.
+#   - A backdoored npm package (like the event-stream incident) ships to
+#     production undetected without Dependabot.
+#   - Dependabot security updates are FREE for public + private repos.
+#
+# This config enables:
+#   1. Python (pip) ecosystem: monitors requirements.txt + phase1/requirements.txt
+#      + phase2/drugos_graph/requirements.txt + graph_transformer/requirements.txt
+#      + rl/requirements.txt. Opens PRs for minor + patch updates. SECURITY
+#      updates are ALWAYS opened (even for major version bumps).
+#   2. npm ecosystem: monitors frontend/package-lock.json. Opens PRs for
+#      minor + patch updates. SECURITY updates are ALWAYS opened.
+#   3. GitHub Actions ecosystem: monitors all .github/workflows/*.yml files.
+#      Opens PRs when an action (actions/checkout, actions/setup-python, etc.)
+#      releases a new version. This catches deprecated action versions + new
+#      features (e.g., cache support).
+#   4. Docker ecosystem: monitors all Dockerfile.* files for base image
+#      updates (python:3.11-slim, node:20, etc.).
+#
+# Schedule: weekly (Monday 09:00 UTC) — daily would be too noisy for a
+# small team. Security updates are opened IMMEDIATELY regardless of schedule.
+# =============================================================================
+
+version: 2
+
+updates:
+  # ─── Python (pip) — root requirements.txt ──────────────────────────────
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "deps(pip)"
+      include: "scope"
+    # Group minor + patch updates into a single PR (less noise). Major
+    # version bumps get their own PR (they may have breaking changes).
+    groups:
+      python-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ─── Python (pip) — phase1/requirements.txt ────────────────────────────
+  - package-ecosystem: "pip"
+    directory: "/phase1"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+      - "phase1"
+    commit-message:
+      prefix: "deps(pip-phase1)"
+      include: "scope"
+    groups:
+      python-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ─── Python (pip) — phase2/drugos_graph/requirements.txt ───────────────
+  - package-ecosystem: "pip"
+    directory: "/phase2/drugos_graph"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+      - "phase2"
+    commit-message:
+      prefix: "deps(pip-phase2)"
+      include: "scope"
+    groups:
+      python-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ─── Python (pip) — graph_transformer/requirements.txt ─────────────────
+  - package-ecosystem: "pip"
+    directory: "/graph_transformer"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+      - "phase3"
+    commit-message:
+      prefix: "deps(pip-phase3)"
+      include: "scope"
+    groups:
+      python-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ─── Python (pip) — rl/requirements.txt ────────────────────────────────
+  - package-ecosystem: "pip"
+    directory: "/rl"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+      - "phase4"
+    commit-message:
+      prefix: "deps(pip-phase4)"
+      include: "scope"
+    groups:
+      python-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ─── npm — frontend/package-lock.json ──────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "npm"
+      - "frontend"
+    commit-message:
+      prefix: "deps(npm)"
+      include: "scope"
+    groups:
+      npm-development:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+      npm-production:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ─── GitHub Actions — .github/workflows/*.yml ──────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "deps(gha)"
+      include: "scope"
+    groups:
+      github-actions:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ─── Docker — base images in Dockerfile.* ──────────────────────────────
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "deps(docker)"
+      include: "scope"

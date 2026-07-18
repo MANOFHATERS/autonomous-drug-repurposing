@@ -10,6 +10,7 @@
  */
 
 import { z } from "zod";
+import { monitoredFetch } from "@/lib/external-api-monitor";
 
 const RXNORM_BASE = "https://rxnav.nlm.nih.gov/REST";
 
@@ -56,7 +57,9 @@ async function fetchWithTimeout(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), RXNORM_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    // Task 260: wrap every RxNorm call in monitoredFetch so the platform
+    // logs the URL, duration, and status code for observability.
+    return await monitoredFetch("rxnorm", url, { ...init, signal: controller.signal });
   } catch (e: unknown) {
     // AbortError is thrown when the controller aborts the fetch.
     if (e instanceof Error && e.name === "AbortError") {

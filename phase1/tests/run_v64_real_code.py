@@ -27,7 +27,7 @@ import pandas as pd
 def step_1_write_all_samples():
     """Step 1: Run write_all_samples() -- writes 7 CSVs to a temp dir."""
     print("\n=== STEP 1: write_all_samples() ===")
-    from pipelines._embedded_samples import write_all_samples
+    from pipelines._dev_samples import write_all_samples
     tmpdir = Path(tempfile.mkdtemp(prefix="v64_real_"))
     written = write_all_samples(tmpdir)
     print(f"Wrote {len(written)} sample CSVs to {tmpdir}")
@@ -169,7 +169,7 @@ def step_5_pipeline_imports():
     print("\n=== STEP 5: Import all Phase 1 pipeline modules ===")
     modules = [
         "pipelines.base_pipeline",
-        "pipelines._embedded_samples",
+        "pipelines._dev_samples",
         "pipelines._v50_downloaders",
         "pipelines.chembl_pipeline",
         "pipelines.drugbank_pipeline",

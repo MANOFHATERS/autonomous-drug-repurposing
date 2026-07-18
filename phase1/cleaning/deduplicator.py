@@ -251,7 +251,7 @@ class _CorrelationIdFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             cid = get_correlation_id()
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
             cid = None
         record.correlation_id = cid or "-"
         return True
@@ -289,7 +289,8 @@ def _log_event(level: str, event: str, **fields: Any) -> None:
             cid = get_correlation_id()
             if cid:
                 payload["correlation_id"] = cid
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
         log_fn("%s: %s", event, json.dumps(payload, default=str, sort_keys=True))
     else:
@@ -671,7 +672,8 @@ class CompletenessWeight:
             try:
                 if val is None or (isinstance(val, float) and val != val):
                     continue
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+                logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
                 continue
             if isinstance(val, str) and val.strip() == "":
                 continue
@@ -710,7 +712,7 @@ class CompletenessWeight:
             # Boolean mask: True where the cell counts toward completeness
             try:
                 mask = col_data.notna()
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
                 mask = pd.Series([True] * len(df), index=df.index)
             # For string columns, also exclude empty / whitespace strings
             if col_data.dtype == object or pd.api.types.is_string_dtype(col_data):
@@ -856,7 +858,7 @@ def _get_helpers() -> SimpleNamespace:
         helpers["get_circuit_breaker"] = get_circuit_breaker
         helpers["SchemaValidationError"] = SchemaValidationError
         helpers["CleaningError"] = CleaningError
-    except Exception as exc:  # pragma: no cover -- defensive
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:# pragma: no cover -- defensive
         logger.debug("dedup: package helpers unavailable: %s", exc)
 
     # Sister-module helpers (lazy, never block import)
@@ -868,7 +870,7 @@ def _get_helpers() -> SimpleNamespace:
         helpers["is_valid_inchikey"] = is_valid_inchikey
         helpers["is_synthetic_inchikey"] = is_synthetic_inchikey
         helpers["normalize_activity_value"] = normalize_activity_value
-    except Exception as exc:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
         logger.debug("dedup: normalizer helpers unavailable: %s", exc)
 
     try:
@@ -881,7 +883,7 @@ def _get_helpers() -> SimpleNamespace:
         helpers["validate_input_size"] = _validate_input_size
         helpers["sanitize_smiles"] = _sanitize_smiles
         helpers["redact_for_log"] = _redact_for_log
-    except Exception as exc:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
         logger.debug("dedup: missing_values helpers unavailable: %s", exc)
 
     return SimpleNamespace(**helpers)
@@ -911,7 +913,8 @@ def set_correlation_id(cid: str | None) -> None:
         helpers = _get_helpers()
         if hasattr(helpers, "pkg_set_cid"):
             helpers.pkg_set_cid(cid)  # type: ignore[attr-defined]
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
 
 
@@ -929,7 +932,8 @@ def get_correlation_id() -> str | None:
             cid = helpers.pkg_get_cid()  # type: ignore[attr-defined]
             if cid:
                 return cid
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
     with _CORRELATION_ID_LOCK:
         return _current_correlation_id
@@ -949,13 +953,14 @@ def _sanitize_string_local(value: Any, *, max_length: int = 200) -> str:
         helpers = _get_helpers()
         if hasattr(helpers, "sanitize_string"):
             return helpers.sanitize_string(value, max_length=max_length)  # type: ignore[attr-defined]
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
     if value is None:
         return ""
     try:
         s = str(value)
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
         return "<unprintable>"
     s = s.replace("\x00", "")
     s = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]", "", s)
@@ -973,7 +978,7 @@ def _redact_for_log_local(value: Any, max_len: int = 80) -> str:
         return "None"
     try:
         s = str(value)
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
         return "<unprintable>"
     if len(s) > max_len:
         s = s[:max_len] + "...[truncated]"
@@ -997,7 +1002,7 @@ def _validate_input_size(df: pd.DataFrame) -> None:
     """
     try:
         nrows = len(df)
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
         return
     if nrows > _MAX_DATAFRAME_ROWS:
         raise ValueError(
@@ -1018,7 +1023,8 @@ def _scan_for_pii(df: pd.DataFrame) -> dict[str, int]:
         helpers = _get_helpers()
         if hasattr(helpers, "scan_for_pii"):
             return helpers.scan_for_pii(df)  # type: ignore[attr-defined]
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
     for col in df.columns:
         col_data = df[col]
@@ -1033,7 +1039,8 @@ def _scan_for_pii(df: pd.DataFrame) -> dict[str, int]:
                 n = int(matches.sum())
                 if n > 0:
                     counts[pii_type] += n
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+                logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
                 continue
     for pii_type, n in counts.items():
         if n > 0:
@@ -1059,14 +1066,15 @@ def _fingerprint_df(df: pd.DataFrame) -> str:
         helpers = _get_helpers()
         if hasattr(helpers, "compute_data_fingerprint"):
             return helpers.compute_data_fingerprint(df)  # type: ignore[attr-defined]
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
     try:
         sorted_cols = sorted(df.columns)
         sorted_df = df[sorted_cols]
         csv_str = sorted_df.to_csv(index=False, float_format="%.10f")
         return hashlib.sha256(csv_str.encode("utf-8")).hexdigest()
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
         return "unknown"
 
 
@@ -1332,7 +1340,8 @@ def _append_dead_letter(
         if hasattr(helpers, "add_dead_letter_pkg"):
             preview = json.dumps(row, default=str)[:500] if row else ""
             helpers.add_dead_letter_pkg(preview, function_name, reason)  # type: ignore[attr-defined]
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
 
 
@@ -1482,7 +1491,8 @@ def get_metrics() -> dict[str, int]:
         pkg_metrics = cleaning.get_metrics()
         if isinstance(pkg_metrics, dict):
             merged["package"] = pkg_metrics  # type: ignore[assignment]
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
     return merged
 
@@ -1745,7 +1755,8 @@ def validate_environment() -> dict[str, Any]:
         major, minor = pd_version.split(".")[:2]
         if int(major) < 2 or (int(major) == 2 and int(minor) < 1):
             issues.append(f"pandas {pd_version} < 2.1.4")
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
     # P1-054 ROOT FIX: avoid __import__('numpy') -- use a lazy helper.
     def _get_numpy_version() -> str:
@@ -1917,7 +1928,7 @@ def _check_whitespace_inchikeys(df: pd.DataFrame) -> bool:
         return False
     try:
         return bool(sample.astype(str).str.contains(_WHITESPACE_PATTERN, regex=True).any())
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
         return False
 
 
@@ -2089,7 +2100,8 @@ def dedup_by_inchikey(
                         warnings=["idempotent_skip"],
                     )
                 return df.copy()
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
 
     # Empty DataFrame
@@ -2172,7 +2184,8 @@ def dedup_by_inchikey(
     # [SEC-2] PII scan
     try:
         _scan_for_pii(df)
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
 
     # [SCI-8] Whitespace check
@@ -2223,7 +2236,8 @@ def dedup_by_inchikey(
             working["inchikey"] = working["inchikey"].apply(
                 lambda x: x.strip().upper() if isinstance(x, str) else x
             )
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
 
     # [DQ-2] Convert NaN-equivalent strings to NaN
@@ -2234,7 +2248,8 @@ def dedup_by_inchikey(
 
     try:
         working["inchikey"] = working["inchikey"].apply(_normalize_null_inchikey)
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
 
     # [SCI-5] SYNTH key handling
@@ -2439,7 +2454,7 @@ def dedup_by_inchikey(
                             transformations.append(
                                 "version_char_normalized_merge"
                             )
-        except Exception as exc:  # pragma: no cover -- defensive
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:# pragma: no cover -- defensive
             logger.debug("version-char mismatch detection failed: %s", exc)
 
     # [DES-3] [PERF-1] Compute weighted completeness scores
@@ -2681,7 +2696,8 @@ def dedup_by_inchikey(
                     "completeness_score": float(row.get("_completeness_score", 0.0)),
                     "reason": "duplicate_inchikey",
                 })
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
         # [LINEAGE-3] Add dead-letter entries for the first N dropped rows
         #
@@ -2745,7 +2761,8 @@ def dedup_by_inchikey(
                     survivor_info=survivor_info,
                 )
                 # counter incremented inside _append_dead_letter (v35 fix)
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+                logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
                 pass
 
     # [CODE-4] reset_index
@@ -2762,7 +2779,8 @@ def dedup_by_inchikey(
         try:
             vc = deduped["source"].value_counts()
             source_attribution = {str(k): int(v) for k, v in vc.items()}
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
 
     # [ARCH-6] [LINEAGE-1] Attach provenance
@@ -2978,7 +2996,8 @@ def dedup_interactions(
                         warnings=["idempotent_skip"],
                     )
                 return df.copy()
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
 
     # Empty DataFrame
@@ -3085,7 +3104,8 @@ def dedup_interactions(
     # [SEC-2] PII scan
     try:
         _scan_for_pii(df)
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+        logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
         pass
 
     input_fp = _fingerprint_df(df)
@@ -3112,7 +3132,8 @@ def dedup_interactions(
     for k in keys:
         try:
             null_keys_mask = null_keys_mask | working[k].isna()
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
     n_null_keys = int(null_keys_mask.sum())
     if n_null_keys > 0:
@@ -3209,7 +3230,7 @@ def dedup_interactions(
                     working["_av_numeric"] = pd.to_numeric(
                         working[activity_value_column], errors="coerce"  # type: ignore[index]
                     )
-                except Exception:
+                except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
                     working["_av_numeric"] = pd.NA
                 n_censored = int(working["_av_censored"].sum())
                 if n_censored > 0:
@@ -3240,7 +3261,7 @@ def dedup_interactions(
                 working["_av_numeric"] = pd.to_numeric(
                     working[activity_value_column], errors="coerce"  # type: ignore[index]
                 )
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
                 working["_av_numeric"] = pd.NA
 
         # [SCI-4] Unit normalization
@@ -3262,7 +3283,7 @@ def dedup_interactions(
                 n_normalized = int(working["_av_norm_warning"].isna().sum())
                 _incr_metric(f"{func_name}_unit_normalizations", n_normalized)
                 transformations.append("normalize_units")
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
                 working["_av_normalized"] = working["_av_numeric"]
                 working["_av_norm_warning"] = None
         else:
@@ -3307,7 +3328,7 @@ def dedup_interactions(
                 )
                 _incr_metric(f"{func_name}_censored_band_values", n_censored_band)
                 transformations.append("censored_band_tagging")
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
             # Defensive: if column doesn't exist or comparison fails,
             # fall back to "no censored-band values".
             working["_av_in_censored_band"] = 0
@@ -3322,7 +3343,8 @@ def dedup_interactions(
                     | (working["_av_normalized"] > _ACTIVITY_NON_PHYSICAL_MAX)
                 )
             )
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
         n_invalid = int(invalid_mask.sum())
         if n_invalid > 0:
@@ -3466,7 +3488,7 @@ def dedup_interactions(
                 # Negate so ascending sort puts highest confidence first
                 working["_av_confidence_sort"] = -working["_av_confidence_sort"]
                 transformations.append("confidence_tiebreaker")
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
                 working["_av_confidence_sort"] = 0.0
                 working["_confidence_was_clipped"] = False
                 working["_confidence_clipped"] = (
@@ -3676,9 +3698,11 @@ def dedup_interactions(
                         survivor_info=survivor_info,
                     )
                     # counter incremented inside _append_dead_letter (v35 fix)
-                except Exception:
+                except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+                    logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
                     pass
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
 
     # [CODE-4] reset_index
@@ -3694,7 +3718,8 @@ def dedup_interactions(
         try:
             vc = deduped["source"].value_counts()
             source_attribution = {str(k): int(v) for k, v in vc.items()}
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+            logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
             pass
 
     # v35 ROOT FIX: compute the actual dead-letter count for this call
@@ -4005,7 +4030,7 @@ def quality_report(
             report["completeness_per_column"][col] = (
                 1.0 - null_count / max(len(df), 1)
             )
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
             report["null_counts"][col] = -1
 
     # Drug-specific checks
@@ -4018,7 +4043,8 @@ def quality_report(
             try:
                 dup_count = int(df["inchikey"].dropna().duplicated().sum())
                 report["duplicate_counts"]["inchikey"] = dup_count
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+                logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
                 pass
             # SYNTH keys
             synth_count = int(df["inchikey"].dropna().apply(_is_synthetic_inchikey).sum())
@@ -4056,7 +4082,8 @@ def quality_report(
                     )
                 )
                 report["out_of_range_activity_value_count"] = int(out_of_range.sum())
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as _narrowed_exc:
+                logger.warning("narrowed except caught (v107 P1-022/023): %s", _narrowed_exc, exc_info=True)
                 pass
         if "activity_type" in df.columns:
             unknown_types = [
@@ -4287,7 +4314,7 @@ def checkpoint_state(
             checkpoint["column_hashes"][col] = hashlib.sha256(
                 col_str.encode("utf-8", errors="replace")
             ).hexdigest()[:16]
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
             checkpoint["column_hashes"][col] = "error"
     if keys is not None:
         try:
@@ -4311,7 +4338,7 @@ def checkpoint_state(
                 }
                 for k in keys if k in df.columns
             }
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
             checkpoint["key_distribution"] = {}
     return checkpoint
 
@@ -4372,7 +4399,7 @@ def performance_benchmark(
                 "throughput_rows_per_sec": (len(df) / elapsed) if elapsed > 0 else 0.0,
                 "status": "ok",
             }
-        except Exception as exc:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
             results["dedup_by_inchikey"] = {
                 "status": "error",
                 "error": str(exc)[:200],
@@ -4387,7 +4414,7 @@ def performance_benchmark(
                 "throughput_rows_per_sec": (len(df) / elapsed) if elapsed > 0 else 0.0,
                 "status": "ok",
             }
-        except Exception as exc:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
             results["dedup_interactions"] = {
                 "status": "error",
                 "error": str(exc)[:200],
@@ -4426,10 +4453,10 @@ def is_reproducible(
                     result_a, result_b, check_dtype=True,
                     check_index_type=True, check_column_type=True,
                 )
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
                 return False
         return True
-    except Exception:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
         return False
 
 
@@ -4455,7 +4482,7 @@ def reproducibility_report(df: pd.DataFrame) -> dict[str, Any]:
         fp2 = r2.attrs.get("_output_fingerprint", "")
         report["fingerprint_stable"] = (fp1 == fp2) and (fp1 != "")
         report["fingerprint"] = fp1
-    except Exception as exc:
+    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
         report["is_reproducible"] = False
         report["error"] = str(exc)[:200]
     return report
@@ -4498,7 +4525,7 @@ def _fire_hooks(
     for hook in hooks:
         try:
             hook(step_name, df)
-        except Exception as exc:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
             _log_event(
                 "warning", "dedup.hook_failed",
                 step=step_name, error=str(exc)[:200],
@@ -4612,7 +4639,7 @@ def clean_interactions(
                         if result[0] is not None:
                             return float(result[0])
                         return None
-                    except Exception:
+                    except (KeyError, ValueError, TypeError, AttributeError, RuntimeError):
                         return None
                 # Preserve original values for forensic audit before overwrite.
                 out["_activity_value_original"] = out[activity_value_column]
@@ -4628,7 +4655,7 @@ def clean_interactions(
                             "for the source values.",
                     )
                 _log_event("info", "clean_interactions.normalize_activity_value")
-        except Exception as exc:
+        except (KeyError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
             _log_event(
                 "debug", "clean_interactions.normalize_skipped",
                 error=str(exc)[:200],

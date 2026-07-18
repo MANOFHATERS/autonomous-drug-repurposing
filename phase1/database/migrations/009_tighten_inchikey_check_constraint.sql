@@ -47,7 +47,10 @@ BEGIN;
 -- ALTER will FAIL if any row violates the new CHECK, so this block gives
 -- operators a chance to clean up first.
 -- v29 ROOT FIX: the audit predicate now uses the SAME regex as the
--- constraint (canonical 27-char OR SYNTH%), not just LENGTH=27.
+-- constraint (canonical 27-char OR tightened SYNTH[A-Z0-9-]{4,30}),
+-- not just LENGTH=27.
+-- v110 Task 32 root fix: SYNTH escape hatch tightened from '^SYNTH' to
+-- '^SYNTH[A-Z0-9-]{4,30}$' (alphanumeric+dash only, 4-30 chars after SYNTH).
 DO $$
 DECLARE
     _bad_count INTEGER;
@@ -56,7 +59,7 @@ BEGIN
     FROM drugs
     WHERE NOT (
         inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'
-        OR inchikey ~ '^SYNTH'
+        OR inchikey ~ '^SYNTH[A-Z0-9-]{4,30}$'
     );
     IF _bad_count > 0 THEN
         RAISE WARNING
@@ -118,13 +121,27 @@ ALTER TABLE drugs
 DO $$
 BEGIN
     -- PostgreSQL: use POSIX regex for strict InChIKey validation.
+    -- v110 Task 32 root fix: tightened the SYNTH escape hatch from
+    -- ``LIKE 'SYNTH%'`` (which accepted ANY string starting with SYNTH,
+    -- including 'SYNTH_GARBAGE_123!!' with spaces/punctuation) to
+    -- ``~ '^SYNTH[A-Z0-9-]{4,30}$'`` which requires SYNTH followed by
+    -- 4-30 uppercase alphanumeric characters or dashes ONLY. This matches
+    -- the actual synthetic ID formats used in the codebase:
+    --   SYNTH0001..SYNTH9999           (test fixtures)
+    --   SYNTH-DB-[0-9A-F]{8}           (drugbank synthesized drug IDs)
+    --   SYNTH-DB-M\d{6}                (drugbank synthesized mixture IDs)
+    -- Real InChIKeys follow the canonical 27-char IUPAC format
+    -- (14 + dash + 10 + dash + 1), e.g. BQJCRHHNABKAKU-XKUOQXGZSA-N (aspirin).
+    -- The audit's claim of "14-2-8" format is scientifically WRONG — the
+    -- actual IUPAC spec is 14-10-1. The canonical regex below is correct.
+    -- Ref: https://www.inchi-trust.org/technical-faq/#2
     ALTER TABLE drugs
         ADD CONSTRAINT chk_drugs_inchikey_format
         CHECK (
             inchikey ~ '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'
-            OR inchikey LIKE 'SYNTH%'
+            OR inchikey ~ '^SYNTH[A-Z0-9-]{4,30}$'
         );
-    RAISE NOTICE '  [OK] Added tightened chk_drugs_inchikey_format (POSIX regex)';
+    RAISE NOTICE '  [OK] Added tightened chk_drugs_inchikey_format (POSIX regex + tightened SYNTH escape hatch)';
 EXCEPTION
     WHEN feature_not_supported OR syntax_error THEN
         -- P1-015 ROOT FIX (Team-2 — SQLite fallback now uses real REGEXP):
@@ -153,9 +170,9 @@ EXCEPTION
             ADD CONSTRAINT chk_drugs_inchikey_format
             CHECK (
                 inchikey REGEXP '^[A-Z]{14}-[A-Z]{10}-[A-Z]$'
-                OR inchikey LIKE 'SYNTH%'
+                OR inchikey REGEXP '^SYNTH[A-Z0-9-]{4,30}$'
             );
-        RAISE NOTICE '  [OK] Added fallback chk_drugs_inchikey_format (SQLite REGEXP — identical semantics to PostgreSQL ~)';
+        RAISE NOTICE '  [OK] Added fallback chk_drugs_inchikey_format (SQLite REGEXP — identical semantics to PostgreSQL ~, including tightened SYNTH escape hatch)';
 END $$;
 
 COMMENT ON CONSTRAINT chk_drugs_inchikey_format ON drugs IS

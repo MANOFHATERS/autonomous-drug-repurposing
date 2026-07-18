@@ -23,8 +23,32 @@ import zipfile
 import sys
 from pathlib import Path
 
-ROOT = Path("/home/z/my-project")
-OUTPUT = Path("/home/z/my-project/download/drugos_complete.zip")
+# IN-078 ROOT FIX (Teammate 13, MEDIUM): the previous version hardcoded
+# `/home/z/my-project` — a path that exists only on the original dev's
+# machine. On any other machine (CI, another laptop, Docker) every Path
+# operation failed with FileNotFoundError or wrote the zip to the wrong
+# location. ROOT FIX: compute the frontend directory (this script lives in
+# frontend/scripts/, so parent.parent == frontend/) relative to the script
+# itself, so the script is portable across machines. An optional --output
+# CLI arg lets CI override the destination.
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = SCRIPT_DIR.parent  # frontend/
+DEFAULT_OUTPUT = ROOT / "download" / "drugos_complete.zip"
+
+
+def _parse_args() -> Path:
+    """Parse --output to allow CI to override the zip destination."""
+    output = DEFAULT_OUTPUT
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg == "--output" and i + 1 < len(args):
+            output = Path(args[i + 1]).resolve()
+        elif arg.startswith("--output="):
+            output = Path(arg.split("=", 1)[1]).resolve()
+    return output
+
+
+OUTPUT = _parse_args()
 
 EXCLUDE_DIRS = {
     "node_modules",
@@ -152,6 +176,11 @@ def main():
             for filename in filenames:
                 full_path = current_dir / filename
                 if should_exclude(full_path):
+                    continue
+                # IN-078: guard against files that vanish mid-walk (e.g.
+                # build artifacts deleted concurrently). Previously a missing
+                # file raised FileNotFoundError and aborted the whole zip.
+                if not full_path.exists():
                     continue
                 # Compute the path inside the ZIP (relative to ROOT, with a top-level "drugos" folder)
                 rel_path = full_path.relative_to(ROOT)

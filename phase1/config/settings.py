@@ -25,16 +25,32 @@ the ``.env`` file exactly once. This makes importing this module
 side-effect-free -- safe for DAG parsing, test frameworks, and IDE
 autocompletion.
 
-Exceptions (P1-022 ROOT FIX -- documented eager reads):
-  ``ENVIRONMENT`` (and its alias ``DRUGOS_ENVIRONMENT``) IS read at
-  import time. This is intentional because ENVIRONMENT is consumed by
-  many module-level constants (``_PROFILE_DEFAULTS`` lookups,
-  ``DATABASE_URL`` dev-mode auto-swap, etc.) that need a stable value
-  at import time. Making ENVIRONMENT lazy would require a sweeping
-  refactor of every consumer. If you need to override ENVIRONMENT in
-  a test, set the env var BEFORE importing ``config.settings`` (e.g.
-  via ``monkeypatch.setenv`` in a fixture that runs before import, or
-  by setting it in the test process's environment before pytest starts).
+Exceptions (P1-012 v117 ROOT FIX -- ENVIRONMENT is now LAZY via __getattr__):
+  ``ENVIRONMENT`` (and its alias ``DRUGOS_ENVIRONMENT``) IS resolved
+  lazily on every access via the module-level PEP 562 ``__getattr__``
+  at the bottom of this file. The previous behavior (eager read at
+  import time, broken test ergonomics for ``monkeypatch.setenv``)
+  has been replaced with a fresh ``os.getenv`` lookup on every
+  ``settings.ENVIRONMENT`` access, normalized through
+  ``_ENV_NORMALIZATION``.
+
+  For import-time consumers that need a STABLE snapshot (the
+  ``_PROFILE_DEFAULTS`` lookup in ``_get_profile_default`` and the
+  ``DATABASE_URL`` dev-mode auto-swap below), the import-time-bound
+  value is preserved as the private ``_ENVIRONMENT_SNAPSHOT`` constant
+  -- this is the value that was read at import time, and it does NOT
+  change if the env var is mutated after import.
+
+  Code that does ``import phase1.config.settings as s; s.ENVIRONMENT``
+  will see the FRESH value (lazy). Code that does
+  ``from phase1.config.settings import ENVIRONMENT`` will see the
+  snapshot at the moment of the import statement (standard Python
+  ``from ... import`` semantics -- the imported name is a snapshot).
+
+  ``recompute_environment()`` is DEPRECATED (still callable for
+  backward compat, emits a DeprecationWarning, returns the freshly
+  resolved value but no longer mutates module state).
+
   An empty-string ENVIRONMENT is treated as "production" (the ``or``
   short-circuit falls through to the production default).
 
@@ -381,28 +397,50 @@ class _DeprecatedSetting:
 # Synchronized with phase2/drugos_graph/config.py -- DO NOT diverge
 # (audit TOP-2).
 #
+# P1-012 v117 ROOT FIX (forensic -- ENVIRONMENT was eagerly bound at import
+# time, breaking monkeypatch.setenv ergonomics):
+#   The previous implementation read DRUGOS_ENVIRONMENT / ENVIRONMENT at
+#   import time and stored the result in a module-level constant called
+#   ``ENVIRONMENT``. Any test that did
+#   ``monkeypatch.setenv("DRUGOS_ENVIRONMENT", "staging")`` AFTER
+#   ``import config.settings`` would see the STALE import-time value,
+#   not "staging". The recommended fix #2 (call ``recompute_environment()``
+#   after monkeypatching) was a workaround that required every test to
+#   remember the call -- fragile.
+#
+#   ROOT FIX (PEP 562): make ``ENVIRONMENT`` a LAZY module attribute via
+#   the module-level ``__getattr__`` at the bottom of this file. Every
+#   ``settings.ENVIRONMENT`` access now triggers a fresh
+#   ``os.getenv("DRUGOS_ENVIRONMENT") or os.getenv("ENVIRONMENT", ...)``
+#   lookup, normalized through ``_ENV_NORMALIZATION``. Tests can now do
+#   ``monkeypatch.setenv(...); assert settings.ENVIRONMENT == "staging"``
+#   WITHOUT calling ``recompute_environment()``.
+#
+#   For import-time consumers that need a STABLE snapshot (the
+#   ``_PROFILE_DEFAULTS`` lookup in ``_get_profile_default`` and the
+#   ``DATABASE_URL`` dev-mode auto-swap below), the import-time-bound
+#   value is preserved as ``_ENVIRONMENT_SNAPSHOT``. These consumers
+#   intentionally use the snapshot because their decisions are baked
+#   into module-level constants at import time and should NOT change
+#   if the env var is mutated post-import.
+#
+#   ``recompute_environment()`` is DEPRECATED -- it still works (returns
+#   the freshly resolved value) but emits a DeprecationWarning and no
+#   longer mutates the module's ``ENVIRONMENT`` (since ``ENVIRONMENT``
+#   is no longer a regular module attribute -- it's a ``__getattr__``
+#   dispatch).
+#
 # P1-022 ROOT FIX (v100 forensic -- docstring was lying about lazy loading):
-# The module docstring at lines 20-26 claims "Environment variables are
-# NOT read at import time." That claim was TRUE for most settings
-# (which use _getenv() inside _ensure_dotenv_loaded()) but FALSE for
-# ENVIRONMENT -- _raw_environment is read EAGERLY at import time here.
-# This made the module's import-time behavior inconsistent with its
-# documented contract. If a test set DRUGOS_ENVIRONMENT=development
-# AFTER importing config.settings, the change was NOT picked up.
-# ROOT FIX: we keep the eager read (because ENVIRONMENT is consumed
-# by _PROFILE_DEFAULTS lookups and many other module-level constants
-# that need a stable value at import time -- making it lazy would
-# require a sweeping refactor of every consumer), but we now:
-#   1. Document the eager-read exception explicitly in the module
-#      docstring (see the "Exceptions" subsection added to the
-#      Loading Strategy block above).
-#   2. Treat empty-string ENVIRONMENT as "production" (the previous
-#      ``or`` short-circuit already did this implicitly because '' is
-#      falsy -- but now it's EXPLICIT and documented, so an operator
-#      who sets ENVIRONMENT= (empty) in their .env knows they get
-#      production mode).
-#   3. Warn LOUDLY (logger.warning, not info -- see P1-023) when
-#      falling back to the production default.
+#   The module docstring previously claimed "Environment variables are
+#   NOT read at import time." That claim was TRUE for most settings
+#   (which use _getenv() inside _ensure_dotenv_loaded()) but FALSE for
+#   ENVIRONMENT -- _raw_environment was read EAGERLY at import time.
+#   P1-012 v117 closes the gap by making ENVIRONMENT truly lazy.
+#
+# v89 P0 ROOT FIX (DRUGOS_ENVIRONMENT default = production) and
+# P1-023 ROOT FIX (LOUD log.warning on production default) are
+# preserved below -- they only fire ONCE at import time, based on the
+# import-time env var state (which equals _ENVIRONMENT_SNAPSHOT).
 _raw_environment: str = (
     os.getenv("DRUGOS_ENVIRONMENT")
     or os.getenv("ENVIRONMENT", "production")
@@ -417,7 +455,12 @@ _ENV_NORMALIZATION: dict[str, str] = {
     "prod": "production",
     "production": "production",
 }
-ENVIRONMENT: str = _ENV_NORMALIZATION.get(_raw_environment, _raw_environment)
+# P1-012 v117: snapshot of the import-time ENVIRONMENT value, used by
+# import-time consumers (_get_profile_default, DATABASE_URL dev-mode
+# auto-swap, UNIPROT_RELEASE production gate). The PUBLIC ``ENVIRONMENT``
+# name is now dispatched lazily via ``__getattr__`` at the bottom of
+# this file -- it is NOT a regular module attribute.
+_ENVIRONMENT_SNAPSHOT: str = _ENV_NORMALIZATION.get(_raw_environment, _raw_environment)
 
 # v89 P0 ROOT FIX (DRUGOS_ENVIRONMENT default = production):
 # The previous default was "development", which silently enabled 11+
@@ -454,57 +497,75 @@ if not os.getenv("DRUGOS_ENVIRONMENT") and not os.getenv("ENVIRONMENT"):
 
 
 def recompute_environment() -> str:
-    """Re-read DRUGOS_ENVIRONMENT / ENVIRONMENT env vars and update ENVIRONMENT.
+    """Re-read DRUGOS_ENVIRONMENT / ENVIRONMENT env vars and return the value.
 
-    P1-012 ROOT FIX (Team-1 -- ENVIRONMENT eager-read breaks test ergonomics):
-      The module-level ``_raw_environment`` (line 406 above) is read EAGERLY
-      at import time. The docstring documents this exception, but tests
-      that use ``monkeypatch.setenv("DRUGOS_ENVIRONMENT", "development")``
-      in a fixture that runs AFTER ``import config.settings`` see no
-      effect -- the module-level ``ENVIRONMENT`` constant has already been
-      bound and is not re-read.
+    P1-012 v117 ROOT FIX (DEPRECATED -- ENVIRONMENT is now lazy via __getattr__):
 
-      The previous workaround was "set the env var BEFORE importing
-      config.settings" -- fragile and incompatible with pytest fixtures
-      that run after import.
+      Prior to v117, ``ENVIRONMENT`` was a module-level constant bound
+      eagerly at import time. Tests that did
+      ``monkeypatch.setenv("DRUGOS_ENVIRONMENT", "development")`` AFTER
+      ``import config.settings`` would see no effect -- the constant
+      had already been bound. ``recompute_environment()`` was the
+      prescribed workaround: call it after ``monkeypatch.setenv`` to
+      re-resolve and mutate the module-level ``ENVIRONMENT``.
 
-      ROOT FIX: provide a ``recompute_environment()`` function that tests
-      can call AFTER ``monkeypatch.setenv(...)`` to re-resolve ENVIRONMENT
-      from the current env vars. The function:
-        1. Re-reads ``DRUGOS_ENVIRONMENT`` / ``ENVIRONMENT`` from ``os.environ``.
-        2. Normalizes via ``_ENV_NORMALIZATION``.
-        3. Updates the module-level ``ENVIRONMENT`` global.
-        4. Returns the new value (for assertability).
+      In v117, ``ENVIRONMENT`` is no longer a regular module attribute --
+      it is dispatched lazily via the module-level PEP 562 ``__getattr__``
+      at the bottom of this file. Every ``settings.ENVIRONMENT`` access
+      reads the env var fresh. As a result, ``recompute_environment()``
+      is NO LONGER NEEDED -- ``monkeypatch.setenv("DRUGOS_ENVIRONMENT",
+      "x"); assert settings.ENVIRONMENT == "x"`` works without it.
 
-      Production code should NOT call this -- the eager read at import
-      time is intentional (ENVIRONMENT is consumed by many module-level
-      constants). This function is for TEST ERGONOMICS only.
+      This function is RETAINED for backward compat with any test or
+      tooling that calls it. It now:
 
-    Usage in tests::
+        1. Emits a ``DeprecationWarning`` informing the caller that the
+           call is no longer necessary.
+        2. Re-reads ``DRUGOS_ENVIRONMENT`` / ``ENVIRONMENT`` and
+           normalizes via ``_ENV_NORMALIZATION``.
+        3. Updates ``_raw_environment`` (a private name still used by
+           some legacy callers) but does NOT mutate ``ENVIRONMENT``
+           (which would create a module attribute and shadow the lazy
+           ``__getattr__`` dispatch -- a regression of the v117 fix).
+        4. Returns the freshly-resolved value.
 
-        import config.settings as s
+    Usage in tests (PREFERRED v117 pattern -- no recompute call)::
+
+        import phase1.config.settings as s
 
         def test_dev_mode(monkeypatch):
             monkeypatch.setenv("DRUGOS_ENVIRONMENT", "development")
-            new_env = s.recompute_environment()
-            assert new_env == "development"
-            assert s.ENVIRONMENT == "development"
-            # ... test dev-mode behavior ...
+            assert s.ENVIRONMENT == "development"  # lazy, no recompute needed
 
     Returns
     -------
     str
-        The new environment value (one of "development", "staging",
-        "production", or the raw value if not in _ENV_NORMALIZATION).
+        The freshly-resolved environment value (one of "development",
+        "staging", "production", or the raw value if not in
+        _ENV_NORMALIZATION).
     """
-    global ENVIRONMENT, _raw_environment
+    # P1-012 v117: emit a DeprecationWarning. Do NOT remove this function
+    # in v117 -- tests in the wider codebase may still call it. Schedule
+    # removal for v2.0.0.
+    warnings.warn(
+        "recompute_environment() is DEPRECATED (P1-012 v117 ROOT FIX). "
+        "ENVIRONMENT is now lazy via the module-level __getattr__ -- "
+        "monkeypatch.setenv('DRUGOS_ENVIRONMENT', ...) is picked up "
+        "automatically on the next settings.ENVIRONMENT access. Stop "
+        "calling recompute_environment(); it will be removed in v2.0.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    global _raw_environment
     _raw_environment = (
         os.getenv("DRUGOS_ENVIRONMENT")
         or os.getenv("ENVIRONMENT", "production")
         or "production"
     ).lower()
-    ENVIRONMENT = _ENV_NORMALIZATION.get(_raw_environment, _raw_environment)
-    return ENVIRONMENT
+    # P1-012 v117: do NOT assign to ENVIRONMENT here. ENVIRONMENT is now a
+    # lazy __getattr__ dispatch -- assigning it as a module attribute would
+    # shadow that dispatch forever after this call, regressing the v117 fix.
+    return _ENV_NORMALIZATION.get(_raw_environment, _raw_environment)
 
 
 BASE_DIR: Path = Path(_getenv("PROJECT_ROOT", str(Path(__file__).parent.parent)))
@@ -549,7 +610,7 @@ def _get_profile_default(key: str, fallback: str) -> str:
     explicit = os.getenv(key)
     if explicit is not None:
         return explicit
-    profile = _PROFILE_DEFAULTS.get(ENVIRONMENT, {})
+    profile = _PROFILE_DEFAULTS.get(_ENVIRONMENT_SNAPSHOT, {})
     return profile.get(key, fallback)
 
 
@@ -615,7 +676,7 @@ else:
 #      UserWarning, so the message survives pytest -p no:warnings and
 #      any operator's stderr filter.
 if "REPLACE_USER" in DATABASE_URL or "REPLACE_PASSWORD" in DATABASE_URL:
-    if ENVIRONMENT == "development":
+    if _ENVIRONMENT_SNAPSHOT == "development":
         # Use a module-level logger so the message lands in the standard
         # log pipeline (file + stderr) regardless of the warnings filter.
         _log = logging.getLogger("drugos.config.settings")
@@ -674,11 +735,11 @@ if "REPLACE_USER" in DATABASE_URL or "REPLACE_PASSWORD" in DATABASE_URL:
             )
             del _dev_db_user, _dev_db_password, _dev_db_host
             del _dev_db_port, _dev_db_name
-    elif ENVIRONMENT in ("staging", "production"):
+    elif _ENVIRONMENT_SNAPSHOT in ("staging", "production"):
         raise ValueError(
             "DATABASE_URL contains placeholder credentials. "
             "Set the DATABASE_URL environment variable with real credentials "
-            f"for the {ENVIRONMENT} environment."
+            f"for the {_ENVIRONMENT_SNAPSHOT} environment."
         )
 
 # v65 ROOT FIX (P1C-010 -- detect cosmic:cosmic default credentials):
@@ -705,14 +766,14 @@ if "REPLACE_USER" in DATABASE_URL or "REPLACE_PASSWORD" in DATABASE_URL:
 #   clear authentication error rather than silently using cosmic:cosmic).
 _DEFAULT_DB_CREDENTIAL_MARKER = "cosmic:cosmic@"
 if _DEFAULT_DB_CREDENTIAL_MARKER in DATABASE_URL:
-    if ENVIRONMENT in ("staging", "production"):
+    if _ENVIRONMENT_SNAPSHOT in ("staging", "production"):
         raise ValueError(
             "DATABASE_URL contains the docker-compose default credentials "
             "('cosmic:cosmic'). Default credentials must not be used in "
-            f"the {ENVIRONMENT} environment. Set the DATABASE_URL "
+            f"the {_ENVIRONMENT_SNAPSHOT} environment. Set the DATABASE_URL "
             "environment variable with real credentials. (v65 root fix P1C-010)"
         )
-    elif ENVIRONMENT == "development":
+    elif _ENVIRONMENT_SNAPSHOT == "development":
         _log = logging.getLogger("drugos.config.settings")
         _allow_default_db = os.getenv("DRUGOS_DEV_ALLOW_DEFAULT_DB", "") == "1"
         if not _allow_default_db:
@@ -893,7 +954,7 @@ CHEMBL_EXPECTED_DRUG_COUNT_MAX: int = _parse_required_int(
 )
 
 # Warn about unlimited processing in non-dev (DATA-4)
-if CHEMBL_MAX_ROWS is None and ENVIRONMENT != "development":
+if CHEMBL_MAX_ROWS is None and _ENVIRONMENT_SNAPSHOT != "development":
     warnings.warn(
         "CHEMBL_MAX_ROWS is not set. The pipeline will process ALL ChEMBL "
         "molecules, which may take several hours and consume significant "
@@ -924,17 +985,33 @@ if CHEMBL_RETRY_BACKOFF_BASE < 1.0:
         f"got {CHEMBL_RETRY_BACKOFF_BASE}"
     )
 
-# Proactive rate limit (P1). ChEMBL's soft limit is ~2 req/sec for short
-# bursts; 0.5s average keeps us safely under the threshold while allowing
-# the token-bucket to absorb bursts (P4).
+# Proactive rate limit (P1, Task 37 v110 root fix). ChEMBL's documented
+# public API rate limit is 5 req/sec (https://chembl.gitbook.io/chembl-interface-documentation/web-services).
+# Default interval of 0.2s = 5 req/sec, utilizing the full allowance.
+# The token-bucket in _chembl_http_client.py enforces this with bounded
+# burst capacity, so we stay at or below 5 req/sec even under concurrent load.
+# v110 root fix: previous default of 0.5s (2 req/sec) was 60% under-utilization
+# of the ChEMBL allowance, needlessly throttling throughput on multi-million
+# record pulls. Set env CHEMBL_MIN_REQUEST_INTERVAL=0.5 to restore the
+# conservative 2 req/sec behavior if a deployer observes 429s.
 CHEMBL_MIN_REQUEST_INTERVAL: float = _getenv_float(
-    "CHEMBL_MIN_REQUEST_INTERVAL", 0.5
+    "CHEMBL_MIN_REQUEST_INTERVAL", 0.2
 )
 if CHEMBL_MIN_REQUEST_INTERVAL < 0.0:
     raise ValueError(
         f"env var 'CHEMBL_MIN_REQUEST_INTERVAL' must be >= 0.0, "
         f"got {CHEMBL_MIN_REQUEST_INTERVAL}"
     )
+if CHEMBL_MIN_REQUEST_INTERVAL > 0.0:
+    _effective_rate = 1.0 / CHEMBL_MIN_REQUEST_INTERVAL
+    if _effective_rate > 5.0:
+        raise ValueError(
+            f"env var 'CHEMBL_MIN_REQUEST_INTERVAL'={CHEMBL_MIN_REQUEST_INTERVAL} "
+            f"implies {_effective_rate:.1f} req/sec, which EXCEEDS ChEMBL's "
+            f"documented 5 req/sec public API rate limit. This would violate "
+            f"ChEMBL's TOS and trigger 429 responses. Use a value >= 0.2 "
+            f"(= 5 req/sec). (Task 37 v110 root fix)"
+        )
 
 # HTTP timeout tuple (connect, read) in seconds (SEC-2, C37).
 CHEMBL_HTTP_TIMEOUT: tuple[float, float] = (
@@ -1134,7 +1211,7 @@ UNIPROT_RELEASE: str = _getenv("UNIPROT_RELEASE", DEFAULT_UNIPROT_RELEASE)
 # ``current_release`` -- a non-reproducible KG is a regulatory
 # non-compliance. The previous code only warned, which operators routinely
 # ignored. Raise to force the operator to pin a release.
-if UNIPROT_RELEASE == "current_release" and ENVIRONMENT == "production":
+if UNIPROT_RELEASE == "current_release" and _ENVIRONMENT_SNAPSHOT == "production":
     raise RuntimeError(
         "UNIPROT_RELEASE is set to 'current_release' in production. "
         "This makes pipeline runs non-reproducible (UniProt releases "
@@ -1142,13 +1219,13 @@ if UNIPROT_RELEASE == "current_release" and ENVIRONMENT == "production":
         "release (e.g., UNIPROT_RELEASE=releases/2024_03) for "
         "reproducibility. (P1-016 ROOT FIX: raise, don't warn.)"
     )
-if UNIPROT_RELEASE == "current_release" and ENVIRONMENT != "production":
+if UNIPROT_RELEASE == "current_release" and _ENVIRONMENT_SNAPSHOT != "production":
     warnings.warn(
         "UNIPROT_RELEASE is set to 'current_release' (ENVIRONMENT=%s). "
         "This is non-reproducible and acceptable ONLY for local dev. "
         "Pin a specific release (e.g., 'releases/2024_03') for any "
         "shared/staging/production deploy. (P1-016)"
-        % ENVIRONMENT,
+        % _ENVIRONMENT_SNAPSHOT,
         UserWarning,
     )
 
@@ -1410,6 +1487,104 @@ DISGENET_API_URL: str = _getenv(
 DISGENET_API_KEY: str = _getenv("DISGENET_API_KEY", "")
 DISGENET_USE_API: bool = _parse_bool(_getenv("DISGENET_USE_API", "true"))
 
+# v110 Task 24 root fix: DisGeNET license tier management.
+#
+# DisGeNET offers three license tiers (per https://www.disgenet.org/plans):
+#   - "curated"  : paid license, full curated GDA records (all sources,
+#                  including BEFREE, CURATED, etc.). ~1.2M+ GDAs.
+#   - "premium"  : paid license, includes animal model + predicted data.
+#   - "free"     : free tier, limited to ~620K GDAs from public sources
+#                  (CURATED + ALL_OMIM + ALL_HPO + INFILER + etc. minus
+#                  premium-only sources). Requires free API key.
+#
+# The audit (Task 24) requires: "must use the curated license if available,
+# fallback to free tier with a warning."
+#
+# ROOT FIX: add DISGENET_LICENSE_TIER setting (default "auto").
+#   - "auto" (default): if DISGENET_API_KEY is present, assume curated tier
+#     (the key was provisioned for a paid plan). If key is absent, fall back
+#     to free tier with a clear warning that the dataset is limited.
+#   - "curated": explicitly use the curated endpoint (fails if no key).
+#   - "free"   : explicitly use the free endpoint (key optional but recommended).
+#   - "premium": explicitly use the premium endpoint (fails if no key).
+#
+# The tier affects:
+#   1. The API endpoint path (curated uses /gda/summary, free uses the same
+#      path but the server returns a limited record set based on the key's
+#      entitlements).
+#   2. The expected record count (curated: ~1.2M+, free: ~620K). The
+#      pipeline logs the expected count so operators can detect a
+#      silent tier downgrade.
+#   3. The warning emitted when falling back to free.
+DISGENET_LICENSE_TIER: str = _getenv("DISGENET_LICENSE_TIER", "auto").lower().strip()
+if DISGENET_LICENSE_TIER not in ("auto", "curated", "premium", "free"):
+    raise ValueError(
+        f"env var 'DISGENET_LICENSE_TIER' must be one of "
+        f"'auto', 'curated', 'premium', 'free' — got {DISGENET_LICENSE_TIER!r}. "
+        f"(Task 24 v110 root fix)"
+    )
+
+# Expected GDA record counts per tier (for silent-downgrade detection).
+# Source: DisGeNET pricing page + Piñero et al. 2020 §3.1.
+DISGENET_EXPECTED_RECORDS_BY_TIER: dict[str, int] = {
+    "curated": 1_200_000,   # curated + ALL sources
+    "premium": 1_500_000,   # premium includes animal model + predicted
+    "free": 620_000,        # free tier (public sources only)
+}
+
+
+def _resolve_disgenet_tier() -> tuple[str, str]:
+    """Resolve the effective DisGeNET license tier and emit warnings.
+
+    Returns
+    -------
+    tuple of (effective_tier, warning_message)
+        effective_tier : str — "curated", "premium", or "free"
+        warning_message : str — empty string if no warning, else the message
+    """
+    if DISGENET_LICENSE_TIER == "auto":
+        if DISGENET_API_KEY:
+            # Key present — assume curated (paid plans provision keys).
+            return ("curated", "")
+        else:
+            # No key — fall back to free tier with warning.
+            _warn = (
+                "DISGENET_LICENSE_TIER=auto and DISGENET_API_KEY is NOT set. "
+                "Falling back to FREE tier — the dataset will be LIMITED to "
+                "~620K public-source GDAs (vs ~1.2M+ for curated). Curated-only "
+                "sources (BEFREE, GWAS_CATALOG_FULL, etc.) will be ABSENT. "
+                "For institutional-grade coverage, set DISGENET_API_KEY with "
+                "a curated/paid plan key, or set DISGENET_LICENSE_TIER=curated "
+                "explicitly. (Task 24 v110 root fix)"
+            )
+            return ("free", _warn)
+    elif DISGENET_LICENSE_TIER in ("curated", "premium"):
+        if not DISGENET_API_KEY:
+            raise ValueError(
+                f"DISGENET_LICENSE_TIER={DISGENET_LICENSE_TIER!r} requires "
+                f"a DISGENET_API_KEY (paid license), but the key is NOT set. "
+                f"Either set DISGENET_API_KEY with a {DISGENET_LICENSE_TIER} "
+                f"plan key, or set DISGENET_LICENSE_TIER=auto/free. "
+                f"(Task 24 v110 root fix)"
+            )
+        return (DISGENET_LICENSE_TIER, "")
+    else:  # "free"
+        if not DISGENET_API_KEY:
+            _warn = (
+                "DISGENET_LICENSE_TIER=free and DISGENET_API_KEY is NOT set. "
+                "DisGeNET's free tier REQUIRES a free API key (register at "
+                "https://www.disgenet.org/plans). Without a key, the API "
+                "will return 401 Unauthorized. (Task 24 v110 root fix)"
+            )
+            return ("free", _warn)
+        return ("free", "")
+
+
+# Resolve the effective tier at import time (so warnings fire once).
+DISGENET_EFFECTIVE_TIER, DISGENET_TIER_WARNING = _resolve_disgenet_tier()
+if DISGENET_TIER_WARNING:
+    warnings.warn(DISGENET_TIER_WARNING, UserWarning)
+
 # The primary URL now points to the API by default (SCI-3)
 DISGENET_URL: str = DISGENET_API_URL
 
@@ -1597,10 +1772,45 @@ DISGENET_API_MAX_RETRY_AFTER: int = _getenv_int(
 
 # SEC-20: Client-side rate limiting.
 DISGENET_API_RATE_LIMIT: float = _getenv_float(
-    "DISGENET_API_RATE_LIMIT", default=2.0
+    "DISGENET_API_RATE_LIMIT", default=1.0
 )
-"""Maximum API requests per second (token-bucket).  Default 2.0 (DisGeNET
-free tier)."""
+"""Maximum API requests per second (token-bucket).
+
+v110 Task 23 root fix: default changed from 2.0 to 1.0 to comply with
+DisGeNET's free-tier TOS (1 req/sec per https://www.disgenet.org/api/).
+The previous default of 2.0 SILENTLY VIOLATED the free-tier TOS and could
+trigger 429 rate-limit responses or API key suspension.
+
+For curated/premium tiers, DisGeNET allows higher rates (up to 5 req/sec
+per the curated plan docs). Deployers on paid plans can set
+DISGENET_API_RATE_LIMIT=5.0 explicitly. The tier-aware clamp below
+prevents accidental TOS violations on the free tier.
+"""
+# v110 Task 23 root fix: tier-aware rate-limit clamp.
+# Free tier: max 1.0 req/sec (DisGeNET TOS).
+# Curated/premium: max 5.0 req/sec (paid plan allowance).
+_MAX_RATE_BY_TIER: dict[str, float] = {
+    "free": 1.0,
+    "curated": 5.0,
+    "premium": 5.0,
+}
+_max_allowed = _MAX_RATE_BY_TIER.get(DISGENET_EFFECTIVE_TIER, 1.0)
+if DISGENET_API_RATE_LIMIT > _max_allowed:
+    _original_rate = DISGENET_API_RATE_LIMIT
+    DISGENET_API_RATE_LIMIT = _max_allowed
+    warnings.warn(
+        f"DISGENET_API_RATE_LIMIT={_original_rate} exceeds the maximum "
+        f"allowed for tier={DISGENET_EFFECTIVE_TIER} ({_max_allowed} req/sec "
+        f"per DisGeNET TOS). Clamped to {_max_allowed}. To use a higher rate, "
+        f"upgrade to a curated/premium plan and set DISGENET_LICENSE_TIER=curated. "
+        f"(Task 23 v110 root fix)",
+        UserWarning,
+    )
+elif DISGENET_API_RATE_LIMIT < 0.0:
+    raise ValueError(
+        f"DISGENET_API_RATE_LIMIT must be >= 0.0, got {DISGENET_API_RATE_LIMIT}. "
+        f"(Task 23 v110 root fix)"
+    )
 
 # REL-8: Circuit breaker.
 DISGENET_CIRCUIT_BREAKER_THRESHOLD: int = _getenv_int(
@@ -2951,8 +3161,11 @@ def log_config_summary() -> None:
     Sensitive values (API keys, passwords) are masked.
     Should be called from entry points after setup_logging().
     """
+    # P1-012 v117: use _ENVIRONMENT_SNAPSHOT here so log_config_summary
+    # reports the same environment that was used for import-time decisions
+    # (DATABASE_URL auto-swap, _PROFILE_DEFAULTS, UNIPROT_RELEASE gate).
     summary = {
-        "ENVIRONMENT": ENVIRONMENT,
+        "ENVIRONMENT": _ENVIRONMENT_SNAPSHOT,
         "CHEMBL_VERSION": CHEMBL_VERSION,
         "STRING_VERSION": STRING_VERSION,
         "STRING_MIN_COMBINED_SCORE": STRING_MIN_COMBINED_SCORE,
@@ -3008,6 +3221,9 @@ def get_provenance_metadata() -> dict:
     """
     config_str = str(sorted(get_data_version_info().items()))
     config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:12]
+    # P1-012 v117: use _ENVIRONMENT_SNAPSHOT in provenance metadata so the
+    # recorded environment matches the import-time decisions baked into the
+    # pipeline's config (DATABASE_URL, _PROFILE_DEFAULTS, UNIPROT_RELEASE).
     return {
         "config_fingerprint": config_hash,
         "data_snapshot_id": DATA_SNAPSHOT_ID,
@@ -3016,7 +3232,7 @@ def get_provenance_metadata() -> dict:
         "string_min_score": STRING_MIN_COMBINED_SCORE,
         "uniprot_release": UNIPROT_RELEASE,
         "disgenet_source": "api" if DISGENET_USE_API else "static",
-        "environment": ENVIRONMENT,
+        "environment": _ENVIRONMENT_SNAPSHOT,
         "pipeline_version": "v1.0",
     }
 
@@ -4196,12 +4412,45 @@ _DEPRECATED_SETTINGS: dict[str, tuple[str, object]] = {
 
 
 def __getattr__(name: str) -> object:
-    """Module-level __getattr__ for deprecated settings.
+    """Module-level __getattr__ for lazy ENVIRONMENT + deprecated settings.
+
+    P1-012 v117 ROOT FIX -- ``ENVIRONMENT`` and ``DRUGOS_ENVIRONMENT`` are
+    now dispatched lazily through this function. Every access to
+    ``settings.ENVIRONMENT`` (or ``settings.DRUGOS_ENVIRONMENT``) re-reads
+    ``os.getenv("DRUGOS_ENVIRONMENT")`` / ``os.getenv("ENVIRONMENT", ...)``
+    fresh and applies ``_ENV_NORMALIZATION``. This fixes the long-standing
+    test ergonomics bug where ``monkeypatch.setenv("DRUGOS_ENVIRONMENT",
+    "staging")`` AFTER ``import config.settings`` had no effect on the
+    module-level ``ENVIRONMENT`` constant.
+
+    For import-time consumers that need a STABLE snapshot (e.g. the
+    ``_PROFILE_DEFAULTS`` lookup in ``_get_profile_default`` and the
+    ``DATABASE_URL`` dev-mode auto-swap), the import-time-bound value is
+    preserved as ``_ENVIRONMENT_SNAPSHOT`` -- those consumers use the
+    snapshot, NOT the lazy value, because their decisions are baked into
+    module-level constants at import time.
+
+    Note (PEP 562 semantics): this ``__getattr__`` is ONLY invoked when
+    the normal module attribute lookup FAILS. ``ENVIRONMENT`` is NOT in
+    the module's ``__dict__`` (only ``_ENVIRONMENT_SNAPSHOT`` is), so
+    ``settings.ENVIRONMENT`` triggers this dispatch every time.
+    ``from phase1.config.settings import ENVIRONMENT`` will trigger it
+    ONCE (at the import statement) and bind the result as a snapshot in
+    the caller's namespace -- standard Python ``from ... import``
+    behavior.
 
     Accessing any name in ``_DEPRECATED_SETTINGS`` triggers a
     ``DeprecationWarning`` with the replacement and removal timeline,
-    then returns the value.  All other names raise ``AttributeError``.
+    then returns the value. All other names raise ``AttributeError``.
     """
+    # P1-012 v117: lazy ENVIRONMENT / DRUGOS_ENVIRONMENT dispatch.
+    if name in ("ENVIRONMENT", "DRUGOS_ENVIRONMENT"):
+        _raw = (
+            os.getenv("DRUGOS_ENVIRONMENT")
+            or os.getenv("ENVIRONMENT", "production")
+            or "production"
+        ).lower()
+        return _ENV_NORMALIZATION.get(_raw, _raw)
     if name in _DEPRECATED_SETTINGS:
         replacement, value = _DEPRECATED_SETTINGS[name]
         warnings.warn(

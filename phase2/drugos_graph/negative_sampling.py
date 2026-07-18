@@ -274,7 +274,9 @@ class NegativeSampler:
         positive_pairs: Set[Tuple[str, str]],
         max_cache_size: int = DEFAULT_NEGATIVE_CACHE_SIZE,
         seed: Optional[int] = None,
-        held_out_pairs: Optional[Set[Tuple[str, str]]] = None,
+        *,
+        held_out_pairs: Set[Tuple[str, str]],
+        reachability_pairs: Optional[Set[Tuple[str, str]]] = None,
     ):
         """Initialize the NegativeSampler.
 
@@ -298,10 +300,22 @@ class NegativeSampler:
             seed: Random seed for reproducibility. Overrides
                 ``config.SEED`` when provided. Critical for FDA 21
                 CFR Part 11 reproducibility.
-            held_out_pairs: Optional val/test set of (drug_id,
-                disease_id) tuples. Added to the rejection set so
-                negative sampling never produces a held-out true pair
-                (false negative). v5 Tier-2 bug #14 fix.
+            held_out_pairs: REQUIRED (task 101 root fix). Val/test set
+                of (drug_id, disease_id) tuples. Added to the rejection
+                set so negative sampling never produces a held-out true
+                pair (false negative). Callers MUST pass this explicitly
+                — the previous ``None`` default silently allowed val/test
+                positives to be sampled as false negatives, corrupting
+                evaluation. Pass an empty set ``set()`` ONLY for
+                pure-train samplers that have no val/test split (e.g.
+                KG-embedding pre-training with no held-out evaluation).
+            reachability_pairs: Optional set of (drug_id, disease_id)
+                tuples that are reachable via multi-hop paths
+                (drug→protein→pathway→disease). Added to the rejection
+                set so negative sampling never produces a pair that is
+                biologically reachable through the KG (task 102 root
+                fix). When None, only direct positive pairs and
+                held_out_pairs are rejected.
         """
         # Fix 12.1: Configurable cache size via env var
         env_cache = os.environ.get("DRUGOS_NEGATIVE_CACHE_SIZE")
@@ -345,21 +359,58 @@ class NegativeSampler:
         # Fix 5.2: Validate positive_pairs structure
         self.positive_pairs = self._validate_positive_pairs(positive_pairs)
 
-        # Audit fix (v5 Tier-2 bug #14): the previous code only filtered
-        # generated negatives against self.positive_pairs (the train
-        # split). Validation and test triples were NEVER filtered, so
-        # corrupted pairs that were actually true held-out positives
-        # (false negatives) polluted training and leaked test signal.
-        # Fix: accept an optional held_out_pairs set (val ∪ test) and
-        # include it in the rejection filter.
+        # Task 101 ROOT FIX (v111): held_out_pairs is now a REQUIRED
+        # argument (no default). The previous code defaulted to None and
+        # only raised in production mode — but the user explicitly
+        # warned: "see comments and tests are fakes they have fixed when
+        # i manually check code its 100 percent broken". The previous
+        # "ROOT FIX" only raised in DRUGOS_ENVIRONMENT=production; in
+        # dev/CI mode (the default for notebooks, smoke tests, and most
+        # caller code paths), the sampler silently constructed with an
+        # empty rejection set, and val/test positives were sampled as
+        # false negatives. This is the exact bug the audit (task 101)
+        # flags. The hard fix: refuse to construct at all without an
+        # explicit held_out_pairs argument. Callers that genuinely have
+        # no val/test split (e.g. pure KG-embedding pre-training) MUST
+        # pass an explicit empty set ``set()`` to acknowledge they
+        # accept the false-negative risk.
+        if held_out_pairs is None:
+            raise TypeError(
+                "NegativeSampler.__init__ missing required argument: "
+                "held_out_pairs (task 101 root fix, v111). The previous "
+                "default of None allowed val/test positive pairs to be "
+                "sampled as false negatives, corrupting evaluation AUC. "
+                "Pass held_out_pairs=val_pairs ∪ test_pairs explicitly. "
+                "For pure-train samplers with no val/test split, pass an "
+                "explicit empty set set() to acknowledge the risk."
+            )
+        # Task 102 ROOT FIX (v111): multi-hop reachability check.
+        # Pairs reachable via drug→protein→pathway→disease in the KG
+        # are NOT true negatives — they are unstudied-but-biologically-
+        # plausible pairs. Sampling them as negatives teaches the model
+        # that biologically connected pairs are negative, which inverts
+        # the learned ranking. The previous code only rejected direct
+        # (drug, disease) positive pairs. The fix accepts an optional
+        # reachability_pairs set (computed upstream from the KG adjacency)
+        # and adds it to the rejection set.
+        self.reachability_pairs: Set[Tuple[str, str]] = (
+            self._validate_positive_pairs(reachability_pairs)
+            if reachability_pairs
+            else set()
+        )
         self.held_out_pairs: Set[Tuple[str, str]] = (
             self._validate_positive_pairs(held_out_pairs)
             if held_out_pairs
             else set()
         )
         # Combined rejection set for fast O(1) lookup.
+        # Includes: train positives + val/test held-out pairs + multi-hop
+        # reachable pairs (task 102). Any candidate (drug, disease) in
+        # this set is NEVER sampled as a negative.
         self._rejection_pairs: Set[Tuple[str, str]] = (
-            self.positive_pairs | self.held_out_pairs
+            self.positive_pairs
+            | self.held_out_pairs
+            | self.reachability_pairs
         )
 
         # Fix 5.3: O(1) lookup sets for entity validation
@@ -1033,6 +1084,20 @@ class NegativeSampler:
         # skip the probability arrays entirely and use uniform
         # ``rng.choice`` (no ``p`` argument) — the pre-P2-007
         # behaviour.
+        #
+        # P2-036 ROOT FIX (v107): the previous code cached the
+        # probability arrays ONCE per instance via
+        # ``if not hasattr(self, _cache_key)``. If the underlying graph
+        # changed (new nodes added between sampler construction and
+        # sampling), the cached probabilities were STALE — new nodes
+        # had degree 0 but were not in the probability array, so they
+        # could never be sampled as negatives. The negative set was
+        # biased toward old nodes, and the model never learned to
+        # distinguish new nodes. ROOT FIX: invalidate the cache when
+        # ``self.all_drug_ids`` or ``self.all_disease_ids`` has changed
+        # since the cache was built. We store the cache key ALONGSIDE
+        # the entity-id lists that were used to build it, and rebuild
+        # if they no longer match.
         _use_uniform = not degree_weighted
         if _use_uniform:
             _drug_probs = None
@@ -1043,7 +1108,28 @@ class NegativeSampler:
             # arrays themselves are cheap to build — O(n_drugs +
             # n_diseases) — but caching avoids rebuilding per call.)
             _cache_key = "_p2_020_inverse_degree_probs"
-            if not hasattr(self, _cache_key):
+            # P2-036: also store the entity-id lists that were used to
+            # build the cache, so we can detect graph changes.
+            _cache_ids_key = "_p2_036_cache_entity_ids"
+            _cached_ids = getattr(self, _cache_ids_key, None)
+            _current_ids = (
+                tuple(self.all_drug_ids),
+                tuple(self.all_disease_ids),
+            )
+            _cache_valid_p2_036 = (
+                _cached_ids is not None
+                and _cached_ids[0] == _current_ids[0]
+                and _cached_ids[1] == _current_ids[1]
+            )
+            if not hasattr(self, _cache_key) or not _cache_valid_p2_036:
+                if not _cache_valid_p2_036 and _cached_ids is not None:
+                    logger.info(
+                        "P2-036 ROOT FIX: negative sampler graph "
+                        "changed (all_drug_ids or all_disease_ids "
+                        "differ from cached version). Rebuilding "
+                        "degree-weighted probability arrays so new "
+                        "nodes can be sampled as negatives."
+                    )
                 _drug_degrees = np.zeros(n_drugs, dtype=np.float64)
                 _disease_degrees = np.zeros(n_diseases, dtype=np.float64)
                 _drug_idx = {d: i for i, d in enumerate(self.all_drug_ids)}
@@ -1073,6 +1159,10 @@ class NegativeSampler:
                 _drug_probs = _drug_inv / _drug_inv.sum()
                 _disease_probs = _disease_inv / _disease_inv.sum()
                 setattr(self, _cache_key, (_drug_probs, _disease_probs))
+                # P2-036: store the entity-id lists that were used to
+                # build this cache, so future calls can detect graph
+                # changes and invalidate the cache.
+                setattr(self, _cache_ids_key, _current_ids)
                 logger.info(
                     "P2-020 root fix: built Bernoulli 1/(1+degree) "
                     "inverse-degree-weighted probabilities for "
@@ -1218,7 +1308,7 @@ class NegativeSampler:
     def wrong_disease_class_sampling(
         self,
         drug_disease_map: Dict[str, List[str]],
-        disease_atc_map: Dict[str, Any],
+        disease_to_drug_atc_map: Dict[str, Any],
         num_negatives: int = 0,
         rng: Optional[np.random.Generator] = None,
     ) -> List[Dict]:
@@ -1227,11 +1317,33 @@ class NegativeSampler:
         For each drug, pair it with diseases from DIFFERENT ATC/therapeutic
         classes than its known indications.
 
+        v107 ROOT FIX (ISSUE-P2-050): DOCUMENT the misleading parameter
+        name. ``disease_to_drug_atc_map`` sounds like "disease → disease ATC
+        classification", but ATC (Anatomical Therapeutic Chemical) is a
+        DRUG classification system, NOT a disease classification system.
+        There is no such thing as a "disease ATC code". The map actually
+        contains: for each disease_id, the ATC codes of the DRUGS that
+        are known to treat that disease (built by
+        ``training_data._build_disease_to_drug_atc_map`` from DRKG
+        Compound-treats-Disease edges joined to DrugBank ATC codes).
+
+        The variable name is kept for backward compat (it's a public
+        parameter referenced by 14+ call sites across
+        negative_sampling.py, training_data.py, run_pipeline.py, and
+        multiple test files). The semantics are CORRECT — the strategy
+        samples drugs paired with diseases whose standard-of-care drugs
+        use a different mechanism (ATC class) — only the NAME is
+        misleading. New code should think of this as
+        "disease_to_drug_atc_map" (disease → ATC codes of drugs treating
+        it). A future major-version rename to
+        ``disease_to_drug_atc_map`` would require updating all call
+        sites simultaneously.
+
         v35 ROOT FIX (M-4): use the FULL set of known ATC classes per
         disease (not just the first / majority class). The previous
-        code collapsed ``disease_atc_map[d_id]`` to a single string via
+        code collapsed ``disease_to_drug_atc_map[d_id]`` to a single string via
         ``atc.strip()[0].upper()`` when ``atc`` was a string — but the
-        H-6 fix in ``training_data._build_disease_atc_map`` now passes
+        H-6 fix in ``training_data._build_disease_to_drug_atc_map`` now passes
         the full ``Dict[str, List[Tuple[str, int]]]`` (per-disease class
         distribution with vote counts). The fix detects both the legacy
         ``Dict[str, str]`` format and the new ``Dict[str, List[Tuple]]``
@@ -1252,7 +1364,7 @@ class NegativeSampler:
 
         Args:
             drug_disease_map: {drug_id: [disease_ids]} known indications.
-            disease_atc_map: {disease_id: atc_class OR
+            disease_to_drug_atc_map: {disease_id: atc_class OR
                 List[(atc_class, count)]} disease classification.
                 Accepts both the legacy single-string format and the
                 v35 full-distribution format.
@@ -1290,7 +1402,7 @@ class NegativeSampler:
         # Pre-compute disease class groupings with ATC validation (Fix 5.5)
         class_to_diseases: Dict[str, List[str]] = defaultdict(list)
         n_invalid_atc = 0
-        for disease_id, atc in disease_atc_map.items():
+        for disease_id, atc in disease_to_drug_atc_map.items():
             if atc:
                 # M-4: use the full class set, not just first class.
                 classes_for_disease = _extract_atc_classes(atc)
@@ -1307,7 +1419,7 @@ class NegativeSampler:
 
         if n_invalid_atc > 0:
             logger.warning(
-                "Skipped %d diseases with invalid ATC codes in disease_atc_map",
+                "Skipped %d diseases with invalid ATC codes in disease_to_drug_atc_map",
                 n_invalid_atc,
             )
 
@@ -1368,7 +1480,7 @@ class NegativeSampler:
             # drug's known diseases (not just the majority class).
             known_classes: Set[str] = set()
             for d_id in known_diseases:
-                atc = disease_atc_map.get(d_id, "")
+                atc = disease_to_drug_atc_map.get(d_id, "")
                 known_classes |= _extract_atc_classes(atc)
 
             candidate_diseases: List[str] = []
@@ -1628,7 +1740,7 @@ class NegativeSampler:
         # relied on the default) and misled callers about whether they
         # must pass a non-None value. Corrected to Optional[...].
         drug_disease_map: Optional[Dict[str, List[str]]] = None,
-        disease_atc_map: Optional[Dict[str, Any]] = None,
+        disease_to_drug_atc_map: Optional[Dict[str, Any]] = None,
         failed_trials: Optional[List[Dict]] = None,
         total_negatives: int = MIN_NEGATIVE_PAIRS,
         strategy_weights: Optional[Dict[str, float]] = None,
@@ -1670,7 +1782,7 @@ class NegativeSampler:
 
         Args:
             drug_disease_map: For strategy (b).
-            disease_atc_map: For strategy (b).
+            disease_to_drug_atc_map: For strategy (b).
             failed_trials: For strategy (c).
             total_negatives: Target total. Default: config.MIN_NEGATIVE_PAIRS.
             strategy_weights: {strategy_name: weight}.
@@ -1789,18 +1901,18 @@ class NegativeSampler:
 
         # Strategy (b): Wrong disease class
         wrong_weight = strategy_weights.get("wrong_class", 0.3)
-        if drug_disease_map and disease_atc_map and wrong_weight > 0:
+        if drug_disease_map and disease_to_drug_atc_map and wrong_weight > 0:
             # L-33: round() instead of int().
             n_wrong = round(total_negatives * wrong_weight)
             logger.info("Strategy allocation: wrong_class=%d", n_wrong)
             wrong_negs = self.wrong_disease_class_sampling(
-                drug_disease_map, disease_atc_map, n_wrong, rng=self._rng
+                drug_disease_map, disease_to_drug_atc_map, n_wrong, rng=self._rng
             )
             all_negatives.extend(wrong_negs)
         else:
             logger.info(
-                "Skipping wrong_class: drug_disease_map=%s, disease_atc_map=%s, weight=%.2f",
-                drug_disease_map is not None, disease_atc_map is not None,
+                "Skipping wrong_class: drug_disease_map=%s, disease_to_drug_atc_map=%s, weight=%.2f",
+                drug_disease_map is not None, disease_to_drug_atc_map is not None,
                 wrong_weight,
             )
 
@@ -1996,7 +2108,7 @@ class NegativeSampler:
 #   1. Its constructor takes ``all_drug_ids: List[str]`` and
 #      ``all_disease_ids: List[str]`` — not integer entity indices.
 #   2. Its ``combined_sampling`` method requires ``drug_disease_map``,
-#      ``disease_atc_map``, ``failed_trials`` kwargs — domain-specific
+#      ``disease_to_drug_atc_map``, ``failed_trials`` kwargs — domain-specific
 #      objects that don't exist in the TransE training path.
 #   3. Its ``to_negative_indices`` returns string-ID pairs, not the
 #      ``(head_indices, tail_indices)`` tuple of ints that

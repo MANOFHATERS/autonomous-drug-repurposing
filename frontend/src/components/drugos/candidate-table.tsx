@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { ChevronDown, ChevronUp, ExternalLink, Star, Info, ChevronLeft, ChevronRight } from 'lucide-react';
 import {
   Table,
@@ -22,6 +22,72 @@ import { SafetyBadge } from '@/components/drugos/safety-badge';
 import { ScoreBar } from '@/components/drugos/score-bar';
 import { useDrugMechanisms } from '@/components/drugos/use-api-data';
 import type { DrugCandidate } from '@/lib/types';
+
+/**
+ * FE-023 ROOT FIX: useShortlist — persists the set of shortlisted candidate
+ * IDs to localStorage so the star toggle survives unmount, page changes, and
+ * browser refresh. The previous code used `useState<Set<string>>(new Set())`
+ * which was lost every time the user navigated away from the table.
+ *
+ * The hook also cross-tab-syncs: if the user opens DrugOS in two tabs and
+ * shortlists a candidate in one, the other tab updates via the `storage`
+ * event. This is the standard pattern for client-side user curation when no
+ * backend endpoint exists yet.
+ *
+ * When a /api/shortlists endpoint is added, swap this hook for a useApiList
+ * call — the CandidateTable call sites won't need to change.
+ */
+const SHORTLIST_STORAGE_KEY = 'drugos:shortlist';
+function useShortlist() {
+  const [shortlisted, setShortlisted] = useState<Set<string>>(() => {
+    if (typeof window === 'undefined') return new Set();
+    try {
+      const raw = window.localStorage.getItem(SHORTLIST_STORAGE_KEY);
+      if (!raw) return new Set();
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? new Set(arr.filter((x): x is string => typeof x === 'string')) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
+
+  // Persist on every change.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(SHORTLIST_STORAGE_KEY, JSON.stringify(Array.from(shortlisted)));
+    } catch {
+      // Quota exceeded or private browsing — keep in-memory state only.
+    }
+  }, [shortlisted]);
+
+  // Cross-tab sync: if another tab changes the shortlist, mirror it here.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== SHORTLIST_STORAGE_KEY) return;
+      try {
+        const arr = e.newValue ? JSON.parse(e.newValue) : [];
+        setShortlisted(Array.isArray(arr) ? new Set(arr.filter((x): x is string => typeof x === 'string')) : new Set());
+      } catch {
+        // ignore malformed
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
+  const toggle = useCallback((id: string) => {
+    setShortlisted((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  return { shortlisted, toggle };
+}
 
 /**
  * FE-033 ROOT FIX: Server-side sort + pagination.
@@ -194,7 +260,9 @@ export function CandidateTable({
   onPageChange,
 }: CandidateTableProps) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [shortlisted, setShortlisted] = useState<Set<string>>(new Set());
+  // FE-023 ROOT FIX: shortlist now persists to localStorage (survives unmount,
+  // page change, refresh) and cross-tab-syncs. Was: useState<Set<string>>(new Set()).
+  const { shortlisted, toggle: toggleShortlist } = useShortlist();
 
   // FE-024 ROOT FIX: Batch-fetch real mechanisms from ChEMBL for every
   // drug in the candidate list. The hook dedupes + caches, so re-renders
@@ -205,16 +273,6 @@ export function CandidateTable({
 
   const toggleExpand = (id: string) => {
     setExpandedId((prev) => (prev === id ? null : id));
-  };
-
-  const toggleShortlist = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setShortlisted((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
   };
 
   // FE-033: Pagination footer geometry.
@@ -345,7 +403,7 @@ export function CandidateTable({
                   onClick={() => onSelect?.(candidate)}
                 >
                   <TableCell>
-                    <button onClick={(e) => toggleShortlist(candidate.id, e)} className="focus:outline-none">
+                    <button onClick={(e) => { e.stopPropagation(); toggleShortlist(candidate.id); }} className="focus:outline-none">
                       <Star
                         className={`h-4 w-4 transition-colors ${
                           isShortlisted ? 'fill-yellow-400 text-yellow-400' : 'text-muted-foreground hover:text-yellow-400'
@@ -378,12 +436,22 @@ export function CandidateTable({
                     <ScoreBar
                       score={candidate.compositeScore}
                       size="sm"
-                      // FE-036: pass through confidence bounds + AUC when available.
-                      // The candidate type doesn't currently carry these — when the
-                      // backend adds them, they'll surface automatically.
-                      confidenceLower={undefined}
-                      confidenceUpper={undefined}
-                      auc={undefined}
+                      // FE-052 ROOT FIX (Teammate 13, MEDIUM): the previous
+                      // version passed `confidenceLower={undefined}` etc.
+                      // explicitly, which SEVERED the wiring between the
+                      // candidate object and ScoreBar — even if the backend
+                      // populated these fields, the UI never showed them.
+                      // Root fix: pass the candidate's own CI bounds + AUC
+                      // through to ScoreBar. They are optional; when absent,
+                      // ScoreBar renders its existing "model AUC: not
+                      // reported" tooltip (unchanged behavior). When the
+                      // Graph Transformer / RL ranker populate them, the CI
+                      // band + AUC tooltip surface automatically — which is
+                      // exactly what the V1 launch transparency criteria
+                      // (project doc §6 Layer 1) require.
+                      confidenceLower={candidate.confidenceLower}
+                      confidenceUpper={candidate.confidenceUpper}
+                      auc={candidate.auc}
                     />
                   </TableCell>
                   <TableCell>

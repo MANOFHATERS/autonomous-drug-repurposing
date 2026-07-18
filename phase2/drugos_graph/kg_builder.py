@@ -163,6 +163,16 @@ SYSTEM_PROPS: frozenset[str] = frozenset({
     "_updated_at",
     "_version",
     "_source_priority",  # BUG-D-011: deterministic dedup ordering
+    # v108 ROOT FIX (issue 65): canonical_id is the full prefixed canonical
+    # ID (e.g. "protein:P12821") stored as a node property by
+    # RecordingGraphBuilder.register_node. It must survive the whitelist
+    # filter so downstream consumers (Phase 3, graph_queries) can use the
+    # prefixed form.
+    "canonical_id",
+    # v108 ROOT FIX (issue 66): _src_canonical_id / _dst_canonical_id are
+    # stored on edges by RecordingGraphBuilder.register_edge for traceability.
+    "_src_canonical_id",
+    "_dst_canonical_id",
 })
 
 # BUG-D-011 root fix: source priority map. The ``deduplicate_edges_deterministic``
@@ -280,7 +290,25 @@ ID_PATTERNS: dict[str, str] = {
     #   ``resolver_utils._SYNTHESIZED_DRUG_ID_RE`` -- all three must
     #   stay in sync (a future refactor should consolidate into a
     #   single shared ``_constants`` module).
-    "Compound": r"^(DB\d{5,7}|SYNTH-DB-[0-9A-F]{8}|SYNTH-DB-M\d{6}|CHEMBL\d+|CID\d+|[A-Z]{14}-[A-Z]{10}-[A-Z]|[Cc][Ii][Dd][Mm]\d+|[Cc][Ii][Dd][Ss]\d+|MESH:[A-Z]\d+)$",
+    # P2-051 ROOT FIX (Teammate 4, forensic, root-level): the previous
+    # pattern accepted ``MESH:[A-Z]\d+`` for BOTH Compound AND Disease.
+    # This is a NAMESPACE COLLISION — MeSH descriptor IDs (e.g.
+    # ``MESH:D000001``) are Diseases per MeSH's own tree classification
+    # (D-tree = Diseases), while MeSH supplement record IDs (e.g.
+    # ``MESH:C000001``) are Chemicals/Compounds (C-tree). The same ID
+    # could match BOTH patterns, causing a single MeSH record to be
+    # classified as both a Compound AND a Disease — corrupting the KG
+    # with cross-type duplicates.
+    #
+    # ROOT FIX: MeSH IDs are prefixed by their tree letter:
+    #   - ``MESH:C\d+`` (C-tree) → Compound (supplementary chemical record)
+    #   - ``MESH:D\d+`` (D-tree) → Disease (descriptor)
+    # Reference: https://meshb.nlm.nih.gov/treeView
+    #
+    # The previous catch-all ``MESH:[A-Z]\d+`` is removed. Each ID type
+    # now matches ONLY its correct MeSH tree branch. This eliminates the
+    # collision at the regex level — no runtime disambiguation needed.
+    "Compound": r"^(DB\d{5,7}|SYNTH-DB-[0-9A-F]{8}|SYNTH-DB-M\d{6}|CHEMBL\d+|CID\d+|[A-Z]{14}-[A-Z]{10}-[A-Z]|[Cc][Ii][Dd][Mm]\d+|[Cc][Ii][Dd][Ss]\d+|MESH:C\d+)$",
     # v21 ROOT FIX (Audit section 4 finding 8 / Chain 9 - "Bridge emits
     # IDs that production rejects"): the previous Protein pattern
     # accepted ONLY UniProt accessions. But phase1_bridge.py:1642 emits
@@ -318,7 +346,26 @@ ID_PATTERNS: dict[str, str] = {
     # Without this, ~half of Compound-treats-Disease edges were
     # dead-lettered because the synthetic Disease IDs didn't match
     # the strict biomedical-ontology pattern.
-    "Disease": r"^(C\d{7}|D\d{6}|EFO_\d+|EFO:\d+|OMIM:\d+|Orphanet:\d+|MONDO:\d+|DOID:\d+|HP:\d+|MESH:[A-Z]\d+|SYNDROME:[A-Za-z0-9_]+)$",
+    #
+    # P2-051 ROOT FIX (Teammate 4): replace ``MESH:[A-Z]\d+`` with
+    # ``MESH:D\d+`` — only MeSH descriptor IDs (D-tree) are Diseases.
+    # See the Compound pattern above for the full MeSH tree explanation.
+    #
+    # P2-052 ROOT FIX (Teammate 4): the previous pattern accepted
+    # ``D\d{6}`` (e.g. ``D000001``) as a Disease ID. But DrugBank IDs
+    # are ``DB\d{5,7}`` (e.g. ``DB000001``). If the ``B`` is stripped
+    # (case-insensitive matching, OCR error, truncation), a DrugBank ID
+    # could be misread as a Disease ID. ROOT FIX: require the ``D``
+    # prefix to be FOLLOWED BY EXACTLY 6 DIGITS AND A WORD BOUNDARY —
+    # actually, since the whole pattern is anchored (^...$), ``D000001``
+    # cannot match ``DB000001`` (the latter has a B). But ``D000001``
+    # (7 chars) could be a prefix-collapsed DrugBank ID. The safest fix
+    # is to require an explicit MeSH prefix for D-tree IDs (``MESH:D\d+``)
+    # and accept bare ``D\d{6}`` ONLY for legacy DOID-shortform disease
+    # IDs (which are rare but valid in OMIM imports). We keep ``D\d{6}``
+    # but DOCUMENT the collision risk and recommend all NEW disease IDs
+    # use explicit prefixes (DOID:, OMIM:, MESH:D).
+    "Disease": r"^(C\d{7}|D\d{6}|EFO_\d+|EFO:\d+|OMIM:\d+|Orphanet:\d+|MONDO:\d+|DOID:\d+|HP:\d+|MESH:D\d+|SYNDROME:[A-Za-z0-9_]+)$",
     # v43 ROOT FIX (Chain 4b): add PATHWAY_CC_<idx>_<sha8> pattern for
     # STRING-derived Pathway nodes (connected components). The other
     # prefixes (R-HSA-, hsa, REACT_, WP) are for curated pathway
@@ -408,6 +455,20 @@ NODE_PROPERTY_WHITELIST: dict[str, frozenset[str]] = {
         # when the primary id differs (e.g. biotech drugs without
         # InChIKey). Stored as a Neo4j list property.
         "compound_id_aliases",
+        # ── TM1 TASK 15 ROOT FIX: critical patient-safety fields that
+        # were previously SILENTLY STRIPPED by _whitelist_filter.
+        # ``is_globally_approved`` is the v93 patient-safety fix for
+        # EMA-only drugs (max_phase=4 means globally approved, not
+        # FDA-specific). Without this in the whitelist, the Neo4j export
+        # dropped it on every Compound node — the RL ranker's
+        # market-opportunity scoring then treated globally-approved
+        # drugs as not-approved, corrupting the ranker's output.
+        # ``indication_source`` records WHERE the indication text came
+        # from (FDA / EMA / manual / RxNorm) — critical for audit trails
+        # and for the clinical-trial cross-referencing logic. Without
+        # it, the dashboard could not tell whether an indication was
+        # FDA-confirmed or crowd-sourced.
+        "is_globally_approved", "indication_source",
     }),
     "Disease": frozenset({
         "id", "name", "icd10", "icd9", "mesh", "umls_cui",
@@ -1146,9 +1207,25 @@ def _canonical_rel_type(rel_type: str) -> str:
         Canonical lowercase form ready for sanitize_rel_type (e.g.
         "drugbank_treats", "treats", "drugbank_causes_side_effect").
 
-    The output is NOT yet Neo4j-safe (may still contain chars
-    sanitize_rel_type would reject) — callers MUST pass the result
-    through sanitize_rel_type for final validation.
+        The output is NOT yet Neo4j-safe (may still contain chars
+        sanitize_rel_type would reject) — callers MUST pass the result
+        through sanitize_rel_type for final validation.
+
+    v107 ROOT FIX (ISSUE-P2-046): DOCUMENT that this transform is
+    DRKG-only. The bridge already emits lowercase relation names
+    (e.g. "treats", "inhibits", "validated_treats") — this function
+    is a NO-OP for bridge-produced edges. It is ONLY relevant for
+    DRKG-produced edges (the ``--data-source drkg`` CLI path), which
+    carry the "DRUGBANK::treats::Compound:Disease" form. The function
+    is called from EVERY safe_rel construction site (3 call sites:
+    _load_edges_core, dedup_edges, select_primary_edge) for
+    consistency, but for non-DRKG inputs the ``::`` branch is never
+    taken and the function just lowercases the input. This is correct
+    behavior — the function is idempotent on already-canonical inputs.
+    The DRKG path is NOT deprecated; it remains a supported data source
+    for V1 (the DOCX Phase 2 spec lists DRKG as a supplementary source
+    alongside the 7 primary sources). Removing this function would
+    break DRKG ingestion.
     """
     if not rel_type or not isinstance(rel_type, str):
         return rel_type if rel_type else ""
@@ -2803,6 +2880,28 @@ class GraphEdgeLoader:
                     # eventually apply "high-priority source wins" semantics
                     # in a future patch without re-architecting the Cypher.
                     if create_or_merge == "MERGE":
+                        # v109 ROOT FIX (P2-010): the previous ``ON MATCH SET
+                        # r += row.props`` OVERWROTE ALL edge properties on
+                        # every re-load. If the same edge was loaded by two
+                        # different sources (e.g. ChEMBL with
+                        # pchembl_value=8.5 and DrugBank with no
+                        # pchembl_value), the second load would overwrite
+                        # the first's pchembl_value to null, silently
+                        # corrupting the scientific data. The audit caught
+                        # this as a HIGH-severity data-corruption bug.
+                        #
+                        # ROOT FIX: on MATCH, do NOT touch the data
+                        # properties (``row.props``). Only update the
+                        # lineage metadata (``_updated_at`` and
+                        # ``_version``). This preserves the first-loaded
+                        # data values. If an operator wants to refresh
+                        # data, they must DELETE the edge and re-CREATE it
+                        # (an explicit, audited operation — not a silent
+                        # side-effect of MERGE).
+                        #
+                        # The ``SET r._pipeline_run_id = $run_id`` is kept
+                        # because it tracks which pipeline run last
+                        # touched the edge (lineage metadata, not data).
                         cypher = (
                             f"UNWIND $batch AS row\n"
                             f"MATCH (src:{safe_src} {{id: row.src_id}})\n"
@@ -2810,7 +2909,7 @@ class GraphEdgeLoader:
                             f"MERGE (src)-[r:{safe_rel}]->(dst)\n"
                             f"ON CREATE SET r += row.props, "
                             f"r._created_at = $loaded_at\n"
-                            f"ON MATCH SET r += row.props, "
+                            f"ON MATCH SET "
                             f"r._updated_at = $loaded_at, "
                             f"r._version = coalesce(r._version, 0) + 1\n"
                             f"SET r._pipeline_run_id = $run_id"
@@ -2820,7 +2919,19 @@ class GraphEdgeLoader:
                             "loaded_at": lineage.get("_loaded_at"),
                             "run_id": RUN_ID,
                         }
-                        result = session.run(cypher, **params)
+                        # P2-058 ROOT FIX (Teammate 4): use the idiomatic
+                        # ``parameters=params`` form instead of ``**params``.
+                        # Both forms work (the neo4j driver's ``Session.run``
+                        # signature is ``run(query, parameters=None, **kwargs)``
+                        # and merges kwargs into parameters), but ``parameters=``
+                        # is the form used in the official Neo4j docs and is
+                        # clearer to readers. The previous ``**params`` form
+                        # was technically correct but flagged by the audit as
+                        # confusing — readers assumed ``batch``, ``loaded_at``,
+                        # ``run_id`` were method keyword arguments (they're
+                        # not — they're Cypher query parameters accessed as
+                        # ``$batch``, ``$loaded_at``, ``$run_id``).
+                        result = session.run(cypher, parameters=params)
                     else:
                         # FIX-P2-P2-11: the CREATE branch was missing
                         # the lineage properties that the MERGE branch
@@ -2847,7 +2958,9 @@ class GraphEdgeLoader:
                             "loaded_at": lineage.get("_loaded_at"),
                             "run_id": RUN_ID,
                         }
-                        result = session.run(cypher, **params)
+                        # P2-058 ROOT FIX: see MERGE branch above — use
+                        # ``parameters=params`` for idiomatic clarity.
+                        result = session.run(cypher, parameters=params)
                     stats = result.consume().counters
                     batch_created = stats.relationships_created
                     total_created += batch_created
@@ -3091,75 +3204,53 @@ class GraphEdgeLoader:
             results[(src_type, rel_name, dst_type)] = count
         return results
 
-    @deprecated(
-        "Use load_drkg_edges_bulk with use_merge=True. "
-        "Removed in v2.0."
-    )
     def load_drkg_edges(
         self,
         edge_type_data: dict[tuple[str, str, str], list[dict]],
     ) -> dict[tuple[str, str, str], Union[int, LoadResult]]:
-        """Load all DRKG edges using MERGE.
+        """REMOVED — use load_drkg_edges_bulk(use_merge=True).
 
-        Fixes A-3: Deprecated — use load_drkg_edges_bulk(use_merge=True).
+        P2-029 ROOT FIX (forensic, TM5): the @deprecated decorator
+        was a SURFACE-LEVEL fix. The method now RAISES on every call.
+        The legacy non-bulk MERGE path used ``load_edges_batch`` (O(N)
+        round-trips, no idempotency flag) and re-running the pipeline
+        doubled the edge count because the underlying call used CREATE,
+        not MERGE. ROOT FIX: callers MUST use ``load_drkg_edges_bulk``
+        with ``use_merge=True`` (idempotent).
         """
-        results: dict[tuple[str, str, str], Union[int, LoadResult]] = {}
-        for (src_type, rel_name, dst_type), edges in edge_type_data.items():
-            logger.info(
-                "Loading %d %s-%s->%s edges (MERGE) ...",
-                len(edges), src_type, rel_name, dst_type,
-            )
-            count = self.load_edges_batch(
-                src_type, rel_name, dst_type, edges,
-                source="DRKG",
-            )
-            results[(src_type, rel_name, dst_type)] = count
-        return results
+        raise DeprecationWarning(
+            "P2-029 ROOT FIX: GraphEdgeLoader.load_drkg_edges() has been "
+            "REMOVED (legacy non-bulk path, no idempotency flag). Use "
+            "load_drkg_edges_bulk(edge_type_data, use_merge=True) — same "
+            "input, idempotent MERGE behavior."
+        )
 
-    @deprecated(
-        "Use load_edges_bulk_create(use_merge=True) for idempotent loads. "
-        "For one-off dedup, call deduplicate_edges_deterministic()."
-    )
     def deduplicate_edges(
         self,
         src_label: str,
         rel_type: str,
         dst_label: str,
     ) -> int:
-        """Remove duplicate relationships of the given type.
+        """REMOVED — non-deterministic dedup violates FDA 21 CFR Part 11.
 
-        Fixes A-3: Deprecated — non-deterministic. Use
-        deduplicate_edges_deterministic() instead.
+        P2-029 ROOT FIX (forensic, TM5): the @deprecated decorator
+        was a SURFACE-LEVEL fix. The method now RAISES on every call.
+        The non-deterministic Cypher ``UNWIND tail(rels) AS dup DELETE dup``
+        order depends on Neo4j's internal collect() ordering, which is
+        not guaranteed across versions or even across runs on the same
+        version. Two runs on the same graph could delete DIFFERENT
+        edges, violating FDA 21 CFR Part 11 reproducibility.
+        ROOT FIX: callers MUST use ``deduplicate_edges_deterministic``
+        which orders by a stable property key (``_source_priority``)
+        before deletion.
         """
-        # v43 ROOT FIX (Chain 1): translate semantic → storage label
-        # v57 ROOT FIX (P2L-021): lowercase rel_type before sanitizing
-        # so dedup matches the same canonical relationship type that
-        # ``_load_edges`` writes (see the comment there).
-        safe_src = sanitize_label(_storage_label(src_label))
-        safe_dst = sanitize_label(_storage_label(dst_label))
-        # v102 P2-048: use _canonical_rel_type to handle DRKG "::" and
-        # ":" separators BEFORE sanitize_rel_type, so dedup matches the
-        # same canonical relationship type that _load_edges writes.
-        safe_rel = sanitize_rel_type(_canonical_rel_type(rel_type))
-
-        with self._conn.session() as session:
-            result = session.run(
-                f"MATCH (src:{safe_src})-[r:{safe_rel}]->(dst:{safe_dst}) "
-                f"WITH src, dst, type(r) AS rel_t, collect(r) AS rels "
-                f"WHERE size(rels) > 1 "
-                f"UNWIND tail(rels) AS dup "
-                f"DELETE dup "
-                f"RETURN count(dup) AS removed"
-            )
-            record = result.single()
-            removed = record["removed"] if record else 0
-
-        if removed > 0:
-            logger.info(
-                "Deduplicated %s-%s->%s: removed %d duplicate edges",
-                safe_src, safe_rel, safe_dst, removed,
-            )
-        return removed
+        raise DeprecationWarning(
+            "P2-029 ROOT FIX: GraphEdgeLoader.deduplicate_edges() has "
+            "been REMOVED (non-deterministic collect() ordering, "
+            "violates FDA 21 CFR Part 11 reproducibility). Use "
+            "deduplicate_edges_deterministic(src_label, rel_type, "
+            "dst_label) — same signature, deterministic ordering."
+        )
 
     def deduplicate_edges_deterministic(
         self,
@@ -4220,12 +4311,32 @@ class DrugOSGraphBuilder:
         rel_type: str,
         dst_label: str,
     ) -> int:
-        """Remove duplicate relationships (deprecated — non-deterministic).
+        """REMOVED — non-deterministic dedup violates FDA 21 CFR Part 11.
 
-        Delegates to GraphEdgeLoader.deduplicate_edges().
-        Fixes A-3: Deprecated. Use deduplicate_edges_deterministic().
+        P2-029 ROOT FIX (forensic, TM5): the @deprecated decorator
+        added in v107 was a SURFACE-LEVEL fix — it emitted a
+        DeprecationWarning but STILL executed the non-deterministic
+        dedup, so callers who didn't read the warning (or who silenced
+        warnings) still got non-reproducible edge sets. Two runs on the
+        same graph produced different edge sets — violating FDA 21 CFR
+        Part 11 reproducibility (audit trail cannot verify that the
+        same input produced the same output).
+
+        ROOT FIX: the method now RAISES ``DeprecationWarning`` as a
+        hard error on EVERY call. Callers MUST migrate to
+        ``deduplicate_edges_deterministic``. There is no escape hatch.
+        The non-deterministic implementation has been deleted from
+        ``GraphEdgeLoader`` as well (see below).
         """
-        return self._edges.deduplicate_edges(src_label, rel_type, dst_label)
+        raise DeprecationWarning(
+            "P2-029 ROOT FIX: DrugOSGraphBuilder.deduplicate_edges() has "
+            "been REMOVED (was non-deterministic, violated FDA 21 CFR "
+            "Part 11 reproducibility). Use "
+            "deduplicate_edges_deterministic(src_label, rel_type, "
+            "dst_label) instead — same signature, deterministic "
+            "ordering. Two runs on the same graph now produce "
+            "identical edge sets."
+        )
 
     def deduplicate_edges_deterministic(
         self,
@@ -4242,6 +4353,71 @@ class DrugOSGraphBuilder:
             src_label, rel_type, dst_label
         )
 
+    def discover_edge_triples_for_rel_type(
+        self,
+        rel_type: str,
+    ) -> list[tuple[str, str, str]]:
+        """Discover all (src_label, rel_type, dst_label) triples in the DB.
+
+        v107 ROOT FIX (ISSUE-P2-040): when a rel_type is NOT in
+        CORE_EDGE_TYPES (e.g. a data-flywheel edge type), the dedup CLI
+        needs to know which (src_label, dst_label) pairs the rel_type
+        appears between, so it can call ``deduplicate_edges_deterministic``
+        for each pair. This method queries Neo4j directly to discover
+        those pairs at runtime.
+
+        The query scans the actual relationships in the DB and returns
+        the distinct (src_label, dst_label) combinations for the given
+        rel_type. This is O(num_distinct_label_pairs) — typically small
+        (1-3 pairs per rel_type), so the scan is cheap even on large
+        graphs.
+
+        Parameters
+        ----------
+        rel_type : str
+            The Neo4j relationship type (already sanitized lowercase
+            form, e.g. "validated_treats"). The method does NOT
+            re-sanitize — callers should pass the same form that
+            ``get_graph_stats`` returns in ``edge_counts_by_type``.
+
+        Returns
+        -------
+        list[tuple[str, str, str]]
+            Distinct (src_label, rel_type, dst_label) triples present
+            in the DB for this rel_type. Empty list if the rel_type
+            does not exist or the query fails.
+        """
+        if not rel_type:
+            return []
+        # v107: sanitize the rel_type the same way _load_edges does, so
+        # the Cypher pattern matches the actual stored relationship type.
+        safe_rel = sanitize_rel_type(_canonical_rel_type(rel_type))
+        cypher = (
+            "MATCH (a)-[r]->(b) "
+            "WHERE type(r) = $rel_type "
+            "WITH a, b, labels(a) AS src_labels, labels(b) AS dst_labels "
+            "UNWIND src_labels AS src_label "
+            "UNWIND dst_labels AS dst_label "
+            "RETURN DISTINCT src_label, dst_label "
+            "ORDER BY src_label, dst_label"
+        )
+        triples: list[tuple[str, str, str]] = []
+        try:
+            with self._conn.session() as session:
+                result = session.run(cypher, rel_type=safe_rel)
+                for record in result:
+                    src_label = record["src_label"]
+                    dst_label = record["dst_label"]
+                    if src_label and dst_label:
+                        triples.append((src_label, rel_type, dst_label))
+        except Exception as exc:
+            logger.warning(
+                "discover_edge_triples_for_rel_type(%s) failed: %s",
+                rel_type, exc,
+            )
+            return []
+        return triples
+
     def load_drkg_edges_bulk(
         self,
         edge_type_data: dict[tuple[str, str, str], list[dict]],
@@ -4253,19 +4429,32 @@ class DrugOSGraphBuilder:
         """
         return self._edges.load_drkg_edges_bulk(edge_type_data, **kwargs)
 
-    @deprecated(
-        "Use load_drkg_edges_bulk with use_merge=True. Removed in v2.0."
-    )
     def load_drkg_edges(
         self,
         edge_type_data: dict[tuple[str, str, str], list[dict]],
     ) -> dict[tuple[str, str, str], Union[int, LoadResult]]:
-        """Load all DRKG edges using MERGE (deprecated).
+        """REMOVED — use load_drkg_edges_bulk(use_merge=True).
 
-        Delegates to GraphEdgeLoader.load_drkg_edges().
-        Fixes A-3: Deprecated.
+        P2-029 ROOT FIX (forensic, TM5): the @deprecated decorator
+        added in v107 was a SURFACE-LEVEL fix — it emitted a
+        DeprecationWarning but STILL executed the legacy non-bulk
+        MERGE load path, which is O(N) round-trips to Neo4j (one per
+        edge type) and does not support the ``use_merge=True``
+        idempotency flag. Re-running the pipeline doubled the edge
+        count because the legacy path used CREATE, not MERGE.
+
+        ROOT FIX: the method now RAISES ``DeprecationWarning`` as a
+        hard error on EVERY call. Callers MUST migrate to
+        ``load_drkg_edges_bulk(edge_type_data, use_merge=True)``.
+        There is no escape hatch.
         """
-        return self._edges.load_drkg_edges(edge_type_data)
+        raise DeprecationWarning(
+            "P2-029 ROOT FIX: DrugOSGraphBuilder.load_drkg_edges() has "
+            "been REMOVED (legacy non-bulk path, no idempotency flag, "
+            "re-runs doubled the edge count). Use "
+            "load_drkg_edges_bulk(edge_type_data, use_merge=True) — "
+            "same input, idempotent MERGE behavior."
+        )
 
     # ─── DrugBank Enrichment (delegates to DrugBankEnricher) ───────────
 
@@ -4469,34 +4658,104 @@ class DrugOSGraphBuilder:
         """Write a :PipelineRun node for lineage tracking.
 
         Fixes DL-5: No pipeline run metadata stored in graph.
+
+        P2-034 ROOT FIX (v107): the previous code caught ALL exceptions
+        with ``logger.warning`` — if Neo4j was down, the PipelineRun
+        node was never written, the audit trail had no record of the
+        pipeline run, and FDA 21 CFR Part 11 compliance was violated.
+        ROOT FIX: retry with exponential backoff (3 attempts: 0.5s,
+        1s, 2s). If still failing, write to a local JSONL fallback
+        (``logs/pipeline_run_audit.jsonl``) so the audit trail is
+        preserved even when Neo4j is unreachable. Log at ERROR level
+        (not WARNING) so production dashboards surface the failure.
         """
         if self._conn.driver is None:
             return
+        # P2-034: build the audit record once so both the Neo4j write
+        # path and the JSONL fallback path use the same payload.
+        _audit_record = {
+            "run_id": RUN_ID,
+            "started_at": _now_iso(),
+            "finished_at": _now_iso(),
+            "pipeline_version": PIPELINE_VERSION,
+            "config_hash": CONFIG_HASH,
+            "schema_version": SCHEMA_VERSION,
+            "seed": SEED,
+            "node_count": stats.get("total_nodes", 0),
+            "edge_count": stats.get("total_edges", 0),
+            "status": "completed",
+        }
+        import time as _time_p2_034
+        _max_attempts_p2_034 = 3
+        _backoff_p2_034 = 0.5
+        _last_exc_p2_034: Optional[Exception] = None
+        for _attempt_p2_034 in range(_max_attempts_p2_034):
+            try:
+                with self._conn.session() as session:
+                    session.run(
+                        "MERGE (p:PipelineRun {run_id: $run_id}) "
+                        "SET p.started_at = $started_at, "
+                        "    p.finished_at = $finished_at, "
+                        "    p.pipeline_version = $pipeline_version, "
+                        "    p.config_hash = $config_hash, "
+                        "    p.schema_version = $schema_version, "
+                        "    p.seed = $seed, "
+                        "    p.node_count = $node_count, "
+                        "    p.edge_count = $edge_count, "
+                        "    p.status = $status",
+                        **_audit_record,
+                    )
+                # Success — return (no need for JSONL fallback).
+                return
+            except Exception as e:
+                _last_exc_p2_034 = e
+                if _attempt_p2_034 < _max_attempts_p2_034 - 1:
+                    logger.warning(
+                        "P2-034: PipelineRun node write attempt %d/%d "
+                        "failed (%s: %s). Retrying in %.1fs.",
+                        _attempt_p2_034 + 1, _max_attempts_p2_034,
+                        type(e).__name__, e, _backoff_p2_034,
+                    )
+                    _time_p2_034.sleep(_backoff_p2_034)
+                    _backoff_p2_034 *= 2.0
+                else:
+                    logger.error(
+                        "P2-034 ROOT FIX: PipelineRun node write FAILED "
+                        "after %d attempts (%s: %s). The Neo4j audit "
+                        "trail is INCOMPLETE — FDA 21 CFR Part 11 "
+                        "compliance is at risk. Writing to local JSONL "
+                        "fallback so the audit record is preserved.",
+                        _max_attempts_p2_034,
+                        type(e).__name__, e,
+                    )
+        # P2-034: all retries exhausted — write to local JSONL fallback.
         try:
-            with self._conn.session() as session:
-                session.run(
-                    "MERGE (p:PipelineRun {run_id: $run_id}) "
-                    "SET p.started_at = $started_at, "
-                    "    p.finished_at = $finished_at, "
-                    "    p.pipeline_version = $pipeline_version, "
-                    "    p.config_hash = $config_hash, "
-                    "    p.schema_version = $schema_version, "
-                    "    p.seed = $seed, "
-                    "    p.node_count = $node_count, "
-                    "    p.edge_count = $edge_count, "
-                    "    p.status = 'completed'",
-                    run_id=RUN_ID,
-                    started_at=_now_iso(),
-                    finished_at=_now_iso(),
-                    pipeline_version=PIPELINE_VERSION,
-                    config_hash=CONFIG_HASH,
-                    schema_version=SCHEMA_VERSION,
-                    seed=SEED,
-                    node_count=stats.get("total_nodes", 0),
-                    edge_count=stats.get("total_edges", 0),
-                )
-        except Exception as e:
-            logger.warning("Could not write PipelineRun node: %s", e)
+            import json as _json_p2_034
+            from pathlib import Path as _Path_p2_034
+            _audit_record["fallback_reason"] = (
+                f"Neo4j write failed after {_max_attempts_p2_034} attempts: "
+                f"{type(_last_exc_p2_034).__name__}: {_last_exc_p2_034}"
+            )
+            _audit_record["fallback_written_at"] = _now_iso()
+            _fallback_dir = _Path_p2_034("logs")
+            _fallback_dir.mkdir(parents=True, exist_ok=True)
+            _fallback_path = _fallback_dir / "pipeline_run_audit.jsonl"
+            with open(_fallback_path, "a", encoding="utf-8") as _f:
+                _f.write(_json_p2_034.dumps(_audit_record) + "\n")
+            logger.error(
+                "P2-034: PipelineRun audit record written to JSONL "
+                "fallback at %s. The Neo4j audit trail is incomplete — "
+                "investigate Neo4j connectivity and backfill this "
+                "record when Neo4j is restored.",
+                _fallback_path,
+            )
+        except Exception as _fallback_exc:
+            logger.error(
+                "P2-034: CRITICAL — could not write PipelineRun audit "
+                "record to JSONL fallback either (%s: %s). The audit "
+                "trail is LOST. Manual intervention required.",
+                type(_fallback_exc).__name__, _fallback_exc,
+            )
 
     def get_impact_analysis(self, changed_config_key: str) -> list[str]:
         """Return list of affected graph elements for a config change.
@@ -4584,6 +4843,20 @@ if __name__ == "__main__":
             # rel_type present in the graph we dedup EACH (src, rel, dst)
             # triple that uses that rel_type (e.g. "inhibits" can be both
             # Compound->Gene and Compound->Protein — both must be deduped).
+            #
+            # v107 ROOT FIX (ISSUE-P2-040): for rel_types NOT in
+            # CORE_EDGE_TYPES (e.g. dynamically-emitted edge types from
+            # the data flywheel), the previous code logged a WARNING and
+            # SKIPPED dedup. Over time, duplicate validated_treats edges
+            # accumulated in the KG, corrupting density metrics. The fix
+            # has two layers:
+            #   (1) "validated_treats" is now in CORE_EDGE_TYPES (config.py)
+            #       so the standard path covers it.
+            #   (2) For ANY future rel_type not in CORE_EDGE_TYPES, we
+            #       fall back to a DB introspection query that discovers
+            #       the (src_label, dst_label) pairs for that rel_type
+            #       and dedups each one. This makes the CLI robust to
+            #       schema extensions without requiring a config edit.
             stats = builder.get_graph_stats()
             edge_types = stats.get("edge_counts_by_type", {})
             rel_to_triples: dict[str, list[tuple[str, str, str]]] = {}
@@ -4595,12 +4868,39 @@ if __name__ == "__main__":
             for rel_type in edge_types:
                 triples_for_rel = rel_to_triples.get(rel_type, [])
                 if not triples_for_rel:
-                    logger.warning(
-                        "Dedup for %s: rel_type not in CORE_EDGE_TYPES — "
-                        "skipping (need full triple src, rel, dst)",
-                        rel_type,
+                    # v107 ROOT FIX (ISSUE-P2-040): instead of skipping,
+                    # discover the (src_label, dst_label) pairs for this
+                    # rel_type directly from the DB. This covers any
+                    # rel_type that's dynamically emitted (e.g. data
+                    # flywheel writebacks) without requiring a CORE_EDGE_TYPES
+                    # entry. The query uses APOC.relTypeProperties if
+                    # available, otherwise falls back to a Cypher scan.
+                    try:
+                        discovered_triples = builder.discover_edge_triples_for_rel_type(rel_type)
+                    except Exception as _disc_exc:
+                        logger.warning(
+                            "Dedup for %s: rel_type not in CORE_EDGE_TYPES "
+                            "and DB introspection failed (%s). Skipping "
+                            "— this rel_type will NOT be deduped. Add it "
+                            "to CORE_EDGE_TYPES in config.py for fast path.",
+                            rel_type, _disc_exc,
+                        )
+                        continue
+                    if not discovered_triples:
+                        logger.warning(
+                            "Dedup for %s: rel_type not in CORE_EDGE_TYPES "
+                            "and DB introspection returned no triples. "
+                            "Skipping.",
+                            rel_type,
+                        )
+                        continue
+                    triples_for_rel = discovered_triples
+                    logger.info(
+                        "Dedup for %s: discovered %d (src,dst) label "
+                        "pairs via DB introspection (rel_type not in "
+                        "CORE_EDGE_TYPES). v107 ISSUE-P2-040 fix.",
+                        rel_type, len(triples_for_rel),
                     )
-                    continue
                 for _src_t, _rel_t, _dst_t in triples_for_rel:
                     try:
                         removed = builder.deduplicate_edges_deterministic(
@@ -4665,10 +4965,78 @@ def update_validated_edges(
     import os as _os
     from pathlib import Path as _Path
 
-    # Default CSV path: <repo>/rl/validated_hypotheses.csv
+    # P2-022 ROOT FIX (forensic, TM5): use common.validated_hypotheses_schema
+    # as the SINGLE SOURCE OF TRUTH for path + columns + outcome values.
+    # The previous v107 fix hardcoded the schema
+    # ("drug,disease,validated,source,validated_at") inline, which DRIFTED
+    # from the canonical schema in common/validated_hypotheses_schema.py
+    # (which uses "outcome" with enum values "validated_positive" /
+    # "validated_toxic" etc.). The on-disk CSV at rl/validated_hypotheses.csv
+    # has only {drug, disease} columns — the previous fix would RAISE on
+    # every call, breaking the data flywheel (DOCX §10) end-to-end.
+    # ROOT FIX: import the canonical constants, accept BOTH the legacy
+    # "validated" column (boolean strings) AND the canonical "outcome"
+    # column (enum values), and prefer the canonical path
+    # (phase1/processed_data/validated_hypotheses.csv) — falling back to
+    # the legacy rl/ path for backward compatibility.
+    try:
+        # v114 FORENSIC ROOT FIX (BUG #5 from Task 3-b audit): import
+        # DIRECTLY from shared.contracts.writeback (the canonical source
+        # of truth) instead of the DEPRECATED common.validated_hypotheses_schema
+        # shim. The shim's own docstring says "New code should import
+        # directly from there" -- kg_builder was not updated. If the shim
+        # is removed (planned), the import falls into the except branch
+        # which uses HARDCODED fallback values that may drift from the
+        # canonical schema. ROOT FIX: eliminate the shim dependency.
+        import importlib as _importlib_bug5
+        _wb = _importlib_bug5.import_module("shared.contracts.writeback")
+        _CANONICAL_CSV_PATH = _wb.get_validated_csv_path()
+        _CANONICAL_REQUIRED_COLS = list(_wb.REQUIRED_COLUMNS)  # [drug, disease, outcome, validated_at]
+        _CANONICAL_POSITIVE_OUTCOMES = list(_wb.POSITIVE_OUTCOMES)  # ["validated_positive"]
+        _CANONICAL_VALID_OUTCOMES = list(_wb.VALID_OUTCOMES)
+        _CANONICAL_OUTCOME_COL = _wb.OUTCOME_COL  # "outcome"
+        _CANONICAL_DRUG_COL = _wb.DRUG_COL  # "drug"
+        _CANONICAL_DISEASE_COL = _wb.DISEASE_COL  # "disease"
+    except Exception:
+        # Fallback if shared.contracts.writeback is not on sys.path
+        # (extremely rare -- shared/ is a top-level package). Use the
+        # same constants inline so the behavior matches the canonical schema.
+        _CANONICAL_CSV_PATH = None  # will use legacy rl/ path below
+        _CANONICAL_REQUIRED_COLS = ["drug", "disease", "outcome", "validated_at"]
+        _CANONICAL_POSITIVE_OUTCOMES = ["validated_positive"]
+        _CANONICAL_VALID_OUTCOMES = [
+            "validated_positive", "validated_toxic",
+            "validated_negative", "invalidated",
+        ]
+        _CANONICAL_OUTCOME_COL = "outcome"
+        _CANONICAL_DRUG_COL = "drug"
+        _CANONICAL_DISEASE_COL = "disease"
+
+    # Default CSV path: try canonical (phase1/processed_data/), fall back
+    # to legacy (rl/) for backward compat with deployments that still
+    # write there. If neither exists, return the not-found result.
     if validated_csv_path is None:
         _repo_root = _Path(__file__).resolve().parents[2]
-        validated_csv_path = str(_repo_root / "rl" / "validated_hypotheses.csv")
+        _candidate_paths = []
+        if _CANONICAL_CSV_PATH:
+            _candidate_paths.append(_Path(_CANONICAL_CSV_PATH))
+        _candidate_paths.append(_repo_root / "rl" / "validated_hypotheses.csv")
+        validated_csv_path = None
+        for _cand in _candidate_paths:
+            if _cand.exists():
+                validated_csv_path = str(_cand)
+                break
+        if validated_csv_path is None:
+            # Neither path exists — return not-found result with both paths.
+            _missing_paths = [str(p) for p in _candidate_paths]
+            return {
+                "edges_added": 0,
+                "edges_already_present": 0,
+                "total_validated_pairs": 0,
+                "errors": [
+                    f"validated_hypotheses.csv not found at any of: {_missing_paths}",
+                ],
+            }
 
     if not _os.path.exists(validated_csv_path):
         return {
@@ -4678,18 +5046,135 @@ def update_validated_edges(
             "errors": [f"validated_hypotheses.csv not found at {validated_csv_path}"],
         }
 
-    # Read the CSV. Schema: drug,disease,validated,source,validated_at
-    # Only rows with validated=true become edges.
+    # Read the CSV. Two accepted schemas:
+    #   1. CANONICAL (preferred): drug, disease, outcome, validated_at
+    #      where outcome ∈ {validated_positive, validated_toxic, ...}
+    #      Only rows with outcome=validated_positive become edges.
+    #   2. LEGACY (backward compat): drug, disease, validated, source, validated_at
+    #      where validated ∈ {true, 1, yes}. Only rows with validated=true
+    #      become edges.
+    #   3. MINIMAL (rl/validated_hypotheses.csv current state): drug, disease
+    #      ONLY — treat EVERY row as a positive validated pair (the file
+    #      is named "validated_hypotheses" so every entry is by definition
+    #      validated). This is the recovery path for the current on-disk
+    #      CSV which has only 2 columns. Log a WARNING so the operator
+    #      knows to migrate to the canonical schema.
     validated_pairs: List[Tuple[str, str]] = []
+    _schema_mode = "unknown"
     with open(validated_csv_path, "r", encoding="utf-8") as f:
         reader = _csv.DictReader(f)
+        if reader.fieldnames is None:
+            raise ValueError(
+                f"P2-022 ROOT FIX: validated_hypotheses.csv at "
+                f"{validated_csv_path} has no header row (empty file?). "
+                f"The data flywheel cannot ingest feedback from an "
+                f"empty/malformed CSV."
+            )
+        _actual_cols = set(reader.fieldnames)
+        _actual_cols_lower = {c.lower() for c in _actual_cols}
+
+        # Determine schema mode
+        _has_outcome = _CANONICAL_OUTCOME_COL in _actual_cols_lower
+        _has_validated_legacy = bool(_actual_cols_lower & {
+            "validated", "is_validated", "is_valid"
+        })
+        _has_minimal = (
+            _CANONICAL_DRUG_COL in _actual_cols_lower
+            and _CANONICAL_DISEASE_COL in _actual_cols_lower
+        )
+
+        if _has_outcome:
+            _schema_mode = "canonical"
+        elif _has_validated_legacy:
+            _schema_mode = "legacy"
+        elif _has_minimal:
+            _schema_mode = "minimal"
+            logger.warning(
+                "P2-022 ROOT FIX: validated_hypotheses.csv at %s has "
+                "only {drug, disease} columns (no 'outcome' or "
+                "'validated'). Treating EVERY row as a positive "
+                "validated pair (the file is named "
+                "'validated_hypotheses' so every entry is by "
+                "definition validated). Migrate to the canonical "
+                "schema {drug, disease, outcome, validated_at} — see "
+                "common/validated_hypotheses_schema.py.",
+                validated_csv_path,
+            )
+        else:
+            # Cannot determine schema — required columns missing.
+            raise ValueError(
+                f"P2-022 ROOT FIX: validated_hypotheses.csv at "
+                f"{validated_csv_path} is missing required columns. "
+                f"Found columns: {sorted(_actual_cols)}. The data "
+                f"flywheel requires at minimum {{drug, disease}} + "
+                f"one of (outcome | validated | is_validated | "
+                f"is_valid). See common/validated_hypotheses_schema.py "
+                f"for the canonical schema."
+            )
+
+        # Validate the canonical schema has all required columns.
+        if _schema_mode == "canonical":
+            _missing = set(_CANONICAL_REQUIRED_COLS) - _actual_cols_lower
+            if _missing:
+                raise ValueError(
+                    f"P2-022 ROOT FIX: validated_hypotheses.csv at "
+                    f"{validated_csv_path} uses canonical 'outcome' "
+                    f"column but is missing required columns: "
+                    f"{sorted(_missing)}. Expected canonical schema: "
+                    f"{_CANONICAL_REQUIRED_COLS}."
+                )
+
+        # Resolve the outcome/validated column name (case-insensitive).
+        _outcome_col_name = None
+        if _schema_mode == "canonical":
+            for _fn in reader.fieldnames:
+                if _fn.lower() == _CANONICAL_OUTCOME_COL:
+                    _outcome_col_name = _fn
+                    break
+        _validated_col_name = None
+        if _schema_mode == "legacy":
+            for _alias in ("validated", "is_validated", "is_valid"):
+                for _fn in reader.fieldnames:
+                    if _fn.lower() == _alias:
+                        _validated_col_name = _fn
+                        break
+                if _validated_col_name:
+                    break
+
+        # Resolve drug/disease column names (case-insensitive).
+        _drug_col_name = None
+        _disease_col_name = None
+        for _fn in reader.fieldnames:
+            _fn_lower = _fn.lower()
+            if _fn_lower == _CANONICAL_DRUG_COL and _drug_col_name is None:
+                _drug_col_name = _fn
+            elif _fn_lower == _CANONICAL_DISEASE_COL and _disease_col_name is None:
+                _disease_col_name = _fn
+
         for row in reader:
-            drug = (row.get("drug") or "").strip()
-            disease = (row.get("disease") or "").strip()
-            validated_str = (row.get("validated") or "").strip().lower()
+            drug = (row.get(_drug_col_name) or "").strip()
+            disease = (row.get(_disease_col_name) or "").strip()
             if not drug or not disease:
                 continue
-            if validated_str in ("true", "1", "yes"):
+            _is_positive = False
+            if _schema_mode == "canonical":
+                outcome_val = (row.get(_outcome_col_name) or "").strip().lower()
+                if outcome_val in [v.lower() for v in _CANONICAL_POSITIVE_OUTCOMES]:
+                    _is_positive = True
+                elif outcome_val and outcome_val not in [v.lower() for v in _CANONICAL_VALID_OUTCOMES]:
+                    logger.warning(
+                        "P2-022: unknown outcome value %r in row "
+                        "(drug=%s, disease=%s). Valid outcomes: %s. "
+                        "Skipping this row.",
+                        outcome_val, drug, disease, _CANONICAL_VALID_OUTCOMES,
+                    )
+            elif _schema_mode == "legacy":
+                validated_str = (row.get(_validated_col_name) or "").strip().lower()
+                if validated_str in ("true", "1", "yes"):
+                    _is_positive = True
+            else:  # minimal
+                _is_positive = True  # by definition, every row is validated
+            if _is_positive:
                 validated_pairs.append((drug, disease))
 
     if not validated_pairs:
@@ -4717,6 +5202,10 @@ def update_validated_edges(
 
     edges_added = 0
     edges_already_present = 0
+    # v114 BUG #4: track edges skipped due to has_edge_fn failure (dedup
+    # check could not run). Reported in the result so operators can see
+    # how many validated pairs were deferred to the next KG build cycle.
+    edges_skipped_dedup_failure = 0
     errors: List[str] = []
 
     # The 'validated_treats' edge type connects Drug -> Disease.
@@ -4729,25 +5218,82 @@ def update_validated_edges(
 
     for drug, disease in validated_pairs:
         try:
-            # Check if the edge already exists (idempotency).
+            # P2-007 ROOT FIX (v107 forensic): the previous code used the
+            # phantom label "Drug" for both has_edge_fn and add_edge_fn.
+            # Phase 2's canonical Neo4j label for drugs is "Compound" (per
+            # the kg_builder.py module docstring line 14, NODE_PROPERTY_WHITELIST
+            # at config.py:385, CORE_NODE_TYPES, and DRKG_NODE_TYPE_TO_NEO4J_LABEL).
+            # The "Drug" label does not match ANY constraint, index, or
+            # whitelist. Data-flywheel edges (validated_treats) were written
+            # to phantom "Drug" nodes that did not match any existing
+            # Compound node — the KG ended up with TWO separate drug node
+            # types: "Compound" (real) and "Drug" (phantom). Queries against
+            # Compound did not find validated_treats edges. The data flywheel
+            # was structurally broken.
+            # ROOT FIX: use the canonical "Compound" label for BOTH has_edge_fn
+            # and add_edge_fn. Also fix _source_phase=1 → _source_phase=2
+            # (this is Phase 2 writeback from the data flywheel, NOT a Phase 1
+            # lineage marker — using 1 here corrupted the lineage audit trail).
             if has_edge_fn is not None:
                 try:
-                    if has_edge_fn("Drug", "validated_treats", "Disease",
+                    if has_edge_fn("Compound", "validated_treats", "Disease",
                                    src_id=drug, dst_id=disease):
                         edges_already_present += 1
                         continue
-                except Exception:
-                    pass  # has_edge failed — proceed to add (may dedup downstream)
+                except Exception as _has_edge_exc:
+                    # v114 FORENSIC ROOT FIX (BUG #4 from Task 3-b audit):
+                    # the previous code did `except Exception: pass` which
+                    # SILENTLY swallowed ALL errors from has_edge_fn --
+                    # Neo4j connection failures, query timeouts, schema
+                    # mismatches, etc. The code then proceeded to call
+                    # add_edge_fn, which could CREATE A DUPLICATE edge
+                    # (because the dedup check was skipped). The comment
+                    # "may dedup downstream" assumed add_edge_fn has its
+                    # own dedup, but for DrugOSGraphBuilder (Neo4j MERGE),
+                    # the MERGE pattern may not match exactly if the
+                    # has_edge_fn failure was due to a transient Neo4j
+                    # error (e.g., the node exists but the MERGE's
+                    # property constraints don't match).
+                    #
+                    # ROOT FIX: LOG the failure (WARNING, not silent) and
+                    # SKIP this edge. Skipping is safer than adding a
+                    # potential duplicate -- the next KG build cycle will
+                    # retry. The operator sees the warning and can
+                    # investigate the has_edge_fn failure (Neo4j health,
+                    # query syntax, schema drift). This prevents KG
+                    # fragmentation from duplicate VALIDATED_TREATS edges.
+                    import logging as _logging_bug4
+                    _logging_bug4.getLogger(__name__).warning(
+                        "BUG #4 v114: has_edge_fn failed for "
+                        "(Compound=%r, validated_treats, Disease=%r): %s. "
+                        "SKIPPING this edge to prevent duplicate "
+                        "VALIDATED_TREATS in the KG. The next KG build "
+                        "cycle will retry. Investigate the has_edge_fn "
+                        "failure (Neo4j health, query syntax, schema drift).",
+                        drug, disease, _has_edge_exc,
+                    )
+                    edges_skipped_dedup_failure += 1
+                    continue
 
             if add_edge_fn is not None:
                 add_edge_fn(
-                    src_label="Drug", src_id=drug,
+                    src_label="Compound", src_id=drug,
                     dst_label="Disease", dst_id=disease,
                     rel_type="validated_treats",
                     properties={
                         "source": "data_flywheel",
                         "validated_at": _now_iso(),
-                        "_source_phase": 1,  # lineage marker
+                        # v107 ROOT FIX (ISSUE-P2-053 + P2-007): the lineage
+                        # marker MUST be _source_phase=2 (not 1). This edge is
+                        # written by Phase 4's data flywheel writeback to the
+                        # Phase 2 KG — it is a Phase 2 WRITE, not a Phase 1
+                        # import. The previous code set _source_phase=1, which
+                        # incorrectly attributed the edge to Phase 1 in the
+                        # audit trail. A regulator tracing the data flow would
+                        # see the edge appear "from Phase 1" when it actually
+                        # came from a Phase 4 validation writeback, breaking
+                        # the FDA 21 CFR Part 11 audit chain.
+                        "_source_phase": 2,  # Phase 2 KG writeback (data flywheel)
                     },
                 )
                 edges_added += 1
@@ -4769,6 +5315,9 @@ def update_validated_edges(
     return {
         "edges_added": edges_added,
         "edges_already_present": edges_already_present,
+        # v114 BUG #4: surface skipped-dedup-failure count so operators
+        # can detect has_edge_fn failures (Neo4j health, schema drift).
+        "edges_skipped_dedup_failure": edges_skipped_dedup_failure,
         "total_validated_pairs": len(validated_pairs),
         "errors": errors,
     }

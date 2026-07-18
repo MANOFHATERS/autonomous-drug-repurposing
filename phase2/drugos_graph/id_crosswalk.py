@@ -1063,11 +1063,21 @@ class IDCrosswalk:
           - DQ-4: numeric validation of ``gene_id``.
           - COD-6 / DQ-4: pandas float artifacts tolerated.
           - GUARD-LINE-1: provenance attached.
+          - v108 ROOT FIX (issue 69): also extract ``gene_name`` /
+            ``gene_names`` from each record and populate
+            ``gene_symbol_to_uniprot`` so that
+            ``gene_symbol_to_uniprot_ac()`` returns a hit. Previously
+            this dict was ONLY populated by ``load_builtin()`` (30
+            hardcoded entries), causing the 0% gene -> protein match
+            rate (runtime-confirmed). Emits a WARN log when zero gene
+            symbols are extracted (e.g. records missing the field).
 
         Args:
             uniprot_records: list of dicts (output of
                 ``uniprot_loader.parse_uniprot_entries``). Each must have
-                ``accession`` and ``gene_id`` keys.
+                ``accession`` and ``gene_id`` keys. ``gene_name`` (str)
+                and ``gene_names`` (list[str]) are optional but
+                recommended for issue 69 to take effect.
 
         Returns:
             Number of NEW UniProt<->Gene mappings added (one per record,
@@ -1077,6 +1087,12 @@ class IDCrosswalk:
         added_u2g = 0
         added_g2u = 0
         added_sec = 0
+        # v108 ROOT FIX (issue 69): gene_symbol -> UniProt crosswalk
+        # counter. Previously this dict was ONLY populated by load_builtin()
+        # (30 hardcoded entries), causing the 0% gene -> protein match rate
+        # (runtime-confirmed). Now we also extract gene symbols from every
+        # UniProt dat record so the crosswalk is complete.
+        added_gsym = 0
         source_name = "uniprot-dat"
 
         for rec_idx, rec in enumerate(uniprot_records):
@@ -1128,6 +1144,53 @@ class IDCrosswalk:
                 )
                 added_g2u += 1
 
+            # v108 ROOT FIX (issue 69): also crosswalk gene_symbol -> UniProt.
+            # The UniProt record dict (from
+            # ``uniprot_loader.parse_uniprot_entries``) exposes ``gene_name``
+            # (str, primary symbol -- see uniprot_loader.py line 200) and
+            # ``gene_names`` (list[str], all primary symbols across
+            # multi-gene loci -- see uniprot_loader.py line 201). We populate
+            # ``gene_symbol_to_uniprot`` for every symbol present so that
+            # ``gene_symbol_to_uniprot_ac()`` returns a hit. Previously this
+            # dict was only populated by ``load_builtin()`` (30 entries),
+            # causing the 0% gene -> protein match rate (runtime-confirmed).
+            gene_name_val = rec.get("gene_name")
+            gene_names_list = rec.get("gene_names") or []
+            if isinstance(gene_names_list, str):
+                # Synthetic / phase-1 sources may pass a semicolon-separated
+                # str instead of a list -- tolerate it (DQ-3 pattern).
+                gene_names_list = [
+                    g.strip() for g in gene_names_list.split(";") if g.strip()
+                ]
+            symbols: list = []
+            if isinstance(gene_name_val, str) and gene_name_val.strip():
+                symbols.append(gene_name_val.strip())
+            if isinstance(gene_names_list, list):
+                for g in gene_names_list:
+                    if isinstance(g, str) and g.strip():
+                        s = g.strip()
+                        if s not in symbols:
+                            symbols.append(s)
+            for sym in symbols:
+                sym_key = sym.upper()
+                # Dedup against existing entries (preserve builtin priority).
+                existing_syms = self.gene_symbol_to_uniprot.get(sym_key)
+                if existing_syms is None:
+                    self.gene_symbol_to_uniprot.setdefault(
+                        sym_key, []
+                    ).append((uniprot_ac, prov))
+                    added_gsym += 1
+                else:
+                    already = any(
+                        ac == uniprot_ac for ac, _ in
+                        self._coerce_stored_list(existing_syms)
+                    )
+                    if not already:
+                        self.gene_symbol_to_uniprot[sym_key].append(
+                            (uniprot_ac, prov)
+                        )
+                        added_gsym += 1
+
             # SCI-3 / DQ-3: secondary accessions -- tolerant + correct dict
             secs = rec.get("secondary_accessions") or []
             if isinstance(secs, str):
@@ -1157,13 +1220,27 @@ class IDCrosswalk:
         # IDEM-4: deterministic ordering
         self._sort_all_lists()
 
+        # v108 ROOT FIX (issue 69): warn if no gene symbols were extracted
+        # at all -- records may be missing the gene_name / gene_names field,
+        # which is the root cause of the 0% gene -> protein match rate.
+        if added_gsym == 0 and uniprot_records:
+            self._logger.warning(
+                "load_from_uniprot_records: processed %d UniProt records "
+                "but extracted ZERO gene_symbol -> UniProt mappings. "
+                "Records may be missing the 'gene_name' / 'gene_names' "
+                "field (issue 69). gene_symbol_to_uniprot_ac() will "
+                "return None for all symbols until this is fixed.",
+                len(uniprot_records),
+            )
+
         added = added_u2g  # COD-3: report NEW primary mappings only
         if added or added_sec:
             self._append_source_summary(source_name, added)
             self._logger.info(
                 "IDCrosswalk: added %d primary mappings + %d secondary "
-                "AC aliases from UniProt dat file",
-                added, added_sec,
+                "AC aliases + %d gene_symbol mappings from UniProt dat "
+                "file",
+                added, added_sec, added_gsym,
             )
         elapsed = time.time() - t0
         self._stage_marker("load_from_uniprot_records", added, elapsed,
@@ -2015,6 +2092,15 @@ class IDCrosswalk:
         Stores the first NCBI Gene ID per ENSG ID into
         ``self.ensg_to_ncbi_gene``.
 
+        v108 ROOT FIX (issue 69): ALSO captures the 3rd column (Gene name)
+        when present and chains it through ``self.gene_to_uniprot``
+        (populated by ``load_builtin()`` or
+        ``load_from_uniprot_records()``) to populate
+        ``self.gene_symbol_to_uniprot`` -- the gene_symbol -> UniProt
+        crosswalk. Previously the Gene name column was SILENTLY DROPPED,
+        which was the root cause of the 0% gene -> protein match rate.
+        Emits a WARN log when the TSV has no 3rd column.
+
         Args:
             ensembl_to_ncbi_path: Path to the Ensembl->NCBI crosswalk TSV.
             allowed_dir: Optional directory that the path must be inside.
@@ -2052,6 +2138,13 @@ class IDCrosswalk:
         source_name = "ensembl-to-ncbi-gene"
         temp: Dict[str, _StoredValue] = {}
         added = 0
+        # v108 ROOT FIX (issue 69): also crosswalk gene_symbol -> UniProt
+        # by chaining NCBI gene ID -> gene_to_uniprot (populated by
+        # load_builtin or load_from_uniprot_records). The BioMart TSV's
+        # 3rd column ("Gene name") was previously SILENTLY DROPPED, which
+        # was the root cause of the 0% gene -> protein match rate.
+        gsym_temp: Dict[str, _StoredValue] = {}
+        gene_name_col_seen = False
         t0 = time.time()
         try:
             open_func = (
@@ -2084,6 +2177,23 @@ class IDCrosswalk:
                     )
                     temp.setdefault(ensg, []).append((ncbi_str, prov))
                     added += 1
+
+                    # v108 ROOT FIX (issue 69): capture Gene name column
+                    # (parts[2]) and chain through gene_to_uniprot to find
+                    # the UniProt accession for this NCBI gene ID.
+                    if len(parts) >= 3:
+                        gene_sym_raw = parts[2].strip()
+                        if gene_sym_raw:
+                            gene_name_col_seen = True
+                            sym_key = gene_sym_raw.upper()
+                            # Chain NCBI gene ID -> UniProt AC.
+                            g2u = self.gene_to_uniprot.get(ncbi_str)
+                            if g2u is not None:
+                                for ac, _ in self._coerce_stored_list(g2u):
+                                    if _validate_uniprot_ac(ac):
+                                        gsym_temp.setdefault(
+                                            sym_key, []
+                                        ).append((ac, prov))
         except (OSError, UnicodeDecodeError) as e:
             self._logger.warning(
                 "load_ensembl_to_ncbi_gene: failed to read %s: %s: %s. "
@@ -2129,14 +2239,47 @@ class IDCrosswalk:
                         seen.add(x)
                 self.ensg_to_ncbi_gene[k] = self._sort_ac_list(merged)
 
+        # v108 ROOT FIX (issue 69): commit gene_symbol -> UniProt mappings
+        # captured during TSV parsing. Dedup against existing entries so
+        # builtin / uniprot-dat mappings retain priority.
+        added_gsym = 0
+        for sym_key, ac_list in gsym_temp.items():
+            ac_sorted = self._sort_ac_list(ac_list)
+            existing_syms = self.gene_symbol_to_uniprot.get(sym_key)
+            if existing_syms is None:
+                self.gene_symbol_to_uniprot[sym_key] = ac_sorted
+                added_gsym += len(ac_sorted)
+            else:
+                cur = list(self._coerce_stored_list(existing_syms))
+                seen_acs = {ac for ac, _ in cur}
+                for ac, prov in ac_sorted:
+                    if ac not in seen_acs:
+                        cur.append((ac, prov))
+                        seen_acs.add(ac)
+                        added_gsym += 1
+                self.gene_symbol_to_uniprot[sym_key] = self._sort_ac_list(cur)
+
+        # v108 ROOT FIX (issue 69): warn if BioMart TSV had no Gene name
+        # column -- gene_symbol -> UniProt crosswalk cannot be populated
+        # from this file.
+        if not gene_name_col_seen:
+            self._logger.warning(
+                "load_ensembl_to_ncbi_gene: BioMart TSV %s has no 3rd "
+                "column (Gene name). gene_symbol -> UniProt crosswalk "
+                "cannot be populated from this file (issue 69). "
+                "gene_symbol_to_uniprot_ac() will fall back to other "
+                "sources (builtin / uniprot-dat).",
+                _redact_path(ensembl_to_ncbi_path),
+            )
+
         self._source_files[source_name] = source_hash
         self._append_source_summary(source_name, added)
         elapsed = time.time() - t0
         self._stage_marker("load_ensembl_to_ncbi_gene", added, elapsed, source_hash)
         self._logger.info(
             "IDCrosswalk: added %d Ensembl->NCBI gene mappings "
-            "(%d unique ENSGs)",
-            added, len(temp),
+            "(%d unique ENSGs) + %d gene_symbol -> UniProt mappings",
+            added, len(temp), added_gsym,
         )
         return added
 

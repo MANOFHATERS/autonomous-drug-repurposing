@@ -93,6 +93,28 @@ WHERE is_fda_approved = FALSE
   AND max_phase >= 4
   AND source = 'chembl';
 
+-- ===========================================================================
+-- Step 6: Schema version metadata
+-- ===========================================================================
+-- P1-042 ROOT FIX (v110): the previous version of this migration was MISSING
+-- the INSERT INTO schema_version row. The migration runner's
+-- _is_migration_applied() check uses _migration_history (not schema_version),
+-- so the migration was still tracked as applied. BUT check_migrations()
+-- cross-references schema_version to confirm the DB is at the expected
+-- version. Without the version=13 row, those checks reported
+-- schema_version_matches=False even though all 13 migrations had been
+-- applied — a false-negative that blocked CI gates.
+-- ROOT FIX: add the INSERT with ON CONFLICT DO NOTHING for idempotency.
+INSERT INTO schema_version (version, description)
+VALUES (
+    13,
+    'P1-049 / P1-046 ROOT FIX: make drugs.is_fda_approved nullable so the ChEMBL '
+    'pipeline can persist NULL = "unknown FDA status" (EMA-only drugs) instead of '
+    'silently coercing to FALSE. Drop NOT NULL + DEFAULT FALSE; add CHECK allowing '
+    'NULL / TRUE / FALSE. Backfill EMA-only drugs (max_phase>=4, source=chembl) to NULL.'
+)
+ON CONFLICT (version) DO NOTHING;
+
 COMMIT;
 
 -- ===========================================================================

@@ -45,7 +45,7 @@ Data Dictionary (StatsReport fields):
     avg_out_degree         : float -- Average out-degree (0.0 if empty)
     max_out_degree         : int  -- Maximum out-degree (0 if empty)
     min_out_degree         : int  -- Minimum out-degree (0 if empty)
-    isolated_nodes         : int  -- Nodes with zero edges (-1 if query failed)
+    isolated_nodes         : Optional[int] -- Nodes with zero edges (None if query failed)
     density_homogeneous_naive : float -- Naive density (for reference only)
     density_per_edge_type  : dict[str, float] -- Per-type density [0, 1]
     compound_name_coverage : float -- Fraction of Compounds with non-null name
@@ -121,6 +121,13 @@ except ImportError:
     GraphDatabase = None
     READ_ACCESS = None
 
+# v108 ROOT FIX (issue 72): logger must be defined BEFORE the env-var
+# threshold block below uses it (lines ~165, ~177). Previously this was
+# defined at line ~251, AFTER the block, causing NameError at import time
+# whenever DRUGOS_STATS_MIN_COMPOUNDS or DRUGOS_STATS_MIN_GENES was set in
+# production mode. Moving the definition up here fixes the import-time crash.
+logger = logging.getLogger(__name__)
+
 from .config import (
     AUDIT_TRAIL_ENABLED,
     CANONICAL_IDS,
@@ -145,15 +152,53 @@ from .utils import sanitize_identifier
 # ── Configurable thresholds (Domain 12: Configuration) ──────────────────
 # Fixes 12.1: Magic numbers externalized to config with env-var overrides.
 
-MIN_COMPOUNDS_FOR_SANITY: int = int(
-    os.environ.get("DRUGOS_STATS_MIN_COMPOUNDS", "10000")
+# P2-021 ROOT FIX (v107): The sanity thresholds were env-var-overridable
+# with NO production guard. An operator could set
+# ``DRUGOS_STATS_MIN_COMPOUNDS=1`` and the Week-2 exit criteria would
+# "pass" with 1 drug and 0 diseases — a degenerate KG shipping to V1
+# launch. ROOT FIX: in production mode (DRUGOS_ENVIRONMENT=production),
+# the env-var override is IGNORED and the hardcoded thresholds are used.
+# In dev mode, the override is honored but a WARNING is logged so the
+# operator knows the gate was lowered.
+_HARD_MIN_COMPOUNDS_FOR_SANITY: int = 10000
+_HARD_MIN_GENES_FOR_SANITY: int = 15000
+_is_prod_p2_021 = os.environ.get("DRUGOS_ENVIRONMENT", "production").lower() in (
+    "prod", "production",
 )
-"""Minimum compound nodes required for sanity check to pass."""
-
-MIN_GENES_FOR_SANITY: int = int(
-    os.environ.get("DRUGOS_STATS_MIN_GENES", "15000")
-)
-"""Minimum gene nodes required for sanity check to pass."""
+_env_min_compounds = os.environ.get("DRUGOS_STATS_MIN_COMPOUNDS", "")
+_env_min_genes = os.environ.get("DRUGOS_STATS_MIN_GENES", "")
+if _is_prod_p2_021 and (_env_min_compounds or _env_min_genes):
+    # Production: override is IGNORED — patient-safety gate is immutable.
+    logger.warning(
+        "P2-021 ROOT FIX: DRUGOS_STATS_MIN_COMPOUNDS / "
+        "DRUGOS_STATS_MIN_GENES env-var override is IGNORED in "
+        "production (DRUGOS_ENVIRONMENT=production). Using immutable "
+        "thresholds: MIN_COMPOUNDS=%d, MIN_GENES=%d. Set "
+        "DRUGOS_ENVIRONMENT=dev to allow the override.",
+        _HARD_MIN_COMPOUNDS_FOR_SANITY, _HARD_MIN_GENES_FOR_SANITY,
+    )
+    MIN_COMPOUNDS_FOR_SANITY: int = _HARD_MIN_COMPOUNDS_FOR_SANITY
+    MIN_GENES_FOR_SANITY: int = _HARD_MIN_GENES_FOR_SANITY
+else:
+    if (_env_min_compounds or _env_min_genes):
+        logger.warning(
+            "P2-021 ROOT FIX: DRUGOS_STATS_MIN_COMPOUNDS / "
+            "DRUGOS_STATS_MIN_GENES env-var override is ACTIVE in dev "
+            "mode. Thresholds lowered — the KG sanity check may pass "
+            "with a degenerate graph. DO NOT use in production."
+        )
+    MIN_COMPOUNDS_FOR_SANITY: int = (
+        int(_env_min_compounds) if _env_min_compounds
+        else _HARD_MIN_COMPOUNDS_FOR_SANITY
+    )
+    MIN_GENES_FOR_SANITY: int = (
+        int(_env_min_genes) if _env_min_genes
+        else _HARD_MIN_GENES_FOR_SANITY
+    )
+"""Minimum compound nodes required for sanity check to pass.
+In production mode the env-var override is ignored (immutable gate)."""
+"""Minimum gene nodes required for sanity check to pass.
+In production mode the env-var override is ignored (immutable gate)."""
 
 MAX_DENSITY_THRESHOLD: float = float(
     os.environ.get("DRUGOS_STATS_MAX_DENSITY", "0.01")
@@ -210,7 +255,7 @@ SANITY_CHECK_COMPOUNDS: List[Dict[str, str]] = [
     },
 ]
 
-logger = logging.getLogger(__name__)
+# (logger is now defined above, near the top of the module — see v108 issue 72)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -319,7 +364,20 @@ class StatsReport(TypedDict, total=False):
     min_out_degree: int
 
     # Connectivity
-    isolated_nodes: int  # -1 if query timed out (Fixes 4.7: no 'N/A')
+    # v108 ROOT FIX (ISSUE-P2-051): use Optional[int] with None for
+    # unknown, instead of the -1 sentinel. The previous -1 sentinel
+    # was a CORRECTNESS bug: downstream code that did
+    # ``if stats["isolated_nodes"] > threshold:`` treated -1 as "very
+    # few isolated nodes" (since -1 < any positive threshold), causing
+    # the check to PASS when it should have FAILED. None is the
+    # Pythonic sentinel for unknown — it cannot be accidentally
+    # compared with ``>`` (Python 3 raises TypeError on `None > int`),
+    # so downstream code is FORCED to handle the unknown case
+    # explicitly via ``if stats["isolated_nodes"] is not None:``.
+    # The ``isolated_nodes_known`` flag is kept for backward compat
+    # with v107 consumers, but new code should prefer the None check.
+    isolated_nodes: Optional[int]  # None if query timed out (v108 root fix)
+    isolated_nodes_known: bool  # DEPRECATED: prefer `isolated_nodes is not None`
 
     # Density (Fixes 3.4, 13.6: naive renamed, per-type added)
     density_homogeneous_naive: float
@@ -989,13 +1047,36 @@ class GraphStats:
                     stats["isolated_nodes"] = _safe_int(
                         records[0]["isolated"],
                     )
+                    # v108 ROOT FIX (ISSUE-P2-051): real measurement —
+                    # isolated_nodes is a valid int, isolated_nodes_known
+                    # is True (backward compat with v107 consumers).
+                    stats["isolated_nodes_known"] = True
                 else:
-                    stats["isolated_nodes"] = -1
+                    # v108 ROOT FIX (ISSUE-P2-051): use None instead of
+                    # the -1 sentinel. The -1 sentinel was a CORRECTNESS
+                    # bug: ``if stats["isolated_nodes"] > threshold:``
+                    # treated -1 as "very few isolated nodes" (since
+                    # -1 < any positive threshold), causing sanity checks
+                    # to PASS when the isolated-node count was UNKNOWN.
+                    # None is the Pythonic sentinel — Python 3 raises
+                    # TypeError on ``None > int``, forcing downstream
+                    # code to handle the unknown case explicitly via
+                    # ``if stats["isolated_nodes"] is not None:``.
+                    # The ``isolated_nodes_known`` flag is kept for
+                    # backward compat with v107 consumers, but new code
+                    # should prefer the None check.
+                    stats["isolated_nodes"] = None
+                    stats["isolated_nodes_known"] = False
                     warnings.append(
                         "Isolated-nodes query failed or timed out. "
-                        "Value set to -1 (unknown). "
+                        "Value set to None (unknown) and "
+                        "isolated_nodes_known=False. Downstream "
+                        "threshold checks MUST check "
+                        "``isolated_nodes is not None`` before "
+                        "comparing (or check isolated_nodes_known). "
                         "This is non-critical -- isolated nodes are "
-                        "cosmetic, not a data-quality issue."
+                        "cosmetic, not a data-quality issue. "
+                        "v108 ISSUE-P2-051 root fix."
                     )
 
                 # ── Naive homogeneous density (Fix 13.6: renamed) ──
@@ -1113,12 +1194,26 @@ class GraphStats:
                         )
 
                         # ── P2-012 legacy participating-node counts ──
+                        # P2-038 ROOT FIX (v107): the previous code used
+                        # ``n_src_part == n_dst_part`` as a proxy for
+                        # "same-type edge" — but coincidental count
+                        # equality (e.g. 100 Compounds and 100 Proteins)
+                        # misclassified cross-type edges as same-type,
+                        # producing a wildly wrong density denominator
+                        # (n*(n-1)/2 instead of n_src*n_dst). ROOT FIX:
+                        # query the actual endpoint labels so the
+                        # same-type check is type-based, not count-based.
+                        # The SYMMETRIC_RELATIONS check is now applied
+                        # FIRST, regardless of endpoint types, per the
+                        # audit's required fix.
                         recs = self._run_query(
                             session,
                             f"MATCH ()-[r:{safe_rel}]->() "
                             "RETURN "
                             "count(DISTINCT startNode(r)) AS n_src, "
-                            "count(DISTINCT endNode(r)) AS n_dst",
+                            "count(DISTINCT endNode(r)) AS n_dst, "
+                            "collect(DISTINCT labels(startNode(r))[0])[0] AS src_label, "
+                            "collect(DISTINCT labels(endNode(r))[0])[0] AS dst_label",
                             f"density_per_type_{rel_type}",
                         )
                         # v20 SF-8 ROOT FIX: mirror the SF-9 pattern.
@@ -1142,18 +1237,34 @@ class GraphStats:
 
                         n_src_part = _safe_int(recs[0]["n_src"])
                         n_dst_part = _safe_int(recs[0]["n_dst"])
+                        # P2-038: type-based same-type check (not count-based).
+                        _src_label = recs[0]["src_label"] if "src_label" in recs[0].keys() else None
+                        _dst_label = recs[0]["dst_label"] if "dst_label" in recs[0].keys() else None
+                        _is_same_type_p2_038 = (
+                            _src_label is not None
+                            and _dst_label is not None
+                            and _src_label == _dst_label
+                        )
 
                         # ── P2-012 participating-node density (legacy) ──
-                        if n_src_part == n_dst_part and n_src_part > 0:
-                            # P2-011: respect SYMMETRIC_RELATIONS for
-                            # the legacy metric too (so the two metrics
-                            # are directly comparable).
+                        # P2-038 ROOT FIX (v107): check SYMMETRIC_RELATIONS
+                        # FIRST, regardless of endpoint types. For
+                        # same-type symmetric: n*(n-1)/2 (undirected). For
+                        # cross-type symmetric: n_src*n_dst (each pair is
+                        # one undirected edge). For same-type asymmetric:
+                        # n*(n-1) (directed). For cross-type asymmetric:
+                        # n_src*n_dst (directed).
+                        if n_src_part > 0 and n_dst_part > 0:
                             if rel_type in SYMMETRIC_RELATIONS:
-                                _denom_part = n_src_part * (n_src_part - 1) // 2
+                                if _is_same_type_p2_038:
+                                    _denom_part = n_src_part * (n_src_part - 1) // 2
+                                else:
+                                    _denom_part = n_src_part * n_dst_part
                             else:
-                                _denom_part = n_src_part * (n_src_part - 1)
-                        elif n_src_part > 0 and n_dst_part > 0:
-                            _denom_part = n_src_part * n_dst_part
+                                if _is_same_type_p2_038:
+                                    _denom_part = n_src_part * (n_src_part - 1)
+                                else:
+                                    _denom_part = n_src_part * n_dst_part
                         else:
                             _denom_part = 1
                         per_type_density_participating[rel_type] = round(
@@ -1501,19 +1612,42 @@ class GraphStats:
             )
 
         self.report = stats
+        # v108 ROOT FIX (issue 72): surface per-node-type counts, per-edge-type
+        # counts, AND density in the log line — previously only total counts
+        # were logged, making it impossible to diagnose graph-skew issues
+        # (e.g. 0 protein nodes, all disease-treats edges missing) from logs.
+        _node_by_type = stats.get("node_counts_by_type", {}) or {}
+        _edge_by_type = stats.get("edge_counts_by_type", {}) or {}
+        _density = stats.get("density_homogeneous_naive")
+        _density_per_type = stats.get("density_per_edge_type", {}) or {}
         logger.info(
             "Stats computation complete: %s nodes, %s edges, "
-            "%s warnings, profile=%s",
+            "%s warnings, profile=%s. "
+            "Node types (%d): %s. "
+            "Edge types (%d): %s. "
+            "Density (homogeneous): %s. "
+            "Density per edge type (%d): %s.",
             stats.get("total_nodes", 0),
             stats.get("total_edges", 0),
             len(warnings),
             stats_profile,
+            len(_node_by_type),
+            dict(sorted(_node_by_type.items(), key=lambda kv: -kv[1])),
+            len(_edge_by_type),
+            dict(sorted(_edge_by_type.items(), key=lambda kv: -kv[1])),
+            _density if _density is not None else "n/a",
+            len(_density_per_type),
+            dict(sorted(_density_per_type.items(), key=lambda kv: str(kv[0]))),
             extra={
                 "total_nodes": stats.get("total_nodes", 0),
                 "total_edges": stats.get("total_edges", 0),
                 "warnings_count": len(warnings),
                 "correlation_id": CORRELATION_ID,
                 "pipeline_run_id": RUN_ID,
+                "node_counts_by_type": _node_by_type,
+                "edge_counts_by_type": _edge_by_type,
+                "density_homogeneous_naive": _density,
+                "density_per_edge_type": _density_per_type,
             },
         )
         return stats
@@ -2557,25 +2691,57 @@ if __name__ == "__main__":
             output = gs.generate_data_readme(stats=stats)
         else:
             # Text format
+            # v108 ROOT FIX (issue 72): surface per-node-type and per-edge-type
+            # counts AND density in the text CLI output — previously only total
+            # counts and type COUNTS were shown (e.g. "Node types: 4"), making
+            # it impossible to spot a graph with 0 protein nodes or 0 treats
+            # edges from the text output alone.
+            _node_by_type = stats.get("node_counts_by_type", {}) or {}
+            _edge_by_type = stats.get("edge_counts_by_type", {}) or {}
+            _density = stats.get("density_homogeneous_naive")
+            _density_per_type = stats.get("density_per_edge_type", {}) or {}
             lines = [
                 f"DrugOS Graph Stats (v{__version__})",
                 f"Generated: {stats.get('computed_at', 'unknown')}",
                 "",
                 f"Total nodes: {stats.get('total_nodes', 0):,}",
                 f"Total edges: {stats.get('total_edges', 0):,}",
-                f"Node types: "
-                f"{len(stats.get('node_counts_by_type', {}))}",
-                f"Edge types: "
-                f"{len(stats.get('edge_counts_by_type', {}))}",
-                f"Avg out-degree: "
-                f"{stats.get('avg_out_degree', 0)}",
-                f"Isolated nodes: "
-                f"{stats.get('isolated_nodes', 'unknown')}",
+                f"Node types: {len(_node_by_type)}",
+                f"Edge types: {len(_edge_by_type)}",
+                f"Avg out-degree: {stats.get('avg_out_degree', 0)}",
+                f"Isolated nodes: {stats.get('isolated_nodes', 'unknown')}",
+                "",
+                "Node counts by type:",
+            ]
+            if _node_by_type:
+                for _lbl, _cnt in sorted(_node_by_type.items(), key=lambda kv: -kv[1]):
+                    lines.append(f"  {_lbl:<30} {_cnt:>10,}")
+            else:
+                lines.append("  (none)")
+            lines.append("")
+            lines.append("Edge counts by type:")
+            if _edge_by_type:
+                for _rel, _cnt in sorted(_edge_by_type.items(), key=lambda kv: -kv[1]):
+                    lines.append(f"  {_rel:<40} {_cnt:>10,}")
+            else:
+                lines.append("  (none)")
+            lines.append("")
+            lines.append(
+                f"Density (homogeneous naive): "
+                f"{_density if _density is not None else 'n/a'}"
+            )
+            lines.append("Density per edge type:")
+            if _density_per_type:
+                for _rel, _val in sorted(_density_per_type.items(), key=lambda kv: str(kv[0])):
+                    lines.append(f"  {str(_rel):<40} {_val}")
+            else:
+                lines.append("  (none)")
+            lines.extend([
                 "",
                 f"Week {args.week} Exit Criteria: "
                 f"{criteria['passed_count']}/{criteria['total_count']} "
                 f"passed",
-            ]
+            ])
             for crit in criteria.get("criteria", []):
                 status = "PASS" if crit["passed"] else "FAIL"
                 lines.append(

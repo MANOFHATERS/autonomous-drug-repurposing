@@ -9,6 +9,11 @@ import {
   clearTotpAttempts,
 } from "@/lib/auth/rate-limit";
 import { db } from "@/lib/db";
+// BE-029 ROOT FIX (Team Member 12): Zod-validated request body. The
+// BillingSubscriptionBody schema also enforces "totpCode XOR mfaTicket"
+// via a refine() — replacing the inline `if (body.totpCode && body.mfaTicket)`
+// check with schema-level enforcement.
+import { validateBody, BillingSubscriptionBody } from "@/lib/zod-schemas";
 
 /**
  * FE-020 ROOT FIX: Previously used requireAuth (any authenticated user),
@@ -89,10 +94,14 @@ export async function POST(req: NextRequest) {
   } catch {
     return badRequest("Invalid JSON");
   }
-  if (!body.planId) return badRequest("planId is required");
-  if (!body.currentPassword) {
-    return badRequest("currentPassword is required to change the billing plan (re-authentication)");
-  }
+  // BE-029 ROOT FIX: schema-validate the body. The schema enforces
+  // planId (non-empty string), currentPassword (required, 1..1024),
+  // totpCode (6 digits, optional), mfaTicket (non-empty, optional), AND
+  // the refine() rejects when BOTH totpCode AND mfaTicket are present
+  // (replacing the inline check below).
+  const parsed = validateBody(BillingSubscriptionBody, body);
+  if (!parsed.ok) return parsed.response;
+  body = parsed.data;
 
   // FE-039 STEP 1: re-verify the user's password.
   const userRecord = await db.user.findUnique({
@@ -104,7 +113,14 @@ export async function POST(req: NextRequest) {
   if (!userRecord) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-  const passwordOk = await verifyPassword(body.currentPassword, userRecord.passwordHash);
+  // FE-016 ROOT FIX (Team Member 15, v108 — pre-existing build blocker):
+  // `body.currentPassword` is typed as `string | undefined` but the
+  // BillingSubscriptionBody zod schema at /lib/zod-schemas.ts:164 requires
+  // it (min 1 char). After `validateBody` returns ok, we know currentPassword
+  // is a non-empty string. Use `!` to assert non-null at the call site —
+  // semantically safe because the validator above already rejected missing
+  // passwords with 400.
+  const passwordOk = await verifyPassword(body.currentPassword!, userRecord.passwordHash);
   if (!passwordOk) {
     await writeAuditLog({
       user: auth.user,
@@ -112,15 +128,33 @@ export async function POST(req: NextRequest) {
       resource: `subscription:${auth.user.orgId}`,
       metadata: { planId: body.planId, reason: "invalid_password" },
     });
+    // BE-033 ROOT FIX (Team Member 12): return 401 (authentication
+    // failure) — NOT 403. A wrong password is an authentication failure,
+    // not an authorization failure. The user is authenticated (they have
+    // a valid session) but they have NOT proven they own the account via
+    // re-auth. 401 tells the client to re-authenticate; 403 would tell
+    // them they're forbidden, which is misleading.
     return NextResponse.json(
-      { error: "forbidden", message: "Current password is incorrect." },
-      { status: 403 }
+      { error: "invalid_credentials", message: "Current password is incorrect." },
+      { status: 401 }
     );
   }
 
   // FE-039 STEP 2: if the user has 2FA enabled, require a fresh TOTP code
   // OR a fresh mfaTicket. This is the "2FA challenge" for the financial action.
   if (userRecord.mfaEnabled) {
+    // BE-075 ROOT FIX: Explicitly reject if BOTH totpCode AND mfaTicket are
+    // provided. The previous code accepted either independently, but if both
+    // were present, the totpCode path was taken and the mfaTicket was ignored.
+    // This is fragile — an attacker with a phished TOTP code AND a stolen
+    // mfaTicket could cause confusion about which auth factor was actually
+    // validated. A clear error prevents ambiguity.
+    if (body.totpCode && body.mfaTicket) {
+      return NextResponse.json(
+        { error: "bad_request", message: "Provide either totpCode or mfaTicket, not both." },
+        { status: 400 }
+      );
+    }
     // FE-014 ROOT FIX: If the caller supplied a totpCode (rather than an
     // mfaTicket), enforce the per-user TOTP brute-force gate. The
     // mfaTicket path is exempt because the ticket is already one-time-use
@@ -187,13 +221,16 @@ export async function POST(req: NextRequest) {
           totpResult.reason === "replayed"
             ? "This 2FA code has already been used. Wait for the next 30-second window."
             : `Invalid 2FA code. ${afterFail.attemptsRemaining} attempt(s) remaining before 2FA is locked.`;
+        // BE-033 ROOT FIX (Team Member 12): 401 (authentication failure),
+        // not 403. A wrong/replayed TOTP code is an authentication failure
+        // — the user has not proven they possess the second factor.
         return NextResponse.json(
           {
             error: totpResult.reason === "replayed" ? "code_replayed" : "invalid_mfa",
             message,
             attemptsRemaining: afterFail.attemptsRemaining,
           },
-          { status: 403 }
+          { status: 401 }
         );
       }
 
@@ -223,9 +260,12 @@ export async function POST(req: NextRequest) {
           resource: `subscription:${auth.user.orgId}`,
           metadata: { planId: body.planId, reason: "invalid_mfa" },
         });
+        // BE-033 ROOT FIX (Team Member 12): 401, not 403. An invalid or
+        // missing mfaTicket is an authentication failure — the caller has
+        // not completed step-up authentication.
         return NextResponse.json(
-          { error: "forbidden", message: "A valid 2FA code (totpCode or mfaTicket) is required to change the billing plan." },
-          { status: 403 }
+          { error: "invalid_mfa", message: "A valid 2FA code (totpCode or mfaTicket) is required to change the billing plan." },
+          { status: 401 }
         );
       }
     }

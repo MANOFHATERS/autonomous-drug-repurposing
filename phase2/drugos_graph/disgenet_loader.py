@@ -363,41 +363,57 @@ def disgenet_to_node_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 "_source": "disgenet",
             })
         gene_symbol = str(row.get("gene_symbol") or "").strip()
-        # NCBI Gene ID column. BUG-B-002 root fix: kg_builder.ID_PATTERNS
-        # rejects 'NCBIGene:2645'. Strip the prefix and use the bare
-        # numeric NCBI gene ID. The previous code emitted 'NCBIGene:2645'
-        # which fell through to the gene_symbol fallback on every row.
-        # Also BUG-A-002 (mentioned in audit): the column may be named
-        # ``gene_id`` in some Phase 1 versions -- accept both names.
-        ncbi_gene_id = (
+        # Task 85 ROOT FIX: use ``gene_symbol`` as the PRIMARY KEY for
+        # Gene nodes, NOT the bare NCBI gene ID. The previous code
+        # preferred ``ncbi_gene_id`` (e.g. ``"2645"``) and only fell
+        # back to ``SYM:<symbol>`` when NCBI was absent. But
+        # ``id_crosswalk.py`` resolves gene->UniProt by indexing the
+        # crosswalk on ``entry.gene_symbol.upper()`` (see
+        # ``id_crosswalk.py`` line 549 / 1036-1037). A Gene node keyed
+        # by ``"2645"`` cannot be found by the crosswalk -- the
+        # crosswalk has no ``"2645"`` entry -- so the gene never gets
+        # linked to its UniProt protein, breaking the Phase 1->Phase 2
+        # graph connectivity. The fix: key Gene nodes on the gene
+        # symbol (upper-cased to match the crosswalk's lookup key) and
+        # preserve NCBI gene ID as a property for back-validation.
+        # Empty/placeholder symbols are skipped so we never emit a
+        # Gene node with an empty primary key.
+        if (
+            not gene_symbol
+            or gene_symbol.upper() in {"NAN", "NONE", "NULL", ""}
+        ):
+            continue
+        ncbi_gene_id_raw = (
             row.get("ncbi_gene_id")
             if row.get("ncbi_gene_id") is not None
             else row.get("gene_id")
         )
-        if ncbi_gene_id is not None and str(ncbi_gene_id).strip() not in ("", "nan"):
-            # Strip any NCBIGene: prefix that may already be present.
-            raw = str(ncbi_gene_id).strip()
+        ncbi_gene_id_norm = ""
+        if ncbi_gene_id_raw is not None and str(ncbi_gene_id_raw).strip() not in ("", "nan"):
+            raw = str(ncbi_gene_id_raw).strip()
             if raw.startswith("NCBIGene:"):
                 raw = raw[len("NCBIGene:"):]
             try:
-                gene_id = str(int(float(raw)))
+                ncbi_gene_id_norm = str(int(float(raw)))
             except (TypeError, ValueError):
-                gene_id = f"SYM:{gene_symbol}" if gene_symbol else None
-                if gene_id is None:
-                    continue
-        elif gene_symbol:
-            gene_id = f"SYM:{gene_symbol}"
-        else:
-            continue
+                ncbi_gene_id_norm = ""
+        # Canonical primary key: upper-cased gene symbol so it matches
+        # the crosswalk's ``entry.gene_symbol.upper()`` lookup key.
+        gene_id = gene_symbol.upper()
         if gene_id not in seen_gene:
             seen_gene.add(gene_id)
-            nodes.append({
+            node: Dict[str, Any] = {
                 "id": gene_id,
                 "label": "Gene",
-                "name": gene_symbol or gene_id,
-                "gene_symbol": gene_symbol,  # BUG-D-009: preserve for canonicalization
+                "name": gene_symbol,
+                "gene_symbol": gene_symbol,  # preserved for downstream join
                 "_source": "disgenet",
-            })
+            }
+            if ncbi_gene_id_norm:
+                # Preserve NCBI gene ID as a property so back-validation
+                # against the NCBI Gene database is still possible.
+                node["ncbi_gene_id"] = ncbi_gene_id_norm
+            nodes.append(node)
     return nodes
 
 
@@ -458,27 +474,22 @@ def disgenet_to_edge_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
         if disease_id:
             disease_id = _normalise_disease_id_to_colon(disease_id)
         gene_symbol = str(row.get("gene_symbol") or "").strip()
-        # BUG-B-002 root fix: same canonicalization as the node emitter.
-        # Strip NCBIGene: prefix and use bare numeric ID.
-        ncbi_gene_id = (
-            row.get("ncbi_gene_id")
-            if row.get("ncbi_gene_id") is not None
-            else row.get("gene_id")
-        )
-        if ncbi_gene_id is not None and str(ncbi_gene_id).strip() not in ("", "nan"):
-            raw = str(ncbi_gene_id).strip()
-            if raw.startswith("NCBIGene:"):
-                raw = raw[len("NCBIGene:"):]
-            try:
-                gene_id = str(int(float(raw)))
-            except (TypeError, ValueError):
-                gene_id = f"SYM:{gene_symbol}" if gene_symbol else None
-                if gene_id is None:
-                    continue
-        elif gene_symbol:
-            gene_id = f"SYM:{gene_symbol}"
-        else:
+        # Task 85 ROOT FIX: mirror the node-emitter logic -- the Gene
+        # endpoint of every disgenet_associated_with edge MUST be keyed
+        # by the upper-cased gene symbol so the edge endpoint matches
+        # the Gene node's primary key (see ``disgenet_to_node_records``)
+        # AND so ``id_crosswalk.py`` can resolve the gene to UniProt.
+        # The previous code emitted ``"2645"`` (bare NCBI gene ID) as
+        # the source endpoint, which (a) did not match any Gene node
+        # id (which used ``SYM:<symbol>`` as fallback) and (b) was
+        # unresolvable by the crosswalk. Result: every DisGeNET edge
+        # dangled off a non-existent Gene node, fragmenting the KG.
+        if (
+            not gene_symbol
+            or gene_symbol.upper() in {"NAN", "NONE", "NULL", ""}
+        ):
             continue
+        gene_id = gene_symbol.upper()
         if not disease_id or not gene_id:
             continue
         # DisGeNET score: prefer ``gda_score`` (Phase 1's normalized name),

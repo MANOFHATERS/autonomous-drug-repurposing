@@ -416,11 +416,19 @@ class TestT047TransactionControlFilter:
     def test_filter_catches_all_variants(self):
         """Import the function and verify it catches all transaction-control forms."""
         # Add the migrations dir to the path so we can import.
-        sys.path.insert(0, str(PHASE1_ROOT))
+        # v114 round 5 FORENSIC ROOT FIX: use targeted remove, not pop(0).
+        _phase1_path = str(PHASE1_ROOT)
+        _added_by_us = _phase1_path not in sys.path
+        if _added_by_us:
+            sys.path.insert(0, _phase1_path)
         try:
             from database.migrations.run_migrations import _is_transaction_control_statement
         finally:
-            sys.path.pop(0)
+            if _added_by_us:
+                try:
+                    sys.path.remove(_phase1_path)
+                except ValueError:
+                    pass
 
         # All of these must be filtered (return True).
         must_filter = [

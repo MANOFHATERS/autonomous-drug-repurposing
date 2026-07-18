@@ -28,9 +28,19 @@ describe("FE-010: RL predictions persisted as 'predicted'", () => {
 
   test("rl/route.ts does NOT use status 'validated' for new RL hypotheses", () => {
     expect(rlRoute).toMatch(/status:\s*["']predicted["']/);
-    const createBlock = rlRoute.match(/db\.hypothesis\.create\(\{[\s\S]*?\}\)/);
-    expect(createBlock).toBeTruthy();
-    expect(createBlock![0]).not.toMatch(/status:\s*["']validated["']/);
+    // BE-028 ROOT FIX (Team Member 12): persistRlCandidates now uses
+    // `tx.hypothesis.upsert(...)` inside a `db.$transaction` instead of
+    // a standalone `db.hypothesis.create(...)`. The `create` branch of
+    // the upsert still uses `status: "predicted"` — we verify that here.
+    // Look for the upsert's `create:` block (which contains the status
+    // assignment for NEW hypotheses).
+    const upsertBlock = rlRoute.match(/tx\.hypothesis\.upsert\(\{[\s\S]*?\}\s*\)/);
+    expect(upsertBlock).toBeTruthy();
+    // The create branch must set status: "predicted" (NOT "validated").
+    const createBranch = upsertBlock![0].match(/create:\s*\{[\s\S]*?(?:update:|}\s*\))/);
+    expect(createBranch).toBeTruthy();
+    expect(createBranch![0]).toMatch(/status:\s*["']predicted["']/);
+    expect(createBranch![0]).not.toMatch(/status:\s*["']validated["']/);
   });
   test("rl/route.ts sets rlPredicted: true on persist", () => {
     expect(rlRoute).toMatch(/rlPredicted:\s*true/);

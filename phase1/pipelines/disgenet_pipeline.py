@@ -191,6 +191,11 @@ from config.settings import (
     DISGENET_UNIPROT_MAP_TTL_HOURS,
     DISGENET_URL,
     DISGENET_USE_API,
+    # v110 Task 24 root fix: import license tier settings.
+    DISGENET_LICENSE_TIER,
+    DISGENET_EFFECTIVE_TIER,
+    DISGENET_TIER_WARNING,
+    DISGENET_EXPECTED_RECORDS_BY_TIER,
     DataSourceName,
     PROCESSED_DATA_DIR,
     _validate_disgenet_config,
@@ -1206,7 +1211,7 @@ class DisGeNETPipeline(BasePipeline):
           ROOT FIX: when DRUGOS_DOWNLOAD_MODE=sample (the default) AND
           (no API key OR the live download fails), fall back to the
           embedded sample GDA dataset
-          (``_embedded_samples.embedded_disgenet_gda()``). The embedded
+          (``_dev_samples.embedded_disgenet_gda()``). The embedded
           sample is biologically valid (real gene IDs, real DOIDs, real
           association types -- see the ``embedded_disgenet_gda``
           docstring). It is written to
@@ -1224,6 +1229,31 @@ class DisGeNETPipeline(BasePipeline):
         """
         # v83 P0-C13: sample-mode embedded fallback.
         _download_mode = os.environ.get("DRUGOS_DOWNLOAD_MODE", "sample").lower().strip()
+
+        # v110 Task 24 root fix: log the effective DisGeNET license tier.
+        #
+        # The tier was resolved at import time in config.settings via
+        # _resolve_disgenet_tier(). Here we log it at the start of download()
+        # so operators see which tier is active in each pipeline run. This
+        # makes silent tier downgrades visible (e.g., if an API key expires
+        # and the tier auto-falls-back to free, the log shows it).
+        _expected_records = DISGENET_EXPECTED_RECORDS_BY_TIER.get(
+            DISGENET_EFFECTIVE_TIER, 0
+        )
+        logger.info(
+            "[disgenet] Task 24 v110: license tier=%s (configured=%s), "
+            "expected_records~=%d, api_key=%s. %s",
+            DISGENET_EFFECTIVE_TIER,
+            DISGENET_LICENSE_TIER,
+            _expected_records,
+            "present" if DISGENET_API_KEY else "ABSENT",
+            DISGENET_TIER_WARNING if DISGENET_TIER_WARNING else "(no tier warning)",
+        )
+        if DISGENET_TIER_WARNING:
+            # Re-emit the warning at download() time so it appears in the
+            # pipeline run log (the import-time warning may have been missed
+            # if the module was imported before logging was configured).
+            logger.warning("[disgenet] %s", DISGENET_TIER_WARNING)
 
         # v91 ROOT FIX (E2E sample-mode 401 failure on CI):
         #   The previous code only short-circuited to the embedded sample
@@ -1327,6 +1357,20 @@ class DisGeNETPipeline(BasePipeline):
                 "[disgenet] Could not compute SHA-256 of %s: %s", path, exc
             )
 
+        # P1-055 ROOT FIX (v108): set source_version from the API response
+        # or static URL. The DisGeNET API returns the source version in
+        # the response headers or the data itself. We use the download
+        # method + current date as a fallback so the audit trail is never
+        # None. The exact version (e.g. "DisGeNET v7.0") would be parsed
+        # from the API response if available.
+        if not getattr(self, "source_version", None):
+            from datetime import datetime, timezone
+            _fmt = getattr(self, "_source_format", "unknown")
+            self.source_version = (
+                f"DisGeNET_{_fmt}_as_of_"
+                f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+            )
+
         return path
 
     def _write_embedded_sample(self) -> Path:
@@ -1335,11 +1379,11 @@ class DisGeNETPipeline(BasePipeline):
         Used as a fallback when the API key is missing OR the live
         download fails in sample mode. The embedded sample is biologically
         valid (real gene IDs, real DOIDs, real association types -- see
-        ``_embedded_samples.embedded_disgenet_gda`` docstring) and
+        ``_dev_samples.embedded_disgenet_gda`` docstring) and
         produces a small but scientifically valid Knowledge Graph.
         """
         import pandas as _pd
-        from pipelines._embedded_samples import embedded_disgenet_gda
+        from pipelines._dev_samples import embedded_disgenet_gda
         dest = self.raw_dir / "disgenet_embedded_sample.csv"
         dest.parent.mkdir(parents=True, exist_ok=True)
         df = embedded_disgenet_gda()
@@ -1347,6 +1391,10 @@ class DisGeNETPipeline(BasePipeline):
         self._source_format = "embedded_csv"
         self._download_method_used = "embedded_sample"
         self._source_url_sanitised = "embedded://disgenet_gda"
+        # P1-055 ROOT FIX (v108): set source_version for the audit trail.
+        # The embedded sample is a snapshot of DisGeNET curated data aligned
+        # to Piñero 2020 §2.3. The version string records this.
+        self.source_version = "DisGeNET_pinero_2020_embedded_sample"
         logger.info(
             "[disgenet] Embedded sample GDA dataset written to %s (%d rows)",
             dest, len(df),
@@ -1611,10 +1659,31 @@ class DisGeNETPipeline(BasePipeline):
                         )
                         break
 
-                    # Termination conditions.
-                    if len(records) < DISGENET_API_PAGE_SIZE:
-                        # Last page (fewer records than requested).
-                        break
+                    # P1-014 v106 FORENSIC ROOT FIX (Team-2): pagination
+                    # termination logic was BUGGY. The previous code had:
+                    #
+                    #   if len(records) < DISGENET_API_PAGE_SIZE:
+                    #       break   # <-- BUG: terminates on ANY short page
+                    #   if (total_available is not None
+                    #       and records_written >= total_available):
+                    #       break
+                    #
+                    # The short-page check fired FIRST. If the DisGeNET API
+                    # ever returned a partial page (during degradation, when
+                    # the operator set a smaller page size for testing, or
+                    # when the test fixture used small pages), pagination
+                    # terminated early -- EVEN WHEN total_available said
+                    # more data was available. The result: the KG had
+                    # records_written records when it should have had
+                    # total_available records. For well-studied diseases
+                    # (breast cancer: 8000+ GDAs), the KG had as few as
+                    # 1 page worth of records.
+                    #
+                    # ROOT FIX: when ``total_available`` is known, it is the
+                    # PRIMARY termination criterion. The short-page heuristic
+                    # is a FALL-BACK for legacy APIs that don't return
+                    # ``totalResults`` -- in that case, a short page is the
+                    # only signal that we've reached the end.
                     if (
                         total_available is not None
                         and records_written >= total_available
@@ -1622,6 +1691,21 @@ class DisGeNETPipeline(BasePipeline):
                         logger.info(
                             "[disgenet] Fetched all %d available records",
                             total_available,
+                        )
+                        break
+                    if (
+                        total_available is None
+                        and len(records) < DISGENET_API_PAGE_SIZE
+                    ):
+                        # Last page (fewer records than requested) -- only
+                        # trust this when total_available is unknown. When
+                        # total_available is known, a short page might be a
+                        # transient API glitch and we keep paginating until
+                        # records_written >= total_available OR an empty page.
+                        logger.info(
+                            "[disgenet] Short page (%d < %d) at offset=%d "
+                            "(total_available unknown) -- stopping.",
+                            len(records), DISGENET_API_PAGE_SIZE, offset,
                         )
                         break
 
@@ -3916,7 +4000,8 @@ class DisGeNETPipeline(BasePipeline):
                             source=rec.get("source") or DataSourceName.DISGENET.value,
                             reason=rec.get("reason", "unknown"),
                             details_json=rec.get("details_json", "{}"),
-                            run_id=rec.get("run_id"),
+                            # v114 round 7: run_id renamed to pipeline_run_id (int FK) in v89 BUG #29.
+                            pipeline_run_id=None,
                         )
                         for rec in new_records
                     ])
@@ -4304,7 +4389,8 @@ class DisGeNETPipeline(BasePipeline):
                     source=row.get("source") or DataSourceName.DISGENET.value,
                     reason=reason,
                     details_json=json.dumps(details, default=str),
-                    run_id=self.run_id,
+                    # v114 round 7: run_id renamed to pipeline_run_id (int FK) in v89 BUG #29.
+                    pipeline_run_id=None,
                 ))
             if objects:
                 session.bulk_save_objects(objects)

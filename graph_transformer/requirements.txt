@@ -8,9 +8,28 @@
 # to install ONLY Phase 3 deps (e.g. a GPU-only training container that
 # does not need Phase 1's airflow/psycopg2).
 torch>=2.0
-torch-geometric>=2.4
+torch-geometric>=2.8.0
 scikit-learn>=1.3
+torch>=2.13.0
+torch-geometric>=2.4
+scikit-learn>=1.9.0
 pandas>=2.1.4
 numpy>=1.26.3
 # Rapidfuzz is used by the Phase 2 adapter's fuzzy KP resolver.
 rapidfuzz>=3.6.1
+# P3-003 ROOT FIX (v113 forensic): RDKit is now a HARD dependency.
+# The previous code fell back to a pseudo-random noise feature when
+# RDKit was unavailable, which produced scientifically meaningless
+# drug feature vectors (90% Gaussian noise + 8 atom-count dims).
+# The GNN cannot learn drug-specific patterns from noise. RDKit is
+# required for ANY environment (dev, CI, production) -- the adapter
+# now raises immediately if RDKit is not importable, regardless of
+# DRUGOS_ENVIRONMENT. No silent degradation.
+rdkit>=2026.3.4
+# P3-025 ROOT FIX (v113 forensic): scipy.sparse is required for the
+# pathway_score computation in gt_rl_bridge.py. The previous code
+# allocated two dense (num_pathways, num_diseases) and (num_drugs,
+# num_diseases) matrices (800MB at 10K-drug production scale) and
+# OOMed the Airflow worker. The fix uses scipy.sparse.csr_matrix
+# (the pathway-disease matrix is boolean and sparse).
+scipy>=1.18.0

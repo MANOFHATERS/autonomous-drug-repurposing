@@ -44,7 +44,7 @@ from database.models import (
 )
 
 # Import SQLite-compatible helpers
-from tests.db_helpers import (
+from db_helpers import (
     get_inchikey_to_drug_id_map,
     get_uniprot_to_protein_id_map,
     sqlite_bulk_update_drugs_from_pubchem,
@@ -505,7 +505,20 @@ class TestModelRelationships:
         assert dpi.protein.uniprot_id == "P23219"
 
         # Traverse Protein -> DPI
-        protein = db_session.query(Protein).filter_by(uniprot_id="P23219").first()
+        # v114 round 8 FORENSIC ROOT FIX (lazy='raise' on Protein relationships):
+        # The Protein model uses lazy='raise' on ALL FOUR of its relationships
+        # (drug_protein_interactions, protein_protein_interactions_a, etc.)
+        # to prevent N+1 queries in production (per models.py line 1229-1246).
+        # The previous code did `protein.drug_protein_interactions` which
+        # raised InvalidRequestError. ROOT FIX: use selectinload to explicitly
+        # load the relationship, or query DPI directly by protein_id.
+        from sqlalchemy.orm import selectinload
+        protein = (
+            db_session.query(Protein)
+            .options(selectinload(Protein.drug_protein_interactions))
+            .filter_by(uniprot_id="P23219")
+            .first()
+        )
         assert protein is not None
         assert len(protein.drug_protein_interactions) >= 1
 

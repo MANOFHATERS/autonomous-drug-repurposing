@@ -1,40 +1,57 @@
 /**
- * Graph Transformer (Phase 3) inference service — RT-006 ROOT FIX.
+ * Graph Transformer (Phase 3) inference service — HTTP-only (Issue 230).
  *
- * Team Member 17: the audit (RT-006) found that
- * `graph_transformer/inference/__init__.py` exports
- * `predict_drug_disease_scores()` and `top_k_novel_predictions()`, but
- * NO API route in `frontend/src/app/api/` invokes them. There was no
- * `/api/predict` or `/api/top-k` route. A researcher asking
- * "what is the GT score for drug X -> disease Y?" could not get an
- * answer — the core ML model was unreachable from the dashboard.
+ * ROOT FIX (forensic, root-level): the previous version of this file
+ * had THREE inference paths, all of which were broken in different ways:
  *
- * Root fix: this service loads the trained GT checkpoint from disk
- * (written by run_4phase.py -> GTRLBridge to <output_dir>/checkpoints/)
- * and exposes two methods that mirror the Python inference module:
+ *   1. Subprocess path (`runPythonInference`): spawned `python3
+ *      scripts/gt_inference.py` per request. Issue 221/222 documented
+ *      that this script DOES NOT EXIST at `frontend/scripts/gt_inference.py`
+ *      (the path the route resolved). The actual script lives at
+ *      `<repo>/scripts/gt_inference.py` — but the path resolution used
+ *      `process.cwd()` which is `frontend/` in dev, so the script was
+ *      never found. Every /api/predict and /api/top-k request returned
+ *      `source: "none"` with a "GT inference helper not found" note.
  *
- *   1. predictPairs(pairs: [{drug, disease}]): scores for arbitrary pairs
- *   2. topKNovel(topK: number): highest-scoring novel (drug, disease) pairs
+ *   2. HTTP path (`runHttpInference`): worked, but only when
+ *      `GT_SERVICE_URL` was set. Most deployments didn't set it because
+ *      the .env.example didn't document it (fixed in Issue 240).
  *
- * The service shells out to a small Python helper (`gt_inference.py`)
- * rather than reimplementing the model in JS. This guarantees the JS
- * and Python paths produce IDENTICAL predictions (no drift). The
- * helper is invoked via `python3` with the repo root on sys.path.
+ *   3. Checkpoint-search path (`findLatestGtCheckpoint`): scanned
+ *      `output_v100/`, `output/`, `graph_transformer/checkpoints/` for
+ *      a `.pt` file. Even if found, the subprocess would still fail to
+ *      spawn (see #1). This was dead code that gave the false impression
+ *      of a fallback.
  *
- * SCIENTIFIC INTEGRITY: if no checkpoint exists, we return
- * `source: "none"` with an empty list — we NEVER fabricate predictions.
- * A researcher who sees an empty list knows to run `python run_4phase.py`
- * to train the model.
+ * ROOT FIX: this file is now HTTP-ONLY. There is no subprocess path,
+ * no checkpoint search, no fs.watch, no tmp files. All GT inference
+ * goes through `GT_SERVICE_URL/predict` and `GT_SERVICE_URL/top-k`
+ * via the shared `mlFetch` HTTP client (Issue 234).
+ *
+ * If `GT_SERVICE_URL` is not set, the functions return a clear
+ * `source: "none"` response with a message telling the operator to
+ * set the env var and start the Phase 3 service. We NEVER fabricate
+ * predictions, NEVER spawn a subprocess, NEVER read a checkpoint
+ * directly from disk.
+ *
+ * SCIENTIFIC INTEGRITY: a GT score is a model output. Only the trained
+ * model can produce it. Reading a checkpoint from disk in JS would
+ * require reimplementing PyTorch inference in JS — which would drift
+ * from the Python path within one PR. The HTTP path guarantees the
+ * JS and Python paths produce IDENTICAL predictions (the Python
+ * service is the single source of truth).
  */
 
-import { promises as fs } from "fs";
-import nodeFs from "fs";
-import path from "path";
-import { spawn } from "child_process";
-import { randomUUID } from "crypto";
+import { mlFetch, resolveServiceUrl, buildServiceUrl, MlServiceError } from "@/lib/http-client";
+import {
+  GtPredictResponseSchema,
+  GtTopKResponseSchema,
+  type GtPrediction,
+  validateMlResponse,
+} from "@/lib/ml-contracts";
 
 // ---------------------------------------------------------------------------
-// Types
+// Public types (kept stable for existing callers)
 // ---------------------------------------------------------------------------
 
 export interface DrugDiseasePair {
@@ -42,11 +59,8 @@ export interface DrugDiseasePair {
   disease: string;
 }
 
-export interface GtPrediction {
-  drug: string;
-  disease: string;
-  score: number; // [0, 1]
-}
+// Re-export for backward compat with existing imports.
+export type { GtPrediction };
 
 export interface GtInferenceResponse {
   predictions: GtPrediction[];
@@ -55,139 +69,22 @@ export interface GtInferenceResponse {
   generatedAt: string;
   count: number;
   checkpointPath?: string | null;
+  error_count?: number;
+  error_rate?: number;
   note?: string;
 }
 
 // ---------------------------------------------------------------------------
-// Checkpoint resolution
+// Service URL resolution
 // ---------------------------------------------------------------------------
 
-const CHECKPOINT_CANDIDATE_DIRS = [
-  process.env.GT_CHECKPOINT_DIR,
-  // RT-006: the bridge writes gt_checkpoint.pt directly to <output_dir>
-  // (not to <output_dir>/checkpoints/). Check both locations for safety.
-  path.resolve(process.cwd(), "output_v100"),
-  path.resolve(process.cwd(), "output_v100", "checkpoints"),
-  path.resolve(process.cwd(), "output"),
-  path.resolve(process.cwd(), "output", "checkpoints"),
-  path.resolve(process.cwd(), "graph_transformer", "checkpoints"),
-].filter(Boolean) as string[];
+const SERVICE_NAME = "phase3_gt";
 
-/**
- * Find the latest trained GT checkpoint. The bridge writes
- * `gt_checkpoint.pt` to <output_dir>/ (run_4phase.py default output is
- * ./output_v100/). We pick the most-recently-modified `.pt` file across
- * the candidate directories, preferring files named `gt_checkpoint.pt`
- * or `best_model.pt`.
- *
- * Returns null if no checkpoint exists.
- */
-function findLatestGtCheckpoint(): string | null {
-  for (const dir of CHECKPOINT_CANDIDATE_DIRS) {
-    let entries: string[] = [];
-    try {
-      entries = nodeFs.readdirSync(dir);
-    } catch {
-      continue;
-    }
-    // Prefer canonical names first, then fall back to any .pt file.
-    const PREFERRED = ["gt_checkpoint.pt", "best_model.pt"];
-    for (const pref of PREFERRED) {
-      const full = path.join(dir, pref);
-      try {
-        if (nodeFs.statSync(full).isFile()) return full;
-      } catch {
-        // skip
-      }
-    }
-    // Fall back to any .pt file (sorted by mtime desc).
-    const candidates = entries
-      .filter((name) => /\.pt$/i.test(name) && !/graph_state/i.test(name))
-      .map((name) => path.join(dir, name))
-      .filter((full) => {
-        try {
-          return nodeFs.statSync(full).isFile();
-        } catch {
-          return false;
-        }
-      });
-    if (candidates.length === 0) continue;
-    let best = candidates[0];
-    let bestMtime = -Infinity;
-    for (const c of candidates) {
-      try {
-        const m = nodeFs.statSync(c).mtimeMs;
-        if (m > bestMtime) {
-          bestMtime = m;
-          best = c;
-        }
-      } catch {
-        // skip
-      }
-    }
-    return best;
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Python inference helper invocation
-// ---------------------------------------------------------------------------
-
-/**
- * Spawn `gt_inference.py` (a small Python helper) to run the actual
- * model inference. The helper loads the checkpoint, runs
- * `predict_drug_disease_scores` or `top_k_novel_predictions`, and
- * writes JSON to stdout.
- *
- * We use a tmp file for the request payload (not stdin) so large pair
- * lists don't overflow the OS pipe buffer.
- */
-async function runPythonInference(
-  checkpointPath: string,
-  mode: "predict" | "top_k",
-  payload: { pairs?: DrugDiseasePair[]; top_k?: number }
-): Promise<{ predictions: GtPrediction[]; modelVersion?: string }> {
-  const tmpDir = "/tmp";
-  const reqId = randomUUID();
-  const reqPath = path.join(tmpDir, `gt_inference_req_${reqId}.json`);
-  const respPath = path.join(tmpDir, `gt_inference_resp_${reqId}.json`);
-
-  try {
-    await fs.writeFile(reqPath, JSON.stringify({ checkpoint: checkpointPath, mode, ...payload }));
-
-    const repoRoot = process.cwd();
-    const scriptPath = path.resolve(repoRoot, "scripts", "gt_inference.py");
-
-    // If the helper doesn't exist, fail gracefully — caller surfaces a
-    // clear message. (The script is shipped with the repo per RT-006 fix.)
-    if (!nodeFs.existsSync(scriptPath)) {
-      throw new Error(`GT inference helper not found at ${scriptPath}. Run 'python run_4phase.py' first to train the model and ensure scripts/gt_inference.py is present.`);
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn("python3", [scriptPath, reqPath, respPath], {
-        cwd: repoRoot,
-        env: { ...process.env, PYTHONPATH: repoRoot },
-      });
-      let stderr = "";
-      child.stderr.on("data", (d) => { stderr += d.toString(); });
-      child.on("error", reject);
-      child.on("close", (code) => {
-        if (code !== 0) reject(new Error(`gt_inference.py exited ${code}: ${stderr.slice(0, 1000)}`));
-        else resolve();
-      });
-    });
-
-    const respRaw = await fs.readFile(respPath, "utf8");
-    const resp = JSON.parse(respRaw);
-    if (resp.error) throw new Error(resp.error);
-    return { predictions: resp.predictions || [], modelVersion: resp.model_version };
-  } finally {
-    // Best-effort cleanup
-    try { await fs.unlink(reqPath); } catch { /* ignore */ }
-    try { await fs.unlink(respPath); } catch { /* ignore */ }
-  }
+function getGtServiceUrl(): string | null {
+  // Canonical env var is GT_SERVICE_URL. No aliases — the subprocess
+  // path is gone, so GT_REPO_ROOT / GT_CHECKPOINT_DIR are no longer
+  // relevant (they were only used by the subprocess path).
+  return resolveServiceUrl("GT_SERVICE_URL");
 }
 
 // ---------------------------------------------------------------------------
@@ -197,10 +94,16 @@ async function runPythonInference(
 /**
  * Score arbitrary (drug, disease) pairs with the trained GT model.
  *
- * Returns `{source: "none", predictions: [], ...}` if no checkpoint
- * exists — we NEVER fabricate scores.
+ * Proxies to `POST {GT_SERVICE_URL}/predict` via the shared HTTP client.
+ * Returns `{source: "none", predictions: [], ...}` if GT_SERVICE_URL is
+ * not set — we NEVER fabricate scores.
+ *
+ * Throws `MlServiceError` if the service is configured but unreachable
+ * after retries. Callers should catch and surface as 502.
  */
-export async function predictPairs(pairs: DrugDiseasePair[]): Promise<GtInferenceResponse> {
+export async function predictPairs(
+  pairs: DrugDiseasePair[],
+): Promise<GtInferenceResponse> {
   if (pairs.length === 0) {
     return {
       predictions: [],
@@ -212,8 +115,8 @@ export async function predictPairs(pairs: DrugDiseasePair[]): Promise<GtInferenc
     };
   }
 
-  const checkpointPath = findLatestGtCheckpoint();
-  if (checkpointPath === null) {
+  const baseUrl = getGtServiceUrl();
+  if (!baseUrl) {
     return {
       predictions: [],
       source: "none",
@@ -221,42 +124,103 @@ export async function predictPairs(pairs: DrugDiseasePair[]): Promise<GtInferenc
       count: 0,
       checkpointPath: null,
       note:
-        "No trained Graph Transformer checkpoint found. Run " +
-        "`python run_4phase.py` to train the model first. RT-006 ROOT FIX: " +
-        "this endpoint NEVER fabricates GT scores.",
+        "GT_SERVICE_URL is not set. The Phase 3 Graph Transformer service " +
+        "(graph_transformer/service.py) must be running and reachable. " +
+        "Start it with `python graph_transformer/service.py` and set " +
+        "GT_SERVICE_URL=http://localhost:8003 in frontend/.env.local. " +
+        "Issue 230 ROOT FIX: this endpoint NEVER spawns a subprocess and " +
+        "NEVER fabricates GT scores.",
     };
   }
 
-  try {
-    const { predictions, modelVersion } = await runPythonInference(checkpointPath, "predict", { pairs });
-    return {
-      predictions,
-      source: "gt_checkpoint",
-      modelVersion,
-      generatedAt: new Date().toISOString(),
-      count: predictions.length,
-      checkpointPath,
-    };
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return {
-      predictions: [],
-      source: "none",
-      generatedAt: new Date().toISOString(),
-      count: 0,
-      checkpointPath,
-      note: `GT inference failed: ${msg}`,
-    };
+  const url = buildServiceUrl(baseUrl, "/predict");
+  const result = await mlFetch<unknown>(url, {
+    service: SERVICE_NAME,
+    method: "POST",
+    body: { pairs },
+    timeoutMs: 60_000, // GT inference can take time on large pair lists
+    maxRetries: 2, // predictions are deterministic; 2 retries is enough
+  });
+
+  if (!result.ok) {
+    const err = result.error as MlServiceError;
+    // 503 from the service = checkpoint not loaded. Surface as source:none
+    // so the dashboard shows "model not trained yet" instead of a 502.
+    if (err.httpStatus === 503) {
+      return {
+        predictions: [],
+        source: "none",
+        generatedAt: new Date().toISOString(),
+        count: 0,
+        checkpointPath: null,
+        note: `GT service is running but no checkpoint is loaded: ${err.message}`,
+      };
+    }
+    // 4xx = bad request (e.g., drug not in graph). Surface the message.
+    if (err.httpStatus >= 400 && err.httpStatus < 500) {
+      return {
+        predictions: [],
+        source: "none",
+        generatedAt: new Date().toISOString(),
+        count: 0,
+        checkpointPath: null,
+        note: `GT service rejected request (${err.httpStatus}): ${err.message}`,
+      };
+    }
+    // Network error (ECONNREFUSED, timeout, etc.) — the service is
+    // configured but not reachable. Return source:"none" with a clear
+    // note instead of throwing a 500. The acceptance criteria requires
+    // /api/predict to return predictions (not 500) — "no predictions
+    // yet, service down" is an acceptable answer; a 500 crash is not.
+    if (err.httpStatus === 0 || err.isTimeout) {
+      return {
+        predictions: [],
+        source: "none",
+        generatedAt: new Date().toISOString(),
+        count: 0,
+        checkpointPath: null,
+        note:
+          `GT service at ${getGtServiceUrl()} is not reachable: ${err.message}. ` +
+          `Check that 'python graph_transformer/service.py' is running and ` +
+          `GT_SERVICE_URL is correct. Issue 230 ROOT FIX: returning ` +
+          `source:"none" instead of 500 so the dashboard shows a clear state.`,
+      };
+    }
+    // Other 5xx — re-throw so the caller surfaces a 502.
+    throw err;
   }
+
+  // Validate the response against the contract.
+  const validated = validateMlResponse(
+    SERVICE_NAME,
+    "/predict",
+    GtPredictResponseSchema,
+    result.body,
+  );
+
+  return {
+    predictions: validated.predictions,
+    source: "gt_checkpoint",
+    modelVersion: validated.modelVersion,
+    generatedAt: validated.generatedAt,
+    count: validated.count,
+    checkpointPath: validated.checkpointPath ?? null,
+    error_count: validated.error_count,
+    error_rate: validated.error_rate,
+  };
 }
 
 /**
  * Return the top-K highest-scoring NOVEL (drug, disease) pairs from the
- * trained GT model. "Novel" = not in the known_pairs list.
+ * trained GT model. "Novel" = not in the known_pairs training set.
+ *
+ * Proxies to `GET {GT_SERVICE_URL}/top-k?k=<n>` via the shared HTTP client.
  */
-export async function topKNovel(topK: number = 50): Promise<GtInferenceResponse> {
-  const checkpointPath = findLatestGtCheckpoint();
-  if (checkpointPath === null) {
+export async function topKNovel(
+  topK: number = 50,
+): Promise<GtInferenceResponse> {
+  const baseUrl = getGtServiceUrl();
+  if (!baseUrl) {
     return {
       predictions: [],
       source: "none",
@@ -264,30 +228,107 @@ export async function topKNovel(topK: number = 50): Promise<GtInferenceResponse>
       count: 0,
       checkpointPath: null,
       note:
-        "No trained Graph Transformer checkpoint found. Run " +
-        "`python run_4phase.py` to train the model first. RT-006 ROOT FIX.",
+        "GT_SERVICE_URL is not set. The Phase 3 Graph Transformer service " +
+        "(graph_transformer/service.py) must be running and reachable. " +
+        "Issue 230 ROOT FIX: this endpoint NEVER spawns a subprocess.",
     };
   }
 
-  try {
-    const { predictions, modelVersion } = await runPythonInference(checkpointPath, "top_k", { top_k: topK });
-    return {
-      predictions,
-      source: "gt_checkpoint",
-      modelVersion,
-      generatedAt: new Date().toISOString(),
-      count: predictions.length,
-      checkpointPath,
-    };
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return {
-      predictions: [],
-      source: "none",
-      generatedAt: new Date().toISOString(),
-      count: 0,
-      checkpointPath,
-      note: `GT inference failed: ${msg}`,
-    };
+  const k = Math.max(1, Math.min(500, Math.floor(topK)));
+  const url = buildServiceUrl(baseUrl, `/top-k?k=${k}`);
+  const result = await mlFetch<unknown>(url, {
+    service: SERVICE_NAME,
+    method: "GET",
+    timeoutMs: 60_000,
+    maxRetries: 2,
+  });
+
+  if (!result.ok) {
+    const err = result.error as MlServiceError;
+    if (err.httpStatus === 503) {
+      return {
+        predictions: [],
+        source: "none",
+        generatedAt: new Date().toISOString(),
+        count: 0,
+        checkpointPath: null,
+        note: `GT service is running but no checkpoint is loaded: ${err.message}`,
+      };
+    }
+    if (err.httpStatus >= 400 && err.httpStatus < 500) {
+      return {
+        predictions: [],
+        source: "none",
+        generatedAt: new Date().toISOString(),
+        count: 0,
+        checkpointPath: null,
+        note: `GT service rejected request (${err.httpStatus}): ${err.message}`,
+      };
+    }
+    // Network error — same graceful handling as predictPairs.
+    if (err.httpStatus === 0 || err.isTimeout) {
+      return {
+        predictions: [],
+        source: "none",
+        generatedAt: new Date().toISOString(),
+        count: 0,
+        checkpointPath: null,
+        note:
+          `GT service at ${getGtServiceUrl()} is not reachable: ${err.message}. ` +
+          `Check that 'python graph_transformer/service.py' is running.`,
+      };
+    }
+    throw err;
   }
+
+  const validated = validateMlResponse(
+    SERVICE_NAME,
+    "/top-k",
+    GtTopKResponseSchema,
+    result.body,
+  );
+
+  return {
+    predictions: validated.predictions,
+    source: "gt_checkpoint",
+    modelVersion: validated.modelVersion,
+    generatedAt: validated.generatedAt,
+    count: validated.count,
+    checkpointPath: validated.checkpointPath ?? null,
+  };
+}
+
+/**
+ * Health check — useful for the /api/system/status route.
+ *
+ * Returns the raw health response from the GT service, or null if the
+ * service is not configured / unreachable.
+ */
+export async function checkGtHealth(): Promise<{
+  configured: boolean;
+  reachable: boolean;
+  checkpointLoaded: boolean;
+  version?: string;
+}> {
+  const baseUrl = getGtServiceUrl();
+  if (!baseUrl) {
+    return { configured: false, reachable: false, checkpointLoaded: false };
+  }
+  const url = buildServiceUrl(baseUrl, "/health");
+  const result = await mlFetch<unknown>(url, {
+    service: SERVICE_NAME,
+    method: "GET",
+    timeoutMs: 5_000,
+    maxRetries: 1,
+  });
+  if (!result.ok) {
+    return { configured: true, reachable: false, checkpointLoaded: false };
+  }
+  const body = result.body as Record<string, unknown>;
+  return {
+    configured: true,
+    reachable: true,
+    checkpointLoaded: Boolean(body?.checkpoint_loaded),
+    version: typeof body?.version === "string" ? body.version : undefined,
+  };
 }

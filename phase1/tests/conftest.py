@@ -21,11 +21,60 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 # ---------------------------------------------------------------------------
-# Ensure project root is importable
+# Ensure project root AND phase1/ are importable
 # ---------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+# v114 round 5 FORENSIC ROOT FIX: the previous code added only the REPO
+# ROOT (PROJECT_ROOT). But phase1 test files do `from config.settings
+# import ...` and `import pipelines.omim_pipeline` — both require
+# phase1/ itself on sys.path (config/ and pipelines/ live inside phase1/).
+# The root conftest.py adds phase1/ early, but some root test files
+# manipulate sys.path (insert/remove) during collection, which can push
+# phase1/ off or remove it entirely. By the time phase1/tests/ files are
+# imported, `from config.settings` fails with ModuleNotFoundError.
+# ROOT FIX: add phase1/ HERE too (defense-in-depth). This conftest runs
+# right before phase1/tests/ collection, re-asserting phase1/ on sys.path
+# even if a root test removed it. Idempotent (checks before inserting).
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # repo root
+PHASE1_ROOT = Path(__file__).resolve().parent.parent          # phase1/ dir
+for _p in (PROJECT_ROOT, PHASE1_ROOT):
+    _p_str = str(_p)
+    if _p_str not in sys.path:
+        sys.path.insert(0, _p_str)
+
+# v114 round 5 FORENSIC ROOT FIX (module-name collision):
+# There are TWO packages named `config` in the repo:
+#   1. phase1/config/        (has settings.py — the Phase 1 config)
+#   2. graph_transformer/config/  (has only __init__.py — GT config)
+# When root tests/ import graph_transformer modules, Python registers
+# `config` in sys.modules pointing to graph_transformer/config/ (which
+# has NO settings submodule). Then phase1/tests/ files that do
+# `from config.settings import ...` fail with ModuleNotFoundError because
+# `config` in sys.modules is the WRONG package.
+# ROOT FIX: explicitly import phase1/config/ and register it as `config`
+# in sys.modules BEFORE any phase1 test runs. This ensures
+# `from config.settings import` resolves to phase1/config/settings.py.
+# This is safe because graph_transformer uses RELATIVE imports
+# (`from .config import ...`) — it never does bare `import config`.
+import importlib as _importlib_p1cfg
+_p1_config_path = PHASE1_ROOT / "config"
+if _p1_config_path.exists():
+    # Insert phase1/ at position 0 so `import config` finds phase1/config/ first.
+    _p1_str = str(PHASE1_ROOT)
+    if _p1_str in sys.path:
+        sys.path.remove(_p1_str)
+    sys.path.insert(0, _p1_str)
+    # Force (re)import of config as phase1/config/.
+    if "config" in sys.modules:
+        # The existing `config` module is likely graph_transformer/config.
+        # Save it under its qualified name so graph_transformer's relative
+        # imports still work, then replace `config` with phase1's.
+        _gt_config = sys.modules.pop("config")
+        sys.modules["graph_transformer.config"] = _gt_config
+    try:
+        _p1_config = _importlib_p1cfg.import_module("config")
+        sys.modules["config"] = _p1_config
+    except ImportError:
+        pass  # phase1/config/ not importable — skip (defensive)
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +123,37 @@ def _reset_namespace_logger_levels():
         if logger.level != _saved_levels[ns]:
             logger.setLevel(_saved_levels[ns])
 
-from database.base import Base
-from database.models import (
+# v114 round 7 FORENSIC ROOT FIX (Base class dual-import — tables missing):
+# The models in database/models.py import Base via the QUALIFIED path
+# `from phase1.database.base import Base` (line 68). But this conftest
+# imported via the BARE path `from database.base import Base`. Even
+# though both resolve to the same FILE, Python's import system treats
+# `database.base` and `phase1.database.base` as DIFFERENT modules
+# (different __name__) — so they create DIFFERENT DeclarativeBase
+# subclasses with DIFFERENT metadata. The models register their tables
+# on `phase1.database.base.Base.metadata`, but the conftest's
+# `Base.metadata.create_all(engine)` used `database.base.Base.metadata`
+# which had ZERO tables. Result: every db_engine fixture created an
+# empty SQLite DB → "no such table: drugs/proteins/pipeline_runs" in
+# 34+ tests.
+#
+# Teammate-3's v117 fix (00a164e) made the two Base.metadata objects
+# the SAME, but the models still register on a separate Base — the
+# dual-import was NOT fully resolved for the test path.
+#
+# ROOT FIX: import Base via the SAME qualified path the models use:
+# `from phase1.database.base import Base`. This ensures the conftest's
+# Base.metadata is the SAME object the models registered their tables
+# on. create_all() will then create all tables correctly.
+from phase1.database.base import Base
+# v114 round 7: import models via the SAME qualified path (phase1.database.models)
+# that the models themselves use internally. Importing via the bare
+# `database.models` path causes Python to execute the module TWICE (once as
+# `phase1.database.models` via internal imports, once as `database.models`
+# via this conftest import) — every class gets defined twice on Base,
+# causing "Multiple classes found for path" errors and "index already
+# exists" errors during create_all.
+from phase1.database.models import (
     Drug,
     DrugProteinInteraction,
     EntityMapping,
@@ -84,6 +162,56 @@ from database.models import (
     Protein,
     ProteinProteinInteraction,
 )
+# v114 round 7 FORENSIC ROOT FIX (sys.modules alias for dual-import):
+# Test files (test_bug_fixes, test_db_loaders, test_omim_pipeline, db_helpers)
+# import via the BARE path `from database.models import ...`. Python treats
+# `database.models` and `phase1.database.models` as DIFFERENT modules —
+# executing the file twice, defining every ORM class twice on Base. This
+# causes "Multiple classes found for path DrugProteinInteraction" and
+# "index uq_drugs_chembl_id already exists" during create_all.
+#
+# ROOT FIX: alias `database` -> `phase1.database` in sys.modules so both
+# import paths resolve to the SAME module object. This is the standard
+# Python pattern for packages that need to work under two names. The alias
+# is set AFTER phase1.database is imported (above), so it points to the
+# already-loaded module. Test files' `from database.models import ...` will
+# then hit the cached `phase1.database.models` instead of re-executing.
+import sys as _sys_alias
+if "phase1.database" in _sys_alias.modules and "database" not in _sys_alias.modules:
+    _sys_alias.modules["database"] = _sys_alias.modules["phase1.database"]
+if "phase1.database.models" in _sys_alias.modules and "database.models" not in _sys_alias.modules:
+    _sys_alias.modules["database.models"] = _sys_alias.modules["phase1.database.models"]
+if "phase1.database.base" in _sys_alias.modules and "database.base" not in _sys_alias.modules:
+    _sys_alias.modules["database.base"] = _sys_alias.modules["phase1.database.base"]
+# v114 round 10 FORENSIC ROOT FIX (pipelines dual-import):
+# The phase1/__init__.py bootstrap adds phase1/ to sys.path, so 'pipelines'
+# is importable as a BARE package (pipelines.omim_pipeline) AND as a
+# qualified package (phase1.pipelines.omim_pipeline). Python treats these
+# as DIFFERENT modules → the clean() function's __globals__ dict is
+# pipelines.omim_pipeline.__dict__, but the test patches
+# phase1.pipelines.omim_pipeline.OMIM_OUTPUT_PATH (a DIFFERENT dict).
+# Result: clean() reads the UNPATCHED OMIM_OUTPUT_PATH → writes to the
+# REAL processed_data dir, not the test's temp dir → FileNotFoundError.
+# ROOT FIX: alias pipelines → phase1.pipelines so both paths resolve to
+# the SAME module object. This is the same dual-import pattern as
+# database.base (round 7 fix).
+if "phase1.pipelines" in _sys_alias.modules and "pipelines" not in _sys_alias.modules:
+    _sys_alias.modules["pipelines"] = _sys_alias.modules["phase1.pipelines"]
+# Alias all pipeline submodules that define module-level constants
+# (OMIM_OUTPUT_PATH, PROCESSED_DATA_DIR, etc.) that tests monkeypatch.
+for _sub in ("omim_pipeline", "disgenet_pipeline", "chembl_pipeline",
+             "drugbank_pipeline", "uniprot_pipeline", "string_pipeline",
+             "pubchem_pipeline", "base_pipeline", "_dev_samples",
+             "_v50_downloaders", "_chembl_http_client", "_http_client"):
+    _qual = f"phase1.pipelines.{_sub}"
+    _bare = f"pipelines.{_sub}"
+    if _qual in _sys_alias.modules and _bare not in _sys_alias.modules:
+        _sys_alias.modules[_bare] = _sys_alias.modules[_qual]
+# Also alias phase1.config (config.settings dual-import from round 5)
+if "phase1.config" in _sys_alias.modules and "config" not in _sys_alias.modules:
+    _sys_alias.modules["config"] = _sys_alias.modules["phase1.config"]
+if "phase1.config.settings" in _sys_alias.modules and "config.settings" not in _sys_alias.modules:
+    _sys_alias.modules["config.settings"] = _sys_alias.modules["phase1.config.settings"]
 
 # v90 ROOT FIX (BUG #10): _get_environment() now defaults to "production"
 # (fail-closed) when DRUGOS_ENVIRONMENT / ENVIRONMENT / ENV is unset. Tests

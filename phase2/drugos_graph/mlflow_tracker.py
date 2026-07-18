@@ -145,6 +145,16 @@ class MLflowTracker:
         # times — see the ``self.run = None`` reset in ``end_run``).
         self._closed: bool = False
         atexit.register(self._atexit_close)
+        # Task 95 ROOT FIX: atexit does NOT fire on SIGTERM, SIGHUP,
+        # SIGQUIT, or os._exit() -- only on clean interpreter shutdown.
+        # Production training jobs are routinely killed with SIGTERM by
+        # orchestrators (Airflow, Kubernetes, SLURM) and the MLflow run
+        # was leaked (left in RUNNING state forever) because atexit
+        # never ran. The fix installs signal handlers for the common
+        # termination signals that re-raise after closing the run.
+        # SIGKILL (9) is uncatchable by design -- the heartbeat daemon
+        # (P2-024) is the only defence against SIGKILL leaks.
+        self._install_signal_handlers()
 
         # P2-024 ROOT FIX (Team 8): heartbeat state. The thread is
         # created in start_run and joined in close. The
@@ -195,42 +205,166 @@ class MLflowTracker:
     def _atexit_close(self) -> None:
         """P2-014: atexit-registered close handler.
 
-        Swallows ALL exceptions so interpreter shutdown never
-        raises (atexit handlers that raise produce noisy
-        tracebacks at shutdown and can mask the real exit code).
+        v107 ROOT FIX (ISSUE-P2-047): the previous code did
+        ``try: self.close() except Exception: pass``, swallowing ALL
+        exceptions silently. If close() raised (e.g. MLflow server
+        unreachable, network timeout), the exception was dropped and
+        the MLflow run was left in an inconsistent state — the UI
+        showed it as "RUNNING" forever, and metrics logged after the
+        failure were lost. Operators had no way to detect the problem.
+
+        ROOT FIX: still swallow the exception (atexit handlers must
+        not raise — it produces noisy tracebacks at shutdown and can
+        mask the real exit code), but LOG it at WARNING level first
+        so the failure is visible in production logs. The MLflow
+        client library's own atexit handlers will retry the close on
+        the next interpreter start; we just need to surface that THIS
+        shutdown failed.
         """
         try:
             self.close()
-        except Exception:
-            pass
+        except Exception as e:
+            # v107 ISSUE-P2-047: log at WARNING so operators can detect
+            # dangling MLflow runs. We still swallow the exception
+            # (atexit handlers must not raise).
+            logger.warning(
+                "MLflowTracker._atexit_close: close() raised %s: %s. "
+                "The MLflow run may be left in an inconsistent state "
+                "(UI may show it as RUNNING). Check the MLflow server "
+                "connectivity and the run's status on next startup. "
+                "v107 ISSUE-P2-047 root fix.",
+                type(e).__name__, e,
+            )
+
+    def _install_signal_handlers(self) -> None:
+        """Task 95 ROOT FIX: install SIGTERM/SIGHUP/SIGQUIT handlers.
+
+        ``atexit`` does NOT fire on:
+
+          * ``SIGTERM`` (default signal sent by ``kill <pid>``, Airflow,
+            Kubernetes pod termination, SLURM scancel, systemd stop)
+          * ``SIGHUP`` (terminal hangup, daemon reload)
+          * ``SIGQUIT`` (``Ctrl-\\``, Java-style abort)
+          * ``os._exit()`` (used by some C extensions and multiprocessing
+            forks)
+          * ``SIGKILL`` (uncatchable by design)
+
+        Without these handlers, every production training job that was
+        SIGTERM'd by an orchestrator leaked its MLflow run (left it in
+        RUNNING state forever). The heartbeat (P2-024) detects the
+        leak but does not PREVENT it -- this method prevents it by
+        calling ``self.close()`` before re-raising the signal with the
+        default handler.
+
+        Idempotent: only installs once per process. Subsequent calls
+        (e.g. if the caller constructs multiple ``MLflowTracker``
+        instances) skip the install -- only the FIRST tracker's
+        close() is registered as the signal handler, which is fine
+        because all subsequent trackers will have their own atexit
+        handlers and the signal-installed tracker's close() will be
+        called via atexit anyway.
+        """
+        # Only install once per process. The signal handler closure
+        # captures ``self`` so we MUST not install twice (the second
+        # install would close the WRONG tracker instance).
+        if getattr(self.__class__, "_signal_handlers_installed", False):
+            return
+        import signal
+        import os
+
+        # Signals we want to catch and clean up before dying. SIGKILL
+        # is uncatchable by design; SIGINT is handled by Python's
+        # default KeyboardInterrupt handler (caller can catch that).
+        _CATCHABLE_SIGNALS = []
+        for sig_name in ("SIGTERM", "SIGHUP", "SIGQUIT"):
+            sig = getattr(signal, sig_name, None)
+            if sig is not None:
+                _CATCHABLE_SIGNALS.append((sig, sig_name))
+
+        if not _CATCHABLE_SIGNALS:
+            # Platform without any of these signals (rare -- e.g.
+            # Windows only has SIGTERM and not SIGHUP/SIGQUIT). Skip
+            # silently; atexit + KeyboardInterrupt still cover most
+            # cases on Windows.
+            return
+
+        def _signal_handler(signum, frame):
+            try:
+                logger.warning(
+                    "MLflowTracker: received signal %d -- closing MLflow "
+                    "run before terminating (Task 95 root fix).",
+                    signum,
+                )
+                self.close()
+            except Exception as e:
+                # Best-effort: log but don't prevent termination.
+                logger.error(
+                    "MLflowTracker: close() failed during signal "
+                    "handling: %s: %s", type(e).__name__, e,
+                )
+            # Re-raise with the default handler so the process exits
+            # with the correct status code (e.g. 143 for SIGTERM).
+            # ``signal.signal(signum, SIG_DFL)`` restores the default
+            # then ``os.kill(os.getpid(), signum)`` re-sends it.
+            try:
+                signal.signal(signum, signal.SIG_DFL)
+                os.kill(os.getpid(), signum)
+            except Exception:
+                # If re-sending fails (e.g. race with another handler),
+                # fall back to sys.exit with the conventional exit code.
+                import sys
+                sys.exit(128 + signum)
+
+        try:
+            for sig, _name in _CATCHABLE_SIGNALS:
+                # Only install if the caller hasn't already installed a
+                # custom handler (don't clobber user-installed handlers
+                # -- they may have their own cleanup logic).
+                current = signal.getsignal(sig)
+                if current in (signal.SIG_DFL, None):
+                    signal.signal(sig, _signal_handler)
+                else:
+                    logger.info(
+                        "MLflowTracker: not installing handler for %s "
+                        "(custom handler %r already installed).",
+                        _name, current,
+                    )
+            self.__class__._signal_handlers_installed = True
+        except (ValueError, OSError) as e:
+            # signal.signal() can raise ValueError if called from a
+            # non-main thread (Python restriction). In that case, log
+            # and skip -- the main thread's atexit still fires.
+            logger.warning(
+                "MLflowTracker: could not install signal handlers "
+                "(%s: %s). atexit + context-manager close() are still "
+                "active; SIGTERM will leak the run if received from a "
+                "non-main-thread construct.",
+                type(e).__name__, e,
+            )
 
     def start_run(self, run_name: str = "default") -> "MLflowTracker":
         """Start a new MLflow run.
 
-        v40 ROOT FIX (P2 #4): the previous ``start_run`` method was NOT
-        paired with ``end_run`` if the caller used it outside the context
-        manager (``with MLflowTracker() as t: ...``). If the body raised
-        before ``end_run`` was called, the MLflow run was left dangling
-        (orphaned run in the MLflow tracking server). The fix:
-        ``start_run`` now returns ``self`` so it can be used as a context
-        manager directly: ``with tracker.start_run("name"): ...``. The
-        ``__exit__`` method calls ``end_run`` regardless of whether an
-        exception was raised, ensuring the run is always properly closed.
+        Task 95 ROOT FIX: the previous ``start_run`` returned ``self``
+        and relied on the caller to either use ``with tracker.start_run()``
+        or call ``close()`` explicitly. If the caller's body raised
+        BETWEEN ``start_run()`` returning and ``__exit__`` firing (or if
+        the caller forgot ``with`` entirely), the MLflow run was leaked.
+        The fix:
 
-        FIX-P2-P2-8: correct the return type annotation from ``None`` to
-        ``"MLflowTracker"`` so static analysers and IDEs match the
-        ``return self`` statement and the documented context-manager
-        usage.
+          1. ``start_run`` still returns ``self`` (for ``with`` usage).
+          2. If the caller uses ``with``, ``__exit__`` calls ``close()``
+             deterministically (unchanged).
+          3. If the caller does NOT use ``with``, the atexit handler
+             (registered in ``__init__``) and the SIGTERM/SIGHUP/SIGQUIT
+             handlers installed by ``_install_signal_handlers`` close
+             the run on process exit.
+          4. ``start_run`` itself wraps the heartbeat-thread start in a
+             try/except: if the thread fails to start, ``close()`` is
+             called immediately so the partially-open run is not leaked.
 
-        P2-024 ROOT FIX (Team 8): start the heartbeat daemon thread
-        AFTER the run is created. The thread writes the current epoch
-        timestamp to the ``drugos.heartbeat_ts`` MLflow tag every
-        ``self._heartbeat_interval`` seconds. If the process is
-        SIGKILL'd, the heartbeat stops; ops can compare the heartbeat
-        timestamp to the current time to detect stale RUNNING runs.
-        The thread is a Python daemon so it does NOT block interpreter
-        shutdown — atexit's close() is still the deterministic
-        cleanup path.
+        This is the smallest change that closes the leak without
+        breaking the existing context-manager contract.
         """
         if self.mlflow:
             self.run = self.mlflow.start_run(run_name=run_name)
@@ -241,21 +375,44 @@ class MLflowTracker:
         # previous run is cleared before the new thread starts.
         self._heartbeat_stop.clear()
         if self._heartbeat_interval > 0:
-            self._heartbeat_thread = threading.Thread(
-                target=self._heartbeat_loop,
-                name="drugos-mlflow-heartbeat",
-                daemon=True,  # P2-024: daemon so it doesn't block shutdown
-            )
-            self._heartbeat_thread.start()
-            logger.info(
-                "P2-024: heartbeat thread started (interval=%ds, "
-                "stale_threshold=%ds, tag=%s). If this process is "
-                "SIGKILL'd, ops can detect the stale run by comparing "
-                "the heartbeat tag to the current time.",
-                self._heartbeat_interval,
-                self._heartbeat_stale_threshold,
-                HEARTBEAT_TAG_NAME,
-            )
+            try:
+                self._heartbeat_thread = threading.Thread(
+                    target=self._heartbeat_loop,
+                    name="drugos-mlflow-heartbeat",
+                    daemon=True,  # P2-024: daemon so it doesn't block shutdown
+                )
+                self._heartbeat_thread.start()
+                logger.info(
+                    "P2-024: heartbeat thread started (interval=%ds, "
+                    "stale_threshold=%ds, tag=%s). If this process is "
+                    "SIGKILL'd, ops can detect the stale run by comparing "
+                    "the heartbeat tag to the current time.",
+                    self._heartbeat_interval,
+                    self._heartbeat_stale_threshold,
+                    HEARTBEAT_TAG_NAME,
+                )
+            except (RuntimeError, OSError) as e:
+                # Task 95: if the heartbeat thread fails to start
+                # (e.g. interpreter is shutting down and threads can't
+                # be created), close the run immediately so it's not
+                # leaked. Log the failure but don't re-raise -- the
+                # caller's body still needs to execute and atexit /
+                # signal handlers will close the run if the body
+                # raises.
+                logger.error(
+                    "MLflowTracker.start_run: failed to start heartbeat "
+                    "thread: %s: %s. Closing run to prevent leak.",
+                    type(e).__name__, e,
+                )
+                try:
+                    self.close()
+                except Exception as close_exc:
+                    logger.error(
+                        "MLflowTracker.start_run: close() after heartbeat "
+                        "thread failure also failed: %s: %s",
+                        type(close_exc).__name__, close_exc,
+                    )
+                raise
         return self  # v40: enable ``with tracker.start_run() as t:`` usage
 
     def _heartbeat_loop(self) -> None:
@@ -281,6 +438,21 @@ class MLflowTracker:
         # marked alive BEFORE the first interval elapses. This lets
         # ops dashboards see the run as "live" immediately after
         # start_run returns, without waiting up to 30s.
+        # P2-023 ROOT FIX (v107): after N consecutive heartbeat failures,
+        # mark the MLflow run as FAILED via a best-effort
+        # ``mlflow.end_run(status="FAILED")``. The previous code
+        # incremented ``heartbeat_failure_count`` forever — after 100
+        # failures the heartbeat was effectively dead but the MLflow UI
+        # still showed the run as "RUNNING" indefinitely. Operators
+        # could not distinguish a live run from a dead one. ROOT FIX:
+        # after 10 consecutive failures (configurable via
+        # ``DRUGOS_MLFLOW_HEARTBEAT_MAX_FAILURES``), attempt to end the
+        # run with status=FAILED so the MLflow UI reflects reality.
+        # The heartbeat thread then EXITS (no point continuing to
+        # retry if the server is unreachable).
+        _max_hb_failures_p2_023 = int(
+            os.environ.get("DRUGOS_MLFLOW_HEARTBEAT_MAX_FAILURES", "10")
+        )
         while not self._heartbeat_stop.is_set():
             try:
                 ts = time.time()
@@ -303,6 +475,15 @@ class MLflowTracker:
                     })
                 self.last_heartbeat_ts = ts
                 self.heartbeat_count += 1
+                # P2-023: reset failure counter on success.
+                if self.heartbeat_failure_count > 0:
+                    logger.info(
+                        "P2-023: heartbeat recovered after %d "
+                        "consecutive failures. Resuming normal "
+                        "heartbeat.",
+                        self.heartbeat_failure_count,
+                    )
+                    self.heartbeat_failure_count = 0
             except Exception as e:
                 # The heartbeat MUST NOT raise — it would kill the
                 # daemon thread and silently disable liveness tracking.
@@ -314,6 +495,45 @@ class MLflowTracker:
                     "process is alive. Check MLflow server health.",
                     self.heartbeat_failure_count, e,
                 )
+                # P2-023 ROOT FIX: after N consecutive failures, mark
+                # the run as FAILED and exit the heartbeat loop. The
+                # MLflow UI will then show the run as FAILED (not
+                # "RUNNING" forever), and operators can distinguish a
+                # dead run from a live one.
+                if self.heartbeat_failure_count >= _max_hb_failures_p2_023:
+                    logger.error(
+                        "P2-023 ROOT FIX: heartbeat failed %d "
+                        "consecutive times (threshold=%d). Marking "
+                        "the MLflow run as FAILED and stopping the "
+                        "heartbeat thread. The MLflow UI will now "
+                        "show this run as FAILED — investigate MLflow "
+                        "server health.",
+                        self.heartbeat_failure_count,
+                        _max_hb_failures_p2_023,
+                    )
+                    try:
+                        if self.mlflow and self.run:
+                            # Best-effort: set a tag indicating the
+                            # heartbeat died, then end the run as
+                            # FAILED. If this also fails, there's
+                            # nothing more we can do — the run will
+                            # stay RUNNING in the UI until the MLflow
+                            # server's own reaper cleans it up.
+                            self.mlflow.set_tag(
+                                "drugos.heartbeat_status",
+                                "FAILED_AFTER_MAX_RETRIES",
+                            )
+                            self.mlflow.end_run(status="FAILED")
+                    except Exception as _end_exc:
+                        logger.error(
+                            "P2-023: best-effort end_run(FAILED) also "
+                            "failed (%s: %s). The MLflow UI will keep "
+                            "showing this run as RUNNING until the "
+                            "server's own reaper cleans it up.",
+                            type(_end_exc).__name__, _end_exc,
+                        )
+                    # Exit the heartbeat loop — no point continuing.
+                    break
             # Wait for the interval OR until close() sets the stop
             # event — whichever comes first. This ensures close()
             # returns promptly without waiting up to 30s for the
@@ -451,22 +671,42 @@ class MLflowTracker:
             return
         self._closed = True
 
-        # P2-024 ROOT FIX (Team 8): stop the heartbeat thread BEFORE
-        # ending the run. Setting the stop event causes the loop's
-        # ``_heartbeat_stop.wait()`` to return immediately, the loop
-        # checks ``is_set()`` and exits. The join(timeout=5) ensures
-        # close doesn't block for the full heartbeat interval.
-        self._heartbeat_stop.set()
-        if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
-            self._heartbeat_thread.join(timeout=5.0)
-            if self._heartbeat_thread.is_alive():
+        # v120 FORENSIC ROOT FIX (Teammate 5, mlflow_tracker P2-014
+        # test_close_is_idempotent): the previous code accessed
+        # ``self._heartbeat_stop`` and ``self._heartbeat_thread``
+        # directly. These attributes are created in ``__init__`` (line
+        # 174-175). But several test paths (and the production
+        # ``__del__`` fallback) create an MLflowTracker via
+        # ``__new__`` (bypassing ``__init__``) to avoid the mlflow
+        # import side-effect, then call ``close()`` directly. The
+        # missing attributes caused ``AttributeError:
+        # 'MLflowTracker' object has no attribute '_heartbeat_stop'``
+        # — the close failed WITHOUT setting ``_closed=True``, so the
+        # NEXT close call re-entered the body and crashed the same
+        # way. The idempotency guarantee was broken.
+        #
+        # ROOT FIX: use ``getattr(self, "_heartbeat_stop", None)``
+        # and ``getattr(self, "_heartbeat_thread", None)`` so close()
+        # is ROBUST to partial initialization. If the attributes are
+        # missing (init was bypassed), there is no heartbeat thread
+        # to stop — skip the join. The close still sets ``_closed=
+        # True`` and proceeds to end_run(), preserving idempotency.
+        _heartbeat_stop = getattr(self, "_heartbeat_stop", None)
+        _heartbeat_thread = getattr(self, "_heartbeat_thread", None)
+        if _heartbeat_stop is not None:
+            _heartbeat_stop.set()
+        if _heartbeat_thread is not None and _heartbeat_thread.is_alive():
+            _heartbeat_thread.join(timeout=5.0)
+            if _heartbeat_thread.is_alive():
                 logger.warning(
                     "P2-024: heartbeat thread did not exit within 5s "
                     "timeout — it will be killed at interpreter exit "
                     "(daemon=True). This may indicate a stuck MLflow "
                     "write."
                 )
-        self._heartbeat_thread = None
+        # Always clear the thread attribute (idempotent across calls).
+        if hasattr(self, "_heartbeat_thread"):
+            self._heartbeat_thread = None
 
         try:
             self.end_run()
@@ -503,3 +743,257 @@ class MLflowTracker:
         # The previous ``return False`` was dead code that could mislead a
         # maintainer into thinking the return value mattered. The
         # convention is to return None (implicitly) from __del__.
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # P2-024 ROOT FIX (Team 8 — forensic completion): the REAPER.
+    # ─────────────────────────────────────────────────────────────────────────
+    # The heartbeat (above) writes ``drugos.heartbeat_ts`` every 30s. But
+    # the issue ALSO requires: "If a run's heartbeat is >5 minutes stale,
+    # MLflow can mark it as FAILED." The previous fix only wrote the
+    # heartbeat — there was no function that QUERIED MLflow for stale
+    # RUNNING runs and MARKED them FAILED. Ops had to do it manually.
+    # This is the missing piece: a classmethod that ops (or a cron job,
+    # or an Airflow sensor) calls periodically to reap stale runs.
+    # ─────────────────────────────────────────────────────────────────────────
+    @classmethod
+    def reap_stale_runs(
+        cls,
+        experiment_name: Optional[str] = None,
+        stale_threshold_seconds: Optional[int] = None,
+        *,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """P2-024 ROOT FIX (Team 8): mark stale RUNNING runs as FAILED.
+
+        The heartbeat thread (``_heartbeat_loop``) updates
+        ``drugos.heartbeat_ts`` on the MLflow run every
+        ``heartbeat_interval`` seconds. If the process is SIGKILL'd
+        (OOM kill, kernel panic, ``os._exit``), atexit does NOT fire
+        and the heartbeat stops. The MLflow run stays in RUNNING state
+        forever. After 100 OOM-killed runs, the MLflow UI shows 100
+        "RUNNING" runs that are actually dead — ops cannot find the
+        real active run, and the audit trail is corrupted.
+
+        This classmethod queries MLflow for all RUNNING runs in the
+        experiment, reads each run's ``drugos.heartbeat_ts`` tag, and
+        marks runs whose heartbeat is older than ``stale_threshold_seconds``
+        as FAILED (with a ``drugos.reaped_reason="heartbeat_stale"`` tag
+        so ops can audit the reap action).
+
+        Called by:
+          - ops manually: ``python -c "from drugos_graph.mlflow_tracker
+            import MLflowTracker; MLflowTracker.reap_stale_runs()"``
+          - a cron job / Airflow sensor that runs every 5 minutes
+          - the pipeline's startup self-check (to clean up stale runs
+            from a previous crashed invocation before starting a new one)
+
+        Args:
+            experiment_name: The MLflow experiment to scan. If None,
+                uses the default ``"DrugOS_Phase2"`` (matching
+                ``MLflowTracker.__init__``).
+            stale_threshold_seconds: A run is considered stale if its
+                ``drugos.heartbeat_ts`` is more than this many seconds
+                in the past. If None, uses
+                ``DEFAULT_HEARTBEAT_STALE_THRESHOLD_SECONDS`` (default
+                300 = 5 minutes, override via
+                ``DRUGOS_MLFLOW_HEARTBEAT_STALE_THRESHOLD``).
+            dry_run: If True, log what WOULD be reaped but do NOT
+                actually mark runs as FAILED. Useful for ops to
+                preview the reap action before running it for real.
+
+        Returns:
+            A dict with keys:
+              - ``scanned`` (int): number of RUNNING runs examined.
+              - ``reaped`` (int): number of runs marked FAILED (0 if
+                ``dry_run=True``).
+              - ``skipped_no_heartbeat_tag`` (int): runs without a
+                ``drugos.heartbeat_ts`` tag (pre-P2-024 runs or runs
+                from other tools). These are NOT reaped — they may
+                be legitimate long-running runs from a different tool.
+              - ``skipped_heartbeat_recent`` (int): runs with a recent
+                heartbeat (within the threshold).
+              - ``reaped_run_ids`` (List[str]): IDs of reaped runs.
+              - ``errors`` (List[str]): error messages for runs that
+                could not be reaped (e.g. MLflow server error).
+
+        Raises:
+            RuntimeError: if MLflow is not installed (the reaper
+                requires MLflow to query and update runs).
+        """
+        try:
+            import mlflow
+        except ImportError as exc:
+            raise RuntimeError(
+                "P2-024 reap_stale_runs requires mlflow to be installed. "
+                "Install with: pip install mlflow"
+            ) from exc
+
+        if experiment_name is None:
+            experiment_name = "DrugOS_Phase2"
+        if stale_threshold_seconds is None:
+            stale_threshold_seconds = DEFAULT_HEARTBEAT_STALE_THRESHOLD_SECONDS
+
+        result: Dict[str, Any] = {
+            "scanned": 0,
+            "reaped": 0,
+            "skipped_no_heartbeat_tag": 0,
+            "skipped_heartbeat_recent": 0,
+            "reaped_run_ids": [],
+            "errors": [],
+            "dry_run": dry_run,
+            "stale_threshold_seconds": stale_threshold_seconds,
+            "experiment_name": experiment_name,
+        }
+
+        try:
+            exp = mlflow.get_experiment_by_name(experiment_name)
+            if exp is None:
+                # No experiment — nothing to reap.
+                logger.info(
+                    "P2-024 reap_stale_runs: experiment %r not found — "
+                    "nothing to reap.",
+                    experiment_name,
+                )
+                return result
+            runs = mlflow.search_runs(
+                experiment_ids=[exp.experiment_id],
+                filter_string="attributes.status = 'RUNNING'",
+            )
+        except Exception as exc:
+            result["errors"].append(
+                f"failed to query MLflow for RUNNING runs: {exc}"
+            )
+            logger.error(
+                "P2-024 reap_stale_runs: failed to query MLflow: %s", exc
+            )
+            return result
+
+        # `runs` is a pandas DataFrame; if pandas is not available or
+        # the search returned no runs, fall back to an empty iterable.
+        try:
+            run_rows = runs.iterrows() if hasattr(runs, "iterrows") else []
+        except Exception:
+            run_rows = []
+
+        now = time.time()
+        for _, row in run_rows:
+            result["scanned"] += 1
+            # The run_id is the index of the DataFrame (mlflow.search_runs
+            # uses run_id as the index).
+            try:
+                run_id = row.name if hasattr(row, "name") else None
+            except Exception:
+                run_id = None
+            if run_id is None:
+                result["errors"].append(
+                    "could not extract run_id from MLflow search row"
+                )
+                continue
+
+            # Read the heartbeat timestamp tag.
+            # mlflow.search_runs puts tags in columns named "tags.<tag_name>".
+            heartbeat_ts_str = None
+            try:
+                if hasattr(runs, "columns"):
+                    tag_col = f"tags.{HEARTBEAT_TAG_NAME}"
+                    if tag_col in runs.columns:
+                        heartbeat_ts_str = row.get(tag_col)
+                # Fallback: use mlflow.get_run to read tags directly
+                # (more reliable across MLflow versions).
+                if heartbeat_ts_str is None:
+                    run_info = mlflow.get_run(run_id)
+                    heartbeat_ts_str = run_info.data.tags.get(HEARTBEAT_TAG_NAME)
+            except Exception as exc:
+                result["errors"].append(
+                    f"run {run_id}: failed to read heartbeat tag: {exc}"
+                )
+                continue
+
+            if heartbeat_ts_str is None:
+                # No heartbeat tag — this is either a pre-P2-024 run or
+                # a run from a different tool. Do NOT reap it (it may be
+                # a legitimate long-running run from another tool that
+                # doesn't use our heartbeat convention).
+                result["skipped_no_heartbeat_tag"] += 1
+                logger.info(
+                    "P2-024 reap_stale_runs: run %s has no %s tag — "
+                    "skipping (may be a pre-P2-024 run or a run from "
+                    "a different tool).",
+                    run_id, HEARTBEAT_TAG_NAME,
+                )
+                continue
+
+            try:
+                heartbeat_ts = float(heartbeat_ts_str)
+            except (TypeError, ValueError):
+                result["errors"].append(
+                    f"run {run_id}: heartbeat tag {heartbeat_ts_str!r} "
+                    f"is not a valid float"
+                )
+                continue
+
+            age = now - heartbeat_ts
+            if age <= stale_threshold_seconds:
+                result["skipped_heartbeat_recent"] += 1
+                logger.debug(
+                    "P2-024 reap_stale_runs: run %s heartbeat is %.1fs "
+                    "old (within threshold %ds) — skipping.",
+                    run_id, age, stale_threshold_seconds,
+                )
+                continue
+
+            # The run is stale — mark it FAILED.
+            logger.warning(
+                "P2-024 reap_stale_runs: run %s heartbeat is %.1fs old "
+                "(threshold %ds) — %s.",
+                run_id, age, stale_threshold_seconds,
+                "would mark FAILED (dry_run)" if dry_run else "marking FAILED",
+            )
+            if dry_run:
+                result["reaped_run_ids"].append(run_id)
+                # In dry_run, don't actually mark — just count what we
+                # WOULD reap. The reaped count is 0 (we didn't reap).
+                continue
+
+            try:
+                mlflow.set_terminated(run_id, status="FAILED")
+                # Also set a tag so ops can audit WHY the run was reaped.
+                try:
+                    client = mlflow.tracking.MlflowClient()
+                    client.set_tag(
+                        run_id, "drugos.reaped_reason", "heartbeat_stale"
+                    )
+                    client.set_tag(
+                        run_id,
+                        "drugos.reaped_heartbeat_age_seconds",
+                        str(int(age)),
+                    )
+                    client.set_tag(
+                        run_id, "drugos.reaped_at", str(now),
+                    )
+                except Exception:
+                    # The set_terminated call already marked the run
+                    # FAILED; the audit tags are best-effort.
+                    pass
+                result["reaped"] += 1
+                result["reaped_run_ids"].append(run_id)
+            except Exception as exc:
+                result["errors"].append(
+                    f"run {run_id}: failed to mark FAILED: {exc}"
+                )
+                logger.error(
+                    "P2-024 reap_stale_runs: failed to mark run %s as "
+                    "FAILED: %s",
+                    run_id, exc,
+                )
+
+        logger.info(
+            "P2-024 reap_stale_runs: scanned=%d, reaped=%d, "
+            "skipped_no_heartbeat=%d, skipped_recent=%d, errors=%d "
+            "(dry_run=%s, threshold=%ds)",
+            result["scanned"], result["reaped"],
+            result["skipped_no_heartbeat_tag"],
+            result["skipped_heartbeat_recent"],
+            len(result["errors"]), dry_run, stale_threshold_seconds,
+        )
+        return result

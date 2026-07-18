@@ -528,105 +528,62 @@ class _RateLimiter:
             self._last_request = time.time()
 
 
-class _CircuitBreaker:
-    """Simple circuit breaker for external service calls (REL-6.11).
-
-    After ``failure_threshold`` consecutive failures, the breaker opens
-    and refuses further calls for ``reset_timeout`` seconds. After the
-    timeout, it enters ``half_open`` state: one call is allowed; if it
-    succeeds, the breaker closes; if it fails, the breaker re-opens.
-
-    v40 ROOT FIX (P1 #9): the previous ``is_open`` method transitioned
-    OPEN -> HALF_OPEN and immediately returned False (allowing the call).
-    But in HALF_OPEN state, EVERY subsequent ``is_open`` call also
-    returned False -- there was no "single probe" gate. Multiple
-    concurrent calls could flood through, defeating the purpose of the
-    half-open state. The fix: track a ``_half_open_probe_in_flight``
-    flag. When transitioning to HALF_OPEN, the FIRST call is allowed
-    (probe). Subsequent calls are REFUSED (return True = "open") until
-    the probe completes (record_success or record_failure resets the
-    flag).
-    """
-
-    def __init__(
-        self,
-        failure_threshold: int = 5,
-        reset_timeout: float = 3600.0,
-    ) -> None:
-        self._failure_threshold = max(1, int(failure_threshold))
-        self._reset_timeout = max(0.0, float(reset_timeout))
-        self._failure_count = 0
-        self._last_failure_time = 0.0
-        self._state = "closed"  # closed | open | half_open
-        self._lock = threading.Lock()
-        # v40 ROOT FIX (P1 #9): track whether the half-open probe is
-        # in flight. Only ONE call is allowed in half_open state.
-        self._half_open_probe_in_flight = False
-
-    def record_failure(self) -> None:
-        with self._lock:
-            self._failure_count += 1
-            self._last_failure_time = time.time()
-            if self._failure_count >= self._failure_threshold:
-                self._state = "open"
-            # v40: reset the probe flag -- the probe failed.
-            self._half_open_probe_in_flight = False
-
-    def record_success(self) -> None:
-        with self._lock:
-            self._failure_count = 0
-            self._state = "closed"
-            # v40: reset the probe flag -- the probe succeeded.
-            self._half_open_probe_in_flight = False
-
-    def is_open(self) -> bool:
-        """Return True if the breaker is open and calls should be refused.
-
-        v92 ROOT FIX (BUG P1-073): is_open() is now a PURE OBSERVATION
-        method -- it does NOT transition state or reserve probe slots.
-        Previously, is_open() mutated state (OPEN->half_open, set
-        _half_open_probe_in_flight=True), which meant monitoring/dashboard
-        code that called is_open() inadvertently broke subsequent
-        allow_request() calls. Callers who want to actually acquire a
-        probe slot MUST call try_acquire_probe() or allow_request().
-        """
-        with self._lock:
-            if self._state == "open":
-                return True
-            if self._state == "half_open":
-                # In half_open, "open" means "refuse additional calls" =
-                # a probe is already in flight.
-                return self._half_open_probe_in_flight
-            return False
-
-    def try_acquire_probe(self) -> bool:
-        """Try to acquire a probe slot in half_open state.
-
-        v92 ROOT FIX (BUG P1-073): This method performs the state mutation
-        that was previously done by is_open(). It transitions OPEN->half_open
-        when the reset timeout has elapsed and reserves a probe slot. Returns
-        True if the request should proceed, False if refused.
-
-        Callers who need to actually acquire a probe slot (i.e., code that
-        decides whether to make a network call) should use this method
-        instead of is_open().
-        """
-        with self._lock:
-            if self._state == "open":
-                if time.time() - self._last_failure_time > self._reset_timeout:
-                    self._state = "half_open"
-                    # Allow the first probe call.
-                    self._half_open_probe_in_flight = True
-                    return False  # allow this call (the probe)
-                return True
-            if self._state == "half_open":
-                # If a probe is already in flight, refuse.
-                if self._half_open_probe_in_flight:
-                    return True  # refuse -- wait for probe to complete
-                # No probe in flight -- allow this call as the new probe.
-                self._half_open_probe_in_flight = True
-                return False
-            return False
+# v107 FORENSIC ROOT FIX (ISSUE-P1-006 + ISSUE-P1-017 + ISSUE-P1-018 + ISSUE-P1-033):
+#   The previous code defined a LOCAL _CircuitBreaker class here (lines
+#   531-629) that DUPLICATED the canonical implementation in
+#   ``phase1/_circuit_breaker.py``. Despite the docstring at
+#   _circuit_breaker.py:33-50 claiming "Consolidated from five duplicate
+#   implementations", the duplicate here was ALIVE and missing every
+#   subsequent fix: no rolling failure window, no exponential backoff,
+#   no probe timeout, no P1-028 auto-recovery.
+#
+#   Compound bugs:
+#     P1-006: the local breaker tripped after 5 LIFETIME-consecutive
+#       failures (no time window). After tripping, it never auto-recovered
+#       because ``_download_with_retries`` called ``is_open()`` (now pure
+#       observation) but never called ``try_acquire_probe()`` to transition
+#       OPEN->HALF_OPEN. After 5 failures, ALL downloads silently failed
+#       with "Circuit breaker is open" until process restart.
+#     P1-017: ``is_open()`` was changed to pure observation (v92) but the
+#       download path still called ``is_open()`` instead of the state-
+#       transitioning ``allow_request()`` / ``try_acquire_probe()``. The
+#       breaker was stuck open forever within the process lifetime.
+#     P1-018: ``try_acquire_probe()`` had INVERTED semantics vs its name
+#       (docstring said "Returns True to proceed" but implementation
+#       returned False to allow). It was also never called anywhere.
+#     P1-033: ``try_acquire_probe()`` was dead code (never called from
+#       _download_with_retries). The v107 fix on the fix branch called
+#       it, but the canonical _CircuitBreaker in _circuit_breaker.py
+#       already provides ``allow_request()`` with CORRECT semantics
+#       (True = proceed, False = refused) AND transitions OPEN->HALF_OPEN
+#       automatically. The canonical breaker is the single source of
+#       truth — use ``allow_request()`` there, not the local duplicate.
+#
+#   ROOT FIX:
+#     1. DELETE the local _CircuitBreaker class entirely.
+#     2. Import the canonical _CircuitBreaker from ``_circuit_breaker.py``.
+#     3. In ``_download_with_retries``, use ``allow_request()`` (which has
+#        CORRECT semantics: True = proceed, False = refused, AND
+#        transitions OPEN->HALF_OPEN automatically).
+#     4. The canonical breaker has rolling failure window, exponential
+#        backoff, probe-timeout auto-recovery, and a ``probe()`` context
+#        manager for new callers.
+try:
+    from _circuit_breaker import _CircuitBreaker  # noqa: F401 — re-exported for legacy callers
+except ImportError:  # pragma: no cover — fallback for different import paths
+    import importlib.util as _ilu
+    import os as _os
+    _cb_path = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "_circuit_breaker.py")
+    if _os.path.exists(_cb_path):
+        _spec = _ilu.spec_from_file_location("_circuit_breaker", _cb_path)
+        _cb_mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_cb_mod)
+        _CircuitBreaker = _cb_mod._CircuitBreaker
+    else:  # pragma: no cover — should never happen in a correct install
+        raise ImportError(
+            "Cannot import _CircuitBreaker from _circuit_breaker.py. "
+            "The canonical circuit breaker module is required."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -854,6 +811,33 @@ class BasePipeline(ABC):
         if seed is not None:
             self.seed = int(seed)
 
+        # v113 FORENSIC ROOT FIX (P1-025, IDEM-7.4):
+        # Per-instance RNG instead of mutating the GLOBAL ``random`` /
+        # ``numpy.random`` state. The previous code called
+        # ``random.seed(self.seed)`` and ``np.random.seed(self.seed)``
+        # inside ``run()`` -- this mutated the GLOBAL RNG. If two
+        # pipeline instances ran concurrently in the same process
+        # (e.g., ChEMBL and DrugBank in the master DAG's parallel
+        # tasks), the second instance's seed overwrote the first's --
+        # the first pipeline's subsequent ``random.uniform()`` calls
+        # used the SECOND pipeline's seed, breaking reproducibility.
+        # The comment at ``pipelines/__init__.py:469`` claimed this
+        # provided "IDEM-4" (idempotency), but it actually DESTROYED
+        # idempotency for concurrent pipelines.
+        #
+        # ROOT FIX: instantiate a local ``random.Random(self.seed)``
+        # and (when numpy is available) a local
+        # ``np.random.default_rng(self.seed)``. Both are stored on
+        # ``self`` and used by all retry-backoff / jitter code in this
+        # module (see ``run()`` and the two ``random.uniform`` call
+        # sites in ``_download_with_retries``). The GLOBAL RNG is no
+        # longer touched.
+        self._rng: random.Random = random.Random(self.seed)
+        if _HAS_NUMPY:
+            self._np_rng = np.random.default_rng(self.seed)
+        else:  # pragma: no cover -- numpy is a hard dep in production
+            self._np_rng = None
+
         # v49 ROOT FIX: read DRUGOS_DOWNLOAD_MODE from env (default sample).
         _mode = os.environ.get("DRUGOS_DOWNLOAD_MODE", self.DEFAULT_DOWNLOAD_MODE).lower().strip()
         if _mode not in self.VALID_DOWNLOAD_MODES:
@@ -880,6 +864,11 @@ class BasePipeline(ABC):
         self._transformation_log: list[dict[str, Any]] = []
         self.dead_letter_queue: list[dict[str, Any]] = []
         self.entity_resolution_applied: bool = False
+        # v107 P1-039: PII detection result (populated by _detect_pii in
+        # run() / run_download_and_clean_only()). Initialized to [] so
+        # code that reads it before clean() runs sees an empty list, not
+        # AttributeError.
+        self._pii_detected: list[str] = []
 
         # Kept for backward compatibility (ARCH-1.16): populated by run()
         # and used by some existing tests / callers as a run context dict.
@@ -1222,10 +1211,18 @@ class BasePipeline(ABC):
                 f"{', '.join(failed)}"
             )
 
-        # Seed management for reproducibility (IDEM-7.4)
-        random.seed(self.seed)
-        if _HAS_NUMPY:
-            np.random.seed(self.seed)
+        # v113 FORENSIC ROOT FIX (P1-025, IDEM-7.4):
+        # Per-instance RNG was already initialised in ``__init__`` as
+        # ``self._rng`` (random.Random) and ``self._np_rng``
+        # (numpy Generator). The previous code here called
+        # ``random.seed(self.seed)`` and ``np.random.seed(self.seed)``
+        # on the GLOBAL RNG -- this mutated the global state for every
+        # other module in the process (Airflow scheduler, ChEMBL HTTP
+        # client, deduplicator). With concurrent pipelines, the second
+        # pipeline's seed overwrote the first's, destroying both
+        # reproducibility AND idempotency. The global seeding is now
+        # REMOVED; all jitter in this module uses ``self._rng`` (see
+        # ``_download_with_retries``).
 
         records_downloaded: int = 0
         records_cleaned: int = 0
@@ -1418,6 +1415,37 @@ class BasePipeline(ABC):
 
             # Sanitize CSV output (SEC-9.14) and persist (ARCH-1.3)
             clean_df = self._sanitize_csv_output(clean_df)
+            # v107 ROOT FIX (ISSUE-P1-039 — _detect_pii was dead code):
+            #   The audit found ``_detect_pii`` was defined but NEVER
+            #   called from any pipeline. The platform claimed
+            #   GDPR/HIPAA compliance in docstrings but the PII detection
+            #   was inert. A drug-name field that accidentally contained
+            #   a patient email (e.g. from a misconfigured DrugBank XML)
+            #   was never flagged. ROOT FIX: call ``_detect_pii`` after
+            #   sanitization (before persistence) and log a WARNING for
+            #   each column where PII is detected. We do NOT dead-letter
+            #   rows (that would be a larger schema change) but we
+            #   surface the signal so operators can investigate. The
+            #   warning is also recorded in the run-log metadata below
+            #   via the ``pii_detected`` field.
+            try:
+                pii_columns = self._detect_pii(clean_df)
+                if pii_columns:
+                    logger.warning(
+                        "[%s] PII detected in cleaned data (SEC-9.15): %s. "
+                        "Investigate the upstream source — drug/protein/disease "
+                        "data should NEVER contain PII. (v107 P1-039)",
+                        self.source_name, pii_columns,
+                    )
+                    self._pii_detected = pii_columns  # stash for run-log
+                else:
+                    self._pii_detected = []
+            except Exception as pii_exc:  # noqa: BLE001 — never crash clean
+                logger.debug(
+                    "[%s] PII detection failed (non-fatal): %s",
+                    self.source_name, pii_exc,
+                )
+                self._pii_detected = []
             cleaned_path = self._persist_cleaned_data(clean_df)
             logger.info(
                 "[%s] Cleaned data persisted to: %s",
@@ -1441,8 +1469,25 @@ class BasePipeline(ABC):
                 ) as session:
                     load_result = self.load(clean_df, session=session)
                     if isinstance(load_result, LoadResult):
-                        records_loaded = load_result.total_upserted
+                        # P1-058 ROOT FIX (v107): use rows_inserted (NOT
+                        # total_upserted) for the records_loaded audit field.
+                        # total_upserted = rows_inserted + rows_updated —
+                        # this double-counts rows that were updated (they
+                        # were already counted as inserted in a previous
+                        # run). A load() that updates 100% of existing rows
+                        # (0 new inserts) reported records_loaded=1000 —
+                        # the load-ratio check passed but NO NEW data was
+                        # loaded. The KG was stale. ROOT FIX: use
+                        # rows_inserted so the audit trail reflects NEW
+                        # data loaded. total_upserted is recorded in
+                        # dq_metrics['load_detail'] for observability.
+                        records_loaded = load_result.rows_inserted
                         dq_metrics["load_detail"] = asdict(load_result)
+                        dq_metrics["load_detail"]["_audit_note"] = (
+                            "records_loaded=rows_inserted (P1-058 ROOT FIX); "
+                            "total_upserted=rows_inserted+rows_updated "
+                            "includes updates (recorded here for observability)"
+                        )
                     else:
                         records_loaded = int(load_result)
 
@@ -1743,6 +1788,27 @@ class BasePipeline(ABC):
 
             # Persist cleaned data (ARCH-1.3) -- side effect, not return value
             clean_df = self._sanitize_csv_output(clean_df)
+            # v107 ROOT FIX (ISSUE-P1-039 — _detect_pii was dead code):
+            # call _detect_pii after sanitization, before persistence.
+            # Same rationale as the run() call site (see comment there).
+            try:
+                pii_columns = self._detect_pii(clean_df)
+                if pii_columns:
+                    logger.warning(
+                        "[%s] PII detected in cleaned data (SEC-9.15): %s. "
+                        "Investigate the upstream source — drug/protein/disease "
+                        "data should NEVER contain PII. (v107 P1-039)",
+                        self.source_name, pii_columns,
+                    )
+                    self._pii_detected = pii_columns
+                else:
+                    self._pii_detected = []
+            except Exception as pii_exc:  # noqa: BLE001 — never crash clean
+                logger.debug(
+                    "[%s] PII detection failed (non-fatal): %s",
+                    self.source_name, pii_exc,
+                )
+                self._pii_detected = []
             cleaned_path = self._persist_cleaned_data(clean_df)
             logger.info(
                 "[%s] Cleaned data persisted to: %s",
@@ -1988,7 +2054,18 @@ class BasePipeline(ABC):
                         "schema_version": SCHEMA_VERSION,
                     },
                 )
-            except Exception as audit_exc:
+            # v107 ROOT FIX (ISSUE-P1-027 — run_load_only audit-log handler
+            #   was broader than run() / run_download_and_clean_only()):
+            #   The previous code used ``except Exception as audit_exc:`` here
+            #   — DIFFERENT from the narrowed ``(OSError, ValueError,
+            #   TypeError)`` tuple used in ``run()`` (line ~1616) and
+            #   ``run_download_and_clean_only()`` (line ~1823). A programming
+            #   bug in ``_write_run_log`` (e.g. AttributeError from a typo)
+            #   was silently masked in ``run_load_only`` but propagated in
+            #   ``run()`` — tests that exercised ``run_load_only`` could
+            #   pass while ``run()`` failed, hiding the bug. ROOT FIX:
+            #   align all three run methods on the SAME narrowed tuple.
+            except (OSError, ValueError, TypeError) as audit_exc:
                 logger.error(
                     "[%s] Audit log write failed: %s",
                     self.source_name,
@@ -1998,9 +2075,19 @@ class BasePipeline(ABC):
             # so HTTP sessions, file handles, and any subclass-specific
             # resources are released even when an exception propagates.
             # Mirrors the same fix in ``run_download_and_clean_only`` above.
+            # v107 ROOT FIX (ISSUE-P1-025 — run_load_only teardown handler
+            #   was broader than run() / run_download_and_clean_only()):
+            #   The previous code used ``except Exception as teardown_exc:``
+            #   here — DIFFERENT from the narrowed ``(OSError, RuntimeError,
+            #   ValueError)`` tuple used in ``run()`` and
+            #   ``run_download_and_clean_only()``. A typo in ``teardown()``
+            #   (e.g. AttributeError) was silently masked as a warning,
+            #   leaking HTTP sessions, file handles, and DB sessions. ROOT
+            #   FIX: align with the narrowed tuple used in the other two
+            #   run methods so programming bugs propagate.
             try:
                 self.teardown()
-            except Exception as teardown_exc:
+            except (OSError, RuntimeError, ValueError) as teardown_exc:
                 logger.warning(
                     "[%s] teardown() failed during run_load_only finally block: %s",
                     self.source_name,
@@ -2066,13 +2153,42 @@ class BasePipeline(ABC):
             with get_db_session() as session:
                 session.execute(_sa_text("SELECT 1"))
             return True
-        except (_SAOperationalError, TimeoutError) as exc:
+        except TimeoutError as exc:
             logger.warning(
-                "[%s] DB unreachable during pre_check: %s",
+                "[%s] DB unreachable during pre_check (timeout): %s",
                 self.source_name,
                 exc,
             )
             return False
+        except Exception as exc:
+            # P1-044 ROOT FIX (v107): guard against None _SAOperationalError.
+            # If SQLAlchemy is not installed, _SAOperationalError is None.
+            # The previous ``except (_SAOperationalError, TimeoutError)``
+            # would raise ``TypeError: catching classes that do not inherit
+                       # from BaseException is not allowed`` because None is not a
+            # valid exception type. The guard at the top of this function
+            # (``if not _HAS_SQLALCHEMY: return False``) mitigates this in
+            # the common case, but defense-in-depth requires us to also
+            # handle the case where _HAS_SQLALCHEMY is True but
+            # _SAOperationalError is None (shouldn't happen, but be safe).
+            if _SAOperationalError is not None and isinstance(exc, _SAOperationalError):
+                logger.warning(
+                    "[%s] DB unreachable during pre_check (operational): %s",
+                    self.source_name,
+                    exc,
+                )
+                return False
+            # Also catch InterfaceError (a parent of OperationalError in
+            # some SQLAlchemy versions) and ProgrammingError (DB driver
+            # not installed).
+            if _SAInterfaceError is not None and isinstance(exc, _SAInterfaceError):
+                logger.warning(
+                    "[%s] DB unreachable during pre_check (interface): %s",
+                    self.source_name,
+                    exc,
+                )
+                return False
+            raise
 
     def _check_disk_space(self, min_mb: int = 1024) -> bool:
         """Check that at least *min_mb* MB of disk space is available.
@@ -2130,11 +2246,19 @@ class BasePipeline(ABC):
         if self._http_session is not None:
             try:
                 self._http_session.close()
-            except (OSError, RuntimeError, ValueError):
-                # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
-                # ``except Exception``. HTTP session close can fail with
-                # socket errors (OSError) or runtime errors.
-                pass
+            except (OSError, RuntimeError, ValueError) as exc:
+                # P1-050 ROOT FIX (v107): log at WARNING so operators can
+                # detect socket leaks. The previous silent ``pass`` let
+                # connection-close failures accumulate invisibly —
+                # eventually hitting the OS file-descriptor limit and
+                # crashing the pipeline with "Too many open files".
+                logger.warning(
+                    "[%s] HTTP session close failed: %s: %s — possible "
+                    "socket leak (P1-050 ROOT FIX).",
+                    self.source_name,
+                    type(exc).__name__,
+                    exc,
+                )
             self._http_session = None
 
         # Replay buffered audit records on next successful DB write (DQ-5.10)
@@ -2274,6 +2398,106 @@ class BasePipeline(ABC):
                 dtypes[col] = "str"
         return dtypes
 
+    # v107 ROOT FIX (ISSUE-P1-024 + ISSUE-P1-035 — pattern-consistency
+    # check was documented in comments but NEVER implemented):
+    #   The comments at lines ~360-385 promised a
+    #   ``_verify_pattern_consistency()`` method "called lazily from
+    #   validate_output" that would assert the schema-declared InChIKey
+    #   and UniProt patterns compile to the same match-set as the
+    #   ``INCHIKEY_PATTERN`` and ``UNIPROT_ID_PATTERN`` constants. The
+    #   audit found this method was NEVER defined — a textbook case of
+    #   "comment says fixed, code says broken". The constants could
+    #   diverge from the schema silently.
+    #
+    # ROOT FIX: implement ``_verify_pattern_consistency()`` and call it
+    # lazily from ``validate_output()``. The check is memoised per
+    # ``(file_key, schema_version)`` so it runs at most once per
+    # pipeline instance + schema — no per-row overhead.
+    _PATTERN_CONSISTENCY_CACHE: dict[tuple[str, str], list[str]] = {}
+
+    @classmethod
+    def _verify_pattern_consistency(cls, file_key: str, schema: dict) -> list[str]:
+        """Verify schema-declared patterns match the canonical constants.
+
+        Returns a list of warning messages (empty if all consistent).
+        Memoised per ``(file_key, schema_version)`` to avoid re-running
+        the check on every ``validate_output()`` call.
+        """
+        schema_version = str(schema.get("version", "unknown"))
+        cache_key = (file_key, schema_version)
+        if cache_key in cls._PATTERN_CONSISTENCY_CACHE:
+            return cls._PATTERN_CONSISTENCY_CACHE[cache_key]
+
+        warnings_list: list[str] = []
+        properties = (
+            schema.get("properties", {}).get(file_key, {}).get("properties", {})
+        )
+        # InChIKey consistency check (ISSUE-P1-024)
+        for col_name, col_spec in properties.items():
+            declared = col_spec.get("pattern")
+            if not declared:
+                continue
+            col_lower = col_name.lower()
+            if "inchikey" in col_lower:
+                try:
+                    declared_re = re.compile(declared)
+                except re.error as exc:
+                    warnings_list.append(
+                        f"Schema pattern for '{col_name}' is not a valid "
+                        f"regex: {exc}"
+                    )
+                    continue
+                # Test a known-good InChIKey against both patterns
+                test_inchikey = "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
+                if bool(INCHIKEY_PATTERN.match(test_inchikey)) != bool(declared_re.match(test_inchikey)):
+                    warnings_list.append(
+                        f"Schema pattern for '{col_name}' ({declared!r}) "
+                        f"does not match INCHIKEY_PATTERN constant "
+                        f"({INCHIKEY_PATTERN.pattern!r}) — test InChIKey "
+                        f"'{test_inchikey}' diverges. The schema and "
+                        f"constant may silently diverge (ISSUE-P1-024)."
+                    )
+                # Test a known-bad InChIKey
+                bad_inchikey = "INVALID-INCHIKEY"
+                if bool(INCHIKEY_PATTERN.match(bad_inchikey)) != bool(declared_re.match(bad_inchikey)):
+                    warnings_list.append(
+                        f"Schema pattern for '{col_name}' ({declared!r}) "
+                        f"does not match INCHIKEY_PATTERN constant "
+                        f"({INCHIKEY_PATTERN.pattern!r}) — bad InChIKey "
+                        f"'{bad_inchikey}' diverges. (ISSUE-P1-024)."
+                    )
+            elif "uniprot" in col_lower:
+                try:
+                    declared_re = re.compile(declared)
+                except re.error as exc:
+                    warnings_list.append(
+                        f"Schema pattern for '{col_name}' is not a valid "
+                        f"regex: {exc}"
+                    )
+                    continue
+                # Test known-good UniProt IDs (6-char and 10-char forms)
+                for test_uniprot in ("P12345", "A0A0K3AVT9"):
+                    if bool(UNIPROT_ID_PATTERN.match(test_uniprot)) != bool(declared_re.match(test_uniprot)):
+                        warnings_list.append(
+                            f"Schema pattern for '{col_name}' ({declared!r}) "
+                            f"does not match UNIPROT_ID_PATTERN constant "
+                            f"({UNIPROT_ID_PATTERN.pattern!r}) — test "
+                            f"UniProt ID '{test_uniprot}' diverges "
+                            f"(ISSUE-P1-035)."
+                        )
+                # Test a known-bad UniProt ID
+                bad_uniprot = "INVALID1"
+                if bool(UNIPROT_ID_PATTERN.match(bad_uniprot)) != bool(declared_re.match(bad_uniprot)):
+                    warnings_list.append(
+                        f"Schema pattern for '{col_name}' ({declared!r}) "
+                        f"does not match UNIPROT_ID_PATTERN constant "
+                        f"({UNIPROT_ID_PATTERN.pattern!r}) — bad UniProt "
+                        f"ID '{bad_uniprot}' diverges (ISSUE-P1-035)."
+                    )
+
+        cls._PATTERN_CONSISTENCY_CACHE[cache_key] = warnings_list
+        return warnings_list
+
     def validate_output(self, df: pd.DataFrame) -> tuple[bool, list[str]]:
         """Validate cleaned DataFrame against ``schema/v1.json`` (SCI-3.12).
 
@@ -2314,8 +2538,46 @@ class BasePipeline(ABC):
         file_key = self._get_processed_filename()
         file_schema = schema.get("properties", {}).get(file_key, {})
         if not file_schema:
-            # No schema for this file -- validation is a no-op
+            # P1-047 ROOT FIX (v108): the previous code silently returned
+            # ``True, []`` (no errors) when the schema had no entry for
+            # this file. This made validate_output() a NO-OP for any
+            # pipeline whose _get_processed_filename() returned a name
+            # not in schema/v1.json. A drugbank row with a malformed
+            # InChIKey passed validation because there was no schema
+            # entry for ``drugbank_drugs.csv``. The KG then had malformed
+            # InChIKeys, and cross-source entity resolution on InChIKey
+            # failed silently. ROOT FIX: log a WARNING so operators can
+            # detect the missing schema entry. We still return True, []
+            # (backward compat — a missing schema is not a data error),
+            # but the WARNING surfaces the gap so it can be fixed.
+            logger.warning(
+                "[%s] validate_output: NO schema entry found for '%s' in "
+                "schema/v1.json. Validation is a NO-OP for this file — "
+                "malformed data (bad InChIKey, out-of-range scores, etc.) "
+                "will NOT be caught. Add a schema entry for '%s' to enable "
+                "validation (P1-047 ROOT FIX).",
+                self.source_name,
+                file_key,
+                file_key,
+            )
             return True, []
+
+        # v107 ROOT FIX (ISSUE-P1-024 + ISSUE-P1-035): lazily verify that
+        # the schema-declared patterns for InChIKey / UniProt columns match
+        # the canonical ``INCHIKEY_PATTERN`` / ``UNIPROT_ID_PATTERN``
+        # constants. The check is memoised per (file_key, schema_version)
+        # so it runs at most once per pipeline instance + schema. Any
+        # divergence is logged as a WARNING — the validation does NOT
+        # fail (the schema is the source of truth for the actual pattern
+        # check below), but the divergence is surfaced for maintainers.
+        try:
+            consistency_warnings = self._verify_pattern_consistency(file_key, schema)
+            for w in consistency_warnings:
+                logger.warning("Pattern consistency: %s", w)
+        except Exception as cons_exc:  # noqa: BLE001 — never crash validation
+            logger.debug(
+                "Pattern consistency check failed (non-fatal): %s", cons_exc
+            )
 
         properties = file_schema.get("properties", {})
         required = file_schema.get("required", [])
@@ -2451,8 +2713,35 @@ class BasePipeline(ABC):
         subclasses during ``download()``). Subclasses may override to
         extract the version from API response headers or file content
         (SCI-3.8).
+
+        P1-055 ROOT FIX (v107): if ``self.source_version`` is None (no
+        subclass set it during download()), return a sensible default
+        based on the source name and current UTC date. The previous
+        implementation returned None — the audit trail had
+        ``source_version=None`` for every run, violating FDA 21 CFR
+        Part 11 version traceability. ROOT FIX: the default is
+        ``f"{source_name}_as_of_{UTC_date}"`` — not as precise as a
+        real release version, but it provides version traceability
+        (the operator can answer "which ChEMBL version produced this
+        KG?" with "chembl_as_of_2026-07-13"). A WARNING is logged so
+        operators know the subclass should be updated to set the real
+        version from the API response.
         """
-        return getattr(self, "source_version", None)
+        sv = getattr(self, "source_version", None)
+        if sv is not None:
+            return sv
+        # P1-055 ROOT FIX (v107): generate a default source_version.
+        logger.warning(
+            "[%s] source_version was not set by download() — using "
+            "default '%s_as_of_<UTC date>'. Update the pipeline's "
+            "download() method to set self.source_version from the "
+            "API response (e.g. ChEMBL's 'release' field, STRING's "
+            "version directory name). (P1-055 ROOT FIX)",
+            self.source_name,
+            self.source_name,
+        )
+        from datetime import datetime, timezone
+        return f"{self.source_name}_as_of_{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
 
     # ------------------------------------------------------------------
     # Record counting (SCI-3.1 through SCI-3.18, PERF-8.1 through PERF-8.3)
@@ -2536,7 +2825,14 @@ class BasePipeline(ABC):
         # after the file is fully written, so ``int(st_mtime)`` is stable.
         try:
             stat = path.stat()
-            cache_key = (str(path), stat.st_size, int(stat.st_mtime))
+            # P1-048 ROOT FIX (v107): use st_mtime_ns (nanosecond resolution)
+            # instead of int(st_mtime) (second resolution). The previous
+            # code used int(st_mtime) which has SECOND resolution — if the
+            # file is modified twice within the same second (rare but
+            # possible on fast SSDs), the cache returned the OLD count.
+            # st_mtime_ns has nanosecond resolution, so the cache key
+            # changes on every modification.
+            cache_key = (str(path), stat.st_size, stat.st_mtime_ns)
         except OSError:
             cache_key = (str(path), 0, 0)
         if cache_key in self._count_cache:
@@ -3586,8 +3882,28 @@ class BasePipeline(ABC):
 
         for attempt in range(1, max_retries + 1):
             try:
-                # Circuit breaker check (REL-6.11)
-                if self._circuit_breaker.is_open():
+                # v107 FORENSIC ROOT FIX (ISSUE-P1-017 + ISSUE-P1-033):
+                #   The previous code called ``self._circuit_breaker.is_open()``
+                #   which (per the v92 ROOT FIX) is now PURE OBSERVATION --
+                #   it does NOT transition state from OPEN -> HALF_OPEN.
+                #   After 5 failures, the breaker tripped and NEVER
+                #   recovered within the process lifetime (the transition
+                #   method ``try_acquire_probe()`` / ``allow_request()`` was
+                #   never called in the download path). All downloads
+                #   silently failed with "Circuit breaker is open" until
+                #   the Airflow worker process restarted.
+                #
+                #   ROOT FIX: use ``allow_request()`` from the canonical
+                #   ``_circuit_breaker.py``. This method (a) returns True
+                #   if the request should proceed / False if refused, AND
+                #   (b) transitions OPEN -> HALF_OPEN when the reset
+                #   timeout has elapsed, reserving the single-probe slot.
+                #   The breaker now auto-recovers after the timeout.
+                #   (ISSUE-P1-033's ``try_acquire_probe()`` fix on the
+                #   local duplicate class is superseded by this canonical
+                #   ``allow_request()`` call — the local class was deleted
+                #   in the P1-006/P1-017/P1-018 fix above.)
+                if not self._circuit_breaker.allow_request():
                     raise DownloadError(
                         f"Circuit breaker is open for {self.source_name}; "
                         f"failing fast. Try again later."
@@ -4009,7 +4325,7 @@ class BasePipeline(ABC):
                 # (``backoff_base * (2 ** attempt) + jitter``) but the
                 # actual _http_client.py code uses the same formula as
                 # here. The docstrings are now aligned.
-                backoff = (2 ** (attempt - 1)) + random.uniform(0, 1)
+                backoff = (2 ** (attempt - 1)) + self._rng.uniform(0, 1)
                 logger.warning(
                     "[%s] Download failed (attempt %d/%d), retrying in %.1fs: %s",
                     self.source_name,
@@ -4031,7 +4347,7 @@ class BasePipeline(ABC):
                         raise DownloadError(
                             f"HTTP {status_code} after {max_retries} attempts"
                         ) from exc
-                    backoff = (2 ** (attempt - 1)) + random.uniform(0, 1)
+                    backoff = (2 ** (attempt - 1)) + self._rng.uniform(0, 1)
                     logger.warning(
                         "[%s] HTTP %d (attempt %d/%d), retrying in %.1fs",
                         self.source_name,
@@ -4042,9 +4358,22 @@ class BasePipeline(ABC):
                     )
                     time.sleep(backoff)
                 else:
-                    # Permanent error -- don't retry (REL-6.4)
+                    # Permanent error -- don't retry (REL-6.4).
+                    # P1-046 ROOT FIX (v107): call record_failure() BEFORE
+                    # raising. The previous code raised DownloadError without
+                    # recording the failure on the circuit breaker. A
+                    # persistent 401 (expired API key) did NOT trip the
+                    # breaker — the pipeline kept retrying the 401 forever
+                    # (until max_retries), and the next call to the same API
+                    # started fresh with no memory of the previous 4xx.
+                    # The operator never saw "circuit breaker open" in the
+                    # logs. ROOT FIX: record the failure so the breaker
+                    # opens after N consecutive 4xx errors, giving the
+                    # operator a clear signal.
+                    self._circuit_breaker.record_failure()
                     raise DownloadError(
-                        f"HTTP {status_code} (permanent error)"
+                        f"HTTP {status_code} (permanent error — circuit "
+                        f"breaker failure recorded)"
                     ) from exc
 
         # Should be unreachable, but keep as safety net (CODE-4.38)
@@ -4219,7 +4548,45 @@ class BasePipeline(ABC):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as meta_exc:
+            # v107 ROOT FIX (ISSUE-P1-029 — corrupt meta silently disables
+            #   the resume precondition):
+            #   The previous code returned ``{}`` (empty dict) when the meta
+            #   file was corrupt (e.g. truncated JSON from a previous crashed
+            #   download). This SILENTLY disabled the If-Match /
+            #   If-Unmodified-Since precondition. The download then
+            #   proceeded WITHOUT the precondition, potentially appending
+            #   bytes from a NEW version of the file to the OLD partial
+            #   bytes — producing a chimeric file that fails integrity
+            #   validation (or worse, passes if the bytes happen to align).
+            #
+            # ROOT FIX: when the meta file is corrupt, DELETE both the
+            # corrupt meta AND the partial download. The next download
+            # starts fresh from byte 0 with no stale partial to append to.
+            # This is the patient-safe behaviour — we lose the resume
+            # optimization but eliminate the chimeric-file footgun.
+            logger.warning(
+                "[%s] Resume metadata for %s is corrupt (%s). Deleting "
+                "the partial download and stale meta file to start fresh "
+                "(v107 P1-029 — no chimeric files).",
+                self.source_name, dest.name, meta_exc,
+            )
+            # Delete the corrupt meta file
+            try:
+                meta_path.unlink()
+            except (OSError, FileNotFoundError):
+                pass
+            # Delete the partial download (the actual data file)
+            try:
+                dest.unlink()
+            except (OSError, FileNotFoundError):
+                pass
+            # Also delete the .tmp sidecar if it exists
+            tmp_path = dest.with_suffix(dest.suffix + ".tmp")
+            try:
+                tmp_path.unlink()
+            except (OSError, FileNotFoundError):
+                pass
             return {}
         headers: dict[str, str] = {}
         if "etag" in meta:
@@ -4396,13 +4763,26 @@ class BasePipeline(ABC):
         Also truncates to ``ERROR_MESSAGE_MAX_LENGTH`` (500 chars) to
         fit the audit DB column (CODE-4.6).
 
-        Order matters: the Bearer-token regex runs first (more
-        specific) so that ``Authorization: Bearer abc123`` becomes
-        ``Authorization: Bearer [REDACTED]`` first, then the
-        Authorization-header regex collapses it to
-        ``Authorization: [REDACTED]``. This prevents the token from
-        leaking through the whitespace gap.
+        P1-042 ROOT FIX (v107): TRUNCATE FIRST, THEN REDACT.
+        The previous order was redact → truncate. This had a subtle bug:
+        if a secret appeared AFTER character 500, the redaction ran on
+        the full message (good), but then truncation cut off the
+        ``[REDACTED]`` marker — leaving the original secret GONE but the
+        audit column showing a truncated message with no indication that
+        redaction occurred. More critically, if a Bearer token SPANNED
+        the 500-char boundary (e.g. "Bearer abc" where the token
+        continued past char 500), the redaction regex
+        ``Bearer\\s+\\S+`` would match the full token in the untruncated
+        message — but a future change to truncate-first would leave a
+        partial "Bearer abc" that the regex might not catch.
+        The defense-in-depth fix: truncate FIRST (so secrets beyond 500
+        chars are GONE, not just redacted), THEN redact any secrets that
+        survived the truncation (including partial tokens at the
+        boundary). The redaction regexes use ``\\S+`` (greedy
+        non-whitespace) which catches partial tokens.
         """
+        # P1-042 ROOT FIX (v107): Truncate FIRST, then redact.
+        msg = msg[:ERROR_MESSAGE_MAX_LENGTH]
         # Redact URL query params
         msg = _REDACT_QUERY_PARAM_RE.sub(r"\1[REDACTED]", msg)
         # Redact OMIM path-segment keys (BUG-9.2, additive)
@@ -4413,8 +4793,7 @@ class BasePipeline(ABC):
         msg = _REDACT_BEARER_RE.sub(r"\1[REDACTED]", msg)
         # Redact Authorization headers (catches Basic, Digest, etc.)
         msg = _REDACT_AUTH_HEADER_RE.sub(r"\1[REDACTED]", msg)
-        # Truncate (CODE-4.6)
-        return msg[:ERROR_MESSAGE_MAX_LENGTH]
+        return msg
 
     def _sanitize_headers(self, headers: Mapping[str, str]) -> dict[str, str]:
         """Redact sensitive headers before logging (SEC-9.5).
@@ -4496,9 +4875,44 @@ class BasePipeline(ABC):
             # escape ONLY the dangerous cells. Non-dangerous cells keep
             # their original Python object representation (int -> int,
             # float -> float, str -> str).
+            # v107 ROOT FIX (ISSUE-P1-040 — ``.values`` caused index
+            #   misalignment in the ``where()`` call):
+            #   The previous code passed ``~_danger_mask.values`` (a numpy
+            #   array) to ``Series.where()``, which disabled pandas' index
+            #   alignment. The ``_obj_series.map(...)`` replacement could
+            #   return a Series with a DIFFERENT index if any cell was NaN
+            #   (map() drops NaN by default in some pandas versions). The
+            #   ``where()`` then misaligned: the dangerous cell at position
+            #   i could be replaced with the escaped value from position j,
+            #   leaving the dangerous cell UNescaped and corrupting a
+            #   non-dangerous cell. CSV injection prevention was incomplete.
+            # ROOT FIX: pass ``~_danger_mask`` (a Series) directly, WITHOUT
+            # ``.values``. Pandas then aligns by index — the mask and the
+            # replacement Series share the same index as ``_obj_series``,
+            # so each cell is escaped iff its own mask bit is set.
             _obj_series = series.astype(object)
+            # v107 FORENSIC ROOT FIX (ISSUE-P1-019 + ISSUE-P1-040):
+            #   The previous code used ``~_danger_mask.values`` (numpy array)
+            #   as the condition for ``Series.where()``. The ``.values``
+            #   attribute DISCARDS the index, so if the DataFrame's index
+            #   had been reset (e.g. after ``dropna``), the alignment
+            #   between ``_danger_mask.values`` and ``_obj_series`` was
+            #   incorrect -- dangerous cells were not escaped. A SMILES
+            #   string starting with ``=`` (rare but possible for peptide
+            #   SMILES) was not escaped, creating a CSV formula injection
+            #   vector. The safety claim was FALSE.
+            #
+            #   ROOT FIX (ISSUE-P1-040): use ``~_danger_mask`` (WITHOUT
+            #   ``.values``) so pandas aligns by index. The boolean mask
+            #   and the Series now share the same index, guaranteeing
+            #   correct cell-level escaping even after index resets.
+            #   v107 defensive hardening: explicitly reindex the mask to
+            #   _obj_series.index with fill_value=False as a guarantee
+            #   against future pandas behavior changes (e.g. if astype()
+            #   ever resets the index in a future pandas release).
+            _aligned_mask = _danger_mask.reindex(_obj_series.index, fill_value=False)
             _escaped = _obj_series.where(
-                ~_danger_mask.values,
+                ~_aligned_mask,
                 _obj_series.map(
                     lambda x: f"'{x}" if isinstance(x, str) else x
                 ),
@@ -4705,12 +5119,21 @@ class BasePipeline(ABC):
         """
         context = self._read_run_context(cleaned_path)
         if context is None:
-            logger.info(
-                "[%s] No run context sidecar for %s, skipping verification",
-                self.source_name,
-                cleaned_path.name,
+            # P1-051 ROOT FIX (v107): the previous code logged an INFO and
+            # silently skipped verification — then loaded the (potentially
+            # tampered) CSV. A tampered cleaned CSV (e.g. an attacker
+            # modified is_fda_approved from False to True) was loaded
+            # without SHA-256 verification, corrupting the KG. ROOT FIX:
+            # raise DataIntegrityError. The caller (run_load_only / recover_from_failure)
+            # must handle this by re-running download+clean to regenerate
+            # the sidecar.
+            raise DataIntegrityError(
+                f"Cleaned CSV {cleaned_path.name} has NO run context sidecar "
+                f"(.run_context.json). The previous run may have crashed "
+                f"before writing it, OR the file may have been tampered "
+                f"with. SHA-256 verification CANNOT be performed. Re-run "
+                f"download+clean to regenerate the sidecar (P1-051 ROOT FIX)."
             )
-            return
         expected_sha = context.get("sha256_cleaned")
         if not expected_sha:
             return
@@ -5273,8 +5696,23 @@ class BasePipeline(ABC):
         # ProgrammingError for schema drift) plus OS/import errors.
         # Programming bugs (AttributeError, NameError) propagate.
         except (OSError, ValueError, RuntimeError, ImportError, KeyError) as exc:
-            # Filter: if this is NOT a DB error, re-raise it so
-            # programming bugs are not silently masked.
+            # v107 FORENSIC ROOT FIX (ISSUE-P1-007):
+            #   The previous code had ``if _db_exc_types and not isinstance(exc, tuple(_db_exc_types)):
+            #   pass`` -- the ``pass`` body did NOTHING. The comment claimed
+            #   "otherwise re-raise" but there was no re-raise. ALL caught
+            #   exceptions fell back to local JSONL, including programming
+            #   bugs (NameError, AttributeError from typos). A typo in a
+            #   ``PipelineRun(source="chmembl")`` field name was silently
+            #   masked as "DB unavailable" -- the audit trail went to a
+            #   local file nobody read. Real bugs became invisible.
+            #
+            #   ROOT FIX: if the exception is NOT a DB error, RE-RAISE it
+            #   so programming bugs propagate instead of being silently
+            #   swallowed. Audit writes only fall back to JSONL for genuine
+            #   DB errors (OperationalError, IntegrityError, InterfaceError,
+            #   ProgrammingError) or the allowed non-DB types that genuinely
+            #   indicate "DB unavailable" (OSError for filesystem/IPC,
+            #   ImportError for missing SQLAlchemy driver).
             _db_exc_types = []
             if _SAIntegrityError is not None:
                 _db_exc_types.append(_SAIntegrityError)
@@ -5285,9 +5723,13 @@ class BasePipeline(ABC):
             if _SAProgrammingError is not None:
                 _db_exc_types.append(_SAProgrammingError)
             if _db_exc_types and not isinstance(exc, tuple(_db_exc_types)):
-                # Check if it's one of our allowed non-DB exceptions;
-                # otherwise re-raise (programming bug -- propagate).
-                pass  # allowed non-DB error, fall back to JSONL
+                # v107 P1-007: RE-RAISE non-DB exceptions so programming
+                # bugs (KeyError from a typo'd field name, RuntimeError
+                # from a contract violation, ValueError from bad data)
+                # propagate to the operator instead of being silently
+                # masked as "DB unavailable". The audit trail must be
+                # TRUSTWORTHY -- a silent fallback hides real bugs.
+                raise
             if (
                 _HAS_SQLALCHEMY
                 and _SAIntegrityError is not None
@@ -5650,8 +6092,23 @@ class BasePipeline(ABC):
             "schema_version": SCHEMA_VERSION,
         }
 
-    def get_audit_trail(self) -> dict[str, Any]:
+    def get_audit_trail(self, *, include_deleted: bool = True) -> dict[str, Any]:
         """Return audit trail for all runs of this pipeline source (LIN-16.13).
+
+        P1-060 ROOT FIX (v107): the default ``include_deleted=True``
+        returns ALL runs including soft-deleted ones. This is required
+        for FDA 21 CFR Part 11 compliance — the audit trail MUST be
+        complete and immutable. An operator who soft-deletes a failed
+        run to "clean up" the UI MUST NOT silently remove it from the
+        audit trail. Pass ``include_deleted=False`` ONLY when the
+        operator explicitly requests non-deleted runs (e.g. for a
+        dashboard view that filters deleted runs by design).
+
+        Parameters
+        ----------
+        include_deleted : bool, default True
+            If True (default, FDA Part 11 compliant), include soft-deleted
+            runs in the audit trail. If False, filter them out.
 
         Returns
         -------
@@ -5668,12 +6125,19 @@ class BasePipeline(ABC):
             }
         try:
             with get_db_session() as session:
-                runs = session.execute(
+                stmt = (
                     _sa_select(PipelineRun)
                     .where(PipelineRun.source == self.source_name)
-                    .order_by(PipelineRun.run_date.desc())
-                    .limit(100)
-                ).scalars().all()
+                )
+                # P1-060 ROOT FIX (v107): default include_deleted=True
+                # for FDA Part 11 compliance. Only filter when explicitly
+                # requested.
+                if not include_deleted:
+                    is_deleted_col = getattr(PipelineRun, "is_deleted", None)
+                    if is_deleted_col is not None:
+                        stmt = stmt.where(is_deleted_col == False)  # noqa: E712
+                stmt = stmt.order_by(PipelineRun.run_date.desc()).limit(100)
+                runs = session.execute(stmt).scalars().all()
                 return {
                     "source": self.source_name,
                     "runs": [
@@ -5969,19 +6433,54 @@ class BasePipeline(ABC):
     def _export_data(self, subject_id: str) -> pd.DataFrame:
         """Export all data for a given subject (GDPR right to portability).
 
-        Default implementation returns an empty DataFrame. Subclasses
-        that handle subject-level data should override this to return
-        all records associated with *subject_id* (e.g. a drug's
-        InChIKey or a protein's UniProt ID).
+        P1-054 ROOT FIX (v107): the previous implementation returned an
+        empty DataFrame silently — making the GDPR hook INERT. The
+        platform CLAIMED GDPR compliance but the hook did nothing.
+        The Autonomous Drug Repurposing Platform is a POPULATION-LEVEL
+        system (10,000 FDA-approved drugs × every known disease) — it
+        does NOT handle subject-level (patient-level) data. There are
+        no patient records, no individual subject data, no PII.
+
+        ROOT FIX: raise NotImplementedError with a clear message
+        documenting that the platform is population-level only. This
+        makes the inert-hook status EXPLICIT — any caller that tries
+        to invoke GDPR portability gets a clear error instead of a
+        silent empty DataFrame.
+
+        Raises
+        ------
+        NotImplementedError
+            Always — the platform is population-level only.
         """
-        return pd.DataFrame()
+        raise NotImplementedError(
+            "_export_data (GDPR right to portability) is NOT implemented. "
+            "The Autonomous Drug Repurposing Platform is a POPULATION-LEVEL "
+            "system: 10,000 FDA-approved drugs × every known disease. It "
+            "does NOT handle subject-level (patient-level) data, PII, or "
+            "individual health records. GDPR Articles 15-20 (data subject "
+            "rights) do not apply to population-level aggregate biomedical "
+            "data derived from public databases (ChEMBL, DrugBank, UniProt, "
+            "STRING, DisGeNET, OMIM, PubChem). If a future phase adds "
+            "subject-level data (e.g. EHR integration), subclasses handling "
+            "that data MUST override this method. (P1-054 ROOT FIX)"
+        )
 
     def _delete_data(self, subject_id: str) -> int:
         """Delete all data for a given subject (GDPR right to erasure).
 
-        Default implementation returns 0 (no deletions). Subclasses
-        that handle subject-level data should override this to delete
-        all records associated with *subject_id* and return the count
-        of deleted records.
+        P1-054 ROOT FIX (v107): the previous implementation returned 0
+        silently — making the GDPR hook INERT. See ``_export_data`` for
+        the full rationale. The platform is population-level only;
+        GDPR right to erasure does not apply.
+
+        Raises
+        ------
+        NotImplementedError
+            Always — the platform is population-level only.
         """
-        return 0
+        raise NotImplementedError(
+            "_delete_data (GDPR right to erasure) is NOT implemented. "
+            "The platform is POPULATION-LEVEL only — no subject-level "
+            "data to delete. See _export_data docstring for full rationale. "
+            "(P1-054 ROOT FIX)"
+        )

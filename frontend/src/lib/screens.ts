@@ -19,7 +19,7 @@ export const screenCategories = [
   { id: 'BILL', label: 'Billing', icon: 'CreditCard' },
   { id: 'INV', label: 'Investor', icon: 'TrendingUp' },
   { id: 'ADMIN', label: 'Admin', icon: 'Shield' },
-  { id: 'LEGAL', label: 'Legal & Compliance', icon: 'Scale' },
+  { id: 'LEGAL', label: 'Legal', icon: 'Scale' },
   { id: 'DEV', label: 'Developer', icon: 'Code' },
   { id: 'SET', label: 'Settings', icon: 'Settings' },
   { id: 'SUPP', label: 'Support', icon: 'HelpCircle' },

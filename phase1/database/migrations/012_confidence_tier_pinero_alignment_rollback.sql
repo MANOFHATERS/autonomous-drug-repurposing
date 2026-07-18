@@ -35,4 +35,8 @@ BEGIN
     END IF;
 END $$;
 
+-- P1-042 ROOT FIX (v110): delete the schema_version row so check_migrations()
+-- no longer reports version 12 as applied after the rollback completes.
+DELETE FROM schema_version WHERE version = 12;
+
 COMMIT;

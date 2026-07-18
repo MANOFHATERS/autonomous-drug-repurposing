@@ -122,15 +122,41 @@ def run_entity_resolution() -> Dict[str, Any]:
             f"Ensure ChEMBL, DrugBank, and/or PubChem pipelines have been run. "
             f"Checked: {chembl_path}, {drugbank_path}, {pubchem_path}"
         )
-    # Validate required columns in non-empty DataFrames
+    # Validate required columns in non-empty DataFrames.
+    # v107 ROOT FIX (ISSUE-P1-038 — silent warning on missing required
+    #   columns):
+    #   The previous code logged a WARNING and continued when a non-empty
+    #   drug DataFrame was missing ``inchikey`` or ``name``. Entity
+    #   resolution then produced 0 canonical entities (because every row
+    #   lacked ``inchikey`` for cross-source deduplication), the KG had
+    #   0 Compound nodes, the GNN trained on 0 drugs, and the RL ranker
+    #   produced 0 candidates. The platform appeared to "work" but was
+    #   empty — a silent data-loss path that the audit correctly flagged.
+    #   A misconfigured ChEMBL pipeline that drops the ``inchikey``
+    #   column (e.g. due to a schema change at the upstream API) would
+    #   be silently masked as a warning.
+    # ROOT FIX: raise RuntimeError immediately. The operator MUST fix
+    # the upstream pipeline before entity resolution can proceed. This
+    # is the patient-safe behaviour: a clearly-failing pipeline is
+    # always preferable to a silently-empty KG.
     required_drug_cols = {"inchikey", "name"}
     for name, df_check in [("chembl", chembl_df), ("drugbank", drugbank_df), ("pubchem", pubchem_df)]:
         if not df_check.empty and not required_drug_cols.issubset(set(df_check.columns)):
             missing = required_drug_cols - set(df_check.columns)
-            logger.warning(
+            logger.error(
                 "Drug DataFrame '%s' is missing required columns: %s. "
-                "Available columns: %s. Entity resolution may produce incomplete results.",
+                "Available columns: %s. Entity resolution CANNOT proceed "
+                "without 'inchikey' (cross-source dedup key) and 'name' "
+                "(display label). Fix the upstream pipeline before retrying.",
                 name, missing, list(df_check.columns),
+            )
+            raise RuntimeError(
+                f"Entity resolution cannot proceed: drug DataFrame "
+                f"'{name}' ({len(df_check)} rows) is missing required "
+                f"columns {sorted(missing)}. Available: {list(df_check.columns)}. "
+                f"This is a hard stop — silently continuing would produce "
+                f"an empty KG (0 Compound nodes), breaking Phase 2/3/4. "
+                f"Fix the upstream {name} pipeline before retrying."
             )
 
     drug_mapping_df = drug_resolver.build_mapping(chembl_df, drugbank_df, pubchem_df)

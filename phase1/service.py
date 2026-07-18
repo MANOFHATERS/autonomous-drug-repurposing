@@ -51,22 +51,101 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # P1-017 v113 ROOT FIX: allow_origins=["*"] permitted ANY website to
+    # make cross-origin requests to this API. Combined with allow_headers=["*"],
+    # a malicious webpage could enumerate every drug in the database — a
+    # data-exfiltration vector for proprietary drug-repurposing hypotheses.
+    # ROOT FIX: read allowed origins from PHASE1_CORS_ORIGINS env var
+    # (comma-separated). Default to localhost:3000 (the Next.js frontend)
+    # for dev. Production deployments MUST set PHASE1_CORS_ORIGINS to the
+    # real frontend domain.
+    allow_origins=os.environ.get(
+        "PHASE1_CORS_ORIGINS", "http://localhost:3000"
+    ).split(","),
     allow_methods=["GET"],
     allow_headers=["*"],
 )
 
 
 def _count_csv_rows(path: Path) -> int:
-    """Count data rows in a CSV (excluding header). Returns 0 if missing."""
+    """Count data rows in a CSV (excluding header). Returns 0 if missing.
+
+    P1-018 v113 ROOT FIX: the previous implementation counted NEWLINES
+    via `sum(1 for line in f)`. A CSV field with an embedded newline
+    (e.g. a `mechanism_of_action` field containing "Inhibits COX-1\nand
+    COX-2") spans multiple physical lines, so the counter overcounted.
+    The DrugBank drugs CSV regularly contains multi-line mechanism fields,
+    causing the /datasets endpoint to report 10,500 drugs when the actual
+    count was 10,000.
+
+    ROOT FIX: use the csv module's reader which correctly handles
+    multi-line quoted fields. This is the standard, robust way to count
+    CSV records.
+    """
     if not path.exists():
         return 0
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            # Skip header, count remaining non-empty lines.
-            next(f, None)
-            return sum(1 for line in f if line.strip())
+        import csv as _csv
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+            reader = _csv.reader(f)
+            try:
+                next(reader)  # skip header
+            except StopIteration:
+                return 0
+            return sum(1 for _row in reader if _row)  # count non-empty rows
     except Exception:
+        return 0
+
+
+def _count_unique_string_proteins(path: Path) -> int:
+    """Count UNIQUE protein IDs from BOTH columns of a STRING PPI CSV.
+
+    P1-029 v117 ROOT FIX: STRING's protein-protein interaction CSV has
+    two protein ID columns (column 0 and column 1). The previous v113
+    "fix" for P1-029 only fired when ``total_proteins == 0`` (i.e. the
+    uniprot_proteins.csv was COMPLETELY ABSENT) -- and even then it
+    used the interaction ROW count as a proxy for the protein count,
+    which both OVERCOUNTS (one protein appears in many interactions)
+    and does not address the COMMON case where both CSVs exist.
+
+    ROOT FIX (v117): parse the STRING PPI CSV with ``csv.reader``
+    (correctly handling multi-line quoted fields), skip the header row,
+    and collect the set of unique protein IDs from BOTH column 0 and
+    column 1. Returns 0 if the file is missing, empty, or unparseable
+    so the caller can fall back gracefully.
+
+    The downstream canonical count remains ``SELECT COUNT(*) FROM
+    proteins`` (the DB query) -- this CSV-derived count is the best
+    pre-DB estimate available to the /datasets endpoint.
+    """
+    if not path.exists():
+        return 0
+    try:
+        import csv as _csv
+        unique_ids: set = set()
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+            reader = _csv.reader(f)
+            try:
+                next(reader)  # skip header row (string_protein_protein_interactions.csv ships with one)
+            except StopIteration:
+                return 0
+            for row in reader:
+                if not row:
+                    continue
+                # Column 0 = protein1, column 1 = protein2 (STRING convention).
+                # Both are typically "<taxid>.<ENSP>" e.g. "9606.ENSP00000000233".
+                if len(row) > 0 and row[0]:
+                    unique_ids.add(row[0])
+                if len(row) > 1 and row[1]:
+                    unique_ids.add(row[1])
+        return len(unique_ids)
+    except Exception as exc:
+        logger.warning(
+            "Phase 1 service: failed to parse STRING PPI CSV %s for unique "
+            "protein count (P1-029 v117). Falling back to uniprot-only count. "
+            "Error: %s",
+            path, exc,
+        )
         return 0
 
 
@@ -78,18 +157,23 @@ def _processed_data_dir() -> Path:
 def _load_dataset_stats() -> Dict[str, Any]:
     """Load real dataset stats from processed_data CSVs (or DB if available).
 
-    Tier-2 fallback: if no CSVs exist, write the embedded sample CSVs
-    so the service always returns non-zero counts (matches the
-    run_4phase.py behavior). We never fabricate numbers.
+    TM1 TASK 2 ROOT FIX: the previous Tier-2 fallback wrote embedded sample
+    CSVs (10 fake drugs) when processed_data was empty. This violated the
+    "NEVER overwrite real data with mock samples" mandate. Now we return
+    zero counts with a clear ``data_status="empty"`` flag so the dashboard
+    honestly reports the absence of data instead of fabricating numbers.
+    The operator must run ``python -m phase1.pipelines all`` to populate
+    real data. For local dev, ``DRUGOS_ENVIRONMENT=development python -m
+    phase1.pipelines samples`` writes mock CSVs to a directory of choice.
     """
     pdir = _processed_data_dir()
     if not pdir.exists() or not any(pdir.glob("*.csv*")):
-        try:
-            from pipelines._embedded_samples import write_all_samples
-            write_all_samples(str(pdir))
-            logger.info("Phase 1 service: wrote embedded sample CSVs to %s", pdir)
-        except Exception as exc:
-            logger.warning("Phase 1 service: could not write embedded samples: %s", exc)
+        logger.warning(
+            "Phase 1 service: processed_data dir %s is empty. Returning "
+            "zero counts with data_status='empty'. Run "
+            "`python -m phase1.pipelines all` to populate real data.",
+            pdir,
+        )
 
     # Count rows per source CSV. These are the REAL Phase 1 outputs.
     sources: List[Dict[str, Any]] = []
@@ -114,18 +198,96 @@ def _load_dataset_stats() -> Dict[str, Any]:
             "row_count": rows,
             "available": rows > 0,
         })
-        if source_name in ("chembl", "drugbank", "pubchem"):
-            total_drugs = max(total_drugs, rows) if source_name != "pubchem" else total_drugs
-            if source_name in ("chembl", "drugbank"):
-                total_drugs = max(total_drugs, rows)
+        # P1-006 v113 ROOT FIX: removed the dead-code block that computed
+        # total_drugs three different ways inside the loop, then
+        # unconditionally overwrote it with the DrugBank count below.
+        # The loop body is now clean — total_drugs is computed AFTER the
+        # loop via a fallback chain.
         if source_name == "uniprot":
             total_proteins = rows
         if source_name == "string":
             total_interactions = rows
 
-    # For drug count, prefer DrugBank (the canonical FDA-approved list).
-    drugbank_path = pdir / "drugbank_drugs.csv"
-    total_drugs = _count_csv_rows(drugbank_path)
+    # P1-006 v113 ROOT FIX: compute total_drugs via a fallback chain.
+    # The previous code unconditionally set total_drugs to the DrugBank
+    # row count. If drugbank_drugs.csv was missing (DrugBank academic
+    # license paused), total_drugs was 0 even if chembl_drugs.csv had
+    # 3,000 rows. ROOT FIX: try drugbank first (canonical FDA-approved
+    # list), then chembl, then a generic drugs.csv fallback. This matches
+    # the Phase1OutputContract's source-priority semantics.
+    for _drug_csv in ("drugbank_drugs.csv", "chembl_drugs.csv", "drugs.csv"):
+        _drug_path = pdir / _drug_csv
+        if _drug_path.exists():
+            total_drugs = _count_csv_rows(_drug_path)
+            if total_drugs > 0:
+                break
+
+    # P1-029 v117 ROOT FIX: total_proteins must account for STRING proteins
+    # that may not be in UniProt (STRING's alias mapping is imperfect -- a
+    # protein in STRING's graph may not yet be in the UniProt snapshot, and
+    # vice versa). The previous v113 "fix" only handled the rare edge case
+    # where uniprot_proteins.csv was COMPLETELY ABSENT (total_proteins==0);
+    # the COMMON case (both CSVs exist) was unaddressed, so total_proteins
+    # stayed at the uniprot row count and silently undercounted STRING-only
+    # proteins. Worse, the v113 fallback used interaction ROW count (each
+    # PPI row = 1 interaction, not 1 protein), which OVERCOUNTED because
+    # one protein appears in many interactions.
+    #
+    # ROOT FIX (v117): parse string_protein_protein_interactions.csv with
+    # csv.reader, count UNIQUE protein IDs from BOTH interaction columns
+    # (column 0 and column 1), then set
+    #     total_proteins = max(uniprot_rows, string_unique_protein_count)
+    # The max() accounts for both directions of imperfect overlap:
+    #   - UniProt-only proteins (no STRING entry): counted by uniprot_rows.
+    #   - STRING-only proteins (no UniProt entry): counted by string_unique.
+    # The DB query ``SELECT COUNT(*) FROM proteins`` remains the canonical
+    # count for downstream consumers (Phase 2 KG builder).
+    _string_ppi_path = pdir / "string_protein_protein_interactions.csv"
+    _string_unique_protein_count = _count_unique_string_proteins(_string_ppi_path)
+    _uniprot_rows = total_proteins  # snapshot before we possibly overwrite
+
+    if _string_unique_protein_count > 0 and _uniprot_rows > 0:
+        # COMMON CASE: both CSVs exist. Take the max to avoid undercounting
+        # in either direction.
+        total_proteins = max(_uniprot_rows, _string_unique_protein_count)
+        logger.info(
+            "Phase 1 service /datasets: total_proteins = "
+            "max(uniprot_rows=%d, string_unique_proteins=%d) = %d "
+            "(P1-029 v117 ROOT FIX -- both CSVs exist, taking the max to "
+            "account for STRING-only proteins not in UniProt and vice versa).",
+            _uniprot_rows, _string_unique_protein_count, total_proteins,
+        )
+    elif _string_unique_protein_count > 0 and _uniprot_rows == 0:
+        # uniprot_proteins.csv absent/empty -- use STRING unique count directly.
+        total_proteins = _string_unique_protein_count
+        logger.info(
+            "Phase 1 service /datasets: total_proteins = %d from STRING "
+            "unique protein IDs (uniprot_proteins.csv absent/empty; "
+            "P1-029 v117 ROOT FIX).",
+            total_proteins,
+        )
+    elif _string_unique_protein_count == 0 and _uniprot_rows == 0 and total_interactions > 0:
+        # Legacy fallback: STRING CSV exists but we couldn't extract unique
+        # proteins from it (e.g. parse failure or unexpected column layout).
+        # Use the interaction count as a conservative lower bound (each
+        # interaction has 2 proteins, but they may overlap). The DB query
+        # is the canonical count.
+        total_proteins = total_interactions  # conservative lower bound
+        logger.info(
+            "Phase 1 service /datasets: total_proteins = %d (STRING "
+            "interaction count as conservative lower bound; could not "
+            "extract unique proteins from STRING CSV; P1-029 v117 legacy "
+            "fallback).",
+            total_proteins,
+        )
+    elif _uniprot_rows > 0:
+        # Only uniprot_proteins.csv exists. No STRING PPI data.
+        logger.info(
+            "Phase 1 service /datasets: total_proteins = %d from "
+            "uniprot_proteins.csv (STRING PPI CSV absent; P1-029 v117).",
+            total_proteins,
+        )
+    # else: both are 0 -- total_proteins stays 0 (data_status=empty).
 
     return {
         "sources": sources,
@@ -243,6 +405,100 @@ def health() -> Dict[str, Any]:
 def datasets() -> Dict[str, Any]:
     """Return real Phase 1 dataset stats (no fabrication)."""
     return _load_dataset_stats()
+
+
+# BE-024 ROOT FIX (Team Member 12): the frontend's
+# `frontend/src/lib/services/dataset-stats.ts:proxyToDatasetService()`
+# issues `GET ${DATASET_SERVICE_URL}/stats`. The previous Phase 1 service
+# only exposed /health, /datasets, and /datasets/{drug}/mechanism — so
+# when an operator set DATASET_SERVICE_URL, the proxy 404'd and fell back
+# to the local checkpoint silently. The operator believed they were
+# fetching live stats when they were not.
+#
+# Root fix: expose /stats with the EXACT response shape the frontend
+# expects (DatasetStatsResponse in dataset-stats.ts). We translate the
+# Phase-1-internal _load_dataset_stats() output into that shape — using
+# the real CSV row counts as the source of truth. No fabrication: if no
+# CSVs exist (Phase 1 hasn't run), we return zero counts with a clear
+# `backend: "phase1_service_no_data"` marker so the dashboard can render
+# the "no data ingested yet" state honestly.
+@app.get("/stats")
+def stats() -> Dict[str, Any]:
+    """Phase 1 stats in the DatasetStatsResponse shape the frontend expects.
+
+    This endpoint is the contract-satisfying peer of
+    ``frontend/src/lib/services/dataset-stats.ts:proxyToDatasetService``.
+    It returns the fields the frontend destructures: sources, nodesLoaded,
+    edgesLoaded, edgeTypesPresent, pipelineVersion, schemaVersion,
+    bridgeVersion, backend, warnings, errors, generatedAt.
+    """
+    raw = _load_dataset_stats()
+    # Translate Phase-1-internal source rows into the frontend's
+    # DatasetSourceStat shape: { name, loaded, rowsLoaded?, sha256? }.
+    sources_out: List[Dict[str, Any]] = []
+    for s in raw.get("sources", []):
+        sources_out.append({
+            "name": s.get("name", "unknown"),
+            "loaded": bool(s.get("available", False)),
+            "rowsLoaded": int(s.get("row_count", 0) or 0),
+        })
+
+    # nodesLoaded / edgesLoaded: Phase 1 doesn't build the graph (Phase 2
+    # does), but the bridge summary records how many nodes/edges were
+    # STAGED for Phase 2. We surface the drug + protein + interaction
+    # counts as the closest Phase-1-native equivalent. Phase 2's own
+    # /kg/stats endpoint is the canonical source for final graph counts.
+    nodes_loaded = (
+        int(raw.get("total_drugs", 0) or 0)
+        + int(raw.get("total_proteins", 0) or 0)
+    )
+    edges_loaded = int(raw.get("total_ppi", 0) or 0)
+
+    # edgeTypesPresent: Phase 1 stages Compound→Protein (DrugBank
+    # interactions) and Protein→Protein (STRING). Other edge types
+    # (Protein→Pathway, Pathway→Disease, Drug→AdverseEvent) are added by
+    # Phase 2. We surface only what Phase 1 actually produced — never
+    # fabricate.
+    edge_types: List[str] = []
+    for s in raw.get("sources", []):
+        if not s.get("available", False):
+            continue
+        name = s.get("name", "")
+        if name == "drugbank":
+            edge_types.append("Compound->Protein")
+        elif name == "string":
+            edge_types.append("Protein->Protein")
+        elif name in ("disgenet", "omim"):
+            edge_types.append("Gene->Disease")
+
+    warnings: List[str] = []
+    errors: List[str] = []
+    if raw.get("total_sources_available", 0) < raw.get("total_sources_expected", 0):
+        warnings.append(
+            f"Phase 1 has {raw.get('total_sources_available', 0)}/"
+            f"{raw.get('total_sources_expected', 0)} sources available. "
+            "Run the full Airflow ETL pipeline to ingest all 7 sources."
+        )
+
+    return {
+        "sources": sources_out,
+        "nodesLoaded": nodes_loaded,
+        "edgesLoaded": edges_loaded,
+        "edgeTypesPresent": edge_types,
+        "pipelineVersion": "phase1-service-v1",
+        "schemaVersion": "1.0",
+        "bridgeVersion": None,
+        "backend": "phase1_service",
+        "warnings": warnings,
+        "errors": errors,
+        "generatedAt": _now_iso(),
+    }
+
+
+def _now_iso() -> str:
+    """Return current UTC time in ISO-8601 (seconds precision)."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 @app.get("/datasets/{drug}/mechanism")

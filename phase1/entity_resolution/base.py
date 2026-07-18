@@ -91,6 +91,7 @@ MAPPING_SCHEMA_VERSION: str = "1.0"
 # ---------------------------------------------------------------------------
 
 
+@enum.unique
 class MatchConfidence(float, enum.Enum):
     """Closed enum of confidence scores emitted by the resolver.
 
@@ -108,6 +109,29 @@ class MatchConfidence(float, enum.Enum):
     cross-version compatibility (``enum.FloatEnum`` was only added to
     the stdlib ``enum`` namespace in Python 3.12+ and is missing in
     earlier versions; the explicit mix-in works everywhere).
+
+    P1-005 ROOT FIX (v113 -- enum alias collisions):
+      Python's ``enum.Enum`` makes the SECOND member with the same value
+      an ALIAS of the FIRST. The previous version had THREE alias
+      collisions:
+        - ``UNIPROT_EXACT = 1.0`` aliased ``INCHIKEY_EXACT`` (so
+          ``MatchConfidence.UNIPROT_EXACT.name == "INCHIKEY_EXACT"``)
+        - ``SYNTHETIC_KEY_MATCH = 0.5`` aliased ``UNKNOWN``
+        - ``SMILES_CANONICAL = 0.75`` aliased ``GENE_NAME_ORGANISM``
+      Downstream code that switched on ``match_conf.name`` (e.g.
+      ``if match.name == "UNIPROT_EXACT":``) was DEAD -- the branch
+      never fired because the name was always ``"INCHIKEY_EXACT"``.
+      Phase 2's KG builder mislabeled UniProt-exact matches as
+      InChIKey-exact; Phase 4's RL ranker over-weighted structural
+      identity. Patient-safety filters that distinguish "structural
+      identity" from "sequence identity" could not fire.
+
+      ROOT FIX: (1) add ``@enum.unique`` so any future duplicate value
+      is a hard error at import time; (2) give each previously-aliased
+      member a DISTINCT value that preserves the intended hierarchy
+      ordering. The new values (0.99 / 0.74 / 0.49) are deliberately
+      adjacent to their former twins so downstream ranking is barely
+      affected, but ``.name`` now resolves correctly for every member.
     """
 
     INCHIKEY_EXACT = 1.0
@@ -137,19 +161,19 @@ class MatchConfidence(float, enum.Enum):
     #   (below the enum, ``_CONFIDENCE_HIERARCHY_ASSERTIONS``) so
     #   future drift fails CI immediately.
     #
-    # The CORRECT hierarchy (descending by value, ties broken by enum
-    # definition order) is:
-    #   INCHIKEY_EXACT      (1.0)  ─┐ tied — both are deterministic,
-    #   UNIPROT_EXACT       (1.0)  ─┘ source-independent exact matches
-    #   INCHIKEY_CONNECTIVITY (0.9)  — same molecule, different stereo
-    #   NAME_NORMALIZED     (0.8)  — exact name after case/punct normalization
-    #   GENE_NAME_ORGANISM  (0.75) ─┐ tied — both are strong but not
-    #   SMILES_CANONICAL    (0.75) ─┘ source-independent exact matches
-    #   PUBCHEM_XREF        (0.7)  — PubChem cross-reference (curated)
-    #   FUZZY               (0.65) — approximate string similarity
-    #   PROTEIN_NAME_FUZZY  (0.60) — approximate protein name match
-    #   UNKNOWN             (0.5)  ─┐ tied — lowest confidence / unknown
-    #   SYNTHETIC_KEY_MATCH (0.5)  ─┘ (computed InChIKey for biologics)
+    # The CORRECT hierarchy (descending by value) is -- per P1-005 v113
+    # each member has a DISTINCT value (no aliases):
+    #   INCHIKEY_EXACT        (1.0)   — deterministic structural identity
+    #   UNIPROT_EXACT         (0.99)  — deterministic sequence identity
+    #   INCHIKEY_CONNECTIVITY (0.9)   — same molecule, different stereo
+    #   NAME_NORMALIZED       (0.8)   — exact name after case/punct normalization
+    #   GENE_NAME_ORGANISM    (0.75)  — gene-name + organism match
+    #   SMILES_CANONICAL      (0.74)  — canonical SMILES match (chemical identity)
+    #   PUBCHEM_XREF          (0.7)   — PubChem cross-reference (curated)
+    #   FUZZY                 (0.65)  — approximate string similarity
+    #   PROTEIN_NAME_FUZZY    (0.60)  — approximate protein name match
+    #   UNKNOWN               (0.5)   — lowest confidence / unknown method
+    #   SYNTHETIC_KEY_MATCH   (0.49)  — computed InChIKey for biologics
     #
     # The previous comment said "raised from 0.6 to be ≥ _FUZZY_THRESHOLD"
     # -- that was a misdiagnosis. The _FUZZY_THRESHOLD (0.85) was the
@@ -161,7 +185,7 @@ class MatchConfidence(float, enum.Enum):
     # lower the threshold here -- that's a separate concern. We just
     # fix the inverted enum values.
     FUZZY = 0.65  # v29: was 0.85 -- inversion fix
-    UNIPROT_EXACT = 1.0
+    UNIPROT_EXACT = 0.99  # P1-005 v113: was 1.0 (aliased INCHIKEY_EXACT); 0.99 preserves "near-exact" semantics while making .name resolve correctly
     GENE_NAME_ORGANISM = 0.75  # v29: was 0.85 -- lowered to sit between
                                 # NAME_NORMALIZED (0.8) and FUZZY (0.65).
                                 # A gene-name+organism match is stronger
@@ -169,6 +193,7 @@ class MatchConfidence(float, enum.Enum):
                                 # an exact name match.
     PROTEIN_NAME_FUZZY = 0.60  # v29: was 0.90 -- inversion fix
     UNKNOWN = 0.5
+    # P1-005 v113: SYNTHETIC_KEY_MATCH was 0.5 (aliased UNKNOWN); now 0.49 so .name resolves correctly. SYNTH keys are computed (not experimental) and rank just below UNKNOWN.
     # v65 ROOT FIX (P1C-009): SYNTH-prefixed InChIKey matches are
     # COMPUTED (not experimental) -- they're generated for biologics /
     # macromolecules that lack a real InChIKey. Different sources may
@@ -185,7 +210,7 @@ class MatchConfidence(float, enum.Enum):
     # method/confidence pair is self-consistent and downstream filters
     # can distinguish SYNTH matches from real InChIKey matches. The
     # value (0.5) is unchanged -- only the labeling is fixed.
-    SYNTHETIC_KEY_MATCH = 0.5
+    SYNTHETIC_KEY_MATCH = 0.49  # P1-005 v113: was 0.5 (aliased UNKNOWN)
     # v89 ROOT FIX (BUG #32 -- smiles_canonical method registered at
     # runtime but missing from the enum):
     #   ``drug_resolver.py:1979`` registers ``"smiles_canonical"`` with
@@ -199,16 +224,17 @@ class MatchConfidence(float, enum.Enum):
     #   0.5; code that used the dict-based lookup got 0.75. Filters
     #   behaved differently depending on which lookup path they used.
     #
-    #   ROOT FIX: add ``SMILES_CANONICAL = 0.75`` to the enum AND to
-    #   the ``from_method`` mapping (below). Now both lookup paths
-    #   return the SAME value (0.75), consistent with the runtime
-    #   registration. The value 0.75 places a canonical-SMILES match
-    #   between NAME_NORMALIZED (0.8, stronger -- exact name after
-    #   normalization) and FUZZY (0.65, weaker -- approximate string
-    #   similarity). A canonical-SMILES match is strong evidence of
-    #   chemical identity (same molecule) but weaker than an InChIKey
-    #   exact match (which is deterministic and source-independent).
-    SMILES_CANONICAL = 0.75
+    #   ROOT FIX: add ``SMILES_CANONICAL`` to the enum AND to the
+    #   ``from_method`` mapping (below). P1-005 v113: the value is 0.74
+    #   (was 0.75, which aliased GENE_NAME_ORGANISM). 0.74 preserves the
+    #   intended ranking (between NAME_NORMALIZED=0.8 and FUZZY=0.65,
+    #   just below GENE_NAME_ORGANISM=0.75) while making .name resolve
+    #   correctly. Both the enum-based and dict-based lookup paths now
+    #   return the SAME value (0.74), consistent with the runtime
+    #   registration in drug_resolver.py. A canonical-SMILES match is
+    #   strong evidence of chemical identity (same molecule) but weaker
+    #   than an InChIKey exact match (deterministic, source-independent).
+    SMILES_CANONICAL = 0.74  # P1-005 v113: was 0.75 (aliased GENE_NAME_ORGANISM)
 
     @classmethod
     def from_method(cls, method: str) -> "MatchConfidence":
@@ -279,17 +305,18 @@ class MatchConfidence(float, enum.Enum):
 #   easy to audit alongside the enum definition above. Keep this list
 #   in EXACT sync with the enum members and the hierarchy comment.
 _CONFIDENCE_HIERARCHY_ASSERTIONS: tuple[tuple[str, float], ...] = (
+    # P1-005 v113: updated to reflect distinct values (no aliases)
     ("INCHIKEY_EXACT", 1.0),
     ("INCHIKEY_CONNECTIVITY", 0.9),
     ("NAME_NORMALIZED", 0.8),
     ("PUBCHEM_XREF", 0.7),
     ("FUZZY", 0.65),
-    ("UNIPROT_EXACT", 1.0),
+    ("UNIPROT_EXACT", 0.99),
     ("GENE_NAME_ORGANISM", 0.75),
     ("PROTEIN_NAME_FUZZY", 0.60),
     ("UNKNOWN", 0.5),
-    ("SYNTHETIC_KEY_MATCH", 0.5),
-    ("SMILES_CANONICAL", 0.75),
+    ("SYNTHETIC_KEY_MATCH", 0.49),
+    ("SMILES_CANONICAL", 0.74),
 )
 for _member_name, _expected_value in _CONFIDENCE_HIERARCHY_ASSERTIONS:
     _actual = getattr(MatchConfidence, _member_name, None)

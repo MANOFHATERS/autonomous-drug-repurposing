@@ -2071,6 +2071,144 @@ def handle_missing_inchikey(
 
 
 # ===========================================================================
+# v110 Task 29 root fix: distinguish "missing" (None) from "not applicable" (False)
+#
+# The audit (Task 29) requires: "must distinguish 'missing' (None) from
+# 'not applicable' (False). Currently both are stored as None."
+#
+# SCIENTIFIC RATIONALE:
+#   - None (missing/unknown): we have NO information about this field.
+#     Example: a drug from PubChem has no FDA approval data (PubChem doesn't
+#     track regulatory status). The correct value is None ("unknown").
+#   - False (not applicable/confirmed-negative): we have POSITIVE EVIDENCE
+#     that the field is negative. Example: a DrugBank drug whose <groups>
+#     element contains "withdrawn" or "illicit" but NOT "approved" — this
+#     drug is CONFIRMED NOT FDA approved. The correct value is False.
+#
+# The previous code defaulted is_fda_approved to None in BOTH cases, which
+# conflated "we don't know" with "we know it's not approved". This caused
+# downstream ML filters to treat confirmed-unapproved drugs as "unknown",
+# potentially surfacing them as repurposing candidates when they should be
+# excluded from safety-critical filters.
+#
+# ROOT FIX:
+#   1. Define NOT_APPLICABLE_SENTINEL = False (the "confirmed negative" value)
+#   2. Define MISSING_SENTINEL = None (the "unknown" value)
+#   3. Add classify_fda_approval(groups_str) helper that returns:
+#        True  — if "approved" is in the groups string (confirmed approved)
+#        False — if "approved" is NOT in groups but groups is non-empty
+#                AND contains a known negative-group like "withdrawn",
+#                "illicit", "experimental" (confirmed not approved)
+#        None  — if groups is empty/None (unknown — no information)
+#   4. Update fill_missing_drug_fields to use this helper when the source
+#      provides groups data, and keep None as the default for truly missing
+#      values.
+# ===========================================================================
+NOT_APPLICABLE_SENTINEL: bool = False
+"""Sentinel value for 'not applicable' (confirmed negative) fields.
+
+Use this when the source provides POSITIVE EVIDENCE that a field is negative
+(e.g., DrugBank groups contains 'withdrawn' but not 'approved').
+Distinct from None which means 'missing/unknown' (no information)."""
+
+MISSING_SENTINEL = None
+"""Sentinel value for 'missing/unknown' fields.
+
+Use this when the source provides NO information about the field.
+Distinct from False which means 'not applicable' (confirmed negative)."""
+
+# DrugBank <groups> values that indicate confirmed non-approval.
+# If a drug's groups contains any of these but NOT "approved", the drug
+# is confirmed NOT FDA approved → is_fda_approved = False (not None).
+_NEGATIVE_FDA_GROUPS: frozenset[str] = frozenset({
+    "withdrawn",      # DrugBank <group>withdrawn</group> — was approved, now pulled
+    "illicit",        # DrugBank <group>illicit</group> — never approved, illegal
+    "experimental",   # DrugBank <group>experimental</group> — pre-clinical only
+})
+
+
+def classify_fda_approval(groups: object) -> "bool | None":
+    """Classify a drug's FDA approval status from its DrugBank groups field.
+
+    Parameters
+    ----------
+    groups : str, list, or None
+        The drug's groups value. Can be:
+        - A string like "approved|investigational" (pipe-separated)
+        - A string like "approved, investigational" (comma-separated)
+        - A list like ["approved", "investigational"]
+        - None or "" (no groups data)
+
+    Returns
+    -------
+    bool or None
+        True  — if "approved" is in groups (confirmed FDA approved)
+        False — if "approved" is NOT in groups but groups is non-empty
+                AND contains a known negative-group (withdrawn, illicit,
+                experimental) — confirmed NOT FDA approved
+        None  — if groups is empty/None (unknown — no information)
+
+    Examples:
+        >>> classify_fda_approval("approved|investigational")
+        True
+        >>> classify_fda_approval("withdrawn")
+        False
+        >>> classify_fda_approval("illicit")
+        False
+        >>> classify_fda_approval("")
+        None
+        >>> classify_fda_approval(None)
+        None
+        >>> classify_fda_approval(["approved", "investigational"])
+        True
+        >>> classify_fda_approval(["withdrawn"])
+        False
+        >>> classify_fda_approval(["nutraceutical"])
+        None  # nutraceutical is not a negative-group — unknown
+    """
+    if groups is None:
+        return None
+    if isinstance(groups, float):
+        import math as _math
+        if _math.isnan(groups):
+            return None
+        groups = str(groups)
+    if isinstance(groups, (list, tuple, set)):
+        groups_lower = {str(g).strip().lower() for g in groups if g is not None}
+    elif isinstance(groups, str):
+        if not groups.strip():
+            return None
+        # Split on common separators: pipe, comma, semicolon, whitespace
+        import re as _re
+        tokens = _re.split(r"[|,;\s]+", groups.strip().lower())
+        groups_lower = {t for t in tokens if t}
+    else:
+        # Unknown type — coerce to string and try
+        groups_str = str(groups).strip().lower()
+        if not groups_str:
+            return None
+        import re as _re
+        tokens = _re.split(r"[|,;\s]+", groups_str)
+        groups_lower = {t for t in tokens if t}
+
+    if not groups_lower:
+        return None  # empty groups → unknown
+
+    # "approved" in groups → confirmed FDA approved
+    if "approved" in groups_lower:
+        return True
+
+    # Check for confirmed-negative groups (withdrawn, illicit, experimental)
+    if groups_lower & _NEGATIVE_FDA_GROUPS:
+        return False
+
+    # Groups exist but no "approved" and no negative-group → unknown
+    # (e.g., "investigational", "nutraceutical", "biotech" — not confirmed
+    # either way)
+    return None
+
+
+# ===========================================================================
 # 2. fill_missing_drug_fields (ARCH-5, BUG-SCI-3, BUG-SCI-7, BUG-SCI-10,
 #                              DESIGN-4, DESIGN-9, IDEM-2, CODE-5, CODE-9,
 #                              DQ-3, DQ-9, REL-4, INT-3, LINEAGE-4)
@@ -2234,6 +2372,46 @@ def fill_missing_drug_fields(
     # Apply per-pipeline overrides (CFG-4).
     if fill_map_override:
         fill_map.update(fill_map_override)
+
+    # v110 Task 29 root fix: pre-fill is_fda_approved from groups data.
+    #
+    # Before applying the None default for missing is_fda_approved, check
+    # if the row has a `groups` column (from DrugBank) or similar evidence.
+    # If so, use classify_fda_approval() to distinguish:
+    #   - True  (confirmed approved — "approved" in groups)
+    #   - False (confirmed NOT approved — "withdrawn"/"illicit"/"experimental"
+    #           in groups but NOT "approved")
+    #   - None  (unknown — no groups data, or groups without approved/negative)
+    #
+    # This distinguishes "missing" (None) from "not applicable" (False) per
+    # Task 29. Only rows where is_fda_approved is CURRENTLY null are touched
+    # — rows with existing True/False values are preserved (idempotent).
+    if "is_fda_approved" in out.columns:
+        _fda_null_mask = out["is_fda_approved"].isna()
+        if _fda_null_mask.any():
+            # Try the `groups` column (DrugBank convention).
+            _groups_col = None
+            for _candidate in ("groups", "drugbank_groups", "approval_groups"):
+                if _candidate in out.columns:
+                    _groups_col = _candidate
+                    break
+            if _groups_col is not None:
+                _classified = out.loc[_fda_null_mask, _groups_col].apply(
+                    classify_fda_approval
+                )
+                _filled_count = int(_classified.notna().sum())
+                if _filled_count > 0:
+                    out.loc[_fda_null_mask, "is_fda_approved"] = _classified
+                    logger.info(
+                        "fill_missing_drug_fields: pre-filled is_fda_approved "
+                        "from %s column using classify_fda_approval() — %d "
+                        "rows classified (True/False), %d rows remain None "
+                        "(unknown). (Task 29 v110 root fix: distinguishes "
+                        "missing from not-applicable)",
+                        _groups_col,
+                        _filled_count,
+                        int(_classified.isna().sum()),
+                    )
 
     for col, default in fill_map.items():
         if col not in out.columns:
@@ -2462,8 +2640,19 @@ def fill_missing_drug_fields(
         #   now deterministic (no heuristic).
         try:
             out.loc[_null_mask_before_fillna, lineage_col] = True
-        except Exception:  # noqa: BLE001
-            pass
+        except (KeyError, ValueError, TypeError) as exc:  # P1-053 ROOT FIX (v108): narrowed from broad except Exception
+            # Lineage tracking is best-effort — a failure here means the
+            # lineage column couldn't be set (dtype mismatch, missing
+            # column, etc.). Log at DEBUG so operators can detect it,
+            # but don't crash the fill operation (the data fill itself
+            # already succeeded above).
+            logger.debug(
+                "fill_missing_drug_fields: could not set lineage column "
+                "'%s' for %d rows (%s: %s) — data fill succeeded but "
+                "lineage tracking failed for this column",
+                lineage_col, int(_null_mask_before_fillna.sum()),
+                type(exc).__name__, exc,
+            )
 
         after_null = int(is_nullish(out[col], column_context="general").sum())
         filled_count = before_null - after_null
@@ -2504,8 +2693,12 @@ def fill_missing_drug_fields(
                         len(unknown_types),
                         unknown_types[:5],
                     )
-        except Exception:  # noqa: BLE001
-            pass
+        except (AttributeError, TypeError, ValueError) as exc:  # P1-053 ROOT FIX (v108): narrowed from broad except Exception
+            logger.debug(
+                "fill_missing_drug_fields: drug_type validation failed "
+                "(%s: %s) — non-fatal, validation skipped",
+                type(exc).__name__, exc,
+            )
 
     duration = time.monotonic() - start_time
     _set_cleaning_metadata(
@@ -2691,7 +2884,12 @@ def handle_missing_protein_fields(
                     dropped_rows_df = pd.DataFrame(
                         [dl["row"] for dl in recent_drops]
                     )
-                except Exception:  # noqa: BLE001
+                except (KeyError, ValueError, TypeError) as exc:  # P1-053 ROOT FIX (v108): narrowed from broad except Exception
+                    logger.debug(
+                        "handle_missing_protein_fields: could not build "
+                        "dropped_rows_df from dead letters (%s: %s)",
+                        type(exc).__name__, exc,
+                    )
                     dropped_rows_df = pd.DataFrame()
 
         # DQ-5: warn on duplicate uniprot_ids.
@@ -2707,8 +2905,12 @@ def handle_missing_protein_fields(
                     dups.head(5).to_dict(),
                 )
                 _increment_metric("duplicate_uniprot_ids", len(dups))
-        except Exception:  # noqa: BLE001
-            pass
+        except (AttributeError, TypeError, ValueError, KeyError) as exc:  # P1-053 ROOT FIX (v108): narrowed from broad except Exception
+            logger.debug(
+                "handle_missing_protein_fields: duplicate uniprot_id "
+                "detection failed (%s: %s) — non-fatal",
+                type(exc).__name__, exc,
+            )
     else:
         msg = (
             f"handle_missing_protein_fields: 'uniprot_id' column not found "
@@ -3110,7 +3312,7 @@ def validate_gda_scores(
     #     1. Numeric coercion -- ALWAYS runs (idempotent: to_numeric on
     #        already-numeric data is a no-op).
     #     2. OMIM categorical mapping -- ALWAYS runs when source="omim"
-    #        (naturally idempotent: mapped values 0.5/0.6/0.8/0.9 are
+    #        (naturally idempotent: mapped values 0.2/0.25/0.9/0.8 are
     #        NOT integers 1/2/3/4, so re-running won't re-map them).
     #     3. Clipping -- uses PER-ROW idempotency: rows already marked
     #        ``_score_was_clipped=True`` are not re-clipped, preserving
@@ -3129,8 +3331,24 @@ def validate_gda_scores(
             non_numeric_mask.loc[non_null_score] = ~str_scores.str.match(
                 _NUMERIC_SCORE_REGEX, na=False
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except (AttributeError, TypeError, ValueError) as exc:
+            # P1-053 ROOT FIX (v107): narrowed from broad ``except Exception``.
+            # The previous code silently swallowed ALL exceptions including
+            # programming bugs (NameError, KeyError). A non-numeric score
+            # detection failure left the score unclipped — the GDA row
+            # was loaded with score=1.5, the DB CHECK
+            # ``chk_gda_normalized_score_range`` rejected it, but if
+            # ``normalized_score`` was not set (because this block
+            # crashed silently), the CHECK did not fire. The KG had a GDA
+            # edge with score=1.5 — the GNN's confidence-weighted loss
+            # was mis-calibrated. ROOT FIX: narrow to (AttributeError,
+            # TypeError, ValueError) — the only exceptions pandas raises
+            # on dtype/str operations. Programming bugs propagate.
+            logger.debug(
+                "validate_gda_scores: non-numeric score detection failed "
+                "(%s: %s); proceeding with to_numeric coercion",
+                type(exc).__name__, exc,
+            )
         non_numeric_count = int(non_numeric_mask.sum())
         if non_numeric_count > 0:
             logger.warning(
@@ -3143,13 +3361,13 @@ def validate_gda_scores(
         # Coerce to numeric (always -- idempotent).
         out["score"] = pd.to_numeric(out["score"], errors="coerce")
         # FIX P1-ER-22 (LOW): cast to float64 unconditionally so the
-        # OMIM categorical->continuous mapping below (1->0.5 etc.)
+        # OMIM categorical->continuous mapping below (1->0.2 etc.)
         # doesn't trigger a pandas FutureWarning about assigning
         # floats to an int64 column.
         out["score"] = out["score"].astype("float64")
 
         # OMIM categorical mapping -- ALWAYS runs when source="omim".
-        # Naturally idempotent: mapped values 0.5/0.6/0.9/0.8 are NOT
+        # Naturally idempotent: mapped values 0.2/0.25/0.9/0.8 are NOT
         # integers 1/2/3/4, so re-running won't re-map them.
         #
         # v89 P0 ROOT FIX (Compound #2 -- OMIM score inversion): the
@@ -3176,12 +3394,13 @@ def validate_gda_scores(
         # AUC = 0.0 (Compound #2 in the v89 audit).
         #
         # The fix: align the validator's map with the pipeline's
-        # SCORE_BY_MAPPING_KEY. The map is now {1: 0.5, 2: 0.6, 3: 0.9,
-        # 4: 0.8} -- matching omim_pipeline.py exactly.
+        # SCORE_BY_MAPPING_KEY. The canonical map is now {1: 0.2,
+        # 2: 0.25, 3: 0.9, 4: 0.8} (Piñero 2020 §2.3) -- matching
+        # omim_pipeline.py exactly.
         #
         # v93 ROOT FIX (P1-029 -- single source of truth): the previous
-        # code hardcoded ``_OMIM_CATEGORICAL_MAP = {1: 0.5, 2: 0.6,
-        # 3: 0.9, 4: 0.8}`` as a local constant. If someone changed
+        # code hardcoded a local ``_OMIM_CATEGORICAL_MAP`` constant
+        # (with the old wrong values 0.5/0.6 for mk=1/mk=2). If someone changed
         # ``SCORE_BY_MAPPING_KEY`` in ``pipelines/omim_pipeline.py``
         # without updating this local copy, the two would SILENTLY
         # DIVERGE -- the pipeline would emit one set of scores and the
@@ -3200,8 +3419,9 @@ def validate_gda_scores(
             # v104 FORENSIC ROOT FIX (P1-006 -- WRONG hardcoded fallback OMIM
             #   score map):
             #   The previous code had a ``try/except ImportError`` that fell
-            #   back to a HARDCODED score map ``{1: 0.5, 2: 0.6, 3: 0.9,
-            #   4: 0.8}`` when the canonical ``SCORE_BY_MAPPING_KEY`` import
+            #   back to a HARDCODED score map with the old wrong values
+            #   (0.5 and 0.6 for mk=1 and mk=2) when the canonical
+            #   ``SCORE_BY_MAPPING_KEY`` import
             #   from ``pipelines.omim_pipeline`` failed. The CANONICAL map
             #   (Piñero 2020 §2.3, implemented in omim_pipeline.py:434) is
             #   ``{1: 0.2, 2: 0.25, 3: 0.9, 4: 0.8}``. The fallback gave
@@ -3510,8 +3730,17 @@ def validate_gda_scores(
                     invalid_values,
                 )
                 _increment_metric("invalid_association_types", invalid_count)
-        except Exception:  # noqa: BLE001
-            pass
+        except (AttributeError, TypeError, ValueError) as exc:
+            # P1-053 ROOT FIX (v107): narrowed from broad
+            # ``except Exception``. Association-type validation is
+            # warn-only — but the previous silent ``pass`` swallowed
+            # programming bugs (KeyError on a missing column). ROOT
+            # FIX: narrow to (AttributeError, TypeError, ValueError).
+            logger.debug(
+                "validate_gda_scores: association_type validation "
+                "failed (%s: %s)",
+                type(exc).__name__, exc,
+            )
 
     # COMP-5: source-specific validation.
     if source == "disgenet" and "score" in out.columns:
@@ -3549,8 +3778,18 @@ def validate_gda_scores(
                     clipped_at_max_count,
                     score_max,
                 )
-        except Exception:  # noqa: BLE001
-            pass
+        except (AttributeError, TypeError, ValueError, KeyError) as exc:
+            # P1-053 ROOT FIX (v107): narrowed from broad
+            # ``except Exception``. The previous silent ``pass`` swallowed
+            # programming bugs. A KeyError on a missing column meant the
+            # source-specific validation was skipped silently. ROOT FIX:
+            # narrow to (AttributeError, TypeError, ValueError, KeyError)
+            # and log at DEBUG so operators can detect issues.
+            logger.debug(
+                "validate_gda_scores: DisGeNET source-specific validation "
+                "failed (%s: %s)",
+                type(exc).__name__, exc,
+            )
 
     # DQ-4: optional dedup.
     if dedup:
@@ -3782,4 +4021,8 @@ __all__ = [
     "get_correlation_id",
     # New: Lineage (v3.0.0)
     "get_provenance",
+    # v110 Task 29 root fix: distinguish missing (None) from not-applicable (False)
+    "NOT_APPLICABLE_SENTINEL",
+    "MISSING_SENTINEL",
+    "classify_fda_approval",
 ]

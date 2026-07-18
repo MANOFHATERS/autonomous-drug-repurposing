@@ -300,21 +300,98 @@ def _extract_http_status(exc: BaseException) -> int | None:
         "404 Not Found: ...") -- last-resort heuristic for wrapped errors
         where the original response object is lost.
 
+    P1-033 v113 ROOT FIX: recursively unwrap ``__cause__`` and
+    ``__context__`` chains. A wrapped exception (e.g.
+    ``airflow.exceptions.AirflowException`` wrapping a 4xx) does NOT have
+    ``status_code`` or ``response`` on the OUTER exception. Without
+    unwrapping, a 401 Unauthorized (expired API key) is retried 6 times
+    over 95 minutes instead of failing fast.
+
+    P1-033 v117 ROOT FIX (forensic -- tenacity.RetryError was NOT actually
+    handled despite the v113 docstring claiming it was):
+      The v113 docstring (lines 303-309) claimed that
+      ``tenacity.RetryError`` wrapping ``requests.HTTPError`` was handled
+      by the ``__cause__`` / ``__context__`` unwrap loop. This was FALSE.
+      ``tenacity.RetryError`` does NOT expose its inner exception via
+      ``__cause__`` or ``__context__`` -- it exposes it via
+      ``.last_attempt.exception()``. The v113 loop walked
+      ``__cause__``/``__context__`` only, so a RetryError-wrapped HTTPError
+      was NOT unwrapped, the status code was NOT extracted, and a 401
+      was retried 6 times. The v113 docstring LIED about this.
+
+      v117 ROOT FIX: add a tenacity-specific unwrap branch INSIDE the
+      loop. When ``_current`` has a ``last_attempt`` attribute (the
+      tenacity.RetryError signature), extract the inner exception via
+      ``_current.last_attempt.exception()`` and continue the unwrap loop
+      from there. A cycle guard (``_seen`` set of ``id()``s) prevents
+      infinite recursion if tenacity's internal bookkeeping creates a
+      circular reference.
+
     Returns ``None`` if no status code can be extracted.
     """
-    # Direct attribute access (requests, httpx, custom API clients)
-    for attr in ("status_code", "status", "code"):
-        val = getattr(exc, attr, None)
-        if isinstance(val, int) and 100 <= val <= 599:
-            return val
-    # Nested response object (requests.HTTPError.response.status_code)
-    response = getattr(exc, "response", None)
-    if response is not None:
+    # P1-033 v113 ROOT FIX: unwrap __cause__ / __context__ chains.
+    # Try the outer exception first, then walk the cause/context chain.
+    # Limit depth to 10 to prevent infinite loops on circular references.
+    # P1-033 v117: ``_seen`` is an additional cycle guard for the
+    # tenacity.RetryError unwrap branch (tenacity's last_attempt.future
+    # can in pathological cases point back to the RetryError itself).
+    _current: BaseException | None = exc
+    _depth = 0
+    _seen: set[int] = set()
+    while _current is not None and _depth < 10:
+        # Cycle guard -- if we've already visited this exception object,
+        # bail out (don't infinite-loop on circular references).
+        if id(_current) in _seen:
+            break
+        _seen.add(id(_current))
+
+        # Direct attribute access (requests, httpx, custom API clients)
         for attr in ("status_code", "status", "code"):
-            val = getattr(response, attr, None)
+            val = getattr(_current, attr, None)
             if isinstance(val, int) and 100 <= val <= 599:
                 return val
-    # String heuristic -- last resort
+        # Nested response object (requests.HTTPError.response.status_code)
+        response = getattr(_current, "response", None)
+        if response is not None:
+            for attr in ("status_code", "status", "code"):
+                val = getattr(response, attr, None)
+                if isinstance(val, int) and 100 <= val <= 599:
+                    return val
+
+        # P1-033 v117 ROOT FIX: tenacity.RetryError unwrap branch.
+        # tenacity.RetryError does NOT expose its inner exception via
+        # __cause__ or __context__ -- it exposes it via
+        # ``.last_attempt.exception()``. Without this branch, a 401
+        # Unauthorized wrapped in a RetryError (which is what
+        # ``tenacity.Retrying`` raises after exhausting retries) would
+        # NOT be detected, and ``is_http_4xx_error`` would return False,
+        # causing ``fail_fast_on_http_4xx`` to re-raise the original
+        # RetryError (which Airflow would then retry -- defeating the
+        # entire purpose of fail_fast_on_http_4xx).
+        if hasattr(_current, "last_attempt"):
+            _last = _current.last_attempt
+            if _last is not None and hasattr(_last, "exception"):
+                try:
+                    _inner = _last.exception()
+                except Exception:
+                    # Some Future-like objects raise if the result is not
+                    # yet available. Treat as "no inner exception".
+                    _inner = None
+                if _inner is not None:
+                    # Advance _current to the inner exception and continue
+                    # the unwrap loop from there. The cycle guard prevents
+                    # infinite recursion if tenacity's internal state
+                    # creates a circular reference.
+                    _current = _inner
+                    _depth += 1
+                    continue
+
+        # Move to the next layer of the exception chain
+        _current = _current.__cause__ or _current.__context__
+        _depth += 1
+
+    # String heuristic -- last resort (on the ORIGINAL exception, not the
+    # unwrapped inner one, because str(RetryError) is unhelpful).
     # v83 FORENSIC ROOT FIX (P2-12): the previous code extracted leading
     # digits from the message -- but "2024-01-15 download failed" would
     # extract "202" (stops at 3 digits) and treat it as HTTP 202 (a

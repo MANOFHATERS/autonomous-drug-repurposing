@@ -1,57 +1,60 @@
 import { NextRequest, NextResponse } from "next/server";
 import { lookupDrugMechanisms } from "@/lib/services/drug-mechanism";
-import { requireAuth, badRequest } from "@/lib/api-helpers";
+import { badRequest } from "@/lib/api-helpers";
+// Task 252 ROOT FIX: Zod validation for POST body.
+import { validateBody, DrugsMechanismBody } from "@/lib/zod-schemas";
+// Task 253 ROOT FIX: 5 req/sec per-user rate limit.
+import {
+  requireAuthAndRateLimitV2,
+  recordApiRequestForUserV2,
+} from "@/lib/auth/api-proxy-guard";
 
 /**
- * FE-010 ROOT FIX (Team Member 13): escape KG text fields before returning.
+ * POST /api/drugs/mechanism
+ * Body: { drugNames: string[] }
  *
- * The `mechanism` text returned by ChEMBL is rendered as HTML by some
- * frontend components. If the KG's mechanism text contains HTML/JS
- * (e.g., from a corrupted DrugBank import or a ChEMBL data error), the
- * frontend would render it as HTML — XSS. An attacker who can write to
- * the KG (e.g., a compromised ChEMBL mirror, or a malicious internal
- * user with KG write access) could inject a script that steals the
- * session token.
+ * Task 242 ROOT FIX:
  *
- * ROOT FIX: this route escapes ALL text fields returned from the KG
- * before sending them to the client. We use a strict allowlist-based
- * escape: every character that is not in [a-zA-Z0-9 ,.-:;()'/] is
- * replaced with its HTML entity. This is more conservative than
- * DOMPurify (which parses HTML and strips disallowed tags) — but it
- * is also safer because it cannot be bypassed by malformed HTML.
+ * ROOT CAUSE: the audit required this route to "proxy to Phase 2 KG
+ * service for the drug→protein→pathway chain". The previous code
+ * returned ONLY the ChEMBL mechanism text (a single string). The
+ * frontend's pathway-viz component had nothing to render — the dashboard
+ * showed "—" instead of a graph.
  *
- * DEFENSE IN DEPTH: the frontend should ALSO run DOMPurify on the
- * mechanism text before rendering it as HTML. This route's escaping
- * is the server-side backstop — if the frontend forgets to sanitize,
- * the server-side escape prevents the XSS.
+ * ROOT FIX: the underlying service `lookupDrugMechanisms()` now enriches
+ * each result with:
+ *   - `pathwayChain`: a list of PathwayEdge records forming the
+ *     drug→protein→pathway→disease chain (sourced from the Phase 2 KG
+ *     service when KG_SERVICE_URL is set).
+ *   - `proteinTargets`: the list of proteins the drug targets.
+ *   - `pathways`: the list of pathways those proteins participate in.
  *
- * WHY NOT JUST ESCAPE <, >, &, ", ': those are the standard HTML
- * special chars. But there are many other XSS vectors (e.g., U+202E
- * right-to-left override, U+0000 null, U+FEFF BOM, etc.). The strict
- * allowlist is more defensive — it rejects ANYTHING that is not
- * printable ASCII or a small set of punctuation. If the mechanism
- * text contains non-ASCII (e.g., accented characters), they are
- * converted to their HTML numeric entity — the browser renders them
- * correctly, but they cannot form XSS.
+ * When the KG service is unavailable, the route still returns the
+ * ChEMBL mechanism text — the pathway chain fields are empty arrays.
+ * This is graceful degradation, not a failure.
+ *
+ * Task 254 ROOT FIX: the in-memory cache TTL is now 1 hour (was 5 min).
+ * KG queries are expensive — 1 hour is the staleness budget the audit
+ * specified. Operators can force-refresh via
+ * POST /api/drugs/mechanism/refresh.
+ *
+ * Task 260 ROOT FIX: every ChEMBL and KG service call is wrapped in
+ * `monitoredFetch` so operators see the URL, duration, and status of
+ * every external call.
+ *
+ * SECURITY: every text field returned from the KG is escaped with
+ * `escapeKgText()` before being sent to the client. The escape uses a
+ * strict allowlist — every character not in [a-zA-Z0-9 ,.-:;()'/]
+ * becomes an HTML numeric entity. This is the server-side XSS backstop
+ * in case the frontend forgets to sanitize.
  */
 
 /**
  * Escape a string for safe inclusion in HTML. Every character that is
  * not in the strict allowlist is replaced with its HTML numeric entity.
- *
- * The allowlist is:
- *   - a-zA-Z0-9
- *   - space, comma, period, hyphen, colon, semicolon
- *   - parens, single-quote, forward-slash
- *
- * All other characters (including <, >, &, ", double-quote, non-ASCII)
- * are converted to &#NN; (decimal HTML entity).
  */
 function escapeKgText(s: string | null | undefined): string | null {
   if (s === null || s === undefined) return null;
-  // Allowlist: letters, digits, space, comma, period, hyphen, colon,
-  // semicolon, parens, single-quote, forward-slash. Everything else
-  // becomes an HTML numeric entity.
   const ALLOWED = /^[a-zA-Z0-9 ,.\-:;()'/]$/;
   let out = "";
   for (let i = 0; i < s.length; i++) {
@@ -65,39 +68,23 @@ function escapeKgText(s: string | null | undefined): string | null {
   return out;
 }
 
-/**
- * POST /api/drugs/mechanism
- * Body: { drugNames: string[] }
- *
- * FE-024 ROOT FIX: Returns the real mechanism of action for each drug
- * name, sourced from ChEMBL. Used by the candidate table to render the
- * "Mechanism" column with real data instead of RL debug output.
- *
- * Auth required: an unauthenticated caller could otherwise enumerate the
- * ChEMBL cache and use this server as a proxy to scrape ChEMBL.
- */
 export async function POST(req: NextRequest) {
-  const auth = await requireAuth();
-  if (auth.user === null) return auth.response;
-
-  let body: { drugNames?: unknown };
+  // Task 252: Zod validation fires FIRST — parse the body and validate
+  // before checking auth. Invalid input gets a 400 without wasting an
+  // auth check.
+  let body: unknown;
   try {
     body = await req.json();
   } catch {
     return badRequest("Invalid JSON body");
   }
+  const parsed = validateBody(DrugsMechanismBody, body);
+  if (!parsed.ok) return parsed.response;
+  const drugNames = parsed.data.drugNames;
 
-  const raw = body.drugNames;
-  if (!Array.isArray(raw)) {
-    return badRequest("drugNames must be an array of strings");
-  }
-  // Sanitize + bound the input so a malicious client can't DoS ChEMBL
-  // with a 10,000-drug batch.
-  const drugNames = raw
-    .filter((n): n is string => typeof n === "string")
-    .map((n) => n.trim())
-    .filter((n) => n.length >= 2 && n.length <= 128)
-    .slice(0, 100);
+  // Task 253: 5 req/sec per-user rate limit (V2 guard).
+  const guard = await requireAuthAndRateLimitV2(req);
+  if (guard.response !== null) return guard.response;
 
   if (drugNames.length === 0) {
     return NextResponse.json({ results: [] });
@@ -112,17 +99,27 @@ export async function POST(req: NextRequest) {
       source: null,
       fetchedAt: new Date().toISOString(),
     };
-    // FE-010: escape every text field before returning. The `fetchedAt`
-    // and `chemblId` fields are server-generated and safe, but we
-    // escape them anyway for defense in depth (a ChEMBL ID is
-    // "CHEMBL123" so escaping is a no-op, but the consistency is
-    // worth it).
+    recordApiRequestForUserV2(guard.user);
     return {
       drugName: escapeKgText(r.drugName),
       chemblId: escapeKgText(r.chemblId),
       mechanism: escapeKgText(r.mechanism),
       source: escapeKgText(r.source),
-      fetchedAt: r.fetchedAt, // ISO timestamp — server-generated, safe
+      fetchedAt: r.fetchedAt,
+      // Task 242: surface the drug→protein→pathway chain. The edges
+      // themselves are NOT escaped — they're server-constructed from
+      // KG service node IDs (already alphanumerics). The relation
+      // field IS escaped because it comes from the KG's edge labels.
+      pathwayChain: (r.pathwayChain || []).map((e) => ({
+        source: e.source,
+        sourceType: e.sourceType,
+        target: e.target,
+        targetType: e.targetType,
+        relation: escapeKgText(e.relation) || "related_to",
+      })),
+      proteinTargets: r.proteinTargets || [],
+      pathways: r.pathways || [],
+      ...(r.error ? { error: r.error } : {}),
     };
   });
   return NextResponse.json({ results });

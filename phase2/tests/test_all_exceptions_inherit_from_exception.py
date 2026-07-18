@@ -250,7 +250,7 @@ _EXPECTED_SUBCLASSES: dict[str, frozenset[str]] = {
 # §1.3 there are 71 classes.  If a future change adds a class, this
 # constant MUST be updated AND the new class MUST be added to __all__
 # (or deliberately documented as an exception).
-_EXPECTED_TOTAL_CLASSES: int = 72  # v14: was 71; +1 for new exception class
+_EXPECTED_TOTAL_CLASSES: int = 73  # v108: was 72; +1 for DrugosGraphError (issue 77 root fix)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -412,7 +412,16 @@ class TestCoreInvariantAllExceptionsInheritFromException:
         DrugOSDataError itself trivially inherits from itself via
         ``issubclass(cls, cls) == True``, so this test is well-defined
         for the base class too.
+
+        v108 ROOT FIX (issue 77): DrugosGraphError is the NEW canonical
+        root base class (DrugOSDataError now subclasses it). DrugosGraphError
+        itself does NOT inherit from DrugOSDataError (it's the parent),
+        so it is skipped from this check. All other classes continue to
+        inherit from DrugOSDataError for backward compatibility.
         """
+        # v108 issue 77: DrugosGraphError is the new root; skip it.
+        if class_name == "DrugosGraphError":
+            pytest.skip("DrugosGraphError is the new root base class (v108 issue 77) — does not inherit from DrugOSDataError")
         cls = _ALL_EXCEPTION_CLASSES[class_name]
         assert issubclass(cls, DrugOSDataError), (
             f"{class_name} does NOT inherit from DrugOSDataError. "
@@ -430,13 +439,26 @@ class TestCoreInvariantAllExceptionsInheritFromException:
         between DrugOSDataError and Exception, this test fails -- forcing
         the author to either revert or update the documented
         inheritance map.
+
+        v108 ROOT FIX (issue 77): DrugOSDataError now inherits from
+        DrugosGraphError (the new canonical root), NOT directly from
+        Exception. DrugosGraphError inherits from Exception. This creates
+        a 2-level hierarchy: Exception → DrugosGraphError → DrugOSDataError
+        → loader-specific exceptions. The test is updated to accept EITHER
+        direct inheritance from Exception OR inheritance via DrugosGraphError.
         """
         bases = DrugOSDataError.__bases__
-        assert bases == (Exception,), (
-            f"DrugOSDataError must inherit directly from Exception, "
-            f"but its bases are {bases}.  If you added an intermediate "
-            f"base, update the master fix prompt's inheritance map "
-            f"(§3.3) and this test."
+        # v108 issue 77: accept (DrugosGraphError,) OR (Exception,)
+        try:
+            from drugos_graph.exceptions import DrugosGraphError
+            acceptable_bases = {(Exception,), (DrugosGraphError,)}
+        except ImportError:
+            acceptable_bases = {(Exception,)}
+        assert bases in acceptable_bases, (
+            f"DrugOSDataError must inherit directly from Exception OR "
+            f"from DrugosGraphError (v108 issue 77), but its bases are "
+            f"{bases}. If you added an intermediate base, update the "
+            f"master fix prompt's inheritance map (§3.3) and this test."
         )
 
     def test_drugos_data_error_stores_context_dict(self):
@@ -1727,8 +1749,21 @@ class TestDomain6ReliabilityResilience:
 
     def test_D6_REL_01_all_exceptions_catchable_by_except_drugos_data_error(self):
         """D6-REL-01 (extended): Every exception class is catchable by
-        ``except DrugOSDataError``."""
+        ``except DrugOSDataError``.
+
+        v108 ROOT FIX (issue 77): DrugosGraphError is the new canonical
+        root base class. It does NOT inherit from DrugOSDataError (it's
+        the parent). Callers who want to catch EVERY exception in the
+        module should use ``except DrugosGraphError`` (the new root) or
+        ``except Exception`` (the stdlib root). The test is updated to
+        skip DrugosGraphError from the ``except DrugOSDataError`` check.
+        """
         for name, cls in _ALL_EXCEPTION_CLASSES.items():
+            # v108 issue 77: DrugosGraphError is the new root; skip it
+            # from this check (it's catchable by `except DrugosGraphError`
+            # or `except Exception`, not `except DrugOSDataError`).
+            if name == "DrugosGraphError":
+                continue
             try:
                 instance = cls("catch test")
             except TypeError:
@@ -2964,9 +2999,23 @@ assert all(
     for cls in _ALL_EXCEPTION_CLASSES.values()
 ), "At least one exception class does NOT inherit from Exception -- CRITICAL bug."
 
+# v108 ROOT FIX (issue 77): DrugosGraphError is the new canonical root base
+# class. DrugOSDataError now subclasses DrugosGraphError. All loader-specific
+# exceptions continue to inherit from DrugOSDataError (backward compat).
+# DrugosGraphError itself does NOT inherit from DrugOSDataError (it's the
+# parent), so we exclude it from this check.
+try:
+    from drugos_graph.exceptions import DrugosGraphError as _DGE
+    _classes_to_check = {
+        k: v for k, v in _ALL_EXCEPTION_CLASSES.items()
+        if v is not _DGE
+    }
+except ImportError:
+    _classes_to_check = _ALL_EXCEPTION_CLASSES
+
 assert all(
     issubclass(cls, DrugOSDataError)
-    for cls in _ALL_EXCEPTION_CLASSES.values()
+    for cls in _classes_to_check.values()
 ), "At least one exception class does NOT inherit from DrugOSDataError."
 
 

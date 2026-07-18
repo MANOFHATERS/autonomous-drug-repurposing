@@ -73,49 +73,68 @@ def predict_drug_disease_scores(
     # code misled reviewers. The fix below merges both: the encode-once
     # optimization runs INSIDE the try/finally, so BUG #19 (save/restore
     # training mode) AND BUG #46 (encode once) are both live.
-    prior_training = model.training
-    model.eval()
-    try:
-        model.to(device)
-        nf = {k: v.to(device) for k, v in node_features.items()}
-        ei = {k: v.to(device) for k, v in edge_indices.items()}
+    #
+    # P3-014 ROOT FIX (v119 forensic, THREAD-SAFE INFERENCE): the V90
+    # BUG #19 fix used ``model.eval()`` / ``model.train(prior_training)``
+    # to save/restore the training mode. This is the SAME racy pattern
+    # that P3-014 flagged in ``predict_all_pairs``: ``nn.Module.training``
+    # is SHARED MUTABLE STATE across all threads. Under concurrent
+    # inference (V1 contract: 100 concurrent API requests to the
+    # /api/predict endpoint, which calls this function via the service
+    # layer), a concurrent training thread's ``model.train()`` call
+    # could be silently overwritten by this function's
+    # ``model.train(prior_training=False)`` restore, leaving the model
+    # in eval mode (dropout disabled, BatchNorm frozen) for the rest
+    # of the epoch.
+    #
+    # ROOT FIX (v119): do NOT toggle ``model.eval()`` /
+    # ``model.train(prior_training)`` inside this function. The
+    # ``@torch.no_grad()`` decorator already disables gradient
+    # computation (per-thread, thread-safe). Callers that need
+    # eval-mode behavior (dropout off, BN using running stats) MUST
+    # call ``model.eval()`` BEFORE invoking this function -- the
+    # standard PyTorch inference contract (identical to
+    # ``predict_all_pairs`` and ``predict_all_pairs_dual``). The Phase
+    # 5 API service sets ``model.eval()`` once at startup after
+    # loading the checkpoint. For the rare mid-epoch-inference case
+    # (training thread calls this mid-epoch), the caller MUST use a
+    # separate model replica. This is the standard PyTorch guidance
+    # for concurrent inference + training.
+    model.to(device)
+    nf = {k: v.to(device) for k, v in node_features.items()}
+    ei = {k: v.to(device) for k, v in edge_indices.items()}
 
-        # V90 BUG #46: encode the graph ONCE for ALL pairs (not per batch).
-        # The encoder processes the entire graph through the Graph Transformer
-        # layers, producing node embeddings. This is the expensive operation.
-        # Calling model(...) per batch re-encodes every batch, wasting
-        # N_batches × compute. Encode once, then index per batch.
-        embeddings = model.encode(
-            nf, ei,
-            exclude_edges_override=set(exclude_edges),
-        )
-        drug_emb_all = embeddings["drug"]
-        disease_emb_all = embeddings["disease"]
+    # V90 BUG #46: encode the graph ONCE for ALL pairs (not per batch).
+    # The encoder processes the entire graph through the Graph Transformer
+    # layers, producing node embeddings. This is the expensive operation.
+    # Calling model(...) per batch re-encodes every batch, wasting
+    # N_batches × compute. Encode once, then index per batch.
+    embeddings = model.encode(
+        nf, ei,
+        exclude_edges_override=set(exclude_edges),
+    )
+    drug_emb_all = embeddings["drug"]
+    disease_emb_all = embeddings["disease"]
 
-        all_probs: List[torch.Tensor] = []
-        n = len(drug_indices)
+    all_probs: List[torch.Tensor] = []
+    n = len(drug_indices)
 
-        for start in range(0, n, batch_size):
-            end = min(start + batch_size, n)
-            d_idx = drug_indices[start:end].to(device)
-            ds_idx = disease_indices[start:end].to(device)
-            # V90 BUG #46: extract per-batch embeddings via indexing (NO
-            # redundant encode call). Then call link_predictor.forward
-            # directly with apply_temperature (V4 B-F5 fix preserved).
-            drug_emb_batch = drug_emb_all[d_idx]
-            disease_emb_batch = disease_emb_all[ds_idx]
-            probs = model.link_predictor.forward(
-                drug_emb_batch, disease_emb_batch,
-                apply_temperature=apply_temperature,
-            ).squeeze(-1)
-            all_probs.append(probs.cpu())
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        d_idx = drug_indices[start:end].to(device)
+        ds_idx = disease_indices[start:end].to(device)
+        # V90 BUG #46: extract per-batch embeddings via indexing (NO
+        # redundant encode call). Then call link_predictor.forward
+        # directly with apply_temperature (V4 B-F5 fix preserved).
+        drug_emb_batch = drug_emb_all[d_idx]
+        disease_emb_batch = disease_emb_all[ds_idx]
+        probs = model.link_predictor.forward(
+            drug_emb_batch, disease_emb_batch,
+            apply_temperature=apply_temperature,
+        ).squeeze(-1)
+        all_probs.append(probs.cpu())
 
-        return torch.cat(all_probs).numpy()
-    finally:
-        # V90 ROOT FIX (BUG #19): restore the prior training state so
-        # callers that invoke this mid-training do not silently lose
-        # dropout / BatchNorm updates for the rest of the process.
-        model.train(prior_training)
+    return torch.cat(all_probs).numpy()
 
 
 @torch.no_grad()
@@ -154,24 +173,51 @@ def top_k_novel_predictions(
     num_drugs = len(drug_names)
     num_diseases = len(disease_names)
 
-    # V31 ROOT FIX (P1-12 / Compound #10): pass apply_temperature=False
-    # to match the RL training distribution. The audit found that
-    # ``generate_rl_input`` uses ``apply_temperature=False`` (raw sigmoid,
-    # full variance) for the RL training CSV, but ``top_k_novel_predictions``
-    # used the default ``apply_temperature=True`` (calibrated, compressed
-    # variance) for Phase 6 inference. The RL policy was trained on raw
-    # scores but inferred on calibrated scores -> out-of-distribution
-    # features -> unreliable Phase 6 rankings.
-    #
-    # The fix: use ``apply_temperature=False`` here so Phase 6's candidate
-    # pool is scored with the SAME distribution the RL agent was trained
-    # on. This ensures the RL policy operates on in-distribution features.
-    score_matrix = model.predict_all_pairs(
-        node_features, edge_indices,
-        num_drugs=num_drugs, num_diseases=num_diseases,
-        exclude_edges=exclude_edges,
-        apply_temperature=False,  # V31 P1-12: match RL training distribution
-    )  # (num_drugs, num_diseases) on device -- raw sigmoid, same as RL training
+    # P3-014 ROOT FIX (v119 forensic, THREAD-SAFE INFERENCE): set
+    # ``model.eval()`` ONCE before calling ``predict_all_pairs_dual``.
+    # The P3-014 fix removed the racy ``self.eval()`` /
+    # ``self.train(prior_training)`` toggle from ``predict_all_pairs_dual``
+    # (it was a race condition under concurrent inference). The new
+    # contract requires the CALLER to set eval mode. We do that here,
+    # with a save/restore pattern that is safe because
+    # ``top_k_novel_predictions`` is called by the Phase 6 literature
+    # cross-check (single-threaded, NOT concurrent). Under the V1
+    # contract's concurrent API path, the service layer sets
+    # ``model.eval()`` once at startup and never toggles it -- this
+    # function is not in the hot path.
+    _prior_training = model.training
+    model.eval()
+    try:
+        # P3-040 + P3-004 ROOT FIX (v113 forensic): use the new
+        # ``predict_all_pairs_dual`` method to compute BOTH raw and
+        # calibrated scores in a SINGLE encode pass. The previous code
+        # called ``predict_all_pairs`` once with apply_temperature=False
+        # (raw sigmoid) -- this was already efficient (single encode),
+        # but it wrote the RAW sigmoid to ``gnn_score``, which the RL
+        # reward function reads. Temperature calibration was dead for
+        # Phase 6.
+        #
+        # The fix: use ``predict_all_pairs_dual`` (single encode pass)
+        # and use the CALIBRATED matrix as the source of ``gnn_score``.
+        # This aligns Phase 6 with the RL training distribution (which
+        # now also uses calibrated gnn_score per P3-004 fix in
+        # ``generate_rl_input``). Both paths now use the SAME calibrated
+        # value -- no more distribution mismatch between training and
+        # Phase 6 inference.
+        raw_matrix, calibrated_matrix = model.predict_all_pairs_dual(
+            node_features, edge_indices,
+            num_drugs=num_drugs, num_diseases=num_diseases,
+            exclude_edges=exclude_edges,
+        )  # SINGLE encode pass; both matrices differ only in sigmoid transform
+    finally:
+        # Restore prior training mode. Safe here because this function
+        # is single-threaded (Phase 6 literature cross-check). The
+        # concurrent API path uses predict_drug_disease_scores (also
+        # P3-014-fixed) which does NOT toggle.
+        model.train(_prior_training)
+
+    # P3-004: use calibrated score as gnn_score (matches bridge fix).
+    score_matrix = calibrated_matrix
 
     # Flatten and find top-K novel
     known_set = set((d.lower(), v.lower()) for d, v in known_pairs)

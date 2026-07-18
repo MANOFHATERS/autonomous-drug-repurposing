@@ -22,6 +22,24 @@
  *   - Add a defense-in-depth layer on top of the CSP headers (which are
  *     the primary XSS mitigation).
  *
+ * BE-078 ROOT FIX (LIMITED — MULTI-INSTANCE DEPLOYMENTS):
+ * The pending-enrollment Map is per-process. In a multi-instance deploy
+ * (K8s replicas, etc.), each instance has its own Map. An attacker who
+ * sends the same setupToken to TWO instances simultaneously could
+ * potentially race both verifications. The actual risk is LOW because:
+ *   - The setupToken is bound to the user's authenticated session (only
+ *     the legitimate user receives it from /api/auth/2fa/setup).
+ *   - The attacker would need to BE the user (or have stolen their
+ *     session) AND send the same token to two instances within the
+ *     ~5-minute TTL — and the second enrollment would just overwrite
+ *     the first (the user's authenticator app shows a different secret
+ *     than the server, locking the user out — DoS, not account takeover).
+ * The proper fix is to persist setup tokens in a shared store (Redis
+ * SETNX, or Postgres with a unique constraint on tokenHash + usedAt IS
+ * NULL). Until that's implemented, this module is documented as
+ * single-instance only. Operators running multi-instance deploys MUST
+ * set up Redis-backed 2FA setup (TODO: BE-078-multi-instance).
+ *
  * FE-018 ROOT FIX (Team Member 14, v2 verification): The audit flagged that
  * "two-factor-setup-token.ts generates tokens with crypto.randomBytes(20)
  * but does not expire them". Inspecting the ACTUAL code: the TTL was already

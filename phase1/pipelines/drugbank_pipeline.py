@@ -1228,11 +1228,32 @@ class DrugBankPipeline(BasePipeline):
 
         # ID5 / LIN5: record SHA for audit trail.
         self._sha256_raw = actual_sha
+        # P1-055 ROOT FIX (v108): set source_version from the DrugBank XML.
+        # DrugBank XML files embed the version in the <drugbank> root
+        # element's "version" attribute. We extract it so the audit trail
+        # records the exact DrugBank release (e.g. "DrugBank_5.1.10").
+        # If extraction fails, fall back to a SHA-based version so the
+        # audit trail is never None.
+        try:
+            import lxml.etree as _ET
+            # Only read the first 4KB to find the root element's version
+            # attribute — avoid parsing the entire (potentially 2GB) XML.
+            with open(xml_path, "rb") as _fh:
+                _head = _fh.read(4096)
+            # Find version="X.Y.Z" in the first 4KB
+            _ver_match = re.search(r'version="([^"]+)"', _head.decode("utf-8", errors="ignore"))
+            if _ver_match:
+                self.source_version = f"DrugBank_{_ver_match.group(1)}"
+            else:
+                self.source_version = f"DrugBank_xml_sha_{actual_sha[:12]}"
+        except Exception:  # noqa: BLE001 -- best-effort version extraction
+            self.source_version = f"DrugBank_xml_sha_{actual_sha[:12]}"
         logger.info(
-            "[%s] DrugBank XML verified: %s (SHA-256: %s...)",
+            "[%s] DrugBank XML verified: %s (SHA-256: %s..., version: %s)",
             self.source_name,
             _log_path(xml_path),
             actual_sha[:16],
+            self.source_version,
         )
         return xml_path
 
@@ -1256,7 +1277,7 @@ class DrugBankPipeline(BasePipeline):
         works correctly (the InChIKeys match across ChEMBL and DrugBank).
         """
         import gzip as _gzip
-        from pipelines._embedded_samples import (
+        from pipelines._dev_samples import (
             embedded_drugbank_drugs,
             embedded_drugbank_interactions,
             embedded_drugbank_indications,
@@ -1287,6 +1308,15 @@ class DrugBankPipeline(BasePipeline):
         self._metrics["sample_drug_count"] = len(embedded_drugbank_drugs())
         self._metrics["sample_interaction_count"] = len(embedded_drugbank_interactions())
         self._metrics["sample_indication_count"] = len(embedded_drugbank_indications())
+
+        # P1-055 ROOT FIX (v108): set source_version for the audit trail.
+        # The previous code did NOT set self.source_version in any of the
+        # 3 download paths (sample, open-data, real XML). The audit trail
+        # had source_version=None for every DrugBank run, violating FDA
+        # 21 CFR Part 11 version traceability. ROOT FIX: set a meaningful
+        # version string in each path so the audit trail can answer
+        # "which DrugBank version produced this KG?".
+        self.source_version = "DrugBank_5.1.10_embedded_sample"
 
         logger.info(
             "[%s] Embedded DrugBank samples written: %s (%d drugs), "
@@ -1342,7 +1372,7 @@ class DrugBankPipeline(BasePipeline):
                 # interactions (the ChEMBL activities are the authoritative
                 # source for DPI; the DrugBank pipeline's job is to provide
                 # drug metadata + indications, which we have).
-                from pipelines._embedded_samples import embedded_drugbank_interactions
+                from pipelines._dev_samples import embedded_drugbank_interactions
                 interactions_csv = self.raw_dir / "drugbank_interactions_sample.csv"
                 embedded_drugbank_interactions().to_csv(interactions_csv, index=False)
                 # Copy the indications file
@@ -1353,6 +1383,8 @@ class DrugBankPipeline(BasePipeline):
                 # extension and call _clean_embedded_samples)
                 drugs_csv = self.raw_dir / "drugbank_drugs_sample.csv"
                 drugs_df.to_csv(drugs_csv, index=False)
+                # P1-055 ROOT FIX (v108): set source_version for open-data path.
+                self.source_version = "DrugBank_open_data_chembl_fda_approved"
                 logger.info(
                     "[%s] Open-data DrugBank solution: %d drugs written to %s",
                     self.source_name, len(drugs_df), drugs_csv.name,
@@ -2149,7 +2181,17 @@ class DrugBankPipeline(BasePipeline):
                 _name_elem.getparent().tag if _name_elem.getparent() is not None else "None",
             )
             # Re-fetch using explicit direct-child XPath.
-            _name_matches = elem.xpath("./db:name", NS)
+            # P1-013 v106 FORENSIC ROOT FIX: lxml's ``xpath()`` does NOT
+            # accept namespaces as a positional argument -- the previous
+            # call ``elem.xpath("./db:name", NS)`` raised
+            # ``TypeError: xpath() takes exactly 1 positional argument (2 given)``
+            # at runtime. The defensive fall-back was therefore DEAD CODE --
+            # if the primary ``elem.find("db:name", NS)`` ever returned a
+            # misparented element, the fall-back would crash with TypeError
+            # instead of recovering. The fix: pass namespaces as a keyword
+            # argument (``namespaces=NS``) per the lxml API contract
+            # (https://lxml.de/api/lxml.etree._Element-class.html#xpath).
+            _name_matches = elem.xpath("./db:name", namespaces=NS)
             _name_elem = _name_matches[0] if _name_matches else None
         name = _sanitize_text(_text_of(_name_elem))
         cas_number = _sanitize_text(_text_of(elem.find("db:cas-number", NS)))

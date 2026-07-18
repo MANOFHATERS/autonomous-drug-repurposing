@@ -383,12 +383,23 @@ def validate_phase1_output_contract(
     if contract is None:
         contract = Phase1OutputContract()
     base_dir = Path(base_dir)
-    if not base_dir.exists():
-        raise FileNotFoundError(
-            f"Phase 1 processed_data directory does not exist: {base_dir}"
-        )
-
+    # v117 ROOT FIX (P1-020): raise DrugOSDataError (not FileNotFoundError)
+    # for missing base_dir. Callers (e.g., the master DAG's _trigger_phase2
+    # task) catch DrugOSDataError to handle contract failures gracefully.
+    # A missing base_dir IS a contract failure — the directory is part of
+    # the Phase 1 output contract. Raising FileNotFoundError propagated
+    # as an unhandled exception and crashed the Airflow task with a
+    # confusing "file not found" error instead of a clear "Phase 1
+    # contract failed" message.
     DrugOSDataError = _local_drugos_data_error()
+    if not base_dir.exists():
+        raise DrugOSDataError(
+            f"Phase 1 processed_data directory does not exist: {base_dir}. "
+            "This is a Phase 1 output contract failure — the directory is "
+            "a required contract artifact. Verify that the Phase 1 ETL "
+            "completed successfully and wrote its outputs to the configured "
+            "PROCESSED_DATA_DIR."
+        )
     resolved: Dict[str, Path] = {}
     missing_required: List[str] = []
 
@@ -530,27 +541,80 @@ def check_neo4j_readiness(pg_session) -> dict:
             #   a warning) instead of crashing.
             _meta_name: Optional[str] = None
             try:
-                _bind = pg_session.bind
+                # v107 ROOT FIX (ISSUE-P1-034 — schema introspection
+                #   inconsistent when session.bind is None):
+                #   The previous code ONLY resolved ``_meta_name`` when
+                #   ``pg_session.bind is not None``. In SQLAlchemy 2.x,
+                #   ``session.bind`` is frequently None (unbound sessions,
+                #   sessions created via ``sessionmaker(bind=None)`` and
+                #   later bound via ``session.connection()``). When
+                #   ``_bind`` was None, ``_meta_name`` stayed None, and
+                #   the fallback branches called ``_sa_table(t, schema=None)``
+                #   which SQLAlchemy interprets as "use the default schema"
+                #   — this works on SQLite (single-schema) but FAILS on
+                #   PostgreSQL with a non-default ``search_path``,
+                #   causing ``check_neo4j_readiness`` to return
+                #   ``ready=False`` even on a fully-populated DB.
+                #
+                # ROOT FIX: try THREE sources of the engine in order:
+                #   1. ``pg_session.bind`` (legacy SQLAlchemy 1.x)
+                #   2. ``pg_session.get_bind()`` (SQLAlchemy 1.4+ — returns
+                #      the bind for the current mapper context; works for
+                #      unbound sessions that have been associated with an
+                #      engine via ``session.configure(bind=engine)`` or
+                #      via ``session.connection()``)
+                #   3. ``database.connection.get_engine()`` (the platform's
+                #      global engine — the same one the session pool uses)
+                # Once we have ANY engine, use ``inspect(engine).default_schema_name``
+                # consistently. This eliminates the SQLite-vs-PostgreSQL
+                # asymmetry that the audit flagged.
+                from sqlalchemy import (
+                    MetaData,
+                    Table,
+                    inspect as _sa_inspect,
+                )
+                _bind = None
+                # Source 1: session.bind (SQLAlchemy 1.x legacy)
+                try:
+                    _bind = pg_session.bind
+                except (AttributeError, TypeError):
+                    _bind = None
+                # Source 2: session.get_bind() (SQLAlchemy 1.4+)
+                if _bind is None:
+                    try:
+                        _bind = pg_session.get_bind()
+                    except (AttributeError, TypeError, LookupError, Exception):
+                        # get_bind() raises LookupError if no mapper is in
+                        # context (e.g. raw SQL execution). Swallow and try
+                        # the next source.
+                        _bind = None
+                # Source 3: global engine from database.connection
+                if _bind is None:
+                    try:
+                        from database.connection import get_engine as _get_engine
+                        _bind = _get_engine()
+                    except Exception:
+                        _bind = None
+                # Now resolve default_schema_name from whichever bind we found.
                 if _bind is not None:
-                    from sqlalchemy import (
-                        MetaData,
-                        Table,
-                        inspect as _sa_inspect,
-                    )
-                    _meta_name = _sa_inspect(_bind).default_schema_name
-                    # P1-002 ROOT FIX (v100 forensic): the previous code
-                    # computed _meta (default_schema_name) but NEVER used
-                    # it -- it always created an UNQUALIFIED _sa_table(t),
-                    # which fails on PostgreSQL when the table is in a
-                    # non-default schema or search_path is misconfigured.
-                    # This caused check_neo4j_readiness to return ready=False
-                    # even on a fully-populated DB, blocking the master DAG's
-                    # _trigger_phase2. ROOT FIX: introspect the actual Table
-                    # object from the SQLAlchemy metadata via reflect() with
-                    # the resolved schema name, so the rendered SQL carries
-                    # the schema qualification (e.g. "public.drugs" not just
-                    # "drugs"). Fall back to the unqualified TableClause
-                    # only if reflection fails (SQLite, no bind, etc.).
+                    try:
+                        _meta_name = _sa_inspect(_bind).default_schema_name
+                    except Exception:
+                        _meta_name = None
+                # P1-002 ROOT FIX (v100 forensic): the previous code
+                # computed _meta (default_schema_name) but NEVER used
+                # it -- it always created an UNQUALIFIED _sa_table(t),
+                # which fails on PostgreSQL when the table is in a
+                # non-default schema or search_path is misconfigured.
+                # This caused check_neo4j_readiness to return ready=False
+                # even on a fully-populated DB, blocking the master DAG's
+                # _trigger_phase2. ROOT FIX: introspect the actual Table
+                # object from the SQLAlchemy metadata via reflect() with
+                # the resolved schema name, so the rendered SQL carries
+                # the schema qualification (e.g. "public.drugs" not just
+                # "drugs"). Fall back to the unqualified TableClause
+                # only if reflection fails (SQLite, no bind, etc.).
+                if _bind is not None:
                     try:
                         _md = MetaData(schema=_meta_name)
                         _table_obj = Table(
@@ -567,6 +631,32 @@ def check_neo4j_readiness(pg_session) -> dict:
                             )
                         else:
                             _table_obj = _sa_table(t)
+                else:
+                    # v107 P1-034: no engine available — use unqualified
+                    # TableClause. This works on SQLite (single-schema)
+                    # but will fail on PostgreSQL with non-default
+                    # search_path. Log a WARNING so operators know the
+                    # schema could not be resolved.
+                    if t == sorted(ALL_TABLES)[0]:  # log once per call
+                        logger.warning(
+                            "check_neo4j_readiness: could not resolve a "
+                            "database engine from pg_session (bind=%r, "
+                            "get_bind=%r, global engine=%r). Using "
+                            "unqualified table references — this works on "
+                            "SQLite but may fail on PostgreSQL with a "
+                            "non-default search_path. Ensure the session "
+                            "is bound to an engine before calling "
+                            "check_neo4j_readiness. (v107 P1-034)",
+                            getattr(pg_session, 'bind', None),
+                            'available' if hasattr(pg_session, 'get_bind') else 'missing',
+                            'available' if _bind is not None else 'missing',
+                        )
+                    if _meta_name:
+                        _table_obj = _sa_table(
+                            t, schema=_meta_name,
+                        )
+                    else:
+                        _table_obj = _sa_table(t)
             except Exception:
                 # P1-002 ROOT FIX: use _meta_name (schema name) in _sa_table()
                 # call with schema= parameter for the fallback case too.
@@ -1008,11 +1098,12 @@ class Neo4jExporter:
     Examples
     --------
     Production (Neo4j credentials)::
-
+        # P1-021 v113 ROOT FIX: NEVER hardcode credentials. Read from env var.
+        import os
         exporter = Neo4jExporter(
             neo4j_uri="bolt://localhost:7687",
             neo4j_user="neo4j",
-            neo4j_password="drugos_dev_password",
+            neo4j_password=os.environ["NEO4J_PASSWORD"],
         )
         report = exporter.export(phase1_processed_dir="phase1/processed_data")
 
@@ -1117,7 +1208,25 @@ class Neo4jExporter:
 
     @staticmethod
     def validate_contract(phase1_processed_dir: Optional[Path | str] = None) -> Dict[str, Any]:
-        """Wrap :func:`validate_phase1_output_contract` for OO callers."""
+        """Wrap :func:`validate_phase1_output_contract` for OO callers.
+
+        v107 FORENSIC ROOT FIX (ISSUE-P1-012):
+          The previous code accepted ``Optional[Path | str] = None`` but
+          passed the value directly to ``validate_phase1_output_contract``
+          which requires a non-None ``base_dir`` (it calls ``Path(base_dir)``
+          which raises TypeError on None). Calling
+          ``Neo4jExporter.validate_contract()`` (no args) crashed with a
+          confusing TypeError instead of a clear error message.
+          ROOT FIX: default to the canonical Phase 1 processed_data dir
+          (``_PHASE1_ROOT / "processed_data"``) when the argument is None.
+          This matches the behavior of the module-level
+          ``export_to_neo4j`` function which also defaults to this path.
+        """
+        # v107 P1-012: default to the canonical Phase 1 processed_data dir
+        # instead of passing None to validate_phase1_output_contract
+        # (which would raise TypeError on Path(None)).
+        if phase1_processed_dir is None:
+            phase1_processed_dir = _PHASE1_ROOT / "processed_data"
         return validate_phase1_output_contract(phase1_processed_dir)
 
 

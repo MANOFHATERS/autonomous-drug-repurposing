@@ -348,6 +348,9 @@ __all__: List[str] = [
     "OpenTargetsConfig",
     # ── Download ──
     "download_opentargets",
+    # ── REST API (Task 90 -- per-disease pagination) ──
+    "fetch_opentargets_associations",
+    "load_opentargets_associations_for_disease",
     # ── Parse ──
     "parse_opentargets_evidence",
     "iter_opentargets_evidence",
@@ -4342,3 +4345,144 @@ def fetch_opentargets_associations(
             },
         )
     return results
+
+
+# =============================================================================
+# Section 15 -- Per-disease REST API loader (Task 90 ROOT FIX)
+# =============================================================================
+# Task 90: ``fetch_opentargets_associations`` was fully implemented with
+# cursor-following pagination but was never wired into the pipeline. The
+# bulk JSONL dump (``load_opentargets``) is the primary production path
+# for full-graph builds, but several legitimate use cases need the
+# per-disease REST API instead:
+#
+#   * Incremental updates for a single disease (e.g. re-fetch breast
+#     cancer associations after a new OpenTargets release without
+#     re-downloading the 30 GB bulk dump).
+#   * Targeted KG construction for a disease-of-interest subgraph.
+#   * CI smoke tests that verify the pagination cursor logic without
+#     needing the full bulk dump.
+#
+# This wrapper converts the raw association dicts returned by
+# ``fetch_opentargets_associations`` into the same KG edge-record
+# format produced by ``opentargets_to_edge_records``, so the two
+# paths can be merged downstream.
+
+
+def load_opentargets_associations_for_disease(
+    disease_id: str,
+    *,
+    max_pages: int = 20,
+    page_size: int = OPENTARGETS_GRAPHQL_DEFAULT_PAGE_SIZE,
+    timeout: int = 60,
+    endpoint: str = OPENTARGETS_GRAPHQL_ENDPOINT,
+    min_score: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Fetch disease-target associations for ONE disease via the REST API.
+
+    Task 90 ROOT FIX. Wraps ``fetch_opentargets_associations`` (which
+    follows the GraphQL cursor) and converts the raw association
+    records into KG edge records matching the format produced by
+    ``opentargets_to_edge_records``. This is the production path for
+    per-disease incremental updates.
+
+    Parameters
+    ----------
+    disease_id : str
+        OpenTargets disease ID (e.g. ``"EFO_0000311"`` for breast
+        cancer, ``"MONDO_0005150"`` for hypertension).
+    max_pages, page_size, timeout, endpoint
+        Same semantics as ``fetch_opentargets_associations``.
+    min_score : float or None
+        Optional minimum overall association score. Associations
+        below this threshold are filtered out before conversion to
+        KG edges (OpenTargets scores are in [0, 1]; a threshold of
+        0.1 is a reasonable default to drop noise).
+
+    Returns
+    -------
+    dict
+        Summary dict with keys:
+          * ``disease_id``: the input disease ID.
+          * ``associations_fetched``: total raw associations returned
+            by the API (before ``min_score`` filtering).
+          * ``associations_kept``: associations that survived
+            ``min_score`` filtering.
+          * ``edges``: list of KG edge records (same format as
+            ``opentargets_to_edge_records``).
+          * ``nodes``: list of KG node records (Disease + Target
+            nodes referenced by the edges).
+          * ``pages_fetched``: number of pagination requests issued.
+          * ``truncated``: True if ``max_pages`` was hit before the
+            API ran out of results.
+    """
+    raw_associations = fetch_opentargets_associations(
+        disease_id,
+        max_pages=max_pages,
+        page_size=page_size,
+        timeout=timeout,
+        endpoint=endpoint,
+    )
+    pages_fetched = max((r.get("page_fetched", 0) for r in raw_associations), default=0)
+    truncated = pages_fetched >= max_pages and bool(raw_associations)
+
+    # Apply optional score filter.
+    if min_score is not None:
+        kept = [
+            r for r in raw_associations
+            if (r.get("score") or 0.0) >= min_score
+        ]
+    else:
+        kept = list(raw_associations)
+
+    # Build KG nodes: one Disease node + one Target (Gene) node per
+    # unique target. Edges link Disease -> associated_with -> Target.
+    edges: List[Dict[str, Any]] = []
+    nodes: List[Dict[str, Any]] = []
+    seen_targets: set = set()
+    disease_node = {
+        "id": disease_id,
+        "label": "Disease",
+        "name": disease_id,  # OpenTargets GraphQL doesn't return disease name in associations; caller can enrich
+        "_source": "opentargets_api",
+    }
+    nodes.append(disease_node)
+
+    for assoc in kept:
+        target_id = str(assoc.get("target_id") or "").strip()
+        target_symbol = str(assoc.get("target_symbol") or "").strip()
+        score = float(assoc.get("score") or 0.0)
+        if not target_id:
+            continue
+        if target_id not in seen_targets:
+            seen_targets.add(target_id)
+            nodes.append({
+                "id": target_id,
+                "label": "Gene",
+                "name": target_symbol or target_id,
+                "gene_symbol": target_symbol.upper() if target_symbol else "",
+                "_source": "opentargets_api",
+            })
+        edges.append({
+            "src_id": target_id,
+            "dst_id": disease_id,
+            "rel_type": "associated_with",
+            "source": "opentargets_api",
+            "normalized_score": score,
+            "datatype_scores": assoc.get("datatype_scores", {}),
+            "props": {
+                "opentargets_score": score,
+                "opentargets_disease_id": disease_id,
+                "opentargets_target_id": target_id,
+            },
+        })
+
+    return {
+        "disease_id": disease_id,
+        "associations_fetched": len(raw_associations),
+        "associations_kept": len(kept),
+        "edges": edges,
+        "nodes": nodes,
+        "pages_fetched": pages_fetched,
+        "truncated": truncated,
+    }

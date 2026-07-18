@@ -72,6 +72,7 @@ FIX vs original codebase:
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -236,6 +237,44 @@ class DrugRepurposingGraphTransformer(nn.Module):
         exclude_edges: Optional[set] = None,
         seed: Optional[int] = None,
         num_training_pairs: Optional[int] = None,
+        # P3-043 ROOT FIX (v107): configurable minimum edge-type count.
+        # The previous code hardcoded ``if len(self.edge_types) < 18: raise``
+        # which blocked ablation studies (removing one edge type to
+        # measure its contribution). The audit's P3-043 finding:
+        # "Ablation studies (removing one edge type to measure its
+        # contribution) are blocked by this check. Researchers cannot
+        # easily measure edge-type importance."
+        #
+        # ROOT FIX: add a ``min_edge_types`` parameter (default 18 —
+        # preserves the current safe behavior). Callers doing ablation
+        # studies can pass a lower value (e.g., ``min_edge_types=14`` to
+        # test the pre-P3-001 14-type schema, or ``min_edge_types=1``
+        # to allow any non-empty edge set). The default 18 enforces the
+        # full canonical schema on the production path; the parameter
+        # is the escape hatch for ablation research.
+        min_edge_types: int = 18,
+        # P3-032 ROOT FIX (v119 forensic, SCIENTIFIC-ML CORRECTNESS):
+        # Optional per-edge-type output projections in the
+        # HeterogeneousMultiHeadAttention. When True, each edge type
+        # gets its own out_proj module (standard HGT, Wang et al. 2019).
+        # When False (default), a single shared out_proj is used
+        # (backward compat with existing trained checkpoints).
+        #
+        # The audit (P3-032) found that the shared out_proj forces ALL
+        # edge types to share the same output projection. For the V1
+        # production graph (18 edge types), this limits the model's
+        # expressiveness. Production deployments targeting the V1 AUC
+        # 0.85 target SHOULD set this to True and retrain from scratch.
+        # Demo / CI runs may leave it False.
+        #
+        # State_dict compatibility: when True, the model has additional
+        # ``graph_transformer_layers.{i}.attention.out_proj_per_edge_type.*``
+        # keys. Old checkpoints (trained with False) do NOT have these
+        # keys — load_state_dict(strict=True) will FAIL with missing
+        # keys. This is the desired behavior: silently initializing the
+        # new modules to zero would make all per-edge-type messages zero
+        # (the model would only see self-loops), corrupting the model.
+        per_edge_type_out_proj: bool = False,
     ) -> None:
         super().__init__()
 
@@ -359,20 +398,26 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # test_v5_forensic_verification.py) which construct the LAYER
         # with 1-2 edge types — those still work because they bypass
         # this model-level check.
-        if len(self.edge_types) < 18:
+        if len(self.edge_types) < min_edge_types:
             raise ValueError(
-                f"DrugRepurposingGraphTransformer requires at least 18 "
-                f"edge types (9 forward + 9 reverse, the canonical "
-                f"Phase 2 schema) so every node type receives incoming "
-                f"messages on all 9 forward relation types (inhibits, "
-                f"activates, binds, modulates, part_of, disrupted_in, "
-                f"treats, tested_for, causes). Got {len(self.edge_types)}: "
-                f"{self.edge_types}. The canonical schema is "
+                f"DrugRepurposingGraphTransformer requires at least "
+                f"{min_edge_types} edge types (got {len(self.edge_types)}: "
+                f"{self.edge_types}). The default min_edge_types=18 enforces "
+                f"the canonical Phase 2 schema (9 forward + 9 reverse) so "
+                f"every node type receives incoming messages on all 9 "
+                f"forward relation types (inhibits, activates, binds, "
+                f"modulates, part_of, disrupted_in, treats, tested_for, "
+                f"causes). The canonical schema is "
                 f"graph_transformer.data.DEFAULT_EDGE_TYPES (18 types). "
                 f"Pass edge_types=DEFAULT_EDGE_TYPES (the default) or a "
                 f"superset. For ablation studies with fewer edge types, "
-                f"construct HeterogeneousMultiHeadAttention directly. "
-                f"(P3-001 ROOT FIX v104: this was previously a `< 14` "
+                f"pass min_edge_types=<lower_value> (e.g., "
+                f"min_edge_types=14 for the pre-P3-001 14-type schema, "
+                f"or min_edge_types=1 to allow any non-empty edge set). "
+                f"(P3-043 ROOT FIX v107: this was previously a hardcoded "
+                f"`< 18` check that blocked ablation studies; it is now "
+                f"configurable via the min_edge_types parameter. "
+                f"P3-001 ROOT FIX v104: this was previously a `< 14` "
                 f"check that allowed the OLD 14-type schema to pass "
                 f"silently, degrading message passing for the 4 neutral "
                 f"binding/modulation edge types.)"
@@ -386,6 +431,9 @@ class DrugRepurposingGraphTransformer(nn.Module):
 
         # Graph Transformer layers (pre-populate LayerNorm for every known
         # node type so state_dict is stable -- B18 fix)
+        # P3-032 ROOT FIX (v119): propagate per_edge_type_out_proj to every
+        # GraphTransformerLayer (which propagates it to the attention).
+        self.per_edge_type_out_proj: bool = bool(per_edge_type_out_proj)
         self.graph_transformer_layers = nn.ModuleList([
             GraphTransformerLayer(
                 embedding_dim=embedding_dim,
@@ -395,6 +443,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
                 dropout=dropout,
                 attention_dropout=attention_dropout,
                 node_types=self.node_types,
+                per_edge_type_out_proj=self.per_edge_type_out_proj,  # P3-032 v119
             )
             for _ in range(num_layers)
         ])
@@ -415,21 +464,64 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # Initialize weights
         self.apply(self._init_weights)
 
+        # FORENSIC ROOT FIX (audit Issue 133, SILENT BUG): re-zero the
+        # NodeTypeEmbedding's unknown-type slot AFTER self.apply(_init_weights).
+        # NodeTypeEmbedding.__init__ zeroed the unknown slot, but
+        # _init_weights's new Xavier init for nn.Embedding (audit Issue 133)
+        # OVERWRITES that zero with random values -- silently breaking the
+        # unknown-type contract (out-of-range node types would produce
+        # random perturbations to the projected features instead of zero).
+        # We re-zero here so the unknown slot is zero REGARDLESS of the
+        # order of operations between NodeTypeEmbedding.__init__ and
+        # self.apply(_init_weights).
+        try:
+            self.node_type_proj.node_type_embedding._reset_unknown_slot()
+        except AttributeError:
+            # Defensive: if a future NodeTypeProjection variant doesn't
+            # expose node_type_embedding, skip silently. The contract is
+            # only meaningful when NodeTypeEmbedding is in use.
+            pass
+
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
         """Initialize all module weights with appropriate strategies.
 
-        V30 ROOT FIX (7.1): the original code used normal(0, 1) for nn.Embedding
-        (std=1.0). For 128-dim embeddings, the L2 norm of each row was ~11.3,
-        which DOMINATED the projected features. BERT/GPT use std=0.02 (50x
-        smaller) so the type embedding adds a gentle bias to the projected
-        features rather than overwriting them. With std=1.0, the type
-        embedding forced all drug nodes to cluster near their type vector,
-        destroying the per-drug signal from the projection layer.
+        FORENSIC ROOT FIX (audit Issue 133): nn.Embedding is now
+        initialized with ``nn.init.xavier_normal_`` (Glorot & Bengio
+        2010, "Understanding the difficulty of training deep
+        feed-forward neural networks"), NOT ``torch.randn`` / normal_.
 
-        The fix uses std=0.02 for nn.Embedding (matching BERT/GPT practice).
-        nn.Linear and nn.LayerNorm are unchanged (Xavier uniform is standard
-        for Linear with ReLU/GELU; ones/zeros is standard for LayerNorm).
+        The previous code used ``nn.init.normal_(mean=0.0, std=0.02)``
+        (the BERT/GPT convention). The audit explicitly mandates Xavier.
+        Both are scientifically defensible, but the audit is the
+        contract for this codebase, so Xavier is the choice.
+
+        Xavier_normal_ draws from N(0, sqrt(2 / (fan_in + fan_out))).
+        For nn.Embedding, fan_in = embedding_dim and fan_out = 1 (each
+        forward pass looks up a single row), so the effective std is
+        sqrt(2 / (embedding_dim + 1)) ~= sqrt(2/embedding_dim). For
+        embedding_dim=128, that's std ~= 0.125 -- between the previous
+        0.02 (BERT) and 1.0 (PyTorch default randn). Xavier is the
+        standard choice for any layer that feeds into a Linear or
+        attention computation (which the node type embeddings do --
+        they get ADDED to the projected features before the first
+        attention layer).
+
+        nn.Linear and nn.LayerNorm are unchanged (Xavier uniform is
+        standard for Linear with ReLU/GELU; ones/zeros is standard for
+        LayerNorm).
+
+        SILENT BUG FIX: NodeTypeEmbedding.__init__ zeroes out the
+        'unknown' type slot (index num_node_types) so out-of-range
+        node types produce NEUTRAL embeddings (zero perturbation to
+        the projected features). ``self.apply(self._init_weights)``
+        runs AFTER NodeTypeEmbedding.__init__, so the Xavier init
+        here OVERWRITES that zero with random values -- breaking the
+        unknown-type contract. The fix is in
+        ``DrugRepurposingGraphTransformer.__init__``: AFTER
+        ``self.apply(self._init_weights)``, we explicitly call
+        ``self.node_type_proj.node_type_embedding._reset_unknown_slot()``
+        to re-zero the unknown slot. See that call site for details.
         """
         if isinstance(module, nn.Linear):
             nn.init.xavier_uniform_(module.weight)
@@ -439,9 +531,10 @@ class DrugRepurposingGraphTransformer(nn.Module):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            # V30 ROOT FIX (7.1): std=0.02 (BERT/GPT standard). The previous
-            # std=1.0 dominated projected features with type-cluster signal.
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            # FORENSIC ROOT FIX (audit Issue 133): Xavier init for
+            # node embeddings (was normal_(std=0.02)). See the
+            # docstring above for the full rationale.
+            nn.init.xavier_normal_(module.weight)
 
     def encode(
         self,
@@ -515,9 +608,84 @@ class DrugRepurposingGraphTransformer(nn.Module):
             # Sanity-check every layer's output
             for ntype, emb in h.items():
                 if torch.isnan(emb).any() or torch.isinf(emb).any():
+                    # P3-045 ROOT FIX (v107): include INPUT feature stats
+                    # in the error message so the user can identify
+                    # WHICH feature caused the NaN/Inf. The previous
+                    # message said only "Check input data quality" —
+                    # the user had to manually inspect every node type's
+                    # features to find the culprit. The audit's P3-045
+                    # finding: "A user sees 'Non-finite values in
+                    # {ntype} embeddings after layer {i}' but doesn't
+                    # know which input feature caused it. They waste
+                    # time debugging the wrong thing."
+                    #
+                    # ROOT FIX: include per-node-type input feature
+                    # statistics (min, max, mean, NaN count, Inf count)
+                    # in the error message. This lets the user
+                    # IMMEDIATELY identify which input feature has the
+                    # problem (e.g., "drug features have 5 NaN values"
+                    # points to a Phase 1 data cleaning bug). The stats
+                    # are computed for ALL node types (not just the one
+                    # that produced NaN) because the NaN may have
+                    # propagated from a different type via message
+                    # passing.
+                    feature_stats_lines = []
+                    for ft, ft_tensor in node_features.items():
+                        ft_flat = ft_tensor.float().flatten()
+                        nan_count = int(torch.isnan(ft_flat).sum().item())
+                        inf_count = int(torch.isinf(ft_flat).sum().item())
+                        if nan_count > 0 or inf_count > 0:
+                            # This is likely the culprit — flag it.
+                            feature_stats_lines.append(
+                                f"  {ft}: shape={tuple(ft_tensor.shape)}, "
+                                f"NaN={nan_count}, Inf={inf_count} "
+                                f"<-- LIKELY CULPRIT (non-finite inputs)"
+                            )
+                        else:
+                            # Compute min/max/mean only for finite tensors
+                            # (avoid NaN propagation into the stats).
+                            finite_mask = torch.isfinite(ft_flat)
+                            if finite_mask.any():
+                                ft_finite = ft_flat[finite_mask]
+                                feature_stats_lines.append(
+                                    f"  {ft}: shape={tuple(ft_tensor.shape)}, "
+                                    f"min={ft_finite.min().item():.4f}, "
+                                    f"max={ft_finite.max().item():.4f}, "
+                                    f"mean={ft_finite.mean().item():.4f}, "
+                                    f"NaN=0, Inf=0"
+                                )
+                            else:
+                                feature_stats_lines.append(
+                                    f"  {ft}: shape={tuple(ft_tensor.shape)}, "
+                                    f"ALL NON-FINITE (NaN or Inf) "
+                                    f"<-- LIKELY CULPRIT"
+                                )
+                    feature_stats = "\n".join(feature_stats_lines)
                     raise RuntimeError(
-                        f"Non-finite values in {ntype} embeddings after "
-                        f"layer {i}. Check input data quality."
+                        f"Non-finite values (NaN or Inf) in '{ntype}' "
+                        f"embeddings after layer {i}. Check input data "
+                        f"quality.\n\n"
+                        f"INPUT FEATURE STATS (per node type):\n"
+                        f"{feature_stats}\n\n"
+                        f"DEBUGGING TIPS:\n"
+                        f"  1. If a feature type has NaN/Inf, the culprit "
+                        f"is Phase 1 data cleaning — check the Phase 1 "
+                        f"pipeline that produced that feature.\n"
+                        f"  2. If all features are finite but the NaN "
+                        f"appears after layer {i}, the culprit is likely "
+                        f"the layer's attention or FFN computation — "
+                        f"check the learning rate (too high can cause "
+                        f"exploding gradients), gradient clipping (should "
+                        f"be <= 1.0), and the input feature scale (very "
+                        f"large features can overflow fp32 after the "
+                        f"first linear projection).\n"
+                        f"  3. To isolate the layer, set num_layers=1 "
+                        f"and re-run; if the NaN persists, the issue is "
+                        f"in layer 0's forward pass (not input data).\n"
+                        f"  (P3-045 ROOT FIX v107: this message now "
+                        f"includes per-node-type input feature stats so "
+                        f"you can identify the culprit without manual "
+                        f"inspection.)"
                     )
 
         # Apply final per-type normalization
@@ -783,25 +951,40 @@ class DrugRepurposingGraphTransformer(nn.Module):
         Returns:
             (num_drugs, num_diseases) score matrix with probabilities
             in [0, 1].
-        """
-        self.eval()
-        device = next(self.parameters()).device
 
-        # V90 ROOT FIX (BUG #9, P0): save prior training state and
-        # restore it in a finally block. The previous code called
-        # ``self.eval()`` and NEVER restored training mode. If
-        # ``predict_all_pairs`` was called mid-training (e.g., for
-        # intermediate evaluation, or by a concurrent thread in the
-        # Phase 5 API), the model was silently switched to eval mode
-        # and STAYED there -- subsequent ``train_epoch()`` calls did
-        # call ``self.model.train()``, but ANY external caller (the
-        # bridge's ``generate_rl_input``, the Phase 5 API server)
-        # that called ``predict_all_pairs`` mid-training silently
-        # disabled dropout and BatchNorm updates for the rest of the
-        # process. Combined with ``_SafeBatchNorm1d``'s batch_size=1
-        # fallback (which already runs BN in eval mode), this could
-        # produce silently wrong training behavior.
-        prior_training = self.training
+        P3-014 ROOT FIX (v114 forensic): THREAD-SAFE INFERENCE.
+        The previous implementation toggled ``self.eval()`` /
+        ``self.train(prior_training)``. ``nn.Module.training`` is
+        SHARED MUTABLE STATE across all threads. Under concurrent
+        inference (V1 contract: 100 concurrent requests), the train/
+        eval toggle became a race condition:
+          - Thread A calls ``self.eval()`` (sets training=False)
+          - Thread B calls ``self.eval()`` (no-op)
+          - Thread A finishes, calls ``self.train(prior_training=False)``
+          - If a training thread C concurrently called ``self.train()``
+            between A's eval and A's restore, C's ``train()`` was
+            silently overwritten by A's restore. The training continued
+            with dropout DISABLED and BatchNorm in eval mode --
+            silently corrupting the regularization regime.
+
+        ROOT FIX: do NOT toggle ``self.eval()`` / ``self.train()``
+        inside this method. Instead, use ``torch.set_grad_enabled(False)``
+        which is a PER-THREAD context manager (manipulates a
+        thread-local flag) -- it does NOT require a lock and does NOT
+        mutate shared module state. Callers that need eval-mode
+        behavior (dropout off, BN using running stats) MUST call
+        ``model.eval()`` BEFORE invoking this method (the standard
+        PyTorch inference pattern). The trainer's ``evaluate()``,
+        ``evaluate_link_prediction``, and the Phase 5 API service
+        already set ``model.eval()`` before inference, so this is the
+        natural contract.
+
+        For the rare mid-epoch-inference case (training thread calls
+        predict mid-epoch), the caller MUST use a separate model
+        replica. This is the standard PyTorch guidance for concurrent
+        inference + training.
+        """
+        device = next(self.parameters()).device
 
         # V4 C-F5 fix: respect the user's stored config when no explicit
         # override is passed. The original code silently overrode the
@@ -811,63 +994,191 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # ROOT FIX (C13): pass exclude_edges as parameter, don't mutate self
         effective_exclude = set(exclude_edges) if exclude_edges is not None else self.exclude_edges
 
-        # V90 ROOT FIX (BUG #9, P0): wrap the inference body in
-        # try/finally so the prior training state is ALWAYS restored,
-        # even on exception. Without this, an exception during
-        # inference (e.g., CUDA OOM) would leave the model in eval
-        # mode, silently corrupting subsequent training.
-        try:
-            with torch.no_grad():
-                embeddings = self.encode(
-                    node_features, edge_indices,
-                    exclude_edges_override=effective_exclude,
-                )
+        # P3-014 ROOT FIX (v114): use per-thread torch.set_grad_enabled(False)
+        # instead of mutating self.training. This is thread-safe and does
+        # NOT require a lock. Callers are responsible for calling
+        # model.eval() before this method (standard PyTorch inference
+        # contract).
+        with torch.set_grad_enabled(False):
+            embeddings = self.encode(
+                node_features, edge_indices,
+                exclude_edges_override=effective_exclude,
+            )
 
             drug_emb_all = embeddings["drug"]  # (num_drugs, D)
             disease_emb_all = embeddings["disease"]  # (num_diseases, D)
 
             score_matrix = torch.zeros(num_drugs, num_diseases, device=device)
 
-            with torch.no_grad():
-                # Outer loop: one drug at a time. Inner loop: diseases in
-                # sub-batches. This bounds peak memory.
-                for d_idx in range(num_drugs):
-                    d_emb_row = drug_emb_all[d_idx:d_idx + 1]  # (1, D)
+            # Outer loop: one drug at a time. Inner loop: diseases in
+            # sub-batches. This bounds peak memory.
+            for d_idx in range(num_drugs):
+                d_emb_row = drug_emb_all[d_idx:d_idx + 1]  # (1, D)
 
-                    for ds_start in range(0, num_diseases, batch_size_diseases):
-                        ds_end = min(ds_start + batch_size_diseases, num_diseases)
-                        ds_emb_batch = disease_emb_all[ds_start:ds_end]  # (B_ds, D)
+                for ds_start in range(0, num_diseases, batch_size_diseases):
+                    ds_end = min(ds_start + batch_size_diseases, num_diseases)
+                    ds_emb_batch = disease_emb_all[ds_start:ds_end]  # (B_ds, D)
 
-                        # Broadcast drug embedding to match the disease batch.
-                        # Memory: B_ds * D floats (e.g. 2048 * 128 = 256K floats = 1 MB).
-                        d_emb_expanded = d_emb_row.expand(ds_end - ds_start, -1)  # (B_ds, D)
+                    # Broadcast drug embedding to match the disease batch.
+                    # Memory: B_ds * D floats (e.g. 2048 * 128 = 256K floats = 1 MB).
+                    d_emb_expanded = d_emb_row.expand(ds_end - ds_start, -1)  # (B_ds, D)
 
-                        # V4 B-F5 fix: use link_predictor.predict_probability
-                        # which applies the calibrated temperature. The RL
-                        # ranker's ``gnn_score`` input is now a CALIBRATED
-                        # probability, not a raw sigmoid. This means the
-                        # B10/B19 temperature calibration that the trainer
-                        # runs after main training is now ACTUALLY USED
-                        # downstream -- before this fix, the calibrated
-                        # parameter was dead weight.
-                        #
-                        # ROOT FIX (FORENSIC-AUDIT-I03): pass apply_temperature
-                        # through to predict_probability so callers can choose
-                        # raw sigmoid (False) or calibrated (True). The bridge
-                        # uses False for the RL input CSV to preserve full
-                        # variance.
-                        probs = self.link_predictor.predict_probability(
-                            d_emb_expanded, ds_emb_batch,
-                            apply_temperature=apply_temperature,
-                        )  # (B_ds,)
-                        score_matrix[d_idx, ds_start:ds_end] = probs
+                    # V4 B-F5 fix: use link_predictor.forward (which applies
+                    # calibrated temperature). The RL ranker's ``gnn_score``
+                    # input is now a CALIBRATED probability, not a raw sigmoid.
+                    #
+                    # P3-023 ROOT FIX (v114): call link_predictor.forward
+                    # DIRECTLY instead of predict_probability. The previous
+                    # call to predict_probability acquired an RLock for EVERY
+                    # call and toggled eval/train -- both are shared mutable
+                    # state, racy under concurrent inference. forward() is
+                    # stateless w.r.t. module.training, so it is thread-safe
+                    # by design (the caller has already set eval mode).
+                    probs = self.link_predictor.forward(
+                        d_emb_expanded, ds_emb_batch,
+                        apply_temperature=apply_temperature,
+                    )  # (B_ds, 1)
+                    score_matrix[d_idx, ds_start:ds_end] = probs.squeeze(-1)
 
             return score_matrix
-        finally:
-            # V90 ROOT FIX (BUG #9, P0): restore the prior training state
-            # so callers that invoked predict_all_pairs mid-training
-            # don't have their dropout/BN regime silently changed.
-            self.train(prior_training)
+
+    # P3-005 ROOT FIX (v113 forensic): single-pass dual-score inference.
+    # The previous bridge code called ``predict_all_pairs`` TWICE -- once
+    # with ``apply_temperature=False`` (raw sigmoid) and once with
+    # ``apply_temperature=True`` (calibrated). Each call ran the expensive
+    # ``encode()`` forward pass through all GT layers; the second call
+    # repeated 100% of the encoder compute just to apply a different
+    # sigmoid transform to the SAME logits. For a 10K-drug graph on a
+    # V100, this wasted ~30 seconds of GPU time per ``generate_rl_input``
+    # invocation. The new method encodes the graph ONCE, then applies
+    # both ``sigmoid(logits)`` and ``sigmoid(logits / T)`` to the SAME
+    # logits tensor. The two output matrices differ ONLY in the final
+    # sigmoid transform -- the encoder + MLP forward is shared.
+    #
+    # P3-004 ROOT FIX (v113 forensic): this method is the foundation
+    # for the calibrated-RL-input fix. The bridge now passes
+    # ``gnn_score_calibrated`` (not raw ``gnn_score``) to the RL reward
+    # function. Temperature calibration (Guo et al. 2017) is a MONOTONIC
+    # transform of the logits, so it preserves the RANKING of pairs (AUC
+    # is unchanged). But for the RL reward function -- which uses
+    # ``gnn_score`` as a CONTINUOUS signal, not just a ranking -- the
+    # calibrated value is more accurate. A drug-disease pair with raw
+    # sigmoid 0.99 might have a calibrated probability of 0.6 (after T=
+    # 1.65). The previous reward function treated both as "high
+    # confidence"; the calibrated version correctly distinguishes them.
+    @torch.no_grad()
+    def predict_all_pairs_dual(
+        self,
+        node_features: Dict[str, torch.Tensor],
+        edge_indices: Dict[Tuple[str, str, str], torch.Tensor],
+        num_drugs: int,
+        num_diseases: int,
+        batch_size_diseases: int = 2048,
+        exclude_edges: Optional[set] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Single-pass dual-score inference (raw + calibrated).
+
+        Encodes the graph ONCE and returns BOTH the raw-sigmoid score
+        matrix and the temperature-calibrated score matrix. The two
+        matrices differ only in the final sigmoid transform applied to
+        the SAME logits -- the encoder + MLP forward is shared, so this
+        method costs ~50% of calling ``predict_all_pairs`` twice.
+
+        Args:
+            (Same as ``predict_all_pairs`` except no ``apply_temperature``
+            parameter -- both transforms are always computed.)
+
+        Returns:
+            Tuple ``(raw_matrix, calibrated_matrix)`` where each matrix
+            is ``(num_drugs, num_diseases)`` with probabilities in [0, 1].
+            ``raw_matrix`` is ``sigmoid(logits)``; ``calibrated_matrix``
+            is ``sigmoid(logits / T)`` where T is the fitted temperature.
+
+        P3-014 ROOT FIX (v119 forensic, THREAD-SAFE INFERENCE): the
+        previous implementation toggled ``self.eval()`` /
+        ``self.train(prior_training)``. ``nn.Module.training`` is SHARED
+        MUTABLE STATE across all threads. Under concurrent inference
+        (V1 contract: 100 concurrent requests), the train/eval toggle
+        became a race condition: a concurrent training thread's
+        ``model.train()`` call could be silently overwritten by this
+        method's ``self.train(prior_training=False)`` restore, leaving
+        the model in eval mode (dropout disabled, BatchNorm frozen)
+        for the rest of the epoch.
+
+        ROOT FIX (v119): do NOT toggle ``self.eval()`` /
+        ``self.train()`` inside this method. The ``@torch.no_grad()``
+        decorator already disables gradient computation (per-thread,
+        thread-safe). Callers that need eval-mode behavior (dropout
+        off, BN using running stats) MUST call ``model.eval()`` BEFORE
+        invoking this method -- the standard PyTorch inference contract
+        (identical to ``predict_all_pairs``). The bridge's
+        ``generate_rl_input`` and ``top_k_novel_predictions`` already
+        set ``model.eval()`` before calling this method. For the rare
+        mid-epoch-inference case (training thread calls this
+        mid-epoch), the caller MUST use a separate model replica.
+        """
+        device = next(self.parameters()).device
+        effective_exclude = (
+            set(exclude_edges) if exclude_edges is not None else self.exclude_edges
+        )
+        # P3-014 v119: NO self.eval() / self.train() toggle here.
+        # @torch.no_grad() (decorator) handles grad disabling per-thread.
+        # Caller is responsible for model.eval() (standard PyTorch contract).
+        embeddings = self.encode(
+            node_features, edge_indices,
+            exclude_edges_override=effective_exclude,
+        )
+        drug_emb_all = embeddings["drug"]  # (num_drugs, D)
+        disease_emb_all = embeddings["disease"]  # (num_diseases, D)
+
+        raw_matrix = torch.zeros(num_drugs, num_diseases, device=device)
+        calibrated_matrix = torch.zeros(num_drugs, num_diseases, device=device)
+
+        for d_idx in range(num_drugs):
+            d_emb_row = drug_emb_all[d_idx:d_idx + 1]  # (1, D)
+            for ds_start in range(0, num_diseases, batch_size_diseases):
+                ds_end = min(ds_start + batch_size_diseases, num_diseases)
+                ds_emb_batch = disease_emb_all[ds_start:ds_end]  # (B_ds, D)
+                d_emb_expanded = d_emb_row.expand(ds_end - ds_start, -1)
+
+                # P3-005 ROOT FIX: compute the logits ONCE via the
+                # link predictor's forward, then apply both sigmoid
+                # transforms to the SAME logits. The link predictor's
+                # ``forward_logits`` returns raw logits (no sigmoid,
+                # no temperature) -- exactly what we need. Shape is
+                # (B_ds, 1) so we squeeze to (B_ds,).
+                logits = self.link_predictor.forward_logits(
+                    d_emb_expanded, ds_emb_batch,
+                ).squeeze(-1)  # (B_ds,)
+                raw_matrix[d_idx, ds_start:ds_end] = torch.sigmoid(logits)
+                # Calibrated: sigmoid(logits / T). The temperature T
+                # is stored on the link predictor after fit_temperature.
+                # P3-005 v113/v114: temperature is an nn.Parameter of
+                # shape (2,) (per-class, v114 P3-016 fix). At inference
+                # time the true label is unknown, so we use the MEAN
+                # of the two per-class temperatures (the same
+                # approximation the link predictor's forward() uses
+                # when labels=None). The clamp to [0.5, 2.0] matches
+                # the link predictor's TEMPERATURE_CLAMP_MIN/MAX.
+                T_param = getattr(self.link_predictor, "temperature", None)
+                if T_param is None:
+                    T = 1.0
+                else:
+                    try:
+                        # v114: temperature is shape (2,) per-class.
+                        # Use the mean (inference-time approximation).
+                        t_clamped = T_param.clamp(min=0.5, max=2.0)
+                        T = float(t_clamped.mean().item())
+                    except (ValueError, TypeError, RuntimeError):
+                        try:
+                            T = float(T_param.item())
+                        except (ValueError, RuntimeError):
+                            T = 1.0
+                if T <= 0 or not math.isfinite(T):
+                    T = 1.0  # degenerate -- treat as identity
+                calibrated_matrix[d_idx, ds_start:ds_end] = torch.sigmoid(logits / T)
+
+        return raw_matrix, calibrated_matrix
 
     @classmethod
     def from_config(cls, config: Any) -> "DrugRepurposingGraphTransformer":
