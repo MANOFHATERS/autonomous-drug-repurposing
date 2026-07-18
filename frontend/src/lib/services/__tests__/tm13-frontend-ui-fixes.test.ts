@@ -133,3 +133,77 @@ describe('FE-052: DrugCandidate type carries confidence + AUC fields', () => {
     expect(candidate.auc).toBe(0.87);
   });
 });
+
+describe('FE-051 wiring: parsePrevalence is actually CALLED in RegulatoryPathwayScreen', () => {
+  // HOSTILE-AUDIT regression test (Teammate 13, MEDIUM): a previous "ROOT
+  // FIX" claim created the @/lib/orphan-drug parser and imported it into
+  // core-screens.tsx, but NEVER ACTUALLY CALLED IT — the import was dead
+  // code, and the RegulatoryPathwayScreen's "Orphan Drug Status" card
+  // showed a static "not yet wired" message instead of using the parser.
+  // The audit caught this because the user explicitly warned that
+  // "comments and tests are fakes — they claim ROOT FIX but the code is
+  // 100 percent broken when manually checked".
+  //
+  // This test reads the actual source of core-screens.tsx and asserts:
+  //   1. parsePrevalence is imported.
+  //   2. parsePrevalence is CALLED (not just imported) inside
+  //      RegulatoryPathwayScreen — i.e. the parser is wired into the UI.
+  //   3. The call site is INSIDE the RegulatoryPathwayScreen function
+  //      body (not in a comment or a different function).
+  //   4. The OrphanEligibility result is rendered (eligible === true /
+  //      false / null branches all present), so the UI actually surfaces
+  //      the parser's output instead of hardcoding a static message.
+  //
+  // If a future refactor re-introduces the dead-import pattern (import
+  // without call), this test fails. That is the point.
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(
+    path.join(__dirname, '../../../components/drugos/core-screens.tsx'),
+    'utf8',
+  );
+
+  test('parsePrevalence is imported from @/lib/orphan-drug', () => {
+    expect(src).toMatch(/import\s+\{[^}]*parsePrevalence[^}]*\}\s+from\s+['"]@\/lib\/orphan-drug['"]/);
+  });
+
+  test('parsePrevalence is CALLED inside RegulatoryPathwayScreen (not dead code)', () => {
+    // Locate the RegulatoryPathwayScreen function body and assert the
+    // call appears INSIDE it (not just in a comment at the top of the file).
+    const fnStart = src.indexOf('function RegulatoryPathwayScreen()');
+    expect(fnStart).toBeGreaterThan(-1);
+    // Find the next "function " after RegulatoryPathwayScreen to bound the body.
+    const fnEnd = src.indexOf('\nfunction ', fnStart + 1);
+    const body = fnEnd > fnStart ? src.slice(fnStart, fnEnd) : src.slice(fnStart);
+    // The body must contain an actual CALL to parsePrevalence(...) —
+    // `parsePrevalence(` with an open paren, not just the identifier in a
+    // comment. We require at least one call site.
+    const callMatches = body.match(/parsePrevalence\s*\(/g) || [];
+    expect(callMatches.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('OrphanEligibility result is rendered with all three branches (true/false/null)', () => {
+    // The UI must surface the parser's structured output, not a static
+    // message. We assert the three conditional branches exist:
+    //   - eligible === true  -> "May qualify for FDA orphan-drug designation"
+    //   - eligible === false -> "Prevalence exceeds FDA orphan threshold"
+    //   - eligible === null  -> "Prevalence data not yet wired"
+    const fnStart = src.indexOf('function RegulatoryPathwayScreen()');
+    const fnEnd = src.indexOf('\nfunction ', fnStart + 1);
+    const body = fnEnd > fnStart ? src.slice(fnStart, fnEnd) : src.slice(fnStart);
+    expect(body).toMatch(/orphanEligibility\.eligible\s*===\s*true/);
+    expect(body).toMatch(/orphanEligibility\.eligible\s*===\s*false/);
+    expect(body).toMatch(/orphanEligibility\.eligible\s*===\s*null/);
+    // The note from the parser must also be rendered.
+    expect(body).toMatch(/orphanEligibility\.note/);
+  });
+
+  test('RegulatoryPathwayScreen extracts diseaseName from RL candidates (previously discarded)', () => {
+    // The original mapping threw away `rc.disease`, so the Orphan Drug
+    // Status card had no disease to look up. The fix keeps diseaseName.
+    const fnStart = src.indexOf('function RegulatoryPathwayScreen()');
+    const fnEnd = src.indexOf('\nfunction ', fnStart + 1);
+    const body = fnEnd > fnStart ? src.slice(fnStart, fnEnd) : src.slice(fnStart);
+    expect(body).toMatch(/diseaseName:\s*\(rc\.disease/);
+  });
+});
