@@ -48,7 +48,7 @@ biopython>=1.83,<2.0
 # rl/rl_drug_ranker.py. Without it, the per-tenant reward-weights loader
 # raises ImportError at call time, breaking the P4-005 multi-tenant
 # feature (rl/reward_weights.yaml + reward_weights.{tenant_id}.yaml).
-pyyaml>=6.0,<7.0
+pyyaml>=6.0.3,<7.0
 
 # fastapi + uvicorn: MANDATORY for rl/service.py (the Phase 4 HTTP API
 # served by the phase4-rl compose service). Without these, the
@@ -73,4 +73,4 @@ psutil>=5.9,<7.0
 # certifi: required by Bio.Entrez HTTPS calls to PubMed. Without it,
 # biopython uses the system CA bundle (which may be missing in slim
 # Docker images), causing SSL verification failures.
-certifi>=2024.0
+certifi>=2026.6.17
