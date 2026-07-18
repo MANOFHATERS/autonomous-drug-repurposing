@@ -48,13 +48,36 @@ def test_p1_030_below_min_score_dead_letter_has_none_confidence_tier():
     # Set DISGENET_USE_API=false to avoid the API-key validation error
     # during DisGeNETPipeline() construction (we are NOT testing the
     # download path — only the in-memory _apply_score_filter logic).
+    # v121 ROOT FIX: DISGENET_USE_API is read at module import time AND
+    # _validate_disgenet_config's __globals__ may point to a STALE module
+    # dict (due to the conftest sys.modules manipulation for the
+    # config/graph_transformer.config collision). Simply patching
+    # _settings.DISGENET_USE_API may not affect the function's globals.
+    # ROOT FIX: patch the function's __globals__ dict DIRECTLY (this
+    # works regardless of which module dict the function is bound to).
+    import config.settings as _settings
+    import pipelines.disgenet_pipeline as _disgenet_mod
+    from unittest.mock import patch
+
     old_use_api = os.environ.get("DISGENET_USE_API")
     os.environ["DISGENET_USE_API"] = "false"
     try:
-        from config.settings import DISGENET_MIN_SCORE
-        from pipelines.disgenet_pipeline import DisGeNETPipeline
+        # Resolve the actual module dict that _validate_disgenet_config
+        # references via __globals__. This may be _settings.__dict__
+        # OR a stale dict if conftest's sys.modules swap happened
+        # after the function was bound.
+        _validate_func = _disgenet_mod._validate_disgenet_config
+        _func_globals = _validate_func.__globals__
 
-        pipeline = DisGeNETPipeline()
+        # Patch BOTH the settings module attribute AND the function's
+        # globals dict (covers both the clean and stale-dict cases).
+        with patch.object(_settings, "DISGENET_USE_API", False), \
+             patch.object(_disgenet_mod, "DISGENET_USE_API", False), \
+             patch.dict(_func_globals, {"DISGENET_USE_API": False}):
+            from config.settings import DISGENET_MIN_SCORE
+            from pipelines.disgenet_pipeline import DisGeNETPipeline
+
+            pipeline = DisGeNETPipeline()
     finally:
         if old_use_api is None:
             os.environ.pop("DISGENET_USE_API", None)
@@ -119,29 +142,58 @@ def test_p1_030_below_min_score_dead_letter_has_none_confidence_tier():
 
 
 def test_p1_029_decimal_adapter_is_process_wide_and_documented():
-    """P1-029: register_adapter is process-wide. Verify it actually
-    converts Decimal→float on a fresh sqlite3 connection (the documented
-    side effect), AND that the module docstring documents this."""
+    """P1-029 v107 ROOT FIX: the process-wide ``sqlite3.register_adapter``
+    was INTENTIONALLY REMOVED (ISSUE-P1-031). It mutated EVERY sqlite3
+    connection in the process — including Airflow's metadata DB and
+    third-party libraries — silently coercing ``Decimal`` to ``float``
+    and losing precision on Numeric columns.
+
+    The replacement is a SQLAlchemy ``before_cursor_execute`` event
+    listener (in ``_configure_engine_events``) that scopes the
+    Decimal→float coercion to ORM-managed SQLite engines ONLY.
+
+    This test verifies the v107 ROOT FIX is in place:
+      1. A FRESH (non-ORM) sqlite3 connection does NOT coerce Decimal
+         (it raises ``ProgrammingError`` — the stdlib default).
+      2. The module docstring documents the v107 fix.
+    """
     import database.connection as conn_mod
 
-    # The adapter should be installed (Decimal→float coercion active).
+    # 1. Process-wide adapter is REMOVED — non-ORM sqlite3 connections
+    #    raise ProgrammingError on Decimal (the stdlib default).
     conn = sqlite3.connect(":memory:")
     try:
-        # Without the adapter, this raises ProgrammingError.
-        # With the adapter, it returns 1.5 (float).
-        result = conn.execute("SELECT ?", (Decimal("1.5"),)).fetchone()[0]
-        assert result == 1.5, f"Decimal adapter not active: got {result!r}"
-        assert isinstance(result, float), (
-            f"Decimal adapter should produce float, got {type(result).__name__}"
-        )
+        try:
+            result = conn.execute(
+                "SELECT ?", (Decimal("1.5"),)
+            ).fetchone()[0]
+            # If we get here, something else in the process registered
+            # the adapter. Fail loudly so we know to investigate.
+            raise AssertionError(
+                f"P1-029 v107 regression: process-wide Decimal adapter is "
+                f"ACTIVE (non-ORM sqlite3 connection coerced Decimal to "
+                f"{type(result).__name__}). The v107 ROOT FIX removed "
+                f"this — Decimal coercion must be SCOPED to ORM-managed "
+                f"SQLite engines via the before_cursor_execute event "
+                f"listener, NOT process-wide."
+            )
+        except sqlite3.ProgrammingError:
+            # Expected — the stdlib default is preserved.
+            pass
     finally:
         conn.close()
 
-    # P1-029: the module docstring must document the process-wide side effect.
+    # 2. The module docstring documents the v107 ROOT FIX.
     docstring = conn_mod.__doc__ or ""
-    assert "process-wide" in docstring.lower() or "P1-029" in docstring, (
-        "P1-029: module docstring must document the process-wide Decimal "
-        "adapter side effect"
+    assert (
+        "v107" in docstring
+        or "ISSUE-P1-031" in docstring
+        or "before_cursor_execute" in docstring
+        or "P1-029" in docstring
+    ), (
+        "P1-029 v107: module docstring must document the removal of the "
+        "process-wide Decimal adapter and the scoped before_cursor_execute "
+        "event listener replacement."
     )
 
 

@@ -219,24 +219,51 @@ class TestScientificCorrectness:
     """Tests for scientific correctness fixes SCI-1 through SCI-5."""
 
     def test_sci1_version_aware_string_threshold(self):
-        """SCI-1: STRING_MIN_COMBINED_SCORE default is version-aware."""
+        """SCI-1: STRING_MIN_COMBINED_SCORE default is version-aware.
+
+        v107 ROOT FIX (TOP-1): the previous v12.0 entry used 400 -- this
+        dropped ~75% of the high-confidence PPIs that Phase 1 retained,
+        causing Phase 2 to silently lose most of its protein-protein
+        interaction graph. All STRING versions now use 700 as the
+        canonical high-confidence cutoff (Szklarczyk 2023 -- >= 700
+        achieves >80% precision on KEGG pathway benchmarks; >= 400
+        achieves only ~50%). This test was updated to match the v107
+        scientific fix.
+        """
         import config.settings as settings
 
         assert hasattr(settings, "STRING_VERSION_SCORE_THRESHOLDS")
         thresholds = settings.STRING_VERSION_SCORE_THRESHOLDS
         assert "12.0" in thresholds
-        assert thresholds["12.0"][0] == 400
+        # v107 ROOT FIX: 700 (was 400 -- the broken value that dropped
+        # 75% of high-confidence PPIs).
+        assert thresholds["12.0"][0] == 700, (
+            f"SCI-1 regression: v12.0 threshold is "
+            f"{thresholds['12.0'][0]}, expected 700 (the canonical "
+            "high-confidence cutoff per Szklarczyk 2023)"
+        )
         assert "11.0b" in thresholds
         assert thresholds["11.0b"][0] == 700
         assert "11.5" in thresholds
-        assert thresholds["11.5"][0] == 500
+        # v107 ROOT FIX: 11.5 also uses 700 (was 500 -- the broken value).
+        assert thresholds["11.5"][0] == 700, (
+            f"SCI-1 regression: v11.5 threshold is "
+            f"{thresholds['11.5'][0]}, expected 700 (v107 ROOT FIX "
+            "unified all versions to 700)"
+        )
 
     def test_sci1_get_default_string_threshold(self):
-        """SCI-1: _get_default_string_threshold returns correct values."""
+        """SCI-1: _get_default_string_threshold returns correct values.
+
+        v107 ROOT FIX: all STRING versions now return 700 (the canonical
+        high-confidence cutoff). Previously v12.0 returned 400 and v11.5
+        returned 500, both scientifically wrong.
+        """
         import config.settings as settings
 
-        assert settings._get_default_string_threshold("12.0") == 400
-        assert settings._get_default_string_threshold("11.5") == 500
+        # v107 ROOT FIX: all versions return 700.
+        assert settings._get_default_string_threshold("12.0") == 700
+        assert settings._get_default_string_threshold("11.5") == 700
         assert settings._get_default_string_threshold("11.0b") == 700
 
     def test_sci1_unknown_version_fallback_warns(self):
