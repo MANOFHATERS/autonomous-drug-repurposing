@@ -209,6 +209,24 @@ services:
       NEO4J_server_memory_heap_initial__size: 512m
       NEO4J_server_memory_heap_max__size: 2G
       NEO4J_server_memory_pagecache_size: 1G
+      # IN-073 ROOT FIX (v124 forensic): enable TLS on the Bolt protocol.
+      # The previous code used ``bolt://`` (plaintext) for every internal
+      # Neo4j connection — exposing every Cypher query + every credential
+      # to anyone who can tcpdump the Docker network. For a pharma platform
+      # under FDA 21 CFR Part 11, plaintext internal transport is a finding.
+      #
+      # ROOT FIX: enable Bolt TLS via Neo4j 5.x config env vars. Neo4j
+      # 5.x auto-generates a self-signed cert on first startup if no
+      # custom cert is mounted. The ``bolt+s://`` scheme (used in all
+      # DRUGOS_NEO4J_URI connections below) tells the driver to use TLS
+      # and accept the self-signed cert (the ``+s`` = "TLS, skip CA
+      # verification"). For full ``verify-full`` mode, mount a CA-signed
+      # cert at /ssl/neo4j.pem and set NEO4J_server_bolt_tls__enabled=true.
+      NEO4J_server_bolt_tls__enabled: "true"
+      NEO4J_server_bolt_tls__level: REQUIRED
+      # IN-073: also enable HTTPS for the Neo4j browser (port 7474).
+      NEO4J_server_https_tls__enabled: "true"
+      NEO4J_server_https_tls__level: REQUIRED
     # IN-003: NO ports — neo4j browser (7474) + bolt (7687) are internal only.
     volumes:
       - drugos_neo4jdata:/data
@@ -239,13 +257,23 @@ services:
     # IN-099 v17: init:true for zombie reaping.
     init: true
     environment:
-      MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?sslmode=prefer
+      MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?sslmode=require
       MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlruns
       MLFLOW_ADMIN_USERNAME: ${MLFLOW_ADMIN_USERNAME:-mlflow_admin}
       # IN-088 v117: password read from /run/secrets/mlflow_admin_password.
       MLFLOW_ADMIN_PASSWORD_FILE: /run/secrets/mlflow_admin_password
       POSTGRES_USER: ${POSTGRES_USER:-drugos}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?ERROR — POSTGRES_PASSWORD must be set}
+      # IN-073 ROOT FIX (v124 forensic): MLflow does NOT natively support
+      # TLS termination. For Docker-internal traffic on the ``data`` and
+      # ``app`` networks (internal:true), plaintext HTTP is acceptable
+      # (traffic does not leave the host). For production deployments
+      # where the MLflow UI must be reachable from outside the Docker
+      # network, put MLflow behind a TLS-terminating reverse proxy
+      # (Caddy/Envoy/Traefik) and set MLFLOW_TRACKING_URI to
+      # ``https://mlflow-proxy:443``. The proxy terminates TLS with a
+      # CA-signed cert and forwards plain HTTP to the MLflow container.
+      # This is the standard production pattern for MLflow deployments.
       MLFLOW_TRACKING_URI: http://mlflow:5000
     # IN-003: expose (internal) not ports (host). MLflow UI reachable via
     # SSH tunnel or `docker exec`, never directly from the host network.
@@ -284,7 +312,7 @@ services:
     init: true
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?sslmode=prefer
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?sslmode=require
       # IN-049 + IN-088 v117: Fernet key from /run/secrets/airflow_fernet_key.
       # Airflow supports the _FILE suffix for Fernet key via the
       # airflow-entrypoint.sh wrapper (reads the file and exports the
@@ -384,7 +412,7 @@ services:
     # both spawn child processes that need zombie reaping.
     init: true
     environment:
-      DRUGOS_NEO4J_URI: bolt://neo4j:7687
+      DRUGOS_NEO4J_URI: bolt+s://neo4j:7687
       DRUGOS_NEO4J_USER: neo4j
       DRUGOS_NEO4J_PASSWORD: ${NEO4J_PASSWORD:?ERROR — NEO4J_PASSWORD must be set}
       PHASE1_PROCESSED_DIR: /opt/phase1/processed_data
@@ -430,7 +458,7 @@ services:
     # IN-099 v117: init:true for zombie reaping.
     init: true
     environment:
-      DRUGOS_NEO4J_URI: bolt://neo4j:7687
+      DRUGOS_NEO4J_URI: bolt+s://neo4j:7687
       DRUGOS_NEO4J_USER: neo4j
       DRUGOS_NEO4J_PASSWORD: ${NEO4J_PASSWORD:?ERROR — NEO4J_PASSWORD must be set}
       KG_SERVICE_PORT: "8001"
@@ -623,8 +651,8 @@ services:
     # optimization, SSR, etc. that need zombie reaping.
     init: true
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?schema=public&sslmode=prefer
-      DRUGOS_NEO4J_URI: bolt://neo4j:7687
+      DATABASE_URL: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?schema=public&sslmode=require
+      DRUGOS_NEO4J_URI: bolt+s://neo4j:7687
       DRUGOS_NEO4J_USER: neo4j
       DRUGOS_NEO4J_PASSWORD: ${NEO4J_PASSWORD:?ERROR — NEO4J_PASSWORD must be set}
       # BE-005/IN-008: frontend proxies to the REAL phase1 FastAPI service.

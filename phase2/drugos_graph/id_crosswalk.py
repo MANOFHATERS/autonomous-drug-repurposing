@@ -780,6 +780,59 @@ class IDCrosswalk:
         # Internal cache: builtin load timestamp for synthesized provenance
         self._builtin_load_time: Optional[str] = None
 
+        # P2-020 ROOT FIX (forensic, root-level): runtime UniProt API
+        # fallback for accessions NOT in the builtin YAML crosswalk.
+        #
+        # The YAML header at data/verified_uniprot_gene_crosswalk.yaml
+        # DOCUMENTS this feature:
+        #   "The id_crosswalk.py module ALSO has a runtime fallback to the
+        #    UniProt ID mapping API for accessions not in the YAML. The
+        #    fallback is disabled by default (network call per accession
+        #    is slow) and can be enabled via
+        #    ``DRUGOS_CROSSWALK_API_FALLBACK=true``."
+        #
+        # The previous code did NOT implement this feature — the YAML's
+        # documentation was a LIE (the exact "comments are fakes, code is
+        # broken" pattern the audit flagged). Production deployments that
+        # relied on the documented fallback had ID translation fail for
+        # ~99.9% of proteins (every accession not in the ~38-entry seed
+        # table returned None, breaking Drug -> Protein -> Gene -> Disease
+        # graph traversals).
+        #
+        # ROOT FIX: implement the documented feature. When the env var
+        # ``DRUGOS_CROSSWALK_API_FALLBACK`` is set to a truthy value
+        # ("true", "1", "yes", "on"), ``uniprot_ac_to_ncbi_gene_id``
+        # calls the UniProt REST API
+        # (https://rest.uniprot.org/uniprotkb/search) for any accession
+        # NOT in the builtin table. Results are CACHED in
+        # ``_api_fallback_cache`` so repeat lookups for the same
+        # accession don't hit the network. A negative cache (None
+        # results) is also stored so we don't re-query the API for
+        # accessions UniProt doesn't know about.
+        #
+        # Network failure handling: on ANY network error (timeout,
+        # connection refused, DNS failure, non-200 HTTP), the fallback
+        # returns None and logs a WARNING. The crosswalk continues to
+        # function — only the fallback is degraded. This matches the
+        # "fail-soft" pattern used by the rest of the module (e.g.,
+        # the builtin table load falls back to a hardcoded tuple on
+        # YAML parse failure).
+        #
+        # Rate limiting: UniProt's fair-use policy is 5 req/s. The
+        # fallback uses a 0.21s sleep between requests to stay under
+        # the limit. The cache further reduces traffic — a typical
+        # KG build hits the API only once per unique accession.
+        self._api_fallback_enabled: bool = (
+            os.environ.get("DRUGOS_CROSSWALK_API_FALLBACK", "").lower()
+            in ("true", "1", "yes", "on")
+        )
+        # Cache: {uniprot_ac (UPPERCASED): Optional[str] gene_id or None}
+        # None means "API returned no mapping" (negative cache).
+        self._api_fallback_cache: Dict[str, Optional[str]] = {}
+        # Lock for thread-safe cache access (translators are called
+        # concurrently per the thread-safety contract).
+        self._api_fallback_lock: threading.Lock = threading.Lock()
+
         # v29 ROOT FIX (audit L-9/I-7): reverse-lookup index cache.
         # ``reverse_lookup`` previously iterated every entry in every
         # namespace dict on EACH call (O(n) per call). ``canonicalize``
@@ -2917,10 +2970,145 @@ class IDCrosswalk:
         self._record_translator_call("resolve_uniprot_alias", True)
         return primary
 
+    def _fetch_gene_id_from_uniprot_api(self, uniprot_ac: str) -> Optional[str]:
+        """P2-020 ROOT FIX: fetch the NCBI Gene ID for ``uniprot_ac`` from
+        the UniProt REST API.
+
+        Called ONLY when:
+          - ``DRUGOS_CROSSWALK_API_FALLBACK`` is set to a truthy value, AND
+          - ``uniprot_ac`` is NOT in the builtin ``uniprot_to_gene`` table.
+
+        Uses the UniProt KB search endpoint:
+            GET https://rest.uniprot.org/uniprotkb/search
+                ?query=accession:{AC}
+                &fields=accession,gene_id
+                &format=tsv
+
+        The response is a 2-line TSV:
+            Entry    Gene ID
+            P23219   5742
+
+        We parse the second line and return the gene_id as a string.
+        On ANY error (network, HTTP non-200, parse failure, empty
+        result), we return None and log a WARNING. The negative result
+        is CACHED so we don't re-query the API for the same accession.
+
+        Thread-safety: the cache is guarded by ``_api_fallback_lock``.
+        The HTTP call is made OUTSIDE the lock (so concurrent calls for
+        DIFFERENT accessions don't serialize). The cache write is
+        atomic (dict assignment is GIL-protected in CPython).
+
+        Rate limiting: UniProt's fair-use policy is 5 req/s. We sleep
+        0.21s after each request to stay under the limit. The cache
+        further reduces traffic — a typical KG build hits the API only
+        once per unique accession.
+        """
+        if not self._api_fallback_enabled:
+            return None
+        key = str(uniprot_ac).strip().upper()
+        if not key:
+            return None
+        # Check cache first (negative cache included).
+        with self._api_fallback_lock:
+            if key in self._api_fallback_cache:
+                return self._api_fallback_cache[key]
+        # Not in cache — query the API.
+        import urllib.request
+        import urllib.error
+        import time as _time
+        UNIPROT_URL = (
+            "https://rest.uniprot.org/uniprotkb/search"
+            f"?query=accession:{key}&fields=accession,gene_id&format=tsv"
+        )
+        try:
+            req = urllib.request.Request(
+                UNIPROT_URL,
+                headers={
+                    "User-Agent": "DrugOS-IDCrosswalk/1.0 (P2-020 API fallback)",
+                    "Accept": "text/tab-separated-values",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status != 200:
+                    self._logger.warning(
+                        "P2-020 API fallback: UniProt returned HTTP %d for "
+                        "accession %r. Returning None.",
+                        resp.status, uniprot_ac,
+                    )
+                    with self._api_fallback_lock:
+                        self._api_fallback_cache[key] = None
+                    return None
+                body = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.URLError as exc:
+            self._logger.warning(
+                "P2-020 API fallback: network error fetching %r from UniProt: "
+                "%s. Returning None. Set DRUGOS_CROSSWALK_API_FALLBACK=false "
+                "to disable the fallback and suppress this warning.",
+                uniprot_ac, exc,
+            )
+            with self._api_fallback_lock:
+                self._api_fallback_cache[key] = None
+            return None
+        except Exception as exc:  # defensive — never let the fallback kill the caller
+            self._logger.warning(
+                "P2-020 API fallback: unexpected error fetching %r from "
+                "UniProt: %s. Returning None.",
+                uniprot_ac, exc,
+            )
+            with self._api_fallback_lock:
+                self._api_fallback_cache[key] = None
+            return None
+        # Rate limit: 0.21s = ~4.76 req/s (under UniProt's 5 req/s limit).
+        _time.sleep(0.21)
+        # Parse the TSV response.
+        # Expected:
+        #   Entry\tGene ID
+        #   P23219\t5742
+        lines = [ln for ln in body.splitlines() if ln.strip()]
+        if len(lines) < 2:
+            # No data row — accession not found in UniProt.
+            with self._api_fallback_lock:
+                self._api_fallback_cache[key] = None
+            return None
+        # Find the data row (skip header). The header contains "Entry".
+        data_line = None
+        for ln in lines:
+            if not ln.startswith("Entry"):
+                data_line = ln
+                break
+        if data_line is None:
+            with self._api_fallback_lock:
+                self._api_fallback_cache[key] = None
+            return None
+        parts = data_line.split("\t")
+        if len(parts) < 2 or not parts[1].strip():
+            with self._api_fallback_lock:
+                self._api_fallback_cache[key] = None
+            return None
+        gene_id = parts[1].strip()
+        # Validate it's a numeric gene ID (defensive — UniProt sometimes
+        # returns "gene_id;symbol" format for older entries).
+        # Take the first numeric token.
+        for tok in gene_id.split(";"):
+            tok = tok.strip()
+            if tok.isdigit():
+                with self._api_fallback_lock:
+                    self._api_fallback_cache[key] = tok
+                return tok
+        # No numeric token found.
+        with self._api_fallback_lock:
+            self._api_fallback_cache[key] = None
+        return None
+
     def uniprot_ac_to_ncbi_gene_id(self, uniprot_ac: str) -> Optional[str]:
         """Translate UniProt AC -> NCBI Gene ID (primary).
 
         Used to build ``Gene -encodes-> Protein`` edges.
+
+        P2-020 ROOT FIX: when the builtin table does NOT contain
+        ``uniprot_ac`` AND ``DRUGOS_CROSSWALK_API_FALLBACK`` is enabled,
+        call the UniProt REST API as a fallback. The result is cached
+        so repeat lookups for the same accession don't hit the network.
         """
         self._check_unloaded_warning()
         if uniprot_ac is None:
@@ -2929,6 +3117,20 @@ class IDCrosswalk:
         key = str(uniprot_ac).strip().upper()
         raw = self.uniprot_to_gene.get(key)
         if raw is None:
+            # P2-020 ROOT FIX: API fallback for accessions NOT in the
+            # builtin table. The fallback is opt-in (env var) because a
+            # network call per accession is slow on a full KG build
+            # (~100K accessions × 0.21s rate-limit = ~6 hours).
+            if self._api_fallback_enabled:
+                api_gene_id = self._fetch_gene_id_from_uniprot_api(uniprot_ac)
+                if api_gene_id is not None:
+                    self._record_translator_call("uniprot_ac_to_ncbi_gene_id", True)
+                    self._logger.info(
+                        "P2-020 API fallback: resolved %r -> NCBI Gene ID %s "
+                        "via UniProt REST API (not in builtin table).",
+                        uniprot_ac, api_gene_id,
+                    )
+                    return api_gene_id
             self._record_translator_call("uniprot_ac_to_ncbi_gene_id", False)
             self._record_unresolved("uniprot_ac", key)
             self._logger.debug(
@@ -2946,13 +3148,25 @@ class IDCrosswalk:
         return None
 
     def uniprot_ac_to_ncbi_gene_id_all(self, uniprot_ac: str) -> List[str]:
-        """Return ALL NCBI Gene IDs for ``uniprot_ac`` (DES-2)."""
+        """Return ALL NCBI Gene IDs for ``uniprot_ac`` (DES-2).
+
+        P2-020 ROOT FIX: when the builtin table does NOT contain
+        ``uniprot_ac`` AND ``DRUGOS_CROSSWALK_API_FALLBACK`` is enabled,
+        call the UniProt REST API as a fallback. Returns a single-element
+        list if the API resolves the accession, or an empty list if not.
+        """
         self._check_unloaded_warning()
         if uniprot_ac is None:
             return []
         key = str(uniprot_ac).strip().upper()
         raw = self.uniprot_to_gene.get(key)
         if raw is None:
+            # P2-020 ROOT FIX: API fallback for accessions NOT in the
+            # builtin table. Consistent with uniprot_ac_to_ncbi_gene_id.
+            if self._api_fallback_enabled:
+                api_gene_id = self._fetch_gene_id_from_uniprot_api(uniprot_ac)
+                if api_gene_id is not None:
+                    return [api_gene_id]
             return []
         results = self._coerce_stored_list(raw)
         out: List[str] = []
