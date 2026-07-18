@@ -12,8 +12,21 @@
 #       compose still has liveness monitoring.
 #
 # Build context: repo root (so we can COPY phase1/requirements.txt).
+#
+# IN-068 v122 FORENSIC ROOT FIX (Teammate 7): the base image MUST match the
+# phase1/docker/Dockerfile.airflow base image (apache/airflow:2.10.5-python3.11)
+# AND the apache-airflow pin in phase1/requirements.txt + requirements.txt.
+# The previous version of this file used `apache/airflow:3.3.0-python3.11`
+# (Airflow 3.x major version) while requirements.txt pinned `apache-airflow
+# <3.0.0`. pip would then either (a) refuse to install because no version
+# satisfies both constraints, or (b) silently downgrade the base image's
+# Airflow 3.3.0 to 2.10.x, breaking the provider packages shipped with the
+# 3.3.0 image. ROOT FIX: pin the base image to 2.10.5 to match everything
+# else. If/when the project upgrades to Airflow 3.x, the base image here,
+# in phase1/docker/Dockerfile.airflow, AND both requirements.txt files must
+# be updated together as a single atomic change.
 # =============================================================================
-FROM apache/airflow:3.3.0-python3.11
+FROM apache/airflow:2.10.5-python3.11
 
 USER root
 
@@ -42,6 +55,22 @@ RUN pip install --no-cache-dir --upgrade \
 # Airflow scheduler.
 COPY --chown=airflow:airflow phase1/requirements.txt /tmp/phase1_requirements.txt
 RUN pip install --no-cache-dir -r /tmp/phase1_requirements.txt
+
+# IN-068 v122 FORENSIC ROOT FIX: build-time assertion that the Airflow
+# version installed inside the image EXACTLY matches the base image's
+# pre-installed Airflow. The previous pin `apache-airflow>=2.10.0,<3.0.0`
+# allowed pip to upgrade the base image's 2.10.5 to a future 2.10.6+,
+# which could break the provider packages pre-installed in the base image.
+# This assertion makes any future drift a BUILD failure (loud) instead of
+# a runtime ImportError hours later (silent). The assertion runs at build
+# time only — no runtime cost.
+RUN python -c "import airflow; assert airflow.__version__ == '2.10.5', \
+    'IN-068 ASSERTION FAILED: airflow.__version__=%r (expected 2.10.5). \
+    The base image apache/airflow:2.10.5-python3.11 ships with Airflow \
+    2.10.5 pre-installed. The phase1/requirements.txt pin must not upgrade \
+    or downgrade it. Check phase1/requirements.txt for an apache-airflow \
+    line and either remove it (the base image supplies it) or pin it to \
+    apache-airflow==2.10.5 exactly.' % airflow.__version__"
 
 # IN-050: REMOVED `COPY phase1/ /opt/phase1/`. The docker-compose service
 # bind-mounts ./phase1 over /opt/phase1, so the COPY was dead weight AND a

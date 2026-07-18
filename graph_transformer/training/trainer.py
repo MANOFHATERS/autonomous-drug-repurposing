@@ -760,6 +760,89 @@ class GraphTransformerTrainer:
             exclude_edges = set(LABEL_LEAKING_EDGES)
 
         n_samples = len(labels)
+
+        # P3-046 v122 FORENSIC ROOT FIX (Teammate 7, PERFORMANCE):
+        # The audit (P3-046) found that the trainer's batch loop iterates
+        # `for start in range(0, n_samples, batch_size):` and constructs
+        # each batch inline. There is no `torch.utils.data.DataLoader`,
+        # no `num_workers`, no prefetch. The data loading is synchronous
+        # and CPU-bound. For the production graph (1M+ training pairs),
+        # the lack of prefetching means the GPU is idle while the CPU
+        # prepares the next batch (GPU utilization ~60-70% vs 95%+ with
+        # prefetching).
+        #
+        # ROOT FIX: use a `torch.utils.data.DataLoader` with
+        # `num_workers=4`, `pin_memory=True`, `persistent_workers=True`
+        # WHEN the training set is large enough to benefit
+        # (>= MIN_SAMPLES_FOR_DATALOADER). For small training sets
+        # (CI, demo, debugging), the inline batching is FASTER
+        # (DataLoader's subprocess spawn overhead dominates for tiny
+        # datasets).
+        #
+        # The DataLoader uses a `torch.utils.data.RandomSampler` seeded
+        # with the trainer's dedicated `self._gen` generator (V4 C-F6 fix
+        # preserved) so reproducibility is maintained. The shuffle order
+        # is identical to the inline path for the same seed.
+        MIN_SAMPLES_FOR_DATALOADER = 8192  # below this, inline is faster
+        use_dataloader = (
+            n_samples >= MIN_SAMPLES_FOR_DATALOADER
+            and getattr(self, "_use_dataloader", True)
+        )
+
+        if use_dataloader:
+            # DataLoader path: prefetch batches in worker processes.
+            from torch.utils.data import (
+                TensorDataset,
+                DataLoader,
+                RandomSampler,
+            )
+
+            # Move training tensors to CPU for the DataLoader workers
+            # (workers cannot share CUDA tensors without careful setup).
+            # The forward pass moves them back to self.device inside
+            # model.forward_logits.
+            dataset = TensorDataset(
+                drug_indices.cpu(),
+                disease_indices.cpu(),
+                labels.cpu().float(),
+            )
+            sampler = RandomSampler(dataset, generator=self._gen)
+            loader = DataLoader(
+                dataset,
+                sampler=sampler,
+                batch_size=batch_size,
+                num_workers=4,
+                pin_memory=(self.device != "cpu"),
+                persistent_workers=True,
+                drop_last=False,
+            )
+            total_loss = 0.0
+            n_batches = 0
+            for d_idx, ds_idx, batch_labels in loader:
+                d_idx = d_idx.to(self.device)
+                ds_idx = ds_idx.to(self.device)
+                batch_labels = batch_labels.to(self.device)
+
+                self.optimizer.zero_grad()
+                logits = self.model.forward_logits(
+                    self.node_features,
+                    self.edge_indices,
+                    d_idx,
+                    ds_idx,
+                    exclude_edges=exclude_edges,
+                )
+                loss = self.criterion(logits, batch_labels)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                self.optimizer.step()
+                if self.scheduler is not None:
+                    self.scheduler.step()
+                total_loss += loss.item()
+                n_batches += 1
+            avg_loss = total_loss / max(n_batches, 1)
+            return avg_loss
+
+        # Inline batching path (small training sets, CI, demo, debugging).
         # V4 C-F6 fix: use the trainer's dedicated generator (not the
         # global RNG) so the shuffle order is deterministic and
         # independent of any other torch ops that may have advanced

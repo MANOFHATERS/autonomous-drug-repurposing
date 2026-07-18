@@ -18,7 +18,7 @@ SHELL := /bin/bash
 PYTHON ?= python3
 PIP    ?= pip3
 
-.PHONY: help install test test-phase1 test-phase2 test-bridge test-shared test-root test-all test-phase1-fast run run-full-platform run-unified run-4phase run-real run-demo dry-run run-json run-neo4j clean restore-test
+.PHONY: help install setup setup-dev test test-phase1 test-phase2 test-bridge test-shared test-root test-all test-phase1-fast run run-full-platform run-unified run-4phase run-real run-demo dry-run run-json run-neo4j clean restore-test
 
 help:
 	@echo "Unified Autonomous Drug Repurposing Platform"
@@ -26,6 +26,8 @@ help:
 	@echo ""
 	@echo "Setup:"
 	@echo "  make install         Install Python deps (top-level requirements.txt)"
+	@echo "  make setup           Start PRODUCTION stack (root docker-compose.yml)"
+	@echo "  make setup-dev       Start DEV stack (phase1/docker-compose.yml — Airflow + PG + Neo4j)"
 	@echo ""
 	@echo "Run (all 4 phases):"
 	@echo "  make run             Full 4-phase run (Phase 1+2+3+4) — DEFAULT"
@@ -54,6 +56,31 @@ install:
 	$(PIP) install -r requirements.txt
 	@echo ""
 	@echo "Dependencies installed. Run 'make run' for the full 4-phase pipeline."
+
+# IN-048 v122 FORENSIC ROOT FIX (Teammate 7): the audit found that
+# phase1/Makefile's `setup` target invoked `docker-compose up -d` without
+# specifying `-f docker-compose.yml`, so an operator running `make -f
+# phase1/Makefile setup` from the repo root would start the WRONG stack
+# (root docker-compose.yml = production, phase1/docker-compose.yml = dev).
+# The phase1/Makefile now uses `-f docker-compose.yml -p drugos-platform-phase1`
+# to be explicit. This root Makefile target starts the PRODUCTION stack
+# (root docker-compose.yml). Use `make setup-dev` for the dev stack.
+setup:
+	@echo "==> Starting PRODUCTION stack (root docker-compose.yml)"
+	@command -v docker-compose >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 || { \
+		echo "ERROR: docker-compose (or docker) not found on PATH." >&2; \
+		exit 1; \
+	}
+	@if command -v docker-compose >/dev/null 2>&1; then \
+		docker-compose -f docker-compose.yml up -d || { echo "ERROR: docker-compose up -d failed" >&2; exit 1; }; \
+	else \
+		docker compose -f docker-compose.yml up -d || { echo "ERROR: docker compose up -d failed" >&2; exit 1; }; \
+	fi
+	@echo "==> PRODUCTION stack started. Use 'docker-compose -f docker-compose.yml ps' to verify."
+
+setup-dev:
+	@echo "==> Starting DEV stack (phase1/docker-compose.yml — Airflow + Postgres + Neo4j + MLflow)"
+	@cd phase1 && $(MAKE) setup
 
 dry-run: run
 

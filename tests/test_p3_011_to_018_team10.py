@@ -159,45 +159,71 @@ class TestP3_011_PosWeight:
 
 
 # ====================================================================
-# P3-012: checkpoint selection by val_loss
+# P3-012: checkpoint selection by val_auc (verified via evaluate_link_prediction)
 # ====================================================================
+# v122 FORENSIC ROOT FIX (Teammate 7): the P3-011 audit SUPERSEDED the
+# earlier P3-012 decision to use val_loss for checkpoint selection.
+# The P3-011 ROOT FIX mandates using the VERIFIED val_auc (computed by
+# evaluate_link_prediction with 3 independent AUC computations:
+# sklearn, Mann-Whitney, dot-product) for checkpoint selection. The
+# previous val_loss-based selection was vulnerable to a subtle bug in
+# trainer.evaluate() that could inflate the val_auc while val_loss
+# stayed low (or vice versa). The verified val_auc is the scientific
+# ground truth. Tests updated to match the audit's mandate.
 
 class TestP3_012_CheckpointSelectionByValLoss:
-    """P3-012: checkpoint selection must use val_loss, not val_auc."""
+    """P3-012: checkpoint selection must use VERIFIED val_auc (P3-011 fix).
+
+    The original P3-012 design used val_loss for checkpoint selection.
+    The P3-011 audit SUPERSEDED this: checkpoint selection must use the
+    VERIFIED val_auc (from evaluate_link_prediction, which has 3
+    independent AUC computations). The V1 launch criterion is AUC > 0.85
+    (not loss < X), so selecting on val_auc is the scientifically
+    correct choice.
+    """
 
     def test_checkpoint_selection_metric_attribute(self):
-        """The trainer exposes ``checkpoint_selection_metric = "val_loss"``.
+        """The trainer exposes ``checkpoint_selection_metric = "val_auc"``.
 
         This makes the selection criterion EXPLICIT and testable. A
-        future regression that switches back to val_auc would break
+        future regression that switches back to val_loss would break
         this test.
         """
         trainer = _build_minimal_trainer(n_drugs=5, n_diseases=5, n_pos=1, n_neg=4)
         assert hasattr(trainer, "checkpoint_selection_metric"), (
             "Trainer must expose checkpoint_selection_metric attribute (P3-012 fix)"
         )
-        assert trainer.checkpoint_selection_metric == "val_loss", (
-            f"checkpoint_selection_metric must be 'val_loss' (not 'val_auc'), "
-            f"got {trainer.checkpoint_selection_metric!r}"
+        # P3-011 ROOT FIX: use verified val_auc (not val_loss).
+        assert trainer.checkpoint_selection_metric == "val_auc", (
+            f"checkpoint_selection_metric must be 'val_auc' (P3-011 ROOT FIX: "
+            f"use VERIFIED val_auc from evaluate_link_prediction, not val_loss). "
+            f"Got {trainer.checkpoint_selection_metric!r}"
         )
 
-    def test_fit_uses_val_loss_for_best_state(self):
-        """fit() must save best_state_dict when val_loss improves (not val_auc).
+    def test_fit_uses_val_auc_for_best_state(self):
+        """fit() must save best_state_dict when VERIFIED val_auc improves.
 
-        We construct a scenario where val_auc is constant (so val_auc-
-        based selection would never save) but val_loss decreases. The
-        best_state_dict should still be saved.
+        P3-011 ROOT FIX: the per-epoch checkpoint selection uses the
+        verified val_auc (from evaluate_link_prediction, which has 3
+        independent AUC computations). The previous val_loss-based
+        selection was vulnerable to subtle bugs in trainer.evaluate().
         """
         import inspect
         fit_src = inspect.getsource(GraphTransformerTrainer.fit)
-        # The key checkpoint-selection line uses val_loss_unweighted.
-        assert "val_loss_unweighted" in fit_src, (
-            "fit() must compute val_loss_unweighted for checkpoint selection"
+        # P3-011: fit() must call evaluate_link_prediction per-epoch.
+        assert "evaluate_link_prediction" in fit_src, (
+            "P3-011 ROOT FIX: fit() must call evaluate_link_prediction "
+            "per-epoch for the VERIFIED val_auc."
         )
-        assert "self.best_val_loss" in fit_src, (
-            "fit() must update self.best_val_loss (val_loss-based selection)"
+        # P3-011: checkpoint selection uses verified_val_auc.
+        assert "verified_val_auc" in fit_src, (
+            "P3-011 ROOT FIX: fit() must use verified_val_auc for "
+            "checkpoint selection (not val_loss or unverified val_auc)."
         )
-        # And the best_state_dict save must be inside the val_loss_improved branch.
+        assert "self.best_val_auc" in fit_src, (
+            "fit() must update self.best_val_auc (val_auc-based selection)"
+        )
+        # And the best_state_dict save must be inside the val_auc_improved branch.
         assert "best_state_dict" in fit_src, (
             "fit() must save best_state_dict"
         )

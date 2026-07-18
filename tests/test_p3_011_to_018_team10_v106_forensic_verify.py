@@ -159,18 +159,34 @@ class TestP3011PosWeight:
 
 
 # ============================================================================
-# P3-012: Checkpoint selection by val_loss (not val_auc)
+# P3-012: Checkpoint selection by VERIFIED val_auc (P3-011 ROOT FIX)
 # ============================================================================
+# v122 FORENSIC ROOT FIX (Teammate 7): the P3-011 audit SUPERSEDED the
+# earlier P3-012 decision to use val_loss. The P3-011 ROOT FIX mandates
+# using the VERIFIED val_auc (from evaluate_link_prediction, which has
+# 3 independent AUC computations: sklearn, Mann-Whitney, dot-product)
+# for checkpoint selection. The V1 launch criterion is AUC > 0.85
+# (not loss < X), so selecting on val_auc is the scientifically correct
+# choice. Tests updated to match the audit's mandate.
 
 class TestP3012ValLossCheckpoint:
-    def test_checkpoint_selection_metric_is_val_loss(self, small_graph, small_model):
+    def test_checkpoint_selection_metric_is_val_auc(self, small_graph, small_model):
+        """P3-011 ROOT FIX: checkpoint selection uses VERIFIED val_auc.
+
+        The original P3-012 design used val_loss. The P3-011 audit
+        SUPERSEDED this because val_loss is vulnerable to subtle bugs
+        in trainer.evaluate(). The verified val_auc (from
+        evaluate_link_prediction with 3 independent AUC computations)
+        is the scientific ground truth.
+        """
         node_features, edge_indices = small_graph
         trainer = GraphTransformerTrainer(
             model=small_model, node_features=node_features,
             edge_indices=edge_indices, device="cpu", seed=42,
         )
-        assert trainer.checkpoint_selection_metric == "val_loss", (
-            f"expected 'val_loss', got {trainer.checkpoint_selection_metric!r}"
+        assert trainer.checkpoint_selection_metric == "val_auc", (
+            f"P3-011 ROOT FIX: expected 'val_auc' (verified AUC from "
+            f"evaluate_link_prediction), got {trainer.checkpoint_selection_metric!r}"
         )
 
     def test_fit_sets_best_state_dict_by_val_loss(self, small_graph, small_model):
@@ -623,14 +639,44 @@ class TestP3018GpuUtilization:
         )
 
     def test_cpu_returns_all_zeros(self, small_graph, small_model):
+        """P3-034 ROOT FIX: on CPU, GPU METRICS are 0.0 but health flag is True.
+
+        The P3-034 fix added `gpu_monitoring_healthy: bool` to the metrics
+        dict. On CPU, there's nothing to monitor (no GPU), so the
+        utilization/memory metrics are 0.0. But monitoring itself did NOT
+        fail (it correctly identified that there's no GPU and returned
+        early). So `gpu_monitoring_healthy=True` is the CORRECT value on
+        CPU (it would be False if torch.cuda.is_available() raised an
+        exception, which would indicate a CUDA driver mismatch).
+        """
         node_features, edge_indices = small_graph
         trainer = GraphTransformerTrainer(
             model=small_model, node_features=node_features,
             edge_indices=edge_indices, device="cpu", seed=42,
         )
         metrics = trainer._log_gpu_utilization(epoch=1)
-        assert all(v == 0.0 for v in metrics.values()), (
-            f"on CPU, all GPU metrics should be 0.0, got {metrics}"
+        # P3-034: the three numeric metrics MUST be 0.0 on CPU.
+        assert metrics["gpu_utilization_pct"] == 0.0, (
+            f"on CPU, gpu_utilization_pct should be 0.0, "
+            f"got {metrics['gpu_utilization_pct']}"
+        )
+        assert metrics["gpu_memory_allocated_mb"] == 0.0, (
+            f"on CPU, gpu_memory_allocated_mb should be 0.0, "
+            f"got {metrics['gpu_memory_allocated_mb']}"
+        )
+        assert metrics["gpu_max_memory_allocated_mb"] == 0.0, (
+            f"on CPU, gpu_max_memory_allocated_mb should be 0.0, "
+            f"got {metrics['gpu_max_memory_allocated_mb']}"
+        )
+        # P3-034 ROOT FIX: gpu_monitoring_healthy is True on CPU (monitoring
+        # did not fail — there's just nothing to monitor). It would be False
+        # if torch.cuda.is_available() raised an exception.
+        assert metrics["gpu_monitoring_healthy"] is True, (
+            f"P3-034 ROOT FIX: on CPU, gpu_monitoring_healthy should be True "
+            f"(monitoring did not fail — there's just no GPU to monitor). "
+            f"Got {metrics['gpu_monitoring_healthy']}. It would be False "
+            f"only if torch.cuda.is_available() raised an exception "
+            f"(indicating a CUDA driver mismatch)."
         )
 
     def test_training_history_records_gpu_metrics(self, small_graph, small_model):

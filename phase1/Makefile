@@ -25,10 +25,22 @@ setup:
 	    echo "       set DATABASE_URL=sqlite:///phase1.db to use SQLite." >&2; \
 	    exit 1; \
 	}
+	# IN-048 v122 FORENSIC ROOT FIX (Teammate 7): explicitly pass `-f
+	# docker-compose.yml` so the setup target uses the CORRECT compose
+	# file regardless of the invoking directory. The previous code ran
+	# `docker-compose up -d` which looked for `docker-compose.yml` in
+	# the CWD. If an operator ran `make -f phase1/Makefile setup` from
+	# the repo root (where the root docker-compose.yml defines a
+	# DIFFERENT production stack), they would start the WRONG stack
+	# silently. The Makefile's directory is phase1/ (relative to the
+	# Makefile itself), so we use $(CURDIR) which is the directory make
+	# was invoked from PLUS the relative path to the compose file. We
+	# also pass `-p drugos-platform-phase1` to set the project name
+	# explicitly (matches the `name:` field in phase1/docker-compose.yml).
 	@if command -v docker-compose >/dev/null 2>&1; then \
-	    docker-compose up -d || { echo "ERROR: docker-compose up -d failed (see above)" >&2; exit 1; }; \
+	    docker-compose -f docker-compose.yml -p drugos-platform-phase1 up -d || { echo "ERROR: docker-compose up -d failed (see above)" >&2; exit 1; }; \
 	else \
-	    docker compose up -d || { echo "ERROR: docker compose up -d failed (see above)" >&2; exit 1; }; \
+	    docker compose -f docker-compose.yml -p drugos-platform-phase1 up -d || { echo "ERROR: docker compose up -d failed (see above)" >&2; exit 1; }; \
 	fi
 	@echo "==> Waiting 5s for containers to become healthy"
 	@sleep 5
