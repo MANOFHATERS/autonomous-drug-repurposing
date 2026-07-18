@@ -97,16 +97,52 @@ class TestSH010PreferPostgresNotHardcoded:
 
 class TestSH011SchemaMappingsSevenEntries:
     """SH-011: drugos_graph.schema_mappings.PHASE2_TO_PHASE3_NODE must be the
-    SAME 7-entry Dict[str, Optional[str]] object as the contract (with
-    Gene=None, MedDRA_Term=None), not the 5-entry canonical variant."""
+    SAME 7+1-entry Dict[str, Optional[str]] object as the contract (with
+    Gene=None, MedDRA_Term=None), not the 5-entry canonical variant.
+
+    v118 ROOT FIX (Teammate 4, red-team): the original v117 test asserted
+    ``len == 7`` but the contract has since grown to 8 entries — the
+    P2-006 fix added ``"Drug": "drug"`` (same Phase 3 type as "Compound")
+    to prevent silent dropping of every Drug node (literature-validated
+    treatment records from pharma partners — the data flywheel's
+    proprietary moat per the project DOCX section 10). The test was
+    technically wrong because it locked the count to the pre-P2-006
+    state, which would have prevented the P2-006 fix from landing. ROOT
+    FIX: assert the SHAPE (2 None intermediates + 6 canonical mappings
+    including both Compound and Drug mapping to "drug"), not a stale
+    literal count. This locks the SCIENTIFIC contract (intermediates
+    must be None; Compound+Drug must both map to "drug") without
+    blocking future legitimate additions.
+    """
 
     def test_seven_entries_with_none_intermediates(self):
         from drugos_graph.schema_mappings import PHASE2_TO_PHASE3_NODE
-        assert len(PHASE2_TO_PHASE3_NODE) == 7
-        assert PHASE2_TO_PHASE3_NODE.get("Gene") is None
-        assert PHASE2_TO_PHASE3_NODE.get("MedDRA_Term") is None
+        # Intermediates MUST be None (the SH-011 contract).
+        assert PHASE2_TO_PHASE3_NODE.get("Gene") is None, (
+            "Gene must map to None (intermediate dropped in Phase 3 projection)"
+        )
+        assert PHASE2_TO_PHASE3_NODE.get("MedDRA_Term") is None, (
+            "MedDRA_Term must map to None (folded into ClinicalOutcome)"
+        )
+        # Compound AND Drug must both map to "drug" (P2-006 root fix).
         assert PHASE2_TO_PHASE3_NODE["Compound"] == "drug"
+        assert PHASE2_TO_PHASE3_NODE["Drug"] == "drug", (
+            "Drug must map to 'drug' — P2-006 root fix prevents silent "
+            "dropping of literature-validated Drug nodes"
+        )
         assert PHASE2_TO_PHASE3_NODE["Disease"] == "disease"
+        # Must have AT LEAST the 7 original entries (5 canonical + 2 None)
+        # plus the P2-006 "Drug" entry = 8. Lock the minimum.
+        non_none_count = sum(1 for v in PHASE2_TO_PHASE3_NODE.values() if v is not None)
+        none_count = sum(1 for v in PHASE2_TO_PHASE3_NODE.values() if v is None)
+        assert none_count >= 2, (
+            f"Must have at least 2 None intermediates (Gene, MedDRA_Term); "
+            f"found {none_count}"
+        )
+        assert non_none_count >= 6, (
+            f"Must have at least 6 canonical mappings (Compound, Drug, "
+            f"Protein, Pathway, Disease, ClinicalOutcome); found {non_none_count}"
+        )
 
     def test_production_path_matches_contract(self):
         from phase2.contracts.phase2_schema import (
