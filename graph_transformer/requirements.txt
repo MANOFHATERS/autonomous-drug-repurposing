@@ -29,4 +29,4 @@ rdkit>=2023.9.1
 # num_diseases) matrices (800MB at 10K-drug production scale) and
 # OOMed the Airflow worker. The fix uses scipy.sparse.csr_matrix
 # (the pathway-disease matrix is boolean and sparse).
-scipy>=1.11.0
+scipy>=1.18.0
