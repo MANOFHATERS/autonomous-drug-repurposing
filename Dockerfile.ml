@@ -17,7 +17,7 @@
 #   Stage 1 (builder): compile heavy deps (torch, PyG, RDKit wheels)
 #   Stage 2 (runtime): copy only installed site-packages + repo source
 # =============================================================================
-FROM python:3.11-slim AS builder
+FROM python:3.14-slim AS builder
 
 # IN-012: pin pip for reproducible builder stage.
 RUN pip install --no-cache-dir --upgrade \
@@ -79,7 +79,7 @@ RUN pip install --no-cache-dir --prefix=/install \
 # =============================================================================
 # Stage 2 — Runtime image
 # =============================================================================
-FROM python:3.11-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 # IN-012: reproducibility env vars.
 ENV PYTHONDONTWRITEBYTECODE=1 \
