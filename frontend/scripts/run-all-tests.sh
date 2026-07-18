@@ -18,10 +18,15 @@
 #   3. The script exits with a non-zero code if ANY stage failed, and the
 #      final message reports the real outcome (PASS/FAIL), never a blanket
 #      "All tests complete".
-#   4. `set -e` is intentionally NOT used for the test stages themselves
-#      (we want to run ALL stages and report a combined result, not abort
-#      on the first failure) — but `pipefail` + explicit PIPESTATUS capture
-#      ensures no failure is hidden.
+#   4. `set -e` is intentionally NOT enabled for the test stages. The
+#      script starts with `set -uo pipefail` (no `-e`), so a failed test
+#      command does NOT abort the script — we capture its exit code via
+#      PIPESTATUS[0] and continue to the next stage. The previous version
+#      toggled `set +e` / `set -e` around each stage; this was unnecessary
+#      noise AND introduced a subtle bug (between stages `-e` was active,
+#      so any stray non-test command failure would have aborted the run
+#      early and hidden later-stage failures). The clean pattern is:
+#      never enable `-e`, rely on `pipefail` + explicit PIPESTATUS capture.
 
 set -uo pipefail
 
@@ -49,12 +54,22 @@ rm -f db/test.db
 # the Dockerfile uses `npm ci`). `npx` resolves to the locally-installed
 # jest (node_modules/.bin/jest), no network fetch. (Previous `bun x jest`
 # required bun to be installed globally, which is NOT in package.json.)
-set +e
+#
+# IN-034 ROOT FIX: `set -e` is intentionally NOT enabled at the top of
+# this script (line 26 uses `set -uo pipefail` only). This means a failed
+# test command does NOT abort the script — we capture its exit code via
+# PIPESTATUS[0] and continue to the next stage, then OR the codes together
+# so the final exit reflects whether ANY stage failed. The previous
+# version toggled `set +e` / `set -e` around each stage, which was
+# unnecessary noise AND introduced a subtle bug: between stages `set -e`
+# was active, so any stray non-test command failure (e.g. a future
+# `pkill` without `|| true`) would abort the run early and hide later
+# stage failures. The clean pattern is: never enable `-e` for the test
+# stages, rely on `pipefail` + explicit PIPESTATUS capture.
 npx jest src/lib/services/__tests__/ --no-coverage --runInBand --forceExit 2>&1 | tail -40
 # PIPESTATUS[0] is the jest exit code (the first command in the pipeline),
 # NOT tail's exit code. This is the critical fix for IN-034.
 JEST_RC=${PIPESTATUS[0]}
-set -e
 echo "Jest exit code: ${JEST_RC}"
 OVERALL_RC=$((OVERALL_RC | JEST_RC))
 
@@ -64,10 +79,8 @@ echo ""
 pkill -9 -f "next dev" 2>/dev/null || true
 sleep 2
 rm -f .next/dev/lock
-set +e
 node scripts/run-integration-tests.js 2>&1 | tail -40
 INTEGRATION_RC=${PIPESTATUS[0]}
-set -e
 echo "Integration exit code: ${INTEGRATION_RC}"
 OVERALL_RC=$((OVERALL_RC | INTEGRATION_RC))
 
@@ -77,10 +90,8 @@ echo ""
 pkill -9 -f "next dev" 2>/dev/null || true
 sleep 2
 rm -f .next/dev/lock
-set +e
 node scripts/run-e2e-tests.js 2>&1 | tail -40
 E2E_RC=${PIPESTATUS[0]}
-set -e
 echo "E2E exit code: ${E2E_RC}"
 OVERALL_RC=$((OVERALL_RC | E2E_RC))
 

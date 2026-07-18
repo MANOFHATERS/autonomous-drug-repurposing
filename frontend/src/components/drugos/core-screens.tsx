@@ -100,10 +100,24 @@ function scoreColor(s: number) {
 // bugs the audit found across core-screens.tsx. They are used by multiple
 // screens below.
 
-// FE-051 ROOT FIX: parsePrevalence + FDA orphan-drug threshold logic lives
-// in @/lib/orphan-drug so it can be unit-tested directly (importing this
-// component file in Jest is expensive — it pulls in recharts + framer-motion).
-import { parsePrevalence } from '@/lib/orphan-drug';
+// FE-051 ROOT FIX (Teammate 13, MEDIUM): parsePrevalence + FDA orphan-drug
+// threshold logic lives in @/lib/orphan-drug so it can be unit-tested
+// directly (importing this component file in Jest is expensive — it pulls
+// in recharts + framer-motion). It is WIRED INTO RegulatoryPathwayScreen
+// below — see the "Orphan Drug Status" card. The previous version of this
+// screen used `prevalence?.includes('per 100,000')` (fragile string match
+// that falsely qualified "5,000 per 100,000" — half the population — as
+// orphan-eligible). The current version calls parsePrevalence, which:
+//   1. Parses the numeric value + unit out of common biomedical prevalence
+//      phrasings ("N per 100,000", "1 in N", "N per million", bare counts).
+//   2. Converts to an estimated US-population count (US_POPULATION constant).
+//   3. Compares against the FDA statutory orphan-drug threshold
+//      (< 200,000 people in the US — 21 U.S.C. §360ee).
+//   4. Returns { eligible: boolean | null, estimate, note } — `null` when
+//      prevalence data is not available, so the UI NEVER guesses.
+// When the disease prevalence API is wired (currently no /api/diseases/[id]
+// endpoint returns prevalence), the screen will light up automatically.
+import { parsePrevalence, type OrphanEligibility } from '@/lib/orphan-drug';
 
 /**
  * Shared empty-state for screens that have no data yet. Per the project
@@ -3224,11 +3238,22 @@ function RegulatoryPathwayScreen() {
   // dropdown was always empty and the screen always showed "No drug selected".
   // Now we fetch real RL candidates via /api/rl and derive the clinical phase
   // and IP status from the selected candidate.
+  //
+  // FE-051 ROOT FIX (Teammate 13, MEDIUM): we ALSO keep the disease name
+  // from each RL candidate (previously discarded) so the Orphan Drug Status
+  // card below can look up the disease's prevalence and call parsePrevalence
+  // to compute FDA orphan-drug eligibility. When no prevalence data is
+  // available (the current state — no /api/diseases/[id] endpoint returns
+  // prevalence), parsePrevalence returns { eligible: null } and the UI
+  // shows an honest "Prevalence data not available" message — it never
+  // guesses. The moment a prevalence source is wired, this screen lights
+  // up automatically with real eligibility assessments.
   const [selectedDrug, setSelectedDrug] = useState<string>('');
   const { data: rlData, loading: rlLoading } = useRlCandidates({ limit: 50 });
   const rlCandidates = useMemo(() => (rlData?.candidates || []).map((rc: any, i: number) => ({
     id: rc.id || `rl-${i}`,
     drugName: rc.drug as string,
+    diseaseName: (rc.disease as string | undefined) || '',
     clinicalPhase: rc.literatureSupport ? 'Literature-supported' : 'Novel',
     ipStatus: null as string | null,
   })), [rlData]);
@@ -3236,6 +3261,20 @@ function RegulatoryPathwayScreen() {
     if (!selectedDrug && rlCandidates.length > 0) setSelectedDrug(rlCandidates[0].drugName);
   }, [rlCandidates, selectedDrug]);
   const candidate = rlCandidates.find(c => c.drugName === selectedDrug) || null;
+
+  // FE-051: compute FDA orphan-drug eligibility for the selected candidate's
+  // disease. `diseases` is currently empty (no prevalence source wired), so
+  // `diseaseForCandidate` is undefined and parsePrevalence(undefined) returns
+  // { eligible: null, note: 'Prevalence data not available.' }. When a real
+  // prevalence source lands, this same code path produces a real assessment.
+  const diseaseForCandidate = candidate?.diseaseName
+    ? diseases.find(d => d.name.toLowerCase() === candidate.diseaseName.toLowerCase())
+    : undefined;
+  const orphanEligibility: OrphanEligibility = useMemo(
+    () => parsePrevalence(diseaseForCandidate?.prevalence),
+    [diseaseForCandidate?.prevalence],
+  );
+
   if (rlLoading) return <FadeIn><PageHeader title="Regulatory Pathway Assessment" description="Assess regulatory requirements for drug repurposing" /><LoadingSpinner label="Loading RL candidates..." /></FadeIn>;
   if (!candidate) return <FadeIn><PageHeader title="Regulatory Pathway Assessment" description="Assess regulatory requirements for drug repurposing" /><EmptyState title="No candidates available" description="The Phase 4 RL ranker returned no candidates. Deploy the RL service to populate this screen." /></FadeIn>;
 
@@ -3276,9 +3315,27 @@ function RegulatoryPathwayScreen() {
               <h4 className="font-medium text-sm mb-1">505(b)(2) Pathway</h4>
               <p className="text-xs text-muted-foreground">This drug may qualify for the 505(b)(2) abbreviated NDA pathway since it is already FDA-approved for another indication.</p>
             </div>
-            <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg">
-              <h4 className="font-medium text-sm mb-1">Orphan Drug Status</h4>
-              <p className="text-xs text-muted-foreground">Orphan-drug designation status requires an FDA Orange Book / orphan designation database lookup that is not yet wired. Verify orphan status at <a href="https://www.accessdata.fda.gov/scripts/opdlisting/oopd/" target="_blank" rel="noopener noreferrer" className="underline">FDA Orphan Designations</a> before relying on exclusivity incentives.</p>
+            <div className={`p-3 border rounded-lg ${orphanEligibility.eligible === true ? 'bg-emerald-50 border-emerald-200' : orphanEligibility.eligible === false ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
+              <h4 className="font-medium text-sm mb-1">Orphan Drug Status (prevalence-based)</h4>
+              <p className="text-xs text-muted-foreground">
+                {candidate.diseaseName
+                  ? <>Disease: <span className="font-medium text-foreground">{candidate.diseaseName}</span>. </>
+                  : 'No disease associated with this candidate. '}
+                {orphanEligibility.note}
+              </p>
+              {orphanEligibility.eligible === true && (
+                <p className="text-xs text-emerald-700 mt-1 font-medium">May qualify for FDA orphan-drug designation (estimated &lt; 200,000 US cases — 21 U.S.C. §360ee).</p>
+              )}
+              {orphanEligibility.eligible === false && (
+                <p className="text-xs text-amber-700 mt-1 font-medium">Prevalence exceeds FDA orphan threshold — does not qualify on prevalence grounds alone.</p>
+              )}
+              {orphanEligibility.eligible === null && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  Prevalence data not yet wired. Verify orphan status at{' '}
+                  <a href="https://www.accessdata.fda.gov/scripts/opdlisting/oopd/" target="_blank" rel="noopener noreferrer" className="underline">FDA Orphan Designations</a>{' '}
+                  before relying on exclusivity incentives.
+                </p>
+              )}
             </div>
           </CardContent>
         </Card>
