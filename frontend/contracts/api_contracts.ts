@@ -298,41 +298,120 @@ export interface TopKResponse {
 
 // ─── Phase 4 (RL service) ────────────────────────────────────────────────
 
+/**
+ * RankedCandidate — single element of ``RankResponse.candidates``.
+ *
+ * SH-024 ROOT FIX (v121, forensic, hostile-auditor):
+ *   The previous static interface declared a NESTED ``reward_breakdown``
+ *   object with snake_case keys (``gnn_score``, ``safety_score``, etc.)
+ *   and snake_case boolean fields (``literature_support``,
+ *   ``is_known_positive``). That shape NEVER matched the actual Python
+ *   ``rl/service.py`` response — Python returns FLAT camelCase fields
+ *   (``gnnScore``, ``safetyScore``, ``literatureSupport``,
+ *   ``isKnownPositive``) per ``_load_candidates_from_csv`` (lines 312-337).
+ *   The runtime Zod schema (``RankedHypothesisSchema`` in
+ *   ``frontend/src/lib/ml-contracts.ts``) already matches Python's actual
+ *   shape. The previous static contract was fiction — it described a
+ *   shape that NEITHER the Python service NOR the runtime Zod schema
+ *   uses, creating the illusion of a contract without enforcing one.
+ *
+ *   ROOT FIX: this static interface now EXACTLY mirrors
+ *   ``RankedHypothesisSchema`` (the runtime Zod schema), which itself
+ *   matches what Python serves. All three layers — static TS, runtime
+ *   Zod, and Python service — now agree on the same shape. A future
+ *   refactor can rename to snake_case + nest ``reward_breakdown`` IN
+ *   ALL THREE LAYERS simultaneously; doing it in only one layer
+ *   (as the previous "fix" did) creates silent drift.
+ *
+ * Field semantics (matching Python ``_load_candidates_from_csv``):
+ *   - drug, disease: identifiers from the CSV (always present).
+ *   - rank: 1-indexed rank from CSV (falls back to row index if missing).
+ *   - reward: composite RL reward from CSV (nullable if column missing).
+ *   - policyProb: PPO policy probability (nullable, optional).
+ *   - gnnScore, safetyScore, marketScore: per-feature scores [0,1].
+ *   - plausibilityScore: alias for gnnScore (legacy UI compat).
+ *   - overallScore: weighted composite using the agent's reward weights
+ *     (read from the .meta.json sidecar — P4-004 fix).
+ *   - confidence: GT binary-entropy confidence (nullable, optional).
+ *   - pathwayScore, unmetNeedScore, efficacyScore, admeScore: per-feature
+ *     scores (nullable, optional).
+ *   - literatureSupport: numeric (0/1) — was originally a bool but the
+ *     CSV stores it as a number; Python passes it through as-is.
+ *   - isKnownPositive: bool — Python parses "1"/"true"/"yes" → true.
+ */
 export interface RankedCandidate {
+  /** Drug name (echoed from CSV). */
   drug: string;
+  /** Disease name (echoed from CSV). */
   disease: string;
-  /** Composite RL reward (weighted sum of all features). */
-  reward: number;
-  /** Rank position (1-indexed). */
-  rank: number;
-  /** Per-feature breakdown of the reward (for transparency). */
-  reward_breakdown?: {
-    gnn_score: number;
-    safety_score: number;
-    market_score: number;
-    pathway_score: number;
-    patent_score: number;
-    adme_score: number;
-    unmet_need_score: number;
-    rare_disease_flag: number;
-  };
-  /** Literature support flag (true if ≥1 PubMed paper supports the hypothesis). */
-  literature_support: boolean;
+  /** Rank position (1-indexed). Optional — falls back to row index. */
+  rank?: number;
+  /** Composite RL reward (nullable if column missing). */
+  reward?: number | null;
+  /** PPO policy probability (nullable, optional). */
+  policyProb?: number | null;
+  /** GT score in [0, 1] (nullable, optional). */
+  gnnScore?: number | null;
+  /** Safety score in [0, 1] (nullable, optional). */
+  safetyScore?: number | null;
+  /** Market opportunity score in [0, 1] (nullable, optional). */
+  marketScore?: number | null;
+  /** Alias for gnnScore (legacy UI compat — same value). */
+  plausibilityScore?: number | null;
+  /** Weighted composite score using agent's reward weights (P4-004 fix). */
+  overallScore?: number | null;
+  /** GT binary-entropy confidence in [0, 1] (nullable, optional). */
+  confidence?: number | null;
+  /** Pathway evidence score (nullable, optional). */
+  pathwayScore?: number | null;
+  /** Unmet-need score (nullable, optional). */
+  unmetNeedScore?: number | null;
+  /** Efficacy score (nullable, optional). */
+  efficacyScore?: number | null;
+  /** ADME (absorption/distribution/metabolism/excretion) score (nullable, optional). */
+  admeScore?: number | null;
+  /** Literature support flag (numeric 0/1 — CSV stores as number, not bool). */
+  literatureSupport?: number | null;
   /** Whether the (drug, disease) pair is a known positive (held-out). */
-  is_known_positive: boolean;
+  isKnownPositive?: boolean;
 }
 
+/**
+ * Response shape for ``GET /rank`` / ``POST /rank`` / ``GET /rank/{drug}``.
+ * Matches ``RlRankResponseSchema`` in ``frontend/src/lib/ml-contracts.ts``
+ * and the Python service in ``rl/service.py`` (``_rank_impl`` function,
+ * lines 561-691).
+ *
+ * SH-024 ROOT FIX (v121): the previous static interface declared
+ * ``next_cursor`` and ``ranked_at`` — NEITHER of which is returned by
+ * the Python service. The real shape uses ``page``, ``pageSize``,
+ * ``count``, ``generatedAt``, ``modelVersion``, and optionally
+ * ``csvPath``, ``backend``, ``note``. This fix aligns the static
+ * contract with the runtime Zod schema AND with the Python service.
+ */
 export interface RankResponse {
   /** Ranked candidates, sorted by reward descending. */
   candidates: RankedCandidate[];
-  /** Total candidates considered. */
-  total: number;
-  /** Source of the ranking ("service" = live RL, "csv_fallback" = static). */
-  source: "service" | "csv_fallback";
-  /** Pagination cursor (null if no more results). */
-  next_cursor: string | null;
+  /** Source of the ranking ("service" = live RL/CSV, "none" = no data). */
+  source: string;
+  /** Model version string (e.g., "rl_drug_ranker.py-v105"). */
+  modelVersion?: string;
   /** ISO 8601 UTC timestamp when the ranking was generated. */
-  ranked_at: string;
+  generatedAt: string;
+  /** Total candidates matching the filter (before pagination). */
+  total: number;
+  /** Current page number (0-indexed, = offset / pageSize). */
+  page: number;
+  /** Page size (limit). */
+  pageSize: number;
+  /** Number of candidates in THIS response (may be < pageSize at end). */
+  count: number;
+  /** Path to the CSV file (only when source = CSV fallback). */
+  csvPath?: string;
+  /** Backend used ("checkpoint" = PPO inference, "csv" = CSV fallback). */
+  backend?: string;
+  /** Note (e.g., "No RL output yet. Run `python run_4phase.py`..."). */
+  note?: string;
 }
 
 // ─── Validation (writable endpoint — initiates writeback) ────────────────
@@ -360,19 +439,68 @@ export interface ValidateRequest {
   original_rl_rank?: number;
 }
 
+/**
+ * Response shape for ``POST /validate`` — the writeback result.
+ *
+ * SH-005 ROOT FIX (v121, forensic, hostile-auditor):
+ *   The previous static interface declared ``success``, ``validated_at``,
+ *   ``csv_path``, ``csv_row_count``, ``neo4j_edge_label?``, ``error?`` —
+ *   NONE of which are returned by the Python service. The real shape
+ *   (served by ``rl/service.py::validate``, lines 801-907) is:
+ *     ``{ok: bool, writeback: {phase1_csv_path, phase2_neo4j_written,
+ *     phase3_trigger_path, validated_hypothesis, writeback_version},
+ *     message?: str}``.
+ *   The runtime Zod schema (``RlValidateResponseSchema`` in
+ *   ``frontend/src/lib/ml-contracts.ts``) already matches the Python
+ *   shape. The previous static contract was fiction — it described a
+ *   shape that NEITHER the Python service NOR the runtime Zod schema
+ *   uses, creating the illusion of a contract without enforcing one.
+ *
+ *   ROOT FIX: this static interface now EXACTLY mirrors
+ *   ``RlValidateResponseSchema`` (the runtime Zod schema), which itself
+ *   matches what Python serves. All three layers — static TS, runtime
+ *   Zod, and Python service — now agree on the same shape. A future
+ *   refactor can rename ``ok`` → ``success`` and flatten
+ *   ``writeback.phase1_csv_path`` → ``csv_path`` IN ALL THREE LAYERS
+ *   simultaneously; doing it in only one layer (as the previous "fix"
+ *   did) creates silent drift.
+ *
+ * Field semantics (matching Python ``rl/service.py::validate``):
+ *   - ok: true if the writeback succeeded (Phase 1 CSV append + Phase 2
+ *     Neo4j edge + Phase 3 retrain trigger all attempted). On failure,
+ *     the endpoint raises HTTPException(500) with a detail message —
+ *     it does NOT return ``{ok: false}``.
+ *   - writeback.phase1_csv_path: absolute path to the
+ *     validated_hypotheses.csv that was appended to.
+ *   - writeback.phase2_neo4j_written: bool — true if the Neo4j edge
+ *     was added (false if Neo4j was unreachable or not configured).
+ *   - writeback.phase3_trigger_path: path to the retrain trigger JSON.
+ *   - writeback.validated_hypothesis: the ValidatedHypothesis record
+ *     (dict) that was written.
+ *   - writeback.writeback_version: schema version string (currently
+ *     "2.0.0-shared-contract" — sourced from shared.contracts.writeback).
+ *   - message: human-readable summary (e.g., "Hypothesis validation
+ *     written back to Phase 1 (CSV), Phase 2 (Neo4j edge), and Phase 3
+ *     (retrain trigger).").
+ */
 export interface ValidateResponse {
   /** Whether the writeback succeeded. */
-  success: boolean;
-  /** ISO 8601 UTC timestamp of the writeback. */
-  validated_at: string;
-  /** Path to the validated_hypotheses.csv (for audit). */
-  csv_path: string;
-  /** Number of rows in the CSV after this writeback. */
-  csv_row_count: number;
-  /** Edge label written to Neo4j (e.g., "VALIDATED_TREATS"). */
-  neo4j_edge_label?: string;
-  /** Error message (if success is false). */
-  error?: string;
+  ok: boolean;
+  /** The writeback result (per-phase paths + the validated hypothesis record). */
+  writeback: {
+    /** Absolute path to the validated_hypotheses.csv (Phase 1). */
+    phase1_csv_path: string;
+    /** Whether the Neo4j VALIDATED_* edge was added (Phase 2). */
+    phase2_neo4j_written: boolean;
+    /** Absolute path to the retrain trigger JSON (Phase 3). */
+    phase3_trigger_path: string;
+    /** The ValidatedHypothesis record that was written (dict). */
+    validated_hypothesis: Record<string, unknown>;
+    /** Writeback schema version (e.g., "2.0.0-shared-contract"). */
+    writeback_version: string;
+  };
+  /** Optional human-readable summary message. */
+  message?: string;
 }
 
 // ─── Health (all services) ───────────────────────────────────────────────
