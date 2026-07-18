@@ -35,7 +35,7 @@ authors = [
 ]
 dependencies = [
     "neo4j>=5.0,<6.0",
-    "pandas>=2.0,<3.0",
+    "pandas>=2.0,<4.0",
     "networkx>=3.0,<4.0",
     "numpy>=1.24,<3.0",
     "torch>=2.0,<3.0",
@@ -95,7 +95,7 @@ mol = [
 # leftover from when numpy 2.0 was not yet stable; numpy 2.x is now
 # stable and supported by pandas 2.x.
 geo = [
-    "pandas>=2.0,<3.0",
+    "pandas>=2.0,<4.0",
     "numpy>=1.24,<3.0",  # v39: aligned with main deps (was <2.0)
 ]
 
