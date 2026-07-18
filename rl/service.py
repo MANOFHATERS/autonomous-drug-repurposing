@@ -234,8 +234,107 @@ def _load_candidates_from_csv(
     # UnicodeDecodeError with a clear error message. This makes the
     # operator aware of malformed CSVs (encoding issues at the source)
     # instead of silently passing garbled data to pharma partners.
+    # P4-013 ROOT FIX: use `with open(csv_path, ...)` directly (not
+    # `f_open = open(...)` then `with f_open as f:`). The previous code
+    # split the open and the with-statement, which the P4-013 test flags
+    # as a streaming-CSV anti-pattern (the file handle leaks if the
+    # with-statement is never entered). The fix combines them.
     try:
-        f_open = open(csv_path, "r", encoding="utf-8")  # strict by default
+        # P4-013: the for loop is INSIDE the with-block so the file is
+        # closed even if the loop raises.
+        with open(csv_path, "r", encoding="utf-8") as f:  # strict by default
+            reader = csv_mod.DictReader(f)
+            for i, row in enumerate(reader):
+                # Normalize keys to lowercase.
+                r = {k.lower(): v for k, v in row.items()}
+                d = r.get("drug", "")
+                dis = r.get("disease", "")
+                if not d or not dis:
+                    continue
+                if drug and drug.lower() not in d.lower():
+                    continue
+                if disease and disease.lower() not in dis.lower():
+                    continue
+                # This row passes the filter — increment total.
+                total_filtered += 1
+
+                gnn = _num(r.get("gnn_score"))
+                safety = _num(r.get("safety_score"))
+                market = _num(r.get("market_score"))
+                reward = _num(r.get("reward"))
+                # P4-031 ROOT FIX: use `if rank is not None` instead of `if rank`.
+                # The previous code used `or` which treats 0 as falsy, so a CSV
+                # with rank=0 fell back to (i+1), overwriting the user's explicit
+                # rank=0. The fix uses `is not None` so rank=0 is preserved.
+                _rank_raw = _num(r.get("rank"))
+                rank = _rank_raw if _rank_raw is not None else float(i + 1)
+                policy_prob = _num(r.get("policy_prob"))
+
+                # P4-004 ROOT FIX: compute overall using the SAME weights as the
+                # agent's reward function. If the .meta.json sidecar is available,
+                # read the weights from there. Otherwise fall back to the agent's
+                # default weights (NOT the old hardcoded 0.4/0.3/0.3).
+                overall: Optional[float] = None
+                if _reward_weights:
+                    # Use weights from sidecar — these are the EXACT weights the
+                    # agent trained with
+                    signals = []
+                    score_keys = {
+                        "gnn": gnn, "safety": safety, "market": market,
+                        "confidence": _num(r.get("confidence")),
+                        "pathway": _num(r.get("pathway_score")),
+                        "patent": _num(r.get("patent_score")),
+                        "rare_disease": _num(r.get("rare_disease_score")),
+                        "unmet_need": _num(r.get("unmet_need_score")),
+                        "efficacy": _num(r.get("efficacy_score")),
+                        "adme": _num(r.get("adme_score")),
+                    }
+                    for key, score in score_keys.items():
+                        w = _reward_weights.get(key)
+                        if score is not None and w is not None and w > 0:
+                            signals.append((score, w))
+                    if signals:
+                        total_w = sum(w for _, w in signals)
+                        overall = sum(v * w for v, w in signals) / total_w if total_w > 0 else None
+                else:
+                    # Fallback: use the agent's DEFAULT reward weights (same as
+                    # RewardConfig defaults in rl_drug_ranker.py)
+                    signals = []
+                    if gnn is not None: signals.append((gnn, 0.04))
+                    if safety is not None: signals.append((safety, 0.25))
+                    if market is not None: signals.append((market, 0.12))
+                    if signals:
+                        total_w = sum(w for _, w in signals)
+                        overall = sum(v * w for v, w in signals) / total_w
+                if overall is None and policy_prob is not None:
+                    overall = policy_prob
+
+                out.append({
+                    "drug": d,
+                    "disease": dis,
+                    # P4-031 ROOT FIX (LOW — Team Cosmic / Phase 4): change
+                    # `if rank else (i + 1)` to `if rank is not None else (i + 1)`.
+                    # The previous code treated rank=0 as falsy (0 is falsy in
+                    # Python), so a CSV with rank=0 would fall back to (i+1) —
+                    # the user's explicit rank=0 was silently overwritten. The
+                    # fix uses `is not None` so rank=0 is preserved (0 is a
+                    # valid rank, e.g., the top-ranked pair).
+                    "rank": int(rank) if rank is not None else (i + 1),
+                    "reward": reward,
+                    "policyProb": policy_prob,
+                    "gnnScore": gnn,
+                    "safetyScore": safety,
+                    "marketScore": market,
+                    "plausibilityScore": gnn,
+                    "overallScore": overall,
+                    "confidence": _num(r.get("confidence")),
+                    "pathwayScore": _num(r.get("pathway_score")),
+                    "unmetNeedScore": _num(r.get("unmet_need_score")),
+                    "efficacyScore": _num(r.get("efficacy_score")),
+                    "admeScore": _num(r.get("adme_score")),
+                    "literatureSupport": _num(r.get("literature_support")),
+                    "isKnownPositive": str(r.get("is_known_positive", "")).lower() in ("1", "true", "yes"),
+                })
     except UnicodeDecodeError as _ude:
         logger.error(
             "P4-027 ROOT FIX: CSV %s is not valid UTF-8 (%s). The previous "
@@ -245,99 +344,6 @@ def _load_candidates_from_csv(
             csv_path, _ude,
         )
         return {"candidates": [], "total": 0}
-    with f_open as f:
-        reader = csv_mod.DictReader(f)
-        for i, row in enumerate(reader):
-            # Normalize keys to lowercase.
-            r = {k.lower(): v for k, v in row.items()}
-            d = r.get("drug", "")
-            dis = r.get("disease", "")
-            if not d or not dis:
-                continue
-            if drug and drug.lower() not in d.lower():
-                continue
-            if disease and disease.lower() not in dis.lower():
-                continue
-            # This row passes the filter — increment total.
-            total_filtered += 1
-
-            gnn = _num(r.get("gnn_score"))
-            safety = _num(r.get("safety_score"))
-            market = _num(r.get("market_score"))
-            reward = _num(r.get("reward"))
-            # P4-031 ROOT FIX: use `if rank is not None` instead of `if rank`.
-            # The previous code used `or` which treats 0 as falsy, so a CSV
-            # with rank=0 fell back to (i+1), overwriting the user's explicit
-            # rank=0. The fix uses `is not None` so rank=0 is preserved.
-            _rank_raw = _num(r.get("rank"))
-            rank = _rank_raw if _rank_raw is not None else float(i + 1)
-            policy_prob = _num(r.get("policy_prob"))
-
-            # P4-004 ROOT FIX: compute overall using the SAME weights as the
-            # agent's reward function. If the .meta.json sidecar is available,
-            # read the weights from there. Otherwise fall back to the agent's
-            # default weights (NOT the old hardcoded 0.4/0.3/0.3).
-            overall: Optional[float] = None
-            if _reward_weights:
-                # Use weights from sidecar — these are the EXACT weights the
-                # agent trained with
-                signals = []
-                score_keys = {
-                    "gnn": gnn, "safety": safety, "market": market,
-                    "confidence": _num(r.get("confidence")),
-                    "pathway": _num(r.get("pathway_score")),
-                    "patent": _num(r.get("patent_score")),
-                    "rare_disease": _num(r.get("rare_disease_score")),
-                    "unmet_need": _num(r.get("unmet_need_score")),
-                    "efficacy": _num(r.get("efficacy_score")),
-                    "adme": _num(r.get("adme_score")),
-                }
-                for key, score in score_keys.items():
-                    w = _reward_weights.get(key)
-                    if score is not None and w is not None and w > 0:
-                        signals.append((score, w))
-                if signals:
-                    total_w = sum(w for _, w in signals)
-                    overall = sum(v * w for v, w in signals) / total_w if total_w > 0 else None
-            else:
-                # Fallback: use the agent's DEFAULT reward weights (same as
-                # RewardConfig defaults in rl_drug_ranker.py)
-                signals = []
-                if gnn is not None: signals.append((gnn, 0.04))
-                if safety is not None: signals.append((safety, 0.25))
-                if market is not None: signals.append((market, 0.12))
-                if signals:
-                    total_w = sum(w for _, w in signals)
-                    overall = sum(v * w for v, w in signals) / total_w
-            if overall is None and policy_prob is not None:
-                overall = policy_prob
-
-            out.append({
-                "drug": d,
-                "disease": dis,
-                # P4-031 ROOT FIX (LOW — Team Cosmic / Phase 4): change
-                # `if rank else (i + 1)` to `if rank is not None else (i + 1)`.
-                # The previous code treated rank=0 as falsy (0 is falsy in
-                # Python), so a CSV with rank=0 would fall back to (i+1) —
-                # the user's explicit rank=0 was silently overwritten. The
-                # fix uses `is not None` so rank=0 is preserved (0 is a
-                # valid rank, e.g., the top-ranked pair).
-                "rank": int(rank) if rank is not None else (i + 1),
-                "reward": reward,
-                "policyProb": policy_prob,
-                "gnnScore": gnn,
-                "safetyScore": safety,
-                "marketScore": market,
-                "plausibilityScore": gnn,
-                "overallScore": overall,
-                "confidence": _num(r.get("confidence")),
-                "pathwayScore": _num(r.get("pathway_score")),
-                "unmetNeedScore": _num(r.get("unmet_need_score")),
-                "efficacyScore": _num(r.get("efficacy_score")),
-                "admeScore": _num(r.get("adme_score")),
-                "literatureSupport": _num(r.get("literature_support")),
-                "isKnownPositive": str(r.get("is_known_positive", "")).lower() in ("1", "true", "yes"),
-            })
 
     # P4-014 ROOT FIX: sort ALL candidates by rank, THEN apply limit.
     # The previous code broke after ``len(out) >= limit`` and THEN sorted,
@@ -350,6 +356,13 @@ def _load_candidates_from_csv(
     # sorted as if it had rank=1e9 (LAST). The fix uses `is None` so
     # rank=0 is preserved and sorted correctly (FIRST, since 0 < 1).
     out.sort(key=lambda c: (c.get("rank") if c.get("rank") is not None else 1e9))
+    # P4-014: apply limit AFTER sort (was: before sort). The previous code
+    # broke after `len(out) >= limit` INSIDE the loop, which collected only
+    # the FIRST `limit` rows in CSV order, then sorted those — returning
+    # arbitrary candidates instead of the true top-N by rank. The fix
+    # collects ALL matching candidates, sorts by rank, THEN slices.
+    if limit > 0:
+        out = out[:limit]
     return {"candidates": out, "total": total_filtered}
 
 
