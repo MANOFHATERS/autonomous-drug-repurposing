@@ -281,24 +281,35 @@ def run_bridge(phase1_dir: Path) -> Tuple[Any, Any]:
             "and USE_NEO4J_BUILDER=1, then re-run."
         )
 
+    # SH-010 ROOT FIX (Teammate 4, v125 forensic, root-level, no surface fix):
+    # The audit found that ``prefer_postgres=False`` was HARDCODED here —
+    # the Phase 1 PostgreSQL staging DB was ALWAYS bypassed, even in
+    # production. The prior "ROOT FIX" changed the hardcode to read the
+    # ``DRUGOS_PREFER_POSTGRES`` env var but kept the DEFAULT at ``"0"``
+    # (False) — the SAME bug in a different disguise. Production
+    # deployments that didn't explicitly set ``DRUGOS_PREFER_POSTGRES=1``
+    # still silently bypassed PostgreSQL and used stale CSV outputs.
+    #
+    # REAL ROOT FIX: delegate to
+    # :func:`drugos_graph.phase1_bridge.resolve_prefer_postgres`, which
+    # defaults to ``"auto"`` mode — auto-detects whether the Phase 1 DB
+    # is reachable and populated (use PostgreSQL) or not (fall back to
+    # CSV). Operators can still force a specific backend by setting
+    # ``DRUGOS_PREFER_POSTGRES=0|1`` explicitly. This makes the
+    # SCIENTIFICALLY correct backend the DEFAULT, while preserving the
+    # dev/CI ergonomics (no DB → automatically uses CSV).
+    try:
+        from drugos_graph.phase1_bridge import resolve_prefer_postgres as _resolve_pp
+        _prefer_pg = _resolve_pp()
+    except Exception:
+        # Bridge not importable (rare — would surface as a larger error
+        # below). Fall back to the safe historical default (CSV) so the
+        # bridge call below can produce its own clear error.
+        _prefer_pg = False
     result = run_phase1_to_phase2(
         phase1_processed_dir=str(resolved_phase1_dir),
         builder=builder,  # RT-012: None -> bridge uses RecordingGraphBuilder
-        # SH-010 ROOT FIX (Teammate 4): the previous code HARDCODED
-        # ``prefer_postgres=False``, which meant Phase 1's PostgreSQL
-        # staging DB (populated by the Phase 1 ORM loaders) was ALWAYS
-        # bypassed — even in production. The bridge silently fell back
-        # to reading Phase 1's CSV outputs, which may be stale or
-        # partial compared to the DB. ROOT FIX: read the
-        # ``DRUGOS_PREFER_POSTGRES`` env var (default: "0" for dev/CI
-        # backward compat; set to "1" in production via docker-compose
-        # / k8s configmap). When ``prefer_postgres=True`` AND the Phase
-        # 1 DB is populated, the bridge reads from the DB (authoritative
-        # source). When the DB is unavailable or empty, the bridge
-        # falls back to CSVs (existing v29 behaviour).
-        prefer_postgres=os.environ.get(
-            "DRUGOS_PREFER_POSTGRES", "0"
-        ).lower() in ("1", "true", "yes", "on"),
+        prefer_postgres=_prefer_pg,
     )
     builder = result["builder"]
     staged = result["staged"]

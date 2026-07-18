@@ -406,17 +406,25 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
         )
 
     try:
-        from drugos_graph.phase1_bridge import run_phase1_to_phase2
-        # SH-010 ROOT FIX (Teammate 4): the previous code HARDCODED
-        # ``prefer_postgres=False``, which bypassed Phase 1's PostgreSQL
-        # staging DB even in production. ROOT FIX: read the
-        # ``DRUGOS_PREFER_POSTGRES`` env var (default: "0" for dev/CI
-        # backward compat; set to "1" in production).
+        from drugos_graph.phase1_bridge import (
+            run_phase1_to_phase2,
+            resolve_prefer_postgres as _resolve_prefer_postgres,
+        )
+        # SH-010 ROOT FIX (Teammate 4, v125 forensic): the previous code
+        # HARDCODED ``prefer_postgres=False`` (and the prior "ROOT FIX"
+        # changed it to ``os.environ.get("DRUGOS_PREFER_POSTGRES", "0")``
+        # which STILL defaulted to False). In production, this silently
+        # bypassed Phase 1's PostgreSQL staging DB and used stale CSV
+        # outputs. REAL ROOT FIX: delegate to
+        # :func:`resolve_prefer_postgres`, which defaults to ``"auto"``
+        # mode — auto-detects whether the Phase 1 DB is reachable and
+        # populated (use PostgreSQL) or not (fall back to CSV). Operators
+        # can still force a specific backend via ``DRUGOS_PREFER_POSTGRES``
+        # = 0|1|auto. This makes the SCIENTIFICALLY correct backend the
+        # DEFAULT.
         result = run_phase1_to_phase2(
             phase1_processed_dir=str(pdir),
-            prefer_postgres=os.environ.get(
-                "DRUGOS_PREFER_POSTGRES", "0"
-            ).lower() in ("1", "true", "yes", "on"),
+            prefer_postgres=_resolve_prefer_postgres(),
         )
         builder = result["builder"]
         summary = result["summary"]
@@ -606,12 +614,19 @@ def _get_cached_bridge(pdir):
         return cached
     # Cache miss (or stale): rebuild.
     try:
-        from drugos_graph.phase1_bridge import run_phase1_to_phase2
+        from drugos_graph.phase1_bridge import (
+            run_phase1_to_phase2,
+            resolve_prefer_postgres as _resolve_prefer_postgres,
+        )
+        # SH-010 ROOT FIX (Teammate 4, v125 forensic): same fix as the
+        # /kg/stats path — delegate to :func:`resolve_prefer_postgres`
+        # so the default is AUTO-DETECT (use PostgreSQL when the Phase 1
+        # DB is populated, fall back to CSV otherwise). The previous
+        # code defaulted to ``"0"`` (False), silently bypassing
+        # PostgreSQL in production.
         result = run_phase1_to_phase2(
             phase1_processed_dir=str(pdir),
-            prefer_postgres=os.environ.get(
-                "DRUGOS_PREFER_POSTGRES", "0"
-            ).lower() in ("1", "true", "yes", "on"),
+            prefer_postgres=_resolve_prefer_postgres(),
         )
         builder = result["builder"]
     except Exception as exc:

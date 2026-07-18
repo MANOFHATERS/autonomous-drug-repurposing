@@ -61,29 +61,76 @@ class TestSH010PreferPostgresNotHardcoded:
 
     def test_run_4phase_reads_env_var(self):
         src = _file_text("run_4phase.py")
-        assert "DRUGOS_PREFER_POSTGRES" in src, (
-            "run_4phase.py must read DRUGOS_PREFER_POSTGRES env var instead "
-            "of hardcoding prefer_postgres=False"
+        # v125 ROOT FIX: run_4phase.py delegates to resolve_prefer_postgres()
+        # which reads DRUGOS_PREFER_POSTGRES internally (with default "auto"
+        # mode that auto-detects PG availability). The v117 partial fix
+        # inlined ``os.environ.get("DRUGOS_PREFER_POSTGRES", "0")`` which
+        # still defaulted to False in production — the v125 fix centralizes
+        # the resolution in resolve_prefer_postgres() so the default is
+        # auto-detect (production-correct).
+        assert "resolve_prefer_postgres" in src, (
+            "run_4phase.py must delegate to resolve_prefer_postgres() "
+            "(v125 ROOT FIX for SH-010 — auto-detect PG availability "
+            "instead of defaulting to False)."
         )
-        # The LIVE call must read the env var (not hardcode False). The
-        # literal ``prefer_postgres=False`` may still appear in the
-        # explanatory comment — we check the executable call site via regex.
-        assert re.search(
-            r'prefer_postgres\s*=\s*os\.environ\.get\(\s*"DRUGOS_PREFER_POSTGRES"',
+        # Must NOT have the v117 partial-fix pattern (defaults to "0" = False
+        # in production). The v117 pattern was a surface fix that left the
+        # audit's complaint ("ALWAYS False, even in production!") unresolved
+        # because the env var default was "0".
+        live_v117_pattern = re.findall(
+            r'prefer_postgres\s*=\s*os\.environ\.get\(\s*"DRUGOS_PREFER_POSTGRES"\s*,\s*"0"',
             src,
-        ), "live prefer_postgres= call must read DRUGOS_PREFER_POSTGRES env var"
-        # No LIVE hardcoded-False keyword arg (must be followed by , or ) to
-        # be a real call arg; the comment occurrence has a backtick/comma
-        # inside a code-fence, not a real call).
-        live_false = re.findall(r'prefer_postgres\s*=\s*False\s*[,)]', src)
+        )
+        # Comments may mention this pattern; the LIVE call must not use it.
+        # Check by stripping comments first.
+        stripped = "\n".join(
+            line for line in src.split("\n") if not line.lstrip().startswith("#")
+        )
+        stripped = re.sub(r'""".*?"""', '', stripped, flags=re.DOTALL)
+        live_v117_in_code = re.search(
+            r'prefer_postgres\s*=\s*os\.environ\.get\(\s*"DRUGOS_PREFER_POSTGRES"\s*,\s*"0"',
+            stripped,
+        )
+        assert live_v117_in_code is None, (
+            "run_4phase.py must NOT use the v117 partial-fix pattern "
+            "(os.environ.get('DRUGOS_PREFER_POSTGRES', '0')) — that defaults "
+            "to False in production. Use resolve_prefer_postgres() (v125 ROOT FIX)."
+        )
+        # No LIVE hardcoded-False keyword arg
+        live_false = re.findall(r'prefer_postgres\s*=\s*False\s*[,)]', stripped)
         assert not live_false, (
             f"run_4phase.py has a live prefer_postgres=False call: {live_false}"
         )
 
     def test_service_reads_env_var_both_callsites(self):
         src = _file_text("phase2/service.py")
-        # Two callsites: /kg/stats in-memory fallback + /kg/explore fallback.
-        assert src.count("DRUGOS_PREFER_POSTGRES") >= 2
+        # v125 ROOT FIX: both callsites must delegate to
+        # resolve_prefer_postgres() (auto-detect mode) instead of inlining
+        # the v117 partial-fix pattern (which defaulted to "0" = False in
+        # production).
+        assert "resolve_prefer_postgres" in src, (
+            "phase2/service.py must delegate to resolve_prefer_postgres() "
+            "at BOTH callsites (/kg/stats and /kg/explore). v125 ROOT FIX."
+        )
+        # Should reference resolve_prefer_postgres at least 2x for the 2 callsites.
+        assert src.count("resolve_prefer_postgres") >= 2, (
+            f"phase2/service.py should reference resolve_prefer_postgres at "
+            f"least twice (one per callsite); found {src.count('resolve_prefer_postgres')}"
+        )
+        # The v117 partial-fix pattern must NOT appear in live code.
+        stripped = "\n".join(
+            line for line in src.split("\n") if not line.lstrip().startswith("#")
+        )
+        stripped = re.sub(r'""".*?"""', '', stripped, flags=re.DOTALL)
+        live_v117_pattern = re.search(
+            r'prefer_postgres\s*=\s*os\.environ\.get\(\s*"DRUGOS_PREFER_POSTGRES"\s*,\s*"0"',
+            stripped,
+        )
+        assert live_v117_pattern is None, (
+            "phase2/service.py must NOT use the v117 partial-fix pattern "
+            "(os.environ.get('DRUGOS_PREFER_POSTGRES', '0')) — defaults to "
+            "False in production. Use resolve_prefer_postgres() (v125 ROOT FIX)."
+        )
 
     def test_bridge_respects_prefer_postgres_param(self):
         import drugos_graph.phase1_bridge as pb
