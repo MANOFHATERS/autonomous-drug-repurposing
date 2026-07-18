@@ -51,7 +51,9 @@ export async function POST(req: NextRequest) {
     });
     // FE-071: issue a one-time setup token bound to this user's session.
     // The client must send it back to /verify alongside the secret + code.
-    const { setupToken, expiresAt } = issue2faSetupToken(user.userId, secret);
+    // BE-078 v123: issue2faSetupToken is now async (DB-backed for multi-
+    // instance race protection). Await it.
+    const { setupToken, expiresAt } = await issue2faSetupToken(user.userId, secret);
     return NextResponse.json({
       secret,
       otpauthUri: uri,

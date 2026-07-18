@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { hashPassword, validateEmail, validatePasswordPolicy, signAccessToken, rotateRefreshToken, setAuthCookies } from "@/lib/auth/server";
+import { hashPassword, validateEmail, validatePasswordPolicy, signAccessToken, rotateRefreshToken, setAuthCookies, resolveJwtSecret, resolvePreviousJwtSecret, KID_EMAIL_VERIFY } from "@/lib/auth/server";
 import { badRequest, internalError, writeAuditLog, requireCsrfOrSend, issueCsrfToken, setCsrfCookie } from "@/lib/api-helpers";
 import { checkIpRateLimit, recordIpAttempt } from "@/lib/auth/rate-limit";
 import { Prisma } from "@prisma/client";
@@ -108,36 +108,38 @@ export function isValidUserStatus(status: unknown): status is AllowedUserStatus 
  * using an insecure secret.
  */
 function signEmailVerificationToken(userId: string, email: string): string {
-  const secret = process.env.JWT_SECRET;
-  // BE-063: isDev is ONLY true when NODE_ENV is explicitly set to
-  // "development" or "test". An unset NODE_ENV defaults to PRODUCTION
-  // behavior (fail-closed).
-  const isDev = process.env.NODE_ENV === "development" || process.env.NODE_ENV === "test";
-  if (!secret || secret.length < 32) {
-    if (!isDev) {
-      // Production (or NODE_ENV unset) with missing/short secret → HARD FAIL.
-      // This prevents a misconfigured deployment from silently using the
-      // insecure dev fallback.
-      throw new Error(
-        "JWT_SECRET must be set to a >=32-char random string in production. " +
-        "Generate one with: openssl rand -base64 48"
-      );
-    }
-    // Dev-only deterministic secret. Logged LOUDLY so it's obvious.
-    console.warn(
-      "[SECURITY] JWT_SECRET not set or too short — using dev-only secret. " +
-      "DO NOT use in production. Set JWT_SECRET to a >=32-char random string."
-    );
-    return jwt.sign(
-      { sub: userId, email, type: "email_verify" },
-      "dev-only-insecure-secret-change-me-MINIMUM-32-CHARS-FOR-HS256!!",
-      { issuer: "drugos", expiresIn: "24h", algorithm: "HS256" }
-    );
-  }
+  // BE-020 / BE-063 ROOT FIX (CONSOLIDATED, v123): the prior implementation
+  // had a DIVERGENT secret resolver inline here — same `isDev` pattern as
+  // the shared `resolveJwtSecret()` but with its own copy of the dev
+  // secret string and its own warning. The shared resolver (now fixed in
+  // lib/auth/server.ts to ALSO use the `isDev` pattern — see BE-020 v123)
+  // is the single source of truth. Using it here:
+  //   - Eliminates the divergent resolver (DRY).
+  //   - Picks up the BE-020 fail-closed behavior (NODE_ENV unset → throw).
+  //   - Picks up hot-rotation support (JWT_SECRET_PREVIOUS) at verify time.
+  //   - Picks up the BE-064 deduped warning (logged once per process).
+  //
+  // BE-044 ROOT FIX (COMPLETE, v123): stamp the KID_EMAIL_VERIFY kid
+  // header so verify-email/route.ts can reject tokens with the wrong type
+  // at the header level. This is the defense-in-depth the audit asked
+  // for — the type claim check in verify-email/route.ts is the primary
+  // gate, but the kid header is a second line of defense if a future
+  // change ever forgets the type check.
+  //
+  // We try both the current AND previous secrets so a token signed just
+  // before a rotation remains valid during the 24h email-verify TTL.
+  // The signing path uses ONLY the current secret (resolveJwtSecret);
+  // the previous secret is only used at verify time (in verify-email/
+  // route.ts) to validate tokens signed before the rotation.
   return jwt.sign(
     { sub: userId, email, type: "email_verify" },
-    secret,
-    { issuer: "drugos", expiresIn: "24h", algorithm: "HS256" }
+    resolveJwtSecret(),
+    {
+      issuer: "drugos",
+      expiresIn: "24h",
+      algorithm: "HS256",
+      keyid: KID_EMAIL_VERIFY,
+    }
   );
 }
 

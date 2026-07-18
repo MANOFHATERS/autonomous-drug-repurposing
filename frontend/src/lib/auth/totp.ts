@@ -19,7 +19,12 @@ import jwt from "jsonwebtoken";
 // breaking 2FA enrollment entirely in dev. The shared `resolveJwtSecret`
 // always returns a usable secret in dev (loudly-logged dev-only fallback) and
 // throws in prod if the env var is missing — which is the correct behavior.
-import { resolveJwtSecret, resolvePreviousJwtSecret } from "./server";
+//
+// BE-044 ROOT FIX (COMPLETE, v123): also import KID_MFA_PENDING so the
+// mfa_pending ticket carries a kid header matching the other token types.
+// The prior fix only stamped kid on access + mfa_challenge tokens; this
+// completes the defense-in-depth by stamping it on mfa_pending too.
+import { resolveJwtSecret, resolvePreviousJwtSecret, KID_MFA_PENDING } from "./server";
 
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -224,10 +229,21 @@ export function issueMfaTicket(opts: { userId: string; email: string }): string 
   // dev-only fallback (so 2FA enrollment works); in prod it throws if
   // JWT_SECRET is missing or too short — which is the desired fail-closed
   // behavior.
+  //
+  // BE-044 ROOT FIX (COMPLETE, v123): stamp the KID_MFA_PENDING kid header
+  // so verifyMfaTicket can reject tokens with the wrong type at the header
+  // level. The prior fix only stamped kid on access + mfa_challenge tokens;
+  // mfa_pending was left with only the `type` claim check. This completes
+  // the defense-in-depth across ALL four token types.
   return jwt.sign(
     { sub: opts.userId, email: opts.email, type: "mfa_pending" } as MfaTicketPayload,
     resolveJwtSecret(),
-    { issuer: "drugos", expiresIn: MFA_TICKET_TTL_SECONDS, algorithm: "HS256" }
+    {
+      issuer: "drugos",
+      expiresIn: MFA_TICKET_TTL_SECONDS,
+      algorithm: "HS256",
+      keyid: KID_MFA_PENDING,
+    }
   );
 }
 
@@ -242,6 +258,20 @@ export function verifyMfaTicket(token: string): MfaTicketPayload | null {
         issuer: "drugos",
         algorithms: ["HS256"],
       }) as MfaTicketPayload;
+      // BE-044 ROOT FIX (COMPLETE, v123): enforce kid header matches
+      // KID_MFA_PENDING. Same pattern as verifyAccessToken and
+      // verifyMfaChallengeToken — the kid is set at signing time and
+      // can't be changed without re-signing. Rejecting wrong-kid tokens
+      // prevents substitution even if a future change ever forgets the
+      // type check below.
+      const decodedHeader = jwt.decode(token, { complete: true }) as
+        | { header?: { kid?: string } }
+        | null;
+      const kid = decodedHeader?.header?.kid;
+      if (kid !== KID_MFA_PENDING) {
+        // Wrong kid — this token was not signed as an mfa_pending ticket.
+        continue;
+      }
       if (!decoded || decoded.type !== "mfa_pending" || !decoded.sub) continue;
       return decoded;
     } catch {

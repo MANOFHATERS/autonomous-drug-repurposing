@@ -107,7 +107,9 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
-      const setupResult = verify2faSetupToken(user.userId, secret, body.setupToken);
+      // BE-078 v123: verify2faSetupToken is now async (DB-backed atomic
+      // claim for multi-instance race protection). Await it.
+      const setupResult = await verify2faSetupToken(user.userId, secret, body.setupToken);
       if (!setupResult.ok) {
         // Map the internal reason to a user-facing error. We deliberately
         // use a single, generic 400 response for all failure modes so an

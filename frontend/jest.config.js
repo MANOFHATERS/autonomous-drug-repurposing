@@ -83,7 +83,9 @@ module.exports = {
           lazy: false,
         },
         sourceMaps: true,
-        inlineMapsContent: false,
+        // v123: removed `inlineMapsContent: false` — it's not a valid swc
+        // option and causes "unknown field `inlineMapsContent`" errors at
+        // transform time. The default behavior (separate .map file) is fine.
       },
     ],
   },
