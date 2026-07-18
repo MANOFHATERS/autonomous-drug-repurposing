@@ -259,13 +259,26 @@ class TestP3004UnknownNodeTypeFallback:
         result = nte(torch.tensor([0, 5, 10, 2]))
         assert result.shape == (4, 16)
 
-    def test_unknown_slot_is_zero_initialized(self):
-        """The unknown slot must be initialized to ZERO (not random)."""
+    def test_unknown_slot_is_small_random_initialized(self):
+        """P3-022 v114 ROOT FIX: the unknown slot MUST be SMALL RANDOM (std=0.02).
+
+        The previous zero-init was a saddle point: the gradient w.r.t. a
+        zero embedding is zero, so fine-tuning on a graph with new node
+        types could never learn the unknown slot's embedding. Small random
+        init (std=0.02, BERT/GPT initialization) breaks the symmetry so
+        the slot can learn. This test was updated in v125 to reflect the
+        P3-022 v114 fix.
+        """
         nte = NodeTypeEmbedding(num_node_types=5, embedding_dim=16)
         # Look up only the unknown slot
         result = nte(torch.tensor([5]))
-        assert torch.allclose(result[0], torch.zeros(16)), \
-            f"Unknown slot is not zero: {result[0]}"
+        # P3-022 v114: MUST be NON-ZERO (small random, std=0.02)
+        assert not torch.allclose(result[0], torch.zeros(16)), \
+            f"P3-022 v114 REGRESSION: unknown slot should be SMALL RANDOM, got zero: {result[0]}"
+        # The norm should be small (~0.02 * sqrt(16) = ~0.08)
+        norm = result[0].norm().item()
+        assert 0.01 < norm < 0.5, \
+            f"P3-022 v114 REGRESSION: unknown slot norm {norm:.4f} outside expected range for std=0.02 init"
 
     def test_warning_emitted_once(self):
         """The unknown-type warning must fire EXACTLY ONCE per instance."""
@@ -517,14 +530,58 @@ class TestP3008LockFreeConcurrentInference:
         assert elapsed < 30, f"Took {elapsed:.1f}s (>30s threshold) — possible lock contention"
 
     def test_eval_mode_does_not_acquire_lock(self):
-        """In eval mode, the lock-free fast path must be taken (no lock acquisition)."""
+        """P3-023 v114 ROOT FIX: predict_probability MUST be LOCK-FREE.
+
+        The previous implementation (P3-037 v107) acquired `self._predict_lock`
+        for EVERY call, serializing all 100 concurrent requests. The v114
+        ROOT FIX removed the lock entirely -- the method now uses
+        `torch.set_grad_enabled(False)` (per-thread, no lock) and delegates
+        to `self.forward()`. Callers are responsible for setting
+        `model.eval()` before invoking (standard PyTorch inference pattern).
+
+        This test was updated in v125 to reflect the P3-023 v114 fix
+        (the old assertions checked for the lock-based fast path pattern
+        which is no longer the correct design).
+
+        NOTE: the test strips comments and docstrings before checking for
+        forbidden patterns, so references to `self.eval()` in COMMENT
+        blocks (explaining the historical bug) are NOT counted as
+        regressions. Only actual executable code is checked.
+        """
         import inspect
+        import re as _re
         src = inspect.getsource(DrugDiseaseLinkPredictor.predict_probability)
-        # The fast path must exist
-        assert "if not self.training" in src, "Lock-free fast path missing"
-        assert "torch.set_grad_enabled(False)" in src, "set_grad_enabled missing"
-        # The lock acquisition must be in the ELSE branch (only for train mode)
-        assert "with self._predict_lock" in src, "RLock retained for train-mode case"
+        # Strip docstrings (triple-quoted strings)
+        src_no_docs = _re.sub(r'""".*?"""', '', src, flags=_re.DOTALL)
+        # Strip inline comments (everything after #)
+        src_no_comments = '\n'.join(
+            line.split('#', 1)[0] for line in src_no_docs.splitlines()
+        )
+        # P3-023 v114: the method MUST use torch.set_grad_enabled(False)
+        # (per-thread, no lock, no shared state mutation).
+        assert "torch.set_grad_enabled(False)" in src_no_comments, (
+            "P3-023 v114 REGRESSION: predict_probability must use "
+            "torch.set_grad_enabled(False) (per-thread, lock-free)."
+        )
+        # P3-023 v114: the method MUST NOT acquire self._predict_lock
+        # (the lock is retained as an attribute for backward compat but
+        # is NOT acquired in the forward path).
+        assert "with self._predict_lock" not in src_no_comments, (
+            "P3-023 v114 REGRESSION: predict_probability must NOT acquire "
+            "self._predict_lock. The lock serialized all 100 concurrent "
+            "requests, collapsing throughput to 1x sequential."
+        )
+        # P3-023 v114: the method MUST NOT toggle self.eval()/self.train()
+        # (shared mutable state, racy under concurrent inference + training).
+        # Check the CODE (not comments/docstrings) for these calls.
+        assert "self.eval()" not in src_no_comments, (
+            "P3-023 v114 REGRESSION: predict_probability must NOT call "
+            "self.eval() (mutates shared module.training state)."
+        )
+        assert "self.train(" not in src_no_comments, (
+            "P3-023 v114 REGRESSION: predict_probability must NOT call "
+            "self.train() (mutates shared module.training state)."
+        )
 
 
 # ============================================================================

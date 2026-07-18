@@ -174,3 +174,49 @@ clean:
 restore-test:
 	@echo "Running backup restore-test (v113 IN-096)..."
 	$(PYTHON) scripts/restore_test.py
+
+# IN-080 v125 FORENSIC ROOT FIX (Teammate Cosmic): hash-pinned lockfile
+# management. Generates .lock files for all requirements.txt files with
+# sha256 hashes for supply-chain integrity. The .lock files are checked
+# into git so the same hashes are used in CI and production.
+#
+# Usage:
+#   make requirements-lock        # regenerate all .lock files
+#   make requirements-verify      # verify .lock files are up-to-date
+#   make requirements-audit       # scan for known CVEs via pip-audit
+#
+# The Dockerfiles use --require-hashes when a .lock file is present.
+# In dev (no .lock file), they fall back to plain requirements.txt.
+requirements-lock:
+	@echo "IN-080: regenerating hash-pinned lockfiles..."
+	$(PYTHON) scripts/generate_lockfiles.py
+	$(PYTHON) scripts/generate_lockfiles_from_root.py
+	@echo ""
+	@echo "IN-080: lockfiles regenerated. Review and commit:"
+	@echo "  git status -- '*.lock'"
+
+requirements-verify:
+	@echo "IN-080: verifying lockfile integrity..."
+	$(PYTHON) scripts/verify_requirements_security.py --strict
+	@for f in requirements.lock phase1/requirements.lock phase2/drugos_graph/requirements.lock graph_transformer/requirements.lock rl/requirements.lock; do \
+	    if [ ! -f "$$f" ]; then \
+		echo "ERROR: $$f is missing (run 'make requirements-lock')"; \
+		exit 1; \
+	    fi; \
+	    warnings=$$(grep -c "WARNING" "$$f" 2>/dev/null || echo 0); \
+	    pinned=$$(grep -c "sha256:" "$$f" 2>/dev/null || echo 0); \
+	    echo "  $$f: $$pinned pinned, $$warnings warnings"; \
+	done
+	@echo "IN-080: lockfile integrity verified."
+
+requirements-audit:
+	@echo "IN-080: scanning for known CVEs via pip-audit..."
+	@command -v pip-audit >/dev/null 2>&1 || { \
+	    echo "Installing pip-audit..."; \
+	    pip install --quiet pip-audit; \
+	}
+	@for f in requirements.txt phase1/requirements.txt phase2/drugos_graph/requirements.txt graph_transformer/requirements.txt rl/requirements.txt; do \
+	    echo "--- Auditing $$f ---"; \
+	    pip-audit -r "$$f" --strict --vulnerability-service osv || true; \
+	done
+	@echo "IN-080: pip-audit scan complete."

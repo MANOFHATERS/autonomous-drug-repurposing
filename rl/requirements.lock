@@ -1,0 +1,46 @@
+# Hash-pinned lockfile for requirements.txt
+# IN-080 ROOT FIX: supply-chain integrity via sha256 hashes.
+# Install with: pip install --require-hashes -r requirements.lock
+# Regenerate with: python scripts/generate_lockfiles_from_root.py
+# NOTE: hashes are reused from the root requirements.lock where the
+# same dep+version appears. New deps are downloaded + hashed fresh.
+
+gymnasium>=0.29,<1.0 \
+    --hash=sha256:61c3384b5575985bb7f85e43213bcb40f36fcdff388cae6bc229304c71f2843e
+
+stable-baselines3>=2.2,<3.0 \
+    --hash=sha256:95f39a473dce081d1abe31acaf7cee446dcf223dcd74093d6ea460bc37e2e748
+
+pandas>=2.1.4,<3.0 \
+    --hash=sha256:b3d11d2fda7eb164ef27ffc14b4fcab16a80e1ce67e9f57e19ec0afaf715ba89
+
+numpy>=1.26.3,<2.0 \
+    --hash=sha256:675d61ffbfa78604709862923189bad94014bef562cc35cf61d3a07bba02a7ed
+
+scikit-learn>=1.3,<2.0 \
+    --hash=sha256:056c92bb67ad4c28463c2f2653d9701449201e7e7a9e94e321be0f71c4fef2b8
+
+torch>=2.0,<3.0 \
+    --hash=sha256:796633c4cdf0fe2cdced72d8f88f22e73dbcfce83132763162f6d4bff13b820b
+
+biopython>=1.83,<2.0 \
+    --hash=sha256:65ba69ef0273e983a9036c2a228142bc34266179a5f03660fc281d332d718630
+
+pyyaml>=6.0,<7.0 \
+    --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc
+
+fastapi>=0.110,<1.0 \
+    --hash=sha256:b9ad015a835173d59865e2f5d8296fbc2b317bf56a2ba1a5bfbdd03de2fd4b1c
+
+uvicorn[standard]>=0.27,<1.0 \
+    --hash=sha256:5d38af6cd620f2ae3849fb44fd4879e0890aa1febe8d47eb355fb45d93fe6a5b
+
+prometheus-client>=0.20,<1.0 \
+    --hash=sha256:d5aec89e349a6ec230805d0df882f3807f74fd6c1a2fa86864e3c2279059fed1
+
+psutil>=5.9,<7.0 \
+    --hash=sha256:97f7cb9921fbec4904f522d972f0c0e1f4fabbdd4e0287813b21215074a0f160
+
+certifi>=2024.0,<2027.0 \
+    --hash=sha256:2227dcbaafe0d2f59279d1762ddddc37783ed4354594f194ffc31d20f41fc3db
+

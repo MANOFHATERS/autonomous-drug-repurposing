@@ -65,8 +65,28 @@ USER airflow
 # Install Phase 1 requirements. Build context is phase1/, so
 # `requirements.txt` == phase1/requirements.txt (same file the root
 # Dockerfile COPYs as `phase1/requirements.txt`).
+#
+# IN-080 v125 FORENSIC ROOT FIX (Teammate Cosmic, mirrored from root
+# Dockerfile.airflow): when the hash-pinned .lock file is present,
+# install with --require-hashes for supply-chain integrity. The pip
+# index URL is pinned to https://pypi.org/simple/ to prevent a
+# misconfigured pip.conf from silently using an untrusted mirror.
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY requirements.lock /tmp/requirements.lock
+RUN if [ -f /tmp/requirements.lock ]; then \
+        pip install --no-cache-dir \
+            --index-url https://pypi.org/simple/ \
+            --require-hashes \
+            --no-deps \
+            -r /tmp/requirements.lock \
+        && pip install --no-cache-dir \
+            --index-url https://pypi.org/simple/ \
+            -r /tmp/requirements.txt; \
+    else \
+        pip install --no-cache-dir \
+            --index-url https://pypi.org/simple/ \
+            -r /tmp/requirements.txt; \
+    fi
 
 # IN-068 v122 FORENSIC ROOT FIX: build-time assertion that the Airflow
 # version installed inside the image EXACTLY matches the base image's

@@ -656,13 +656,31 @@ class GTRLBridge:
             # V90 BUG #34 fix: parameterized (was hardcoded [64, 32]).
             link_predictor_hidden_dims=link_predictor_hidden_dims,
             link_predictor_dropout=dropout,
+            # P3-032 v125 ROOT FIX (Teammate Cosmic): enable per-edge-type
+            # output projections for PRODUCTION models. Standard HGT (Wang
+            # et al. 2019) uses per-edge-type out_proj so each edge type
+            # learns its own message transformation. The previous default
+            # (False) used a SINGLE shared out_proj for all edge types --
+            # less expressive, the model cannot distinguish "inhibits
+            # messages should be transformed differently from activates
+            # messages". The per-edge-type out_proj increases parameter
+            # count by ~18x for out_proj (from embedding_dim^2 to
+            # 18*embedding_dim^2), which is acceptable for the production
+            # model (10K drugs, 100K proteins). Old checkpoints trained
+            # with per_edge_type_out_proj=False load into this model with
+            # strict=False (the per-edge-type weights are zero-initialized
+            # until retrained). The contract documents this in
+            # graph_transformer/contracts/phase3_schema.py::
+            # PER_EDGE_TYPE_OUT_PROJ_DEFAULT.
+            per_edge_type_out_proj=True,
         ).to(self.device)
 
         n_params = sum(p.numel() for p in self.model.parameters())
         logger.info(
-            f"V90 BUG #34: Model built: {n_params:,} parameters "
+            f"V90 BUG #34 + P3-032 v125: Model built: {n_params:,} parameters "
             f"(dropout={dropout}, attention_dropout={attention_dropout}, "
-            f"link_predictor_hidden_dims={link_predictor_hidden_dims})"
+            f"link_predictor_hidden_dims={link_predictor_hidden_dims}, "
+            f"per_edge_type_out_proj=True [P3-032 v125 ROOT FIX])"
         )
 
     # ------------------------------------------------------------------

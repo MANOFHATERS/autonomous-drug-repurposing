@@ -64,6 +64,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ─── PyTorch CPU + PyTorch Geometric (aligned to torch 2.2.0) ───────────
 # IN-070 ROOT FIX: torch and PyG wheels are aligned to the EXACT same patch
 # version (2.2.0) to avoid undefined-symbol crashes from ABI drift.
+# IN-080 v125: index URLs are pinned (pytorch.org for torch, pypi.org for
+# everything else) to prevent a misconfigured pip.conf from silently using
+# an untrusted mirror. The exact-version pins (==X.Y.Z) provide version
+# integrity; for full hash-pinning, run `make requirements-lock` to
+# generate per-Dockerfile .lock files.
 RUN pip install --no-cache-dir --prefix=/install \
     "torch==2.2.0+cpu" \
     --index-url https://download.pytorch.org/whl/cpu
@@ -72,6 +77,7 @@ RUN pip install --no-cache-dir --prefix=/install \
     "torch-geometric==2.5.3" \
     "torch-scatter==2.1.2+pt22cpu" \
     "torch-sparse==0.6.18+pt22cpu" \
+    --index-url https://pypi.org/simple/ \
     -f https://data.pyg.org/whl/torch-2.2.0+cpu.html
 
 RUN pip install --no-cache-dir --prefix=/install \
@@ -100,7 +106,8 @@ RUN pip install --no-cache-dir --prefix=/install \
     "pyyaml==6.0.1" \
     "certifi==2024.2.2" \
     "prometheus-client==0.20.0" \
-    "psutil==5.9.8"
+    "psutil==5.9.8" \
+    --index-url https://pypi.org/simple/
 
 # =============================================================================
 # Stage 2 — Runtime image
