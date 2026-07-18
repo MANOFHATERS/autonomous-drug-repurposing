@@ -32,9 +32,9 @@ const PROJECT_WRITE_ROLES = new Set([
   "member",
   "developer",
   "researcher",
-  "data-scientist",
+  "data_scientist",
   "pi",
-  "business-dev",
+  "business_dev",
 ]);
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {

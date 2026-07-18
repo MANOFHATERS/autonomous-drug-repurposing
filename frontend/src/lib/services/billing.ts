@@ -92,7 +92,16 @@ export async function getOrganizationSubscription(orgId: string) {
   });
 }
 
-export async function changePlan(orgId: string, newPlanId: string): Promise<void> {
+export async function changePlan(
+  orgId: string,
+  newPlanId: string,
+  // BE-048 v123 FORENSIC ROOT FIX: optional idempotency key. When provided
+  // (which the POST /api/billing/subscription route always does), changePlan
+  // checks for an existing invoice with the same (organizationId, idempotencyKey)
+  // BEFORE creating a new one. If found, the existing invoice is returned and
+  // no new invoice is created — preventing double-charges on client retries.
+  idempotencyKey?: string,
+): Promise<{ invoiceId: string | null; idempotentReplay: boolean }> {
   const plan = getPlan(newPlanId);
   if (!plan) throw new Error(`Unknown plan: ${newPlanId}`);
 
@@ -108,10 +117,41 @@ export async function changePlan(orgId: string, newPlanId: string): Promise<void
   //
   // We pass the transaction client `tx` to every Prisma call inside the
   // callback so they all participate in the same atomic unit.
+  // BE-048 v123: result accumulator — the transaction returns the invoiceId
+  // (or null for free plans) and whether this was an idempotent replay.
+  // We capture these outside the transaction so we can return them after
+  // the transaction commits.
+  let resultInvoiceId: string | null = null;
+  let resultIdempotentReplay = false;
+
   await db.$transaction(async (tx) => {
     const now = new Date();
     const periodEnd = new Date(now);
     periodEnd.setMonth(periodEnd.getMonth() + 1);
+
+    // BE-048 v123 FORENSIC ROOT FIX: idempotency check. If the caller
+    // provided an idempotencyKey, look up an existing invoice with the
+    // same (organizationId, idempotencyKey) BEFORE doing anything else.
+    // If found, this is a CLIENT RETRY (network timeout, double-click,
+    // etc.) — return the existing invoice and skip the plan-change write
+    // entirely. The subscription was already updated in the first call;
+    // re-running the update would just rewrite the same values (idempotent
+    // in principle, but skipping it avoids a useless write and a useless
+    // invoice-notification). The caller can distinguish "fresh change"
+    // from "idempotent replay" via the returned `idempotentReplay` flag.
+    if (idempotencyKey) {
+      const existingInvoice = await tx.billingInvoice.findUnique({
+        where: {
+          organizationId_idempotencyKey: { organizationId: orgId, idempotencyKey },
+        },
+        select: { id: true },
+      });
+      if (existingInvoice) {
+        resultInvoiceId = existingInvoice.id;
+        resultIdempotentReplay = true;
+        return; // Skip plan-change write — the first call already did it.
+      }
+    }
 
     const existing = await tx.subscription.findUnique({ where: { organizationId: orgId } });
     if (existing) {
@@ -155,8 +195,18 @@ export async function changePlan(orgId: string, newPlanId: string): Promise<void
           periodStart: now,
           periodEnd,
           dueDate: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000),
+          // BE-048 v123: stamp the idempotencyKey on the invoice row so
+          // future retries with the same key find this invoice and return
+          // it instead of creating a duplicate. When idempotencyKey is
+          // undefined (legacy callers), the column is NULL — the unique
+          // constraint (organizationId, idempotencyKey) allows multiple
+          // NULLs (PostgreSQL NULL-distinct semantics), so legacy
+          // callers are unaffected.
+          idempotencyKey: idempotencyKey ?? null,
         },
       });
+      // BE-048 v123: capture the invoiceId so we can return it to the caller.
+      resultInvoiceId = invoice.id;
       // Reference invoice.id so TS doesn't flag it as unused (it's
       // captured in the closure below for the notification metadata).
       void invoice;
@@ -207,6 +257,14 @@ export async function changePlan(orgId: string, newPlanId: string): Promise<void
       });
     }
   });
+
+  // BE-048 v123: return the invoiceId (or null for free plans / idempotent
+  // replays of free-plan changes) and whether this was an idempotent replay.
+  // The caller (POST /api/billing/subscription) uses `idempotentReplay` to
+  // log the replay in the audit trail so operators can see how often client
+  // retries are happening (a high replay rate may indicate client-side bugs
+  // or network issues that warrant investigation).
+  return { invoiceId: resultInvoiceId, idempotentReplay: resultIdempotentReplay };
 }
 
 export async function listOrganizationInvoices(orgId: string) {

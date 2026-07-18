@@ -68,6 +68,13 @@
   --accent: #F0EFF9;
   --accent-foreground: #3D3870;
   --destructive: #C0392B;
+  /* FE-039 v123 ROOT FIX: --destructive-foreground was referenced by
+     tailwind.config.ts (destructive.foreground) but NEVER defined. The
+     `text-destructive-foreground` utility resolved to `var(--destructive-foreground)`
+     which is invalid CSS → the browser fell back to `inherit` (typically
+     near-black on a red background = unreadable). Define it as white so
+     text/buttons on the destructive red background are legible. */
+  --destructive-foreground: #FFFFFF;
   --border: #E2E1EA;
   --input: #E2E1EA;
   --ring: #5B4FCF;
@@ -102,6 +109,11 @@
   --accent: #252540;
   --accent-foreground: #C4C4D8;
   --destructive: #E74C3C;
+  /* FE-039 v123 ROOT FIX (dark mode): define --destructive-foreground
+     for the dark theme as well so `text-destructive-foreground` works
+     in dark mode. White text on the dark-mode destructive red (#E74C3C)
+     is the correct contrast pair (WCAG AA: 4.5:1). */
+  --destructive-foreground: #FFFFFF;
   --border: #2D2D48;
   --input: #2D2D48;
   --ring: #7B6FEF;

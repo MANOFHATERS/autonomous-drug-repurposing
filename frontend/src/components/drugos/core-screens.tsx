@@ -67,10 +67,20 @@ import { api } from '@/lib/api-client';
 // `@/lib/empty-defaults`. Type imports come from `@/lib/types`.
 import {
   diseases, drugCandidates, clinicalTrials, graphNodes, graphEdges,
-  trendingDiseases, recentQueries, savedQueries, usageMetrics,
+  recentQueries, savedQueries, usageMetrics,
   patents, evidenceItems, admetProfiles, offTargetPredictions,
   drugInteractions,
 } from '@/lib/empty-defaults';
+// FE-043 v123 FORENSIC ROOT FIX: import `trendingDiseases` from
+// `@/lib/static-content` (curated REAL marketing content with 4 entries:
+// Huntington's, Alzheimer's, Pancreatic Cancer, ALS) instead of from
+// `@/lib/empty-defaults` (which exports `trendingDiseases = []`). The
+// previous code imported the EMPTY array — the dashboard's "Trending
+// Diseases" section showed ZERO diseases even though the marketing team
+// had curated a real list. The empty-defaults export is kept for other
+// consumers that want a typed empty placeholder, but the dashboard should
+// use the real curated list.
+import { trendingDiseases } from '@/lib/static-content';
 import type {
   DrugCandidate, Disease, ClinicalTrial,
   GraphNode, GraphEdge, Patent, EvidenceItem,

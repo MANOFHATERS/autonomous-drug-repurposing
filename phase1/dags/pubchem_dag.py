@@ -6,7 +6,7 @@ batch-queries the PubChem PUG REST API for properties, and bulk-updates
 the ``drugs`` table with retrieved molecular data.
 
 Can be triggered independently or as part of the master pipeline.
-Schedule: every Wednesday at 08:00 UTC (cron ``0 8 * * 3``).
+Schedule: every Saturday at 08:00 UTC (cron ``0 8 * * 6`` — P1-047 root fix).
 v49 ROOT FIX (Compound-4 -- Sunday Morning Pile-Up): was previously
 ``0 8 * * 0`` (Sunday 08:00 UTC) which overlapped the master DAG
 window (Sunday 02:00 UTC, 8h timeout). Moved to Wednesday to

@@ -544,6 +544,17 @@ model BillingInvoice {
   periodEnd       DateTime
   dueDate         DateTime
   pdfUrl          String?
+  // BE-048 v123 FORENSIC ROOT FIX: idempotency key for plan-change POSTs.
+  // The POST /api/billing/subscription route accepts a client-generated
+  // idempotencyKey (UUID). Before creating a new invoice, changePlan
+  // checks for an existing invoice with the same (organizationId,
+  // idempotencyKey). If one exists, it returns that invoice instead of
+  // creating a duplicate — preventing double-charges on client retries
+  // (network timeout, double-click, etc.). The unique constraint on
+  // (organizationId, idempotencyKey) makes this DB-enforced: even if two
+  // concurrent POSTs race, only one invoice is created. The column is
+  // nullable so legacy invoices (created before this fix) remain valid.
+  idempotencyKey  String?
   createdAt       DateTime @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id])
@@ -552,6 +563,11 @@ model BillingInvoice {
   @@index([organizationId])
   @@index([status])
   @@index([dueDate])
+  // BE-048: unique constraint ensures one invoice per idempotency key per
+  // org. The composite (organizationId, idempotencyKey) is unique even when
+  // idempotencyKey is null (PostgreSQL treats NULL as distinct, so multiple
+  // null-key rows are allowed — that's the legacy path).
+  @@unique([organizationId, idempotencyKey])
 }
 
 // ---------------------------------------------------------------------------

@@ -99,9 +99,14 @@ export async function POST(req: NextRequest) {
       select: { id: true, email: true, passwordHash: true, mfaEnabled: true, mfaSecret: true, lastTotpCounter: true },
     });
     if (!dbUser) {
+      // BE-021 v123 FORENSIC ROOT FIX: returning 404 here leaks auth state
+      // (an attacker with a stolen token can distinguish "valid token for a
+      // deleted user" from "invalid token"). Return 401 — same shape as
+      // FE-068's root fix in /api/auth/me — so the response is
+      // indistinguishable from an invalid-token rejection.
       return NextResponse.json(
-        { error: "not_found", message: "User not found" },
-        { status: 404 }
+        { error: "unauthorized", message: "Authentication required" },
+        { status: 401 }
       );
     }
     if (!dbUser.mfaEnabled || !dbUser.mfaSecret) {

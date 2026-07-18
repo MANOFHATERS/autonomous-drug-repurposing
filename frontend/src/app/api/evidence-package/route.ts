@@ -47,7 +47,7 @@ export async function POST(req: NextRequest) {
   const csrf = await requireCsrfOrSend(req);
   if (csrf.response) return csrf.response;
 
-  const auth = await requireAuthRole("researcher", "data-scientist", "pi", "business-dev");
+  const auth = await requireAuthRole("researcher", "data_scientist", "pi", "business_dev");
   if (auth.user === null) return auth.response;
 
   let body: { drug: string; disease: string; notes?: string; literatureLimit?: number; trialsLimit?: number };
@@ -84,10 +84,34 @@ export async function POST(req: NextRequest) {
     validateEntityInKg(body.drug, "drug"),
     validateEntityInKg(body.disease, "disease"),
   ]);
+  // BE-015 v123 FORENSIC ROOT FIX: handle kg_service_unavailable as 503.
+  // The previous code's `notFound` (404) was wrong for the case where the
+  // KG service was unreachable — the entity may exist in the KG, we just
+  // can't verify it right now. 503 tells the researcher to retry later.
   if (!drugCheck.ok) {
+    if (drugCheck.reason === "kg_service_unavailable") {
+      return NextResponse.json(
+        {
+          error: "kg_service_unavailable",
+          message:
+            "Knowledge Graph service is unreachable. Please retry in a few minutes.",
+        },
+        { status: 503 },
+      );
+    }
     return notFound(drugCheck.reason || `Drug "${body.drug}" not found in knowledge graph`);
   }
   if (!diseaseCheck.ok) {
+    if (diseaseCheck.reason === "kg_service_unavailable") {
+      return NextResponse.json(
+        {
+          error: "kg_service_unavailable",
+          message:
+            "Knowledge Graph service is unreachable. Please retry in a few minutes.",
+        },
+        { status: 503 },
+      );
+    }
     return notFound(diseaseCheck.reason || `Disease "${body.disease}" not found in knowledge graph`);
   }
 
@@ -142,7 +166,7 @@ export async function POST(req: NextRequest) {
  * the standard paginated envelope `{ items, total, hasMore, limit, offset }`.
  */
 export async function GET(req: NextRequest) {
-  const auth = await requireAuthRole("researcher", "data-scientist", "pi", "business-dev");
+  const auth = await requireAuthRole("researcher", "data_scientist", "pi", "business_dev");
   if (auth.user === null) return auth.response;
   const id = req.nextUrl.searchParams.get("id");
   if (id) {

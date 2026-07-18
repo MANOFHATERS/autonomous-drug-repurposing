@@ -12,7 +12,7 @@ v39 ROOT FIX (P1 #52): updated docstring. The previous docstring said
 gene deletion/duplication syndrome). Both are loaded.
 
 Can be triggered independently or as part of the master pipeline.
-Schedule: 15th of every month at 07:00 UTC
+Schedule: every Thursday at 07:00 UTC (cron ``0 7 * * 4`` — P1-047 root fix).
 
 v89 FORENSIC ROOT FIX (BUG #8 P1 -- Sunday Morning Pile-Up):
   The previous schedule ``0 7 1 * *`` (1st of month 07:00 UTC) could

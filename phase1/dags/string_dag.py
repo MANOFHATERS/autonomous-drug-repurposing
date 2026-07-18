@@ -6,7 +6,7 @@ filters by minimum combined score, maps STRING IDs to UniProt accessions,
 and bulk-upserts into the ``protein_protein_interactions`` table.
 
 Can be triggered independently or as part of the master pipeline.
-Schedule: 15th of every month at 05:00 UTC
+Schedule: every Saturday at 05:00 UTC (cron ``0 5 * * 6`` — P1-047 root fix)
 
 v89 FORENSIC ROOT FIX (BUG #8 P1 -- Sunday Morning Pile-Up):
   Moved from ``0 5 1 * *`` (1st of month) to ``0 5 15 * *`` (15th of

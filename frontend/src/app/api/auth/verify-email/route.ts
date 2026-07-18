@@ -11,6 +11,10 @@ import { validateBody, VerifyEmailBody } from "@/lib/zod-schemas";
 // recommendation). We reuse the existing per-IP rate-limit primitives
 // from the login flow — `checkIpRateLimit` + `recordIpAttempt`.
 import { checkIpRateLimit, recordIpAttempt } from "@/lib/auth/rate-limit";
+// BE-011 v123 FORENSIC ROOT FIX: migrate verify-email to the distributed
+// Redis-backed rate limiter. Same rationale as /api/auth/register — on a
+// multi-instance deploy, the sync limiter gave the attacker N× the budget.
+import { checkIpRateLimitDistributed } from "@/lib/auth/rate-limit";
 // BE-020 ROOT FIX: use the SHARED `resolveJwtSecret()` from lib/auth/server.ts
 // instead of re-implementing the secret-resolution logic here. The shared
 // resolver:
@@ -69,7 +73,15 @@ export async function POST(req: NextRequest) {
   // requires every state-mutating endpoint to be rate-limited. We reuse
   // the existing per-IP limiter from the login flow: same window
   // (IP_WINDOW_MINUTES), same max attempts (IP_MAX_ATTEMPTS).
-  const ipLock = checkIpRateLimit(req);
+  // BE-011 v123 FORENSIC ROOT FIX: use the DISTRIBUTED `checkIpRateLimitDistributed`
+  // (Redis-backed, shared across instances) instead of the SYNC `checkIpRateLimit`
+  // (per-process, in-memory). The sync version gave an attacker N× the budget on
+  // a multi-instance deploy. The distributed version atomically records the attempt
+  // AND checks the count in a single multi-call. When Redis is unavailable, the
+  // distributed function falls back to the sync path internally (calling
+  // `recordIpAttempt` + `checkIpRateLimit`), so the contract is identical
+  // regardless of which path ran.
+  const ipLock = await checkIpRateLimitDistributed(req);
   if (ipLock.blocked) {
     return NextResponse.json(
       {
@@ -80,10 +92,10 @@ export async function POST(req: NextRequest) {
       { status: 429, headers: { "Retry-After": String(ipLock.retryAfterSeconds) } }
     );
   }
-  // Record the attempt up-front so a flood of requests is capped
-  // regardless of whether each one succeeds or fails. (The login route
-  // uses the same pattern — FE-056.)
-  recordIpAttempt(req);
+  // BE-011: recordIpAttempt is no longer needed — checkIpRateLimitDistributed
+  // records the attempt atomically when Redis is available, and falls back to
+  // calling recordIpAttempt internally when Redis is down. The contract is
+  // "the attempt is always recorded after a successful check".
 
   let body: { token?: string };
   try {
