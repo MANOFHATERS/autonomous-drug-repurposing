@@ -362,9 +362,9 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
         raise FileNotFoundError(
             f"Phase 1 processed data directory not found at {pdir}. "
             f"Run the Phase 1 pipeline first (python run_4phase.py "
-            f"phase1, or python run_full_platform.py --phase 1). The "
+            f"phase1). The "
             f"Phase 2 KG service refuses to serve mock data — the "
-            f"user's mandate is NO mock data. (P2-001 root fix, v107)"
+            f"user's mandate is NO mock data. (P2-001 root fix, v107.)"
         )
     # Check for at least one expected Phase 1 source CSV.
     try:
@@ -398,8 +398,7 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
             f"Phase 1 source CSVs not found at {pdir}. Expected at "
             f"least one of: {sorted(_expected_phase1_csvs)[:8]}... "
             f"Found only non-Phase-1 files. Run the Phase 1 pipeline "
-            f"first (python run_4phase.py phase1, or "
-            f"python run_full_platform.py --phase 1). The Phase 2 KG "
+            f"first (python run_4phase.py phase1). The Phase 2 KG "
             f"service refuses to serve mock data — the user's mandate "
             f"is NO mock data. (P2-001 v120 regression fix — the v107 "
             f"glob check matched non-Phase-1 CSVs like "
