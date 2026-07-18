@@ -21,6 +21,13 @@ frontend/server.log
 .env
 .env.*
 !.env.example
+# IN-088 v117 ROOT FIX (Teammate 8): Docker Compose secrets directory.
+# The secrets/ directory holds file-based secrets mounted into containers
+# via the compose `secrets:` block (postgres_password.txt, neo4j_password.txt,
+# airflow_fernet_key.txt, etc.). These files contain REAL credentials and
+# MUST NEVER be committed to git.
+secrets/
+secrets/*.txt
 # Pipeline-trained model checkpoints (regenerable, do not commit)
 checkpoints/
 output_v100/

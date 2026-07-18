@@ -169,6 +169,78 @@ REWARD_FEATURE_COLS: Final[List[str]] = [
     RARE_DISEASE_FLAG_COL,
 ]
 
+# SH-034 v117 ROOT FIX (Teammate 8): EXPLICIT contract for columns that
+# are in RL_FEATURE_COLUMNS (Phase 3 writes them) but NOT in
+# REWARD_FEATURE_COLS (Phase 4's reward function ignores them).
+#
+# The audit (SH-034) flagged this as a "contract drift" — Phase 3
+# writes a column Phase 4 ignores. The previous code documented this
+# as intentional in a comment, but a comment is NOT a contract. A
+# future edit could add or remove a column from REWARD_FEATURE_COLS
+# without updating the comment, silently changing the reward function's
+# behavior.
+#
+# ROOT FIX: define TRANSPARENCY_ONLY_COLS as the EXPLICIT set of
+# columns that Phase 3 writes for transparency/audit but Phase 4's
+# reward function does NOT weight. A CI test (tests/test_feature_contract.py)
+# asserts:
+#   set(RL_FEATURE_COLUMNS) == set(REWARD_FEATURE_COLS) | set(TRANSPARENCY_ONLY_COLS)
+# This makes the drift DETECTABLE at test time — any edit that adds a
+# column to RL_FEATURE_COLUMNS without classifying it (reward vs
+# transparency-only) is a test failure.
+TRANSPARENCY_ONLY_COLS: Final[List[str]] = [
+    # Identity columns — not features, used as CSV join keys.
+    DRUG_COL,
+    DISEASE_COL,
+    # GT output columns — used by the reward function via GNN_SCORE_COL,
+    # but the calibrated/timestamp/confidence columns are for audit
+    # transparency (the operator can see "was the GT model calibrated?
+    # when was the prediction made? how confident was it?") without
+    # being weighted in the reward (would double-count gnn_score).
+    GNN_SCORE_CALIBRATED_COL,
+    GNN_SCORE_TIMESTAMP_COL,
+    CONFIDENCE_COL,
+    # Drug-level efficacy — INTENTIONALLY excluded from the reward
+    # function (issue #345). efficacy_score measures the drug's
+    # target diversity (how many diseases it's already approved for).
+    # Including it in the reward would CONFOUND with gnn_score: a drug
+    # approved for many diseases has high efficacy_score AND high
+    # gnn_score (the GT model learned from those approvals). The
+    # reward function would effectively double-count the GT signal.
+    # Phase 4 keeps the column for transparency (the operator can see
+    # "this prediction is for a drug with prior efficacy evidence")
+    # but does NOT weight it in the reward.
+    EFFICACY_SCORE_COL,
+    # Disease-level context columns — re-derived by the env via groupby
+    # on each reset, so they're in the CSV for audit but not weighted
+    # in the reward (they're normalization context, not features).
+    DISEASE_PAIR_COUNT_COL,
+    DISEASE_AVG_GNN_COL,
+    DISEASE_AVG_SAFETY_COL,
+]
+
+# SH-034 v117: assert the contract holds at import time. If a future
+# edit adds a column to RL_FEATURE_COLUMNS without classifying it, this
+# assertion fails at import — fail-closed.
+_RL_SET = set(RL_FEATURE_COLUMNS)
+_REWARD_SET = set(REWARD_FEATURE_COLS)
+_TRANSPARENCY_SET = set(TRANSPARENCY_ONLY_COLS)
+assert _RL_SET == _REWARD_SET | _TRANSPARENCY_SET, (
+    f"SH-034 v117 CONTRACT VIOLATION: RL_FEATURE_COLUMNS must equal the "
+    f"union of REWARD_FEATURE_COLS and TRANSPARENCY_ONLY_COLS. "
+    f"Missing from both: {_RL_SET - _REWARD_SET - _TRANSPARENCY_SET}. "
+    f"In reward but not rl: {_REWARD_SET - _RL_SET}. "
+    f"In transparency but not rl: {_TRANSPARENCY_SET - _RL_SET}. "
+    f"Fix shared/contracts/feature_names.py."
+)
+# Also assert no overlap (a column can't be both weighted and transparency-only).
+assert not (_REWARD_SET & _TRANSPARENCY_SET), (
+    f"SH-034 v117 CONTRACT VIOLATION: a column is in BOTH REWARD_FEATURE_COLS "
+    f"and TRANSPARENCY_ONLY_COLS: {_REWARD_SET & _TRANSPARENCY_SET}. "
+    f"A column must be one or the other, not both."
+)
+del _RL_SET, _REWARD_SET, _TRANSPARENCY_SET
+
 # Disease-context columns the env re-derives via groupby (issue #344).
 DISEASE_CONTEXT_COLS: Final[List[str]] = [
     DISEASE_PAIR_COUNT_COL,
@@ -239,6 +311,7 @@ __all__ = [
     # Schemas
     "RL_FEATURE_COLUMNS",
     "REWARD_FEATURE_COLS",
+    "TRANSPARENCY_ONLY_COLS",   # SH-034 v117: columns Phase 3 writes but Phase 4 reward ignores
     "DISEASE_CONTEXT_COLS",
     # Task 328 aliases (6 canonical RL features)
     "FEATURE_GNN_SCORE",

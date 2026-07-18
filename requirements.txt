@@ -31,7 +31,21 @@ psycopg2-binary>=2.9.9,<3.0
 lxml>=5.1.0,<6.0
 rapidfuzz>=3.6.1,<4.0
 python-dotenv>=1.0.0,<2.0
-apache-airflow>=2.8.0,<3.0.0
+# IN-086 ROOT FIX (Teammate 8 v117): pin apache-airflow to >=2.10.0,<3.0.0
+# to match phase1/requirements.txt. The previous >=2.8.0,<3.0.0 pin allowed
+# pip to install Airflow 2.8.x in dev/CI environments (NOT using the Docker
+# image), which:
+#   1. Diverged from the Dockerfile.airflow base image (apache/airflow:2.10.5)
+#      — a "works in Docker, breaks in venv" hazard.
+#   2. Airflow 2.8.x has known bugs with SQLAlchemy 2.0.x that 2.10.x fixed
+#      (https://github.com/apache/airflow/pull/39112). The phase1 DAGs use
+#      @dag/@task decorators that fail on 2.8.x with sqlalchemy 2.0.30.
+#   3. The Dockerfile.airflow installs phase1/requirements.txt which pins
+#      >=2.10.0,<3.0.0 — having the ROOT requirements.txt pin >=2.8.0 caused
+#      a version drift between dev (`pip install -r requirements.txt`) and
+#      Docker (which installs phase1/requirements.txt + the base image's 2.10.5).
+# Pinning >=2.10.0,<3.0.0 in BOTH files eliminates the drift.
+apache-airflow>=2.10.0,<3.0.0
 
 # ─── Phase 2: Knowledge Graph Construction ─────────────────────────────────
 neo4j>=5.0,<6.0

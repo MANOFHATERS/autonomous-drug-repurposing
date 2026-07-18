@@ -1,0 +1,54 @@
+# P4-005 + P4-043 v117 ROOT FIX (Teammate 8): Per-Tenant Reward Weights
+# =========================================================================
+# This is the "rare_disease_partner" tenant profile — a pharma partner
+# focused on rare/orphan diseases. Their reward weights prioritize:
+#   - rare_disease_flag (0.25, up from 0.08) — they pay a premium for
+#     orphan-drug exclusivity (7-year US market exclusivity + premium
+#     pricing).
+#   - unmet_need_score (0.12, up from 0.10) — rare diseases have few
+#     existing treatments, so unmet need is the dominant commercial driver.
+#   - safety_score (0.20, down from 0.25) — rare disease patients often
+#     tolerate higher AE rates because there are no alternatives (the
+#     FDA's orphan-drug approval standard is more lenient on safety).
+#
+# This file was previously a commented-out block in reward_weights.yaml
+# (lines 90-121). The audit (P4-043) flagged this as "documentation
+# only" — the example tenant profile was not actually loadable by
+# load_reward_weights_for_tenant(). Engineers had to copy-paste the
+# commented block into a new file to use it, which led to:
+#   1. Copy-paste errors (typos in the weights).
+#   2. Stale comments (the example didn't match the actual schema).
+#   3. No CI coverage (the example was never tested).
+#
+# ROOT FIX: ship the two example tenant profiles as ACTUAL files. The
+# load_reward_weights_for_tenant() function discovers them via the
+# convention reward_weights.{tenant_id}.yaml in the same directory.
+# A CI test (tests/rl/test_tenant_profiles.py) loads each profile and
+# verifies the weights sum to 1.0 and match REWARD_FEATURE_COLS.
+#
+# Usage:
+#   python -m rl.rl_drug_ranker show-weights --tenant rare_disease_partner
+#   python -m rl.rl_drug_ranker set-weights --tenant rare_disease_partner \
+#       --weight rare_disease_flag=0.30 --weight safety_score=0.18
+
+profile_name: "rare_disease_partner"
+profile_description: >
+  Reward-weights profile for a pharma partner focused on rare/orphan
+  diseases. Prioritizes rare_disease_flag (orphan-drug premium) and
+  unmet_need_score (few existing treatments). Safety weight is reduced
+  because rare-disease patients often tolerate higher AE rates (FDA
+  orphan-drug approval standard is more lenient on safety).
+profile_version: "1.0"
+
+reward_weights:
+  gnn_score: 0.04
+  safety_score: 0.20
+  market_score: 0.08
+  confidence: 0.08
+  pathway_score: 0.12
+  patent_score: 0.06
+  rare_disease_flag: 0.25
+  unmet_need_score: 0.12
+  efficacy_score: 0.03
+  adme_score: 0.02
+  # Sum = 1.00
