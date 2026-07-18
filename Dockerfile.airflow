@@ -1,6 +1,34 @@
 # =============================================================================
 # Dockerfile.airflow — Apache Airflow 2.10.5 for Phase 1 ETL scheduling
 # =============================================================================
+# v118 ROOT FIX (Teammate 8 — IN-100 hostile-auditor): the previous
+# Dockerfile used ``FROM apache/airflow:3.3.0-python3.11`` while the
+# root ``requirements.txt`` (line 48) AND ``phase1/requirements.txt``
+# (line 82) BOTH pin ``apache-airflow>=2.10.0,<3.0.0``. The base image
+# version 3.3.0 directly VIOLATED the requirements pin:
+#
+#   * The base image has Airflow 3.3.0 pre-installed.
+#   * ``pip install -r /tmp/phase1_requirements.txt`` tries to install
+#     apache-airflow>=2.10.0,<3.0.0 — pip sees 3.3.0 is already
+#     installed but the requirement says <3.0.0, so pip attempts to
+#     DOWNGRADE Airflow, which fails because:
+#     - Airflow 3.x → 2.x is a major downgrade that breaks the metadata
+#       DB schema (3.x introduced a new ``dag`` table structure).
+#     - Provider packages (apache-airflow-providers-postgres, etc.) are
+#       version-locked to the Airflow major version.
+#   * The Docker image fails to build, OR builds with a broken Airflow
+#     install where DAGs cannot import.
+#
+# The comment at the top of this file CLAIMED "Apache Airflow 2.10.5"
+# but the FROM line used 3.3.0 — exactly the "comments are fakes, code
+# is broken" pattern the audit flagged. The fix is to make the FROM
+# line MATCH the comment AND the requirements pin: 2.10.5.
+#
+# Airflow 2.10.5 is the same version the previous comment referenced
+# and is the LATEST 2.10.x patch release that satisfies <3.0.0. It is
+# fully compatible with the phase1 DAGs (which use @dag/@task decorators
+# that work in 2.x but were renamed in 3.x).
+#
 # v116 ROOT FIX (Teammate 15, issues IN-011/IN-050):
 #   IN-050 (LOW): removed `COPY phase1/ /opt/phase1/` — docker-compose
 #       bind-mounts ./phase1 over /opt/phase1, so the COPY was dead weight
@@ -13,7 +41,7 @@
 #
 # Build context: repo root (so we can COPY phase1/requirements.txt).
 # =============================================================================
-FROM apache/airflow:3.3.0-python3.11
+FROM apache/airflow:2.10.5-python3.11
 
 USER root
 
