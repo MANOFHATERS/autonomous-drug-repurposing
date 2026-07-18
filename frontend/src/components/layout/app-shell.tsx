@@ -291,7 +291,12 @@ function SidebarCategorySection({
         className="flex items-center gap-2 w-full px-3 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider hover:text-foreground transition-colors"
       >
         <IconComponent className="h-3.5 w-3.5" />
-        <span className="flex-1 text-left">{category.id}</span>
+        {/* FE-013 ROOT FIX (v118): previously rendered `category.id` which
+            showed terse codes like 'PUB', 'AUTH', 'DASH'. The ScreenCategory
+            type has a human-readable `label` field ('Public', 'Authentication',
+            'Dashboards') — use it so the sidebar reads correctly. The `id`
+            field is still used internally for navigation/lookup. */}
+        <span className="flex-1 text-left">{category.label}</span>
         {isOpen ? (
           <ChevronDown className="h-3 w-3" />
         ) : (
@@ -478,7 +483,11 @@ export function AppShell({ activeScreen, onNavigate, children }: AppShellProps) 
                       }}
                       className="cursor-pointer"
                     >
-                      {activeMeta.category}
+                      {/* FE-013 ROOT FIX (v118): breadcrumb showed the terse
+                          category id ('DASH', 'CORE'). The Screen type has a
+                          `categoryLabel` field that is the human-readable
+                          category name ('Dashboards', 'Drug Repurposing'). */}
+                      {activeMeta.categoryLabel}
                     </BreadcrumbLink>
                   </BreadcrumbItem>
                   <BreadcrumbSeparator />
