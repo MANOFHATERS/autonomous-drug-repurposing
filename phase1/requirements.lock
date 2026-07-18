@@ -17,7 +17,7 @@ numpy>=1.26.3,<3.0 \
 rdkit>=2024.3.1,<2025.0 \
     --hash=sha256:82e91020e700979f6fc94a4722b47d770912d54cd9accb1c85961c57550cb945
 
-sqlalchemy>=2.0.25,<3.0 \
+sqlalchemy>=2.0.25,<2.1 \
     --hash=sha256:1d21ce524ab86c23046e992a5b81cb54c21079c6df6e78b8fc77d77cac70a6b9
 
 psycopg2-binary>=2.9.9,<3.0 \
