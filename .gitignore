@@ -1,38 +1,122 @@
-# v91: ignore pipeline run outputs (they're regenerable)
-output_*/
-phase1/processed_data/
+# =============================================================================
+# Autonomous Drug Repurposing Platform — .gitignore
+# =============================================================================
+# v118 IN-053 ROOT FIX (Teammate 16): the previous .gitignore was a partial
+# list that ignored ``phase1/processed_data/`` but NOT ``phase1/raw_data/``
+# (10-100GB of downloaded biomedical data), NOT ``logs/`` (audit JSONL
+# files), NOT ``.airflow_home/`` (Airflow scheduler state), NOT ``*.db``
+# (SQLite fallback DBs), NOT recursive ``**/*.egg-info/``. An operator
+# running ``git add .`` after a full pipeline run would commit tens of GB
+# of regenerable artifacts. GitHub rejects pushes > 100MB. The fix below
+# uses globs that cover ALL output directories (output_v100, output_real_run,
+# output_full_platform, dev_output_v100, output_v118, etc.) and ALL SQLite
+# DBs (phase1.db, frontend/dev.db, etc.).
+# =============================================================================
+
+# ─── Python bytecode & build artifacts ──────────────────────────────────────
 *.pyc
 __pycache__/
+*.pyo
+*.pyd
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+coverage.xml
 *.egg-info/
-# Don't commit build artifacts or local DBs
-frontend/.next/
-frontend/node_modules/
+**/*.egg-info/
+*.egg
+build/
+dist/
+
+# ─── Virtual environments ───────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ─── Pipeline outputs (regenerable, do not commit) ──────────────────────────
+# v91 + v118: glob ``output_*/`` covers output_v100, output_real_run,
+# output_full_platform, dev_output_v100, output_v118, etc. Also keep the
+# explicit entries for backwards compat with tooling that globs .gitignore.
+output_*/
+output_v100/
+dev_output_v100/
+rl/output/
+checkpoints/
+graph_transformer/retrain_triggered.json
+
+# ─── Phase 1 data directories (downloaded biomedical data, 10-100GB) ────────
+phase1/processed_data/
+phase1/raw_data/
+
+# ─── Logs & audit JSONL (regenerable, do not commit) ────────────────────────
+logs/
+**/logs/audit/*.jsonl
+**/logs/audit/*.jsonl.lock
+**/logs/transformations/*.jsonl
+
+# ─── Airflow state (scheduler, db, logs) ────────────────────────────────────
+.airflow_home/
+airflow.db
+airflow.cfg
+airflow-webserver.pid
+airflow.cfg*
+
+# ─── SQLite DBs (frontend dev DB, phase1 fallback DB, etc.) ─────────────────
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
 frontend/dev.db
 frontend/prisma/*.db
 frontend/prisma/prisma/
 frontend/db/
+
+# ─── Frontend build artifacts & deps ────────────────────────────────────────
+frontend/.next/
+frontend/node_modules/
+frontend/.next/standalone/
+frontend/.next/cache/
 frontend/dev.log
 frontend/server.log
-.env.local
+frontend/playwright-report/
+frontend/test-results/
+frontend/coverage/
+
+# ─── Environment files (NEVER commit real secrets) ──────────────────────────
 # v116 IN-001/BE-004/P1-001 ROOT FIX: root .env holds REAL secrets (Fernet
 # key, DB passwords, API keys). It MUST NOT be committed. .env.example is
 # the committed template with placeholders only.
+# v118 IN-052 ROOT FIX (Teammate 16): the .env.* glob catches ALL .env
+# variants (.env.staging, .env.production, .env.development, etc.). The
+# !.env.example + !**/.env.example negations allow the example templates
+# (with placeholders only) to be committed.
 .env
+.env.local
 .env.*
 !.env.example
-# IN-088 v117 ROOT FIX (Teammate 8): Docker Compose secrets directory.
+!**/.env.example
+
+# ─── Docker Compose secrets directory (IN-088) ──────────────────────────────
 # The secrets/ directory holds file-based secrets mounted into containers
-# via the compose `secrets:` block (postgres_password.txt, neo4j_password.txt,
-# airflow_fernet_key.txt, etc.). These files contain REAL credentials and
-# MUST NEVER be committed to git.
+# via the compose ``secrets:`` block (postgres_password.txt,
+# neo4j_password.txt, airflow_fernet_key.txt, etc.). These files contain
+# REAL credentials and MUST NEVER be committed to git.
 secrets/
 secrets/*.txt
-# Pipeline-trained model checkpoints (regenerable, do not commit)
-checkpoints/
-output_v100/
-rl/output/
-.venv/
-graph_transformer/retrain_triggered.json
-dev_output_v100/
-output_v100/
+
+# ─── IDE / editor / OS files ────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Bun (binary lockfile not diffable) ─────────────────────────────────────
+bun.lockb
