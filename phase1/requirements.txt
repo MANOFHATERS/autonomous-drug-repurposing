@@ -38,7 +38,18 @@ rdkit>=2024.3.1,<2025.0; python_version>="3.8"
 # not exist (latest 2.0.x is 2.0.36 as of 2024-12). pip install would
 # fail with `No matching distribution found`. Also added upper bound
 # `<3.0` to prevent breaking major upgrades.
-sqlalchemy>=2.0.25,<3.0
+#
+# IN-086 v126 FORENSIC ROOT FIX (Team Cosmic): tightened the upper bound
+# from `<3.0` to `<2.1` to match Airflow 2.10.x's SQLAlchemy compat matrix.
+# Airflow 2.10.x is officially compatible with SQLAlchemy 2.0.x ONLY
+# (https://airflow.apache.org/docs/apache-airflow/2.10.5/installation/
+# prerequisites.html). Allowing `<3.0` meant a future SQLAlchemy 2.1
+# release could be pip-installed alongside `apache-airflow==2.10.5`,
+# silently breaking the Airflow metadata DB session at import time
+# (SQLAlchemy 2.1 may remove deprecated APIs that Airflow 2.10.5 still
+# uses). Pinning `<2.1` makes the incompatibility a pip-resolver error
+# at install time (loud) instead of a runtime ImportError (silent).
+sqlalchemy>=2.0.25,<2.1
 # v122 IN-080 FIX: added upper bound `<3.0` to prevent breaking major
 # upgrades (psycopg2-binary 3.x may have API changes).
 psycopg2-binary>=2.9.9,<3.0
