@@ -671,22 +671,42 @@ class MLflowTracker:
             return
         self._closed = True
 
-        # P2-024 ROOT FIX (Team 8): stop the heartbeat thread BEFORE
-        # ending the run. Setting the stop event causes the loop's
-        # ``_heartbeat_stop.wait()`` to return immediately, the loop
-        # checks ``is_set()`` and exits. The join(timeout=5) ensures
-        # close doesn't block for the full heartbeat interval.
-        self._heartbeat_stop.set()
-        if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
-            self._heartbeat_thread.join(timeout=5.0)
-            if self._heartbeat_thread.is_alive():
+        # v120 FORENSIC ROOT FIX (Teammate 5, mlflow_tracker P2-014
+        # test_close_is_idempotent): the previous code accessed
+        # ``self._heartbeat_stop`` and ``self._heartbeat_thread``
+        # directly. These attributes are created in ``__init__`` (line
+        # 174-175). But several test paths (and the production
+        # ``__del__`` fallback) create an MLflowTracker via
+        # ``__new__`` (bypassing ``__init__``) to avoid the mlflow
+        # import side-effect, then call ``close()`` directly. The
+        # missing attributes caused ``AttributeError:
+        # 'MLflowTracker' object has no attribute '_heartbeat_stop'``
+        # — the close failed WITHOUT setting ``_closed=True``, so the
+        # NEXT close call re-entered the body and crashed the same
+        # way. The idempotency guarantee was broken.
+        #
+        # ROOT FIX: use ``getattr(self, "_heartbeat_stop", None)``
+        # and ``getattr(self, "_heartbeat_thread", None)`` so close()
+        # is ROBUST to partial initialization. If the attributes are
+        # missing (init was bypassed), there is no heartbeat thread
+        # to stop — skip the join. The close still sets ``_closed=
+        # True`` and proceeds to end_run(), preserving idempotency.
+        _heartbeat_stop = getattr(self, "_heartbeat_stop", None)
+        _heartbeat_thread = getattr(self, "_heartbeat_thread", None)
+        if _heartbeat_stop is not None:
+            _heartbeat_stop.set()
+        if _heartbeat_thread is not None and _heartbeat_thread.is_alive():
+            _heartbeat_thread.join(timeout=5.0)
+            if _heartbeat_thread.is_alive():
                 logger.warning(
                     "P2-024: heartbeat thread did not exit within 5s "
                     "timeout — it will be killed at interpreter exit "
                     "(daemon=True). This may indicate a stuck MLflow "
                     "write."
                 )
-        self._heartbeat_thread = None
+        # Always clear the thread attribute (idempotent across calls).
+        if hasattr(self, "_heartbeat_thread"):
+            self._heartbeat_thread = None
 
         try:
             self.end_run()

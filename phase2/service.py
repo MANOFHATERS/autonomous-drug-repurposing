@@ -319,14 +319,77 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
     (Compound, Protein, Gene, Disease, Pathway, ClinicalOutcome).
     """
     pdir = _REPO_ROOT / "phase1" / "processed_data"
-    # P2-001: do NOT inject mock data. If Phase 1 has not run, fail loud.
-    if not pdir.exists() or not any(pdir.glob("*.csv*")):
+    # P2-001 ROOT FIX (v107): do NOT inject mock data. If Phase 1 has
+    # not run, fail loud.
+    #
+    # v120 FORENSIC ROOT FIX (P2-001 regression — Teammate 5): the v107
+    # check used ``any(pdir.glob("*.csv*"))`` which matched ANY CSV file
+    # in the directory, including NON-Phase-1 files like
+    # ``validated_hypotheses.csv`` (the data-flywheel's output). The
+    # check passed, the bridge ran, returned 0 nodes / 0 edges (because
+    # none of the expected Phase 1 source CSVs were present), and the
+    # API returned HTTP 200 with ``node_count=0, edge_count=0`` — the
+    # exact silent-data-loss pattern P2-001 was supposed to prevent.
+    # The frontend displayed "0 drugs, 0 diseases" as if the KG was
+    # empty (not "Phase 1 not run"), and the GNN trained on an empty
+    # graph (the worst kind of mock data — invisible mock data).
+    #
+    # ROOT FIX (v120): check that at least ONE of the EXPECTED Phase 1
+    # source CSVs (per ``_PHASE1_SOURCE_TO_CSV``) is present. This is
+    # the authoritative check — the bridge reads exactly these files,
+    # so if none exist, the bridge will produce an empty graph. Also
+    # add a post-bridge sanity check: if the bridge returns 0 nodes
+    # AND 0 edges (the "empty graph" failure mode), raise 503 instead
+    # of returning 0/0 with HTTP 200. This is the second line of
+    # defense against silent data loss (the first line is the file
+    # check, but a corrupt Phase 1 run could leave empty CSVs that
+    # pass the file check but produce no graph).
+    if not pdir.exists():
         raise FileNotFoundError(
-            f"Phase 1 processed data not found at {pdir}. Run the Phase 1 "
-            f"pipeline first (python run_4phase.py phase1, or "
-            f"python run_full_platform.py --phase 1). The Phase 2 KG service "
-            f"refuses to serve mock data — the user's mandate is NO mock data. "
-            f"(P2-001 root fix, v107)"
+            f"Phase 1 processed data directory not found at {pdir}. "
+            f"Run the Phase 1 pipeline first (python run_4phase.py "
+            f"phase1, or python run_full_platform.py --phase 1). The "
+            f"Phase 2 KG service refuses to serve mock data — the "
+            f"user's mandate is NO mock data. (P2-001 root fix, v107)"
+        )
+    # Check for at least one expected Phase 1 source CSV.
+    try:
+        from drugos_graph.phase1_bridge import _PHASE1_SOURCE_TO_CSV
+    except Exception:
+        _PHASE1_SOURCE_TO_CSV = {}
+    _expected_phase1_csvs = set(_PHASE1_SOURCE_TO_CSV.values())
+    _found_phase1_csvs = [
+        csv_name for csv_name in _expected_phase1_csvs
+        if (pdir / csv_name).exists() or (pdir / f"{csv_name}.gz").exists()
+    ]
+    if not _expected_phase1_csvs:
+        # Bridge contract unavailable (degraded mode) — fall back to
+        # the legacy glob check (any CSV file) but log a warning so
+        # the operator knows the check is imprecise.
+        logger.warning(
+            "Phase 2 service: _PHASE1_SOURCE_TO_CSV unavailable — "
+            "falling back to legacy glob check (any CSV in %s). This "
+            "is a DEGRADED mode; install phase1.contracts to enable "
+            "the precise source-CSV check.",
+            pdir,
+        )
+        if not any(pdir.glob("*.csv*")):
+            raise FileNotFoundError(
+                f"Phase 1 processed data not found at {pdir} (no CSV "
+                f"files present). Run the Phase 1 pipeline first. "
+                f"(P2-001 root fix, v107)"
+            )
+    elif not _found_phase1_csvs:
+        raise FileNotFoundError(
+            f"Phase 1 source CSVs not found at {pdir}. Expected at "
+            f"least one of: {sorted(_expected_phase1_csvs)[:8]}... "
+            f"Found only non-Phase-1 files. Run the Phase 1 pipeline "
+            f"first (python run_4phase.py phase1, or "
+            f"python run_full_platform.py --phase 1). The Phase 2 KG "
+            f"service refuses to serve mock data — the user's mandate "
+            f"is NO mock data. (P2-001 v120 regression fix — the v107 "
+            f"glob check matched non-Phase-1 CSVs like "
+            f"validated_hypotheses.csv, causing silent 0/0 returns.)"
         )
 
     try:
@@ -399,6 +462,38 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
                     rel = m.group(1).strip() if m else str(et_key)
                 edge_types[rel] = edge_types.get(rel, 0) + int(count)
 
+        # v120 FORENSIC ROOT FIX (P2-001 regression — Teammate 5):
+        # SECOND LINE OF DEFENSE. Even when the file-existence check
+        # passes (some Phase 1 source CSVs are present), a corrupt or
+        # partial Phase 1 run can leave EMPTY CSVs that the bridge
+        # reads successfully but produces 0 nodes / 0 edges. The
+        # previous code returned HTTP 200 with node_count=0,
+        # edge_count=0 — the EXACT silent-data-loss pattern P2-001
+        # was supposed to prevent. The frontend displayed "0 drugs"
+        # as if the KG was empty (not "Phase 1 corrupt"), and the
+        # GNN trained on an empty graph.
+        # ROOT FIX: if the bridge returns 0 nodes AND 0 edges, raise
+        # FileNotFoundError (which the route handler converts to 503
+        # with a clear error). This is the fail-closed behavior the
+        # audit demanded. The operator sees: "Phase 1 source CSVs
+        # present but produced 0 nodes / 0 edges — Phase 1 pipeline
+        # is corrupt or incomplete. Re-run Phase 1."
+        _nodes_loaded = int(summary.get("nodes_loaded", 0))
+        _edges_loaded = int(summary.get("edges_loaded", 0))
+        if _nodes_loaded == 0 and _edges_loaded == 0:
+            raise FileNotFoundError(
+                f"Phase 1 source CSVs are present at {pdir} but the "
+                f"bridge produced 0 nodes / 0 edges. This means the "
+                f"Phase 1 CSVs are EMPTY or CORRUPT (the bridge read "
+                f"them successfully but they contained no usable "
+                f"rows). Re-run the Phase 1 pipeline to regenerate "
+                f"the CSVs. The Phase 2 KG service refuses to serve "
+                f"an empty graph — the user's mandate is NO mock "
+                f"data, and HTTP 200 with node_count=0 is the WORST "
+                f"kind of mock data (invisible). "
+                f"(P2-001 v120 second-line-of-defense fix)"
+            )
+
         # SH-026 ROOT FIX (Teammate 4, forensic, root-level): emit BOTH
         # the legacy snake_case fields AND the canonical CAMELCASE
         # contract fields so the TS schema (frontend/src/lib/ml-contracts.ts
@@ -416,8 +511,8 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
         _sources_read = summary.get("sources_read", []) or []
         return {
             # Legacy fields (backward compat with kg-service.ts)
-            "node_count": int(summary.get("nodes_loaded", 0)),
-            "edge_count": int(summary.get("edges_loaded", 0)),
+            "node_count": _nodes_loaded,
+            "edge_count": _edges_loaded,
             "node_types": node_types,
             "edge_types": edge_types,
             "backend": _backend_legacy,
@@ -430,8 +525,8 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
             # SH-026: canonical contract fields — CAMELCASE (matches
             # frontend/src/lib/ml-contracts.ts:KgStatsResponseSchema so
             # the TS schema validates directly without transformation).
-            "nodeCount": int(summary.get("nodes_loaded", 0)),
-            "edgeCount": int(summary.get("edges_loaded", 0)),
+            "nodeCount": _nodes_loaded,
+            "edgeCount": _edges_loaded,
             "nodeTypeCounts": node_types,
             "edgeTypeCounts": edge_types,
             "generatedAt": _last_updated,
