@@ -63,7 +63,7 @@ uvicorn[standard]>=0.27,<1.0
 # prometheus-client: imported by rl/rl_drug_ranker.py for the
 # RL_RANKER_PREDICTIONS counter (institutional-grade observability).
 # Without it, the counter is silently a no-op (try/except import).
-prometheus-client>=0.20,<1.0
+prometheus-client>=0.25.0,<1.0
 
 # psutil: imported by rl/rl_drug_ranker.py for system metrics in the
 # scientific_validation report. Without it, the report's memory/CPU
