@@ -57,6 +57,19 @@ logs/
 **/logs/audit/*.jsonl
 **/logs/audit/*.jsonl.lock
 **/logs/transformations/*.jsonl
+# v124 P2-043 REAL ROOT FIX: prevent future audit-log backup files from
+# being committed. The previous "fix" kept corrupted backup files
+# (bridge_fallbacks.jsonl.p2-043-pre-purge-bak,
+# v109_archived/bridge_fallbacks.jsonl.v108_pre_fix, etc.) tracked in
+# git, meaning anyone who cloned the repo inherited 909 lines of
+# nonsensical thread_3/write_NN test-pollution entries. These patterns
+# catch ALL backup-file naming schemes so the corruption can't recur.
+**/logs/audit/*.bak
+**/logs/audit/*.pre-purge-bak
+**/logs/audit/*-pre-purge-bak
+**/logs/audit/*.v*_pre_fix
+**/logs/audit/v*_archived/
+**/logs/audit/**.bak
 
 # ─── Airflow state (scheduler, db, logs) ────────────────────────────────────
 .airflow_home/
