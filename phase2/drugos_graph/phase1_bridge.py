@@ -1579,6 +1579,20 @@ class Phase1StagedData:
     # 5-node-type contract (Drugs, Proteins, Pathways, Diseases,
     # Clinical Outcomes).
     pathway_nodes: List[Dict[str, Any]] = field(default_factory=list)
+    # v121 FORENSIC ROOT FIX (P2-047 REAL, HIGH — Phase1-Bridge):
+    # MedDRA_Term nodes derived from sider_adverse_events.csv by
+    # _load_sider_adverse_events(). The previous "v113 fix" for P2-047
+    # ONLY added ``sider_adverse_events`` to the paths dict in
+    # ``read_phase1_outputs`` — the file was READ into
+    # ``out["sider_adverse_events"]`` but NEVER consumed by
+    # ``stage_phase1_to_phase2``. No Compound→causes_adverse_event→
+    # MedDRA_Term edges were emitted, no MedDRA_Term nodes were
+    # created. The audit's claim ("the bridge doesn't consume them")
+    # remained TRUE — the comment-only "fix" was the exact "comments
+    # are fakes" pattern the user warned about. ROOT FIX: add the
+    # field, populate it from the loaded DataFrame, and load it into
+    # the graph in ``load_into_graph``.
+    meddra_term_nodes: List[Dict[str, Any]] = field(default_factory=list)
 
     # Edges keyed by (src_label, rel_type, dst_label) — matches CORE_EDGE_TYPES
     edges: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = field(
@@ -1619,6 +1633,7 @@ class Phase1StagedData:
             + len(self.disease_nodes)
             + len(self.clinical_outcome_nodes)
             + len(self.pathway_nodes)  # v57 ROOT FIX (P2C-001)
+            + len(self.meddra_term_nodes)  # v121 P2-047 REAL
         )
 
     @property
@@ -1907,6 +1922,19 @@ _PHASE1_EXPECTED_COLUMNS: Dict[str, List[str]] = {
         "pchembl_value", "standard_relation",
     ],
     "indications": ["drugbank_id", "disease_id"],
+    # v121 P2-047 REAL ROOT FIX: SIDER adverse-events contract. The
+    # bridge now CONSUMES this CSV (previously it was read into the
+    # frames dict but never iterated — a fake fix). Required columns
+    # are the MINIMUM the bridge needs to build
+    # Compound→causes_adverse_event→MedDRA_Term edges:
+    #   • ``umls_id_meddra`` — the MedDRA CUI (C0018790). The bridge
+    #     prefixes it with "MedDRA:" to match
+    #     kg_builder.ID_PATTERNS["MedDRA_Term"] = ^(\d{8}|MedDRA:C\d{7})$.
+    #   • ``side_effect_name`` — human-readable name for the MedDRA term
+    #     (stored as the node ``name`` property).
+    # ``pubchem_cid`` and ``stitch_id_flat`` are in ANY_OF below — the
+    # bridge accepts either as the Compound endpoint identifier.
+    "sider_adverse_events": ["umls_id_meddra", "side_effect_name"],
 }
 
 # v108 ROOT FIX (issue 64): merge schema-derived columns over the hardcoded
@@ -2005,6 +2033,18 @@ _PHASE1_ANY_OF_COLUMNS: Dict[str, List[List[str]]] = {
     #   _PHASE1_EXPECTED_COLUMNS["drugs"] (see above).
     "drugs": [
         ["drugbank_id", "chembl_id"],  # accept either as Compound identifier
+    ],
+    # v121 P2-047 REAL ROOT FIX: SIDER rows identify the Compound endpoint
+    # via either a PubChem CID (``pubchem_cid`` int, the canonical form
+    # emitted by parse_sider_side_effects) OR a STITCH flat ID
+    # (``stitch_id_flat`` string like "CIDm000001"). The bridge accepts
+    # either. ``stitch_id_stereo`` is NOT accepted as the canonical
+    # Compound endpoint — stereo-specific STITCH IDs (CIDs prefix) map
+    # to stereo-specific Compound nodes that may not exist in the KG
+    # (the bridge builds Compound nodes from InChIKey, which is the
+    # racemic/flat form by default).
+    "sider_adverse_events": [
+        ["pubchem_cid", "stitch_id_flat"],
     ],
 }
 
@@ -5445,6 +5485,215 @@ def _load_clinical_outcomes(
     return nodes, edges
 
 
+# ============================================================================
+# v121 FORENSIC ROOT FIX (P2-047 REAL, HIGH — Phase1-Bridge):
+# SIDER adverse-events consumer. The audit found that the v113 "fix" for
+# P2-047 ONLY added ``sider_adverse_events`` to the paths dict in
+# ``read_phase1_outputs`` — the file was READ into the frames dict but
+# NEVER consumed by ``stage_phase1_to_phase2``. No
+# Compound→causes_adverse_event→MedDRA_Term edges were emitted in
+# bridge-only mode. The RL safety ranker (which queries these edges for
+# its safety-signal dimension) had ZERO adverse-event signal in
+# bridge-only mode — a patient-safety bug where dangerous drugs (e.g.
+# thalidomide, rofecoxib) were ranked "green/safe".
+#
+# This function is the missing consumer. It mirrors the production
+# ``sider_to_node_records`` / ``sider_to_edge_records`` emitters in
+# ``sider_loader.py`` but operates on the bridge's DataFrame (already
+# loaded) instead of re-parsing the raw TSV. This avoids double-IO and
+# keeps the bridge as the single authoritative wire for Phase 1 → Phase 2
+# data flow (the audit's stated architectural goal).
+#
+# PATIENT SAFETY: emits the CANONICAL edge type
+# ``("Compound", "causes_adverse_event", "MedDRA_Term")`` — NOT the
+# legacy ``("Compound", "causes_side_effect", "Side Effect")`` (which
+# P2-049 removed from CORE_EDGE_TYPES). The RecordingGraphBuilder's
+# whitelist check (line ~1002) dead-letters any edge not in
+# CORE_EDGE_TYPES_SET, so a legacy edge would be silently dropped.
+# ============================================================================
+def _load_sider_adverse_events(
+    *,
+    sider_df: Optional[pd.DataFrame],
+    compound_canonical_by_pubchem: Dict[str, str],
+    run_id: str,
+    loaded_at: str,
+    schema_version: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Derive ``MedDRA_Term`` nodes and ``causes_adverse_event`` edges from
+    ``sider_adverse_events.csv`` (the v121 P2-047 REAL root fix).
+
+    Parameters
+    ----------
+    sider_df : DataFrame or None
+        ``sider_adverse_events.csv`` content. None or empty → returns ([], []).
+    compound_canonical_by_pubchem : dict
+        Maps ``"CID{pubchem_cid}"`` (e.g. ``"CID5311025"``) → the canonical
+        Compound node ID (InChIKey, DrugBank ID, or ChEMBL ID) the bridge
+        already built. Built upstream by ``stage_phase1_to_phase2`` from
+        ``staged.compound_nodes``. SIDER rows whose Compound endpoint is NOT
+        in this map are SKIPPED — emitting an edge to a non-existent
+        Compound would violate referential integrity and the
+        RecordingGraphBuilder would dead-letter it anyway.
+    run_id, loaded_at, schema_version : str
+        Lineage properties written to every node/edge.
+
+    Returns
+    -------
+    (nodes, edges) : tuple of lists of dicts
+        Nodes are MedDRA_Term records (deduped by ``umls_id_meddra``).
+        Edges are ``("Compound", "causes_adverse_event", "MedDRA_Term")``
+        records with ``src_id`` = canonical Compound ID and ``dst_id`` =
+        ``"MedDRA:{umls_id_meddra}"``.
+    """
+    if sider_df is None or sider_df.empty:
+        return [], []
+
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+    seen_meddra_ids: Dict[str, str] = {}  # umls_id_meddra -> meddra_node_id (dedup)
+    n_skipped_no_compound = 0
+    n_skipped_invalid_cui = 0
+    n_skipped_invalid_pubchem = 0
+
+    for idx, row in sider_df.iterrows():
+        umls_raw = _safe_str(row.get("umls_id_meddra"))
+        # Validate the UMLS CUI format. kg_builder.ID_PATTERNS["MedDRA_Term"]
+        # = ^(\d{8}|MedDRA:C\d{7})$. We prefix with "MedDRA:" so the final
+        # id is "MedDRA:C0018790" (matches the second branch). Reject CUIs
+        # that don't match C\d{7} — they would dead-letter downstream.
+        if not umls_raw or not isinstance(umls_raw, str):
+            n_skipped_invalid_cui += 1
+            continue
+        cui = umls_raw.strip().upper()
+        # Normalise: strip any existing "MedDRA:" prefix (some SIDER
+        # exports pre-prefix; the raw SIDER file does NOT, but defensive
+        # coding guards against a future schema drift).
+        if cui.startswith("MEDDRA:"):
+            cui = cui[len("MEDDRA:"):]
+        if not (len(cui) == 8 and cui[0] == "C" and cui[1:].isdigit()):
+            # Not a valid UMLS CUI (C + 7 digits). Skip — the
+            # RecordingGraphBuilder's ID_PATTERNS check would dead-letter
+            # the edge anyway, and a malformed MedDRA_Term node would
+            # pollute the graph.
+            n_skipped_invalid_cui += 1
+            continue
+        meddra_node_id = f"MedDRA:{cui}"
+
+        # Dedup MedDRA_Term nodes by umls_id_meddra (one node per CUI).
+        if cui not in seen_meddra_ids:
+            seen_meddra_ids[cui] = meddra_node_id
+            name_raw = _safe_str(row.get("side_effect_name")) or cui
+            meddra_type_raw = _safe_str(row.get("meddra_type"))
+            # v60 ROOT FIX (mirrored from sider_loader._build_node_record):
+            # populate ``meddra_id`` (numeric MedDRA code) AND ``umls_cui``
+            # so both ID systems are resolvable. CANONICAL_IDS["MedDRA_Term"]
+            # = "meddra_id" — without this field, entity resolution returns
+            # None for every MedDRA_Term node.
+            meddra_id_raw = row.get("meddra_id")
+            meddra_id: Optional[str]
+            if meddra_id_raw is None or (
+                isinstance(meddra_id_raw, float) and pd.isna(meddra_id_raw)
+            ):
+                meddra_id = None
+            else:
+                meddra_id = _safe_str(meddra_id_raw)
+            nodes.append({
+                "id": meddra_node_id,
+                "name": name_raw,
+                # v60 P2-001-style fix: canonical ID field for MedDRA_Term.
+                "meddra_id": meddra_id,
+                "umls_cui": cui,
+                "meddra_type": meddra_type_raw or None,
+                "source": "SIDER",
+                "_source_phase": 1,
+                "_source_file": "sider_adverse_events.csv",
+                "_source_row": _safe_row_idx(idx),
+                "_pipeline_run_id": run_id,
+                "_loaded_at": loaded_at,
+                "_schema_version": schema_version,
+            })
+
+        # Resolve the Compound endpoint. Prefer pubchem_cid (canonical),
+        # fall back to stitch_id_flat. Both are normalised to the
+        # ``"CID{pubchem_cid}"`` form expected by
+        # ``compound_canonical_by_pubchem``.
+        compound_endpoint: Optional[str] = None
+        pubchem_raw = row.get("pubchem_cid")
+        if pubchem_raw is not None and not (
+            isinstance(pubchem_raw, float) and pd.isna(pubchem_raw)
+        ):
+            try:
+                cid_int = int(pubchem_raw)
+                if cid_int > 0:
+                    compound_endpoint = f"CID{cid_int}"
+            except (ValueError, TypeError):
+                # Malformed pubchem_cid — fall through to stitch_id_flat.
+                pass
+        if compound_endpoint is None:
+            stitch_flat = _safe_str(row.get("stitch_id_flat"))
+            if stitch_flat:
+                # STITCH flat IDs are "CIDm{pubchem_cid}" — strip the
+                # "CIDm" prefix to recover the bare PubChem CID, then
+                # re-prefix with "CID" (the canonical Compound alias).
+                # Mirror sider_loader._extract_pubchem_cid's logic.
+                s = stitch_flat.strip().upper()
+                if s.startswith("CIDM"):
+                    bare = s[len("CIDM"):]
+                    if bare.isdigit():
+                        compound_endpoint = f"CID{bare}"
+                elif s.startswith("CID") and s[3:].isdigit():
+                    # Already in CID{digits} form (rare for stitch_id_flat
+                    # but defensive).
+                    compound_endpoint = s
+        if compound_endpoint is None:
+            n_skipped_invalid_pubchem += 1
+            continue
+
+        compound_canonical = compound_canonical_by_pubchem.get(compound_endpoint)
+        if compound_canonical is None:
+            # Compound not in the graph — skip to preserve referential
+            # integrity. The RecordingGraphBuilder would dead-letter
+            # this edge anyway (missing endpoint).
+            n_skipped_no_compound += 1
+            continue
+
+        edges.append({
+            "src_id": compound_canonical,
+            "dst_id": meddra_node_id,
+            "source": "SIDER",
+            # SIDER has no per-edge frequency in the meddra_all_se file
+            # (frequencies are in a separate file we don't load here).
+            # The RL safety ranker uses edge EXISTENCE as the safety
+            # signal — the count of distinct MedDRA_Term endpoints per
+            # Compound drives the safety score, not a per-edge weight.
+            "evidence": _safe_str(row.get("meddra_type")) or "PT",
+            "_source_phase": 1,
+            "_source_file": "sider_adverse_events.csv",
+            "_source_row": _safe_row_idx(idx),
+            "_pipeline_run_id": run_id,
+            "_loaded_at": loaded_at,
+            "_schema_version": schema_version,
+        })
+
+    if n_skipped_no_compound or n_skipped_invalid_cui or n_skipped_invalid_pubchem:
+        logger.warning(
+            "v121 P2-047 REAL: SIDER adverse-events load skipped "
+            "%d rows (Compound not in graph), %d rows (invalid UMLS CUI), "
+            "%d rows (invalid pubchem_cid/stitch_id_flat). Emitted "
+            "%d MedDRA_Term nodes and %d causes_adverse_event edges.",
+            n_skipped_no_compound, n_skipped_invalid_cui,
+            n_skipped_invalid_pubchem,
+            len(nodes), len(edges),
+        )
+    else:
+        logger.info(
+            "v121 P2-047 REAL: SIDER adverse-events load emitted "
+            "%d MedDRA_Term nodes and %d causes_adverse_event edges.",
+            len(nodes), len(edges),
+        )
+    return nodes, edges
+
+
 def stage_phase1_to_phase2(
     frames: Dict[str, pd.DataFrame],
     *,
@@ -7697,6 +7946,90 @@ def stage_phase1_to_phase2(
                 n_enriched,
             )
 
+    # ── v121 P2-047 REAL ROOT FIX: SIDER adverse-events consumption ──────
+    # The audit's #1 HIGH finding for the bridge: SIDER data was READ
+    # into the frames dict but NEVER consumed. The v113 "fix" only
+    # added the paths-dict entry — the bridge still emitted ZERO
+    # Compound→causes_adverse_event→MedDRA_Term edges in bridge-only
+    # mode. The RL safety ranker (which queries these edges for its
+    # safety-signal dimension) had ZERO adverse-event signal — a
+    # patient-safety bug where dangerous drugs (e.g. thalidomide,
+    # rofecoxib) were ranked "green/safe".
+    #
+    # ROOT FIX: build a ``compound_canonical_by_pubchem`` lookup map
+    # from ``staged.compound_nodes`` (which already carry ``pubchem_cid``
+    # and ``compound_id_aliases``), then call ``_load_sider_adverse_events``
+    # to emit MedDRA_Term nodes + causes_adverse_event edges. Edges
+    # whose Compound endpoint is NOT in the graph are SKIPPED to
+    # preserve referential integrity (the RecordingGraphBuilder would
+    # dead-letter them anyway).
+    sider_df = frames.get("sider_adverse_events")
+    if sider_df is not None and not sider_df.empty:
+        # Build the Compound lookup map ONCE (O(N) where N = number of
+        # Compound nodes). Each SIDER row is then an O(1) lookup.
+        compound_canonical_by_pubchem: Dict[str, str] = {}
+        for c in staged.compound_nodes:
+            canonical_id = c.get("id")
+            if not canonical_id:
+                continue
+            # Direct pubchem_cid field on the Compound node.
+            pc = c.get("pubchem_cid")
+            if pc is not None and not (
+                isinstance(pc, float) and pd.isna(pc)
+            ):
+                try:
+                    cid_int = int(pc)
+                    if cid_int > 0:
+                        compound_canonical_by_pubchem[f"CID{cid_int}"] = canonical_id
+                except (ValueError, TypeError):
+                    pass
+            # compound_id_aliases may contain "CID{pubchem_cid}" entries
+            # (the Compound builder populates this list with every alias
+            # it encountered — drugbank_id, chembl_id, pubchem_cid, etc.).
+            aliases = c.get("compound_id_aliases") or []
+            if isinstance(aliases, str):
+                # Defensive: handle the legacy string form.
+                aliases = [a.strip() for a in aliases.split("|") if a.strip()]
+            for alias in aliases:
+                if not isinstance(alias, str):
+                    continue
+                a = alias.strip().upper()
+                if a.startswith("CID") and a[3:].isdigit():
+                    # Only set if not already present — the direct
+                    # pubchem_cid field above is authoritative.
+                    compound_canonical_by_pubchem.setdefault(a, canonical_id)
+
+        sider_nodes, sider_edges = _load_sider_adverse_events(
+            sider_df=sider_df,
+            compound_canonical_by_pubchem=compound_canonical_by_pubchem,
+            run_id=run_id,
+            loaded_at=loaded_at,
+            schema_version=schema_version,
+        )
+        if sider_nodes:
+            # Dedup against any MedDRA_Term nodes that might already
+            # exist (defensive — the bridge doesn't currently emit
+            # MedDRA_Term nodes from any other path, but a future
+            # caller might). Dedup by node ``id``.
+            _existing_meddra_ids = {n.get("id") for n in staged.meddra_term_nodes}
+            for n in sider_nodes:
+                if n.get("id") not in _existing_meddra_ids:
+                    staged.meddra_term_nodes.append(n)
+                    _existing_meddra_ids.add(n.get("id"))
+        if sider_edges:
+            edge_key = ("Compound", "causes_adverse_event", "MedDRA_Term")
+            # v121 P2-047 REAL: extend (not replace) — the bridge may
+            # already have edges from a prior call (defensive).
+            staged.edges.setdefault(edge_key, []).extend(sider_edges)
+        logger.info(
+            "v121 P2-047 REAL: bridge now consumes SIDER adverse-events "
+            "CSV — emitted %d MedDRA_Term nodes and %d "
+            "Compound→causes_adverse_event→MedDRA_Term edges. The RL "
+            "safety ranker now has adverse-event signal in bridge-only "
+            "mode (previously zero — patient-safety bug).",
+            len(sider_nodes), len(sider_edges),
+        )
+
     return staged
 
 
@@ -7759,6 +8092,13 @@ def load_into_graph(
         # lineage checksum reflects the truly-complete Phase 1 output.
         "chembl_activities": "chembl_activities_clean.csv",
         "omim_susceptibility": "omim_gene_disease_susceptibility.csv",
+        # v121 P2-047 REAL ROOT FIX: include sider_adverse_events.csv in
+        # the lineage checksum so a swap between a 0-row CSV and a
+        # populated one produces a DIFFERENT checksum (lineage
+        # reproducibility). The bridge now CONSUMES this file to build
+        # Compound→causes_adverse_event→MedDRA_Term edges — it is no
+        # longer a dead read.
+        "sider_adverse_events": "sider_adverse_events.csv",
     }
     # v29 ROOT FIX (audit I-10): checksum excluded empty CSVs. Now
     # includes all CSVs for complete lineage. We use
@@ -7840,6 +8180,15 @@ def load_into_graph(
         # causing a KeyError in step1_load_phase1 (run_pipeline.py:1821)
         # and aborting the pipeline on the first run after the v43 fix.
         ("Pathway", staged.pathway_nodes),
+        # v121 P2-047 REAL ROOT FIX: load MedDRA_Term nodes derived from
+        # sider_adverse_events.csv. Without this, the
+        # (Compound, causes_adverse_event, MedDRA_Term) edges loaded
+        # below reference MedDRA_Term nodes that don't exist in the
+        # graph, causing referential integrity violations and silently
+        # dropping every SIDER safety edge (the RL ranker then sees
+        # ZERO adverse events for every drug — a patient-safety bug
+        # where dangerous drugs are ranked "green/safe").
+        ("MedDRA_Term", staged.meddra_term_nodes),
     ):
         if not nodes:
             report["by_label"][label] = 0

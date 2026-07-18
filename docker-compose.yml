@@ -83,6 +83,7 @@ volumes:
   airflow-logs:       # IN-064: Airflow task logs (audit evidence)
   grafana-data:
   prometheus-data:
+  alertmanager-data:   # v121 IN-096 REAL: alertmanager state (silences, notification log)
   backups:            # IN-005: pg_dump + neo4j-admin dump outputs
 
 # Default logging for every service (IN-041: prevent disk-fill)
@@ -132,6 +133,21 @@ secrets:
     file: ./secrets/mlflow_admin_password.txt
   grafana_admin_password:
     file: ./secrets/grafana_admin_password.txt
+  # v121 IN-096 REAL ROOT FIX: Alertmanager secrets (PagerDuty + Slack).
+  # Operators must create these files before enabling the observability
+  # profile:
+  #   echo "your-pd-routing-key" > ./secrets/pagerduty_routing_key.txt
+  #   echo "https://hooks.slack.com/services/..." > ./secrets/slack_webhook_url.txt
+  #   chmod 600 ./secrets/pagerduty_routing_key.txt ./secrets/slack_webhook_url.txt
+  # If these files are missing, alertmanager will start but alerts will
+  # fail to deliver (logged to alertmanager's stderr). The
+  # BackupRestoreFailed alert will still fire in Prometheus (visible in
+  # the Prometheus UI) — the missing secrets only affect delivery, not
+  # detection.
+  pagerduty_routing_key:
+    file: ./secrets/pagerduty_routing_key.txt
+  slack_webhook_url:
+    file: ./secrets/slack_webhook_url.txt
 
 services:
   # ===========================================================================
@@ -762,6 +778,59 @@ services:
     deploy:
       resources:
         limits: { memory: 512m, cpus: '0.5' }
+    logging: *default-logging
+    restart: unless-stopped
+    profiles: [full-stack, observability]
+
+  # ===========================================================================
+  # v121 IN-096 REAL ROOT FIX: Alertmanager + Pushgateway
+  # ===========================================================================
+  # The audit's IN-096 fix list explicitly required:
+  #   "Add alerting for backup failures (Alertmanager)."
+  # The v113 "fix" added scripts/restore_test.py but NO alertmanager
+  # service. This is the missing piece: alertmanager routes backup-
+  # failure alerts to PagerDuty (critical) and Slack (warnings).
+  #
+  # Pushgateway is added because scripts/restore_test.py is a batch job
+  # (exits after running) — its metrics would be lost between Prometheus
+  # scrape intervals without a push-based buffer.
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/config.yml:ro
+      - alertmanager-data:/alertmanager
+    networks: [app]
+    command:
+      - '--config.file=/etc/alertmanager/config.yml'
+      - '--storage.path=/alertmanager'
+    # IN-088 v117: mount alertmanager secrets (PagerDuty routing key,
+    # Slack webhook URL) as files — NOT env vars.
+    secrets:
+      - pagerduty_routing_key
+      - slack_webhook_url
+    deploy:
+      resources:
+        limits: { memory: 128m, cpus: '0.25' }
+        reservations: { memory: 32m }
+    logging: *default-logging
+    restart: unless-stopped
+    profiles: [full-stack, observability]
+
+  pushgateway:
+    image: prom/pushgateway:v1.10.0
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
+    networks: [app]
+    # pushgateway is a stateless metric buffer — no persistent volume
+    # needed. Metrics are lost on restart, which is acceptable for
+    # backup-health metrics (the next restore_test.py run re-pushes
+    # them within 7 days).
+    deploy:
+      resources:
+        limits: { memory: 64m, cpus: '0.25' }
+        reservations: { memory: 16m }
     logging: *default-logging
     restart: unless-stopped
     profiles: [full-stack, observability]

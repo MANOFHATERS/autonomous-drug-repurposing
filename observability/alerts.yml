@@ -1,0 +1,106 @@
+# v121 IN-096 REAL ROOT FIX: Prometheus alert rules for backup health.
+#
+# The audit's IN-096 fix list explicitly required:
+#   "Add alerting for backup failures (Alertmanager)."
+#
+# These rules fire on metrics emitted by scripts/restore_test.py (which
+# runs as a weekly GitHub Actions cron job AND as a sidecar container
+# that pushes metrics to pushgateway on each backup cycle).
+#
+# The restore_test.py script emits these metrics via pushgateway:
+#   drugos_backup_restore_test_total{result="pass|fail"}  # counter
+#   drugos_backup_restore_test_timestamp_seconds          # gauge, last run
+#   drugos_backup_age_hours                               # gauge, age of newest backup
+#   drugos_backup_row_count{table="drugs|proteins|..."}   # gauge, per-table rows
+#
+# Three alerts:
+#   1. BackupRestoreFailed — last restore test failed (CRITICAL, 24/7 page)
+#   2. BackupAgeExceededRPO — newest backup older than RPO (CRITICAL, 24/7 page)
+#   3. BackupJobNotRunning — no backup observed in 25h (WARNING, slack)
+
+groups:
+  - name: backup-health
+    interval: 30s
+    rules:
+      # ──────────────────────────────────────────────────────────────────
+      # CRITICAL: backup restore test FAILED.
+      # The weekly restore test (scripts/restore_test.py) failed. This
+      # means a real disaster restore would also fail. Page immediately.
+      # ──────────────────────────────────────────────────────────────────
+      - alert: BackupRestoreFailed
+        expr: |
+          increase(drugos_backup_restore_test_total{result="fail"}[2h]) > 0
+          or
+          (drugos_backup_restore_test_timestamp_seconds > 0
+           and
+           drugos_backup_restore_test_total{result="fail"}
+             > drugos_backup_restore_test_total{result="pass"})
+        for: 0m
+        labels:
+          severity: critical
+          patient_safety: 'true'
+          component: backup
+        annotations:
+          summary: 'Backup restore test FAILED — patient-safety risk'
+          description: >-
+            The weekly backup restore test (scripts/restore_test.py) failed.
+            A real disaster restore would also fail. Investigate the
+            restore-test CI run immediately — the backup may be corrupted
+            (Postgres WAL gap, Neo4j store file corruption), or the backup
+            script may have stopped producing valid backups.
+          runbook_url: 'https://github.com/MANOFHATERS/autonomous-drug-repurposing/blob/main/docs/runbooks/backup-restore-failed.md'
+
+      # ──────────────────────────────────────────────────────────────────
+      # CRITICAL: backup age exceeds RPO.
+      # The newest backup file is older than the RPO window (default 24h).
+      # Data loss exceeds the documented limit — a disaster now would
+      # lose more than 24h of pipeline runs, validated hypotheses, and
+      # KG mutations. Page immediately.
+      # ──────────────────────────────────────────────────────────────────
+      - alert: BackupAgeExceededRPO
+        # RPO is configurable via the drugos_rpo_hours metric (pushed by
+        # restore_test.py from the DRUGOS_RPO_HOURS env var, default 24).
+        # If the metric is missing, fall back to a hardcoded 24h.
+        expr: |
+          drugos_backup_age_hours
+            > on() (drugos_rpo_hours or vector(24))
+        for: 5m
+        labels:
+          severity: critical
+          patient_safety: 'true'
+          component: backup
+        annotations:
+          summary: 'Backup age {{ $value | humanize }}h exceeds RPO'
+          description: >-
+            The newest backup is {{ $value | humanize }}h old, exceeding
+            the RPO (Recovery Point Objective). Data loss in a disaster
+            now exceeds the documented limit. Check the backup cron job
+            (docker-compose exec backup bash) and the backup script
+            (observability/backup.sh).
+
+      # ──────────────────────────────────────────────────────────────────
+      # WARNING: backup job not running.
+      # No backup has been observed in 25 hours (1 hour past the default
+      # 24h RPO). The backup cron may be misconfigured or the backup
+      # container may have crashed. Send a Slack warning (do NOT page).
+      # ──────────────────────────────────────────────────────────────────
+      - alert: BackupJobNotRunning
+        expr: |
+          (time() - drugos_backup_restore_test_timestamp_seconds) > 90000
+          or
+          drugos_backup_restore_test_timestamp_seconds == 0
+        for: 10m
+        labels:
+          severity: warning
+          component: backup
+        annotations:
+          summary: 'Backup job has not run in 25+ hours'
+          description: >-
+            No backup restore-test has been observed in the last 25 hours.
+            The backup cron may be misconfigured, the backup container
+            may have crashed, or pushgateway may have flushed the metric
+            (pushgateway does NOT persist metrics across restarts).
+            Verify the backup cron is running:
+              docker-compose logs backup --tail 50
+            And verify pushgateway is healthy:
+              curl http://pushgateway:9091/-/healthy
