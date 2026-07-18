@@ -22,7 +22,7 @@ rapidfuzz>=3.6.1
 # required for ANY environment (dev, CI, production) -- the adapter
 # now raises immediately if RDKit is not importable, regardless of
 # DRUGOS_ENVIRONMENT. No silent degradation.
-rdkit>=2023.9.1
+rdkit>=2026.3.4
 # P3-025 ROOT FIX (v113 forensic): scipy.sparse is required for the
 # pathway_score computation in gt_rl_bridge.py. The previous code
 # allocated two dense (num_pathways, num_diseases) and (num_drugs,
