@@ -2,11 +2,24 @@
 # Scrapes every FastAPI service's /metrics endpoint (prometheus_client
 # make_asgi_app) + node-exporter (host metrics) + cadvisor (container
 # metrics) + pushgateway (batch jobs).
+# v121 IN-096 REAL ROOT FIX: load alert rules from alerts.yml + scrape
+# pushgateway (where scripts/restore_test.py pushes backup-health metrics).
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
   external_labels:
     monitor: 'drugos-platform'
+
+# v121 IN-096 REAL ROOT FIX: alert rules for backup health.
+# Alerts fire on metrics emitted by scripts/restore_test.py (pushed to
+# pushgateway). Routing + receivers are in alertmanager.yml.
+rule_files:
+  - alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
 
 scrape_configs:
   # ─── Host + container metrics ─────────────────────────────────────────
@@ -17,6 +30,17 @@ scrape_configs:
   - job_name: 'cadvisor'
     static_configs:
       - targets: ['cadvisor:8080']
+
+  # v121 IN-096 REAL ROOT FIX: pushgateway for batch-job metrics.
+  # scripts/restore_test.py pushes backup-health metrics here on every
+  # run. Pushgateway is a push-based metric buffer — Prometheus scrapes
+  # it like any other target. Without pushgateway, batch jobs that exit
+  # before the next scrape interval lose their metrics.
+  - job_name: 'pushgateway'
+    honor_labels: true
+    static_configs:
+      - targets: ['pushgateway:9091']
+    metrics_path: /metrics
 
   # ─── Phase 1 services ─────────────────────────────────────────────────
   - job_name: 'phase1-service'

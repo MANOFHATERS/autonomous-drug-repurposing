@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backup restore-test script (v113 IN-096 ROOT FIX).
+"""Backup restore-test script (v113 IN-096 ROOT FIX, v121 IN-096 REAL ROOT FIX).
 
 The audit found that even if backups were configured (IN-005), there
 was NO process to VERIFY that backups are restorable. The industry
@@ -31,6 +31,21 @@ This script implements the restore test:
      RTO (Recovery Time Objective -- e.g., 4 hours) from env vars.
    - Verifies the backup's timestamp is within the RPO window.
 
+4. **v121 IN-096 REAL ROOT FIX: Pushgateway metrics emission.**
+   - Pushes backup-health metrics to Prometheus pushgateway so the
+     alert rules in ``observability/alerts.yml`` can fire.
+   - Metrics:
+       * ``drugos_backup_restore_test_total{result="pass|fail"}`` (counter)
+       * ``drugos_backup_restore_test_timestamp_seconds`` (gauge, last run)
+       * ``drugos_backup_age_hours`` (gauge, age of newest backup)
+       * ``drugos_rpo_hours`` (gauge, RPO window for alert thresholds)
+   - Without this, the BackupRestoreFailed / BackupAgeExceededRPO /
+     BackupJobNotRunning alerts have NO data to fire on — the
+     Prometheus rules would be dead code. The v113 "fix" added the
+     script but not the metric emission, so the alerts (added in
+     v121) would never fire. This is the "comments are fakes" pattern
+     the user warned about.
+
 Exit codes:
     0: all restore tests passed
     1: one or more restore tests failed (see logs for details)
@@ -44,6 +59,9 @@ Environment variables:
     DRUGOS_BACKUP_DIR: directory containing backup files (default: /var/backups/drugos)
     DRUGOS_RPO_HOURS: Recovery Point Objective in hours (default: 24)
     DRUGOS_RTO_HOURS: Recovery Time Objective in hours (default: 4)
+    DRUGOS_PUSHGATEWAY_URL: pushgateway URL for metrics (default: http://pushgateway:9091)
+                             If empty or unreachable, metrics are NOT pushed
+                             (the restore test still runs and exits correctly).
 
 Usage:
     python3 scripts/restore_test.py
@@ -51,23 +69,18 @@ Usage:
     python3 scripts/restore_test.py --skip-neo4j      # skip Neo4j test
 
 CI integration (weekly cron):
-    Add to .github/workflows/ci.yml:
-        jobs:
-          restore-test:
-            runs-on: ubuntu-latest
-            schedule:
-              - cron: '0 6 * * 1'  # every Monday 06:00 UTC
-            steps:
-              - uses: actions/checkout@v4
-              - run: python3 scripts/restore_test.py
+    See the ``restore-test`` job in .github/workflows/ci.yml (v121).
+    The job runs every Monday 06:00 UTC and on manual dispatch.
 """
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -76,6 +89,73 @@ def _log(level: str, msg: str) -> None:
     """Log a message with timestamp and level."""
     ts = datetime.now(timezone.utc).isoformat()
     print(f"{ts} | {level:<8} | {msg}", file=sys.stderr if level == "ERROR" else sys.stdout)
+
+
+# v121 IN-096 REAL ROOT FIX: Pushgateway metrics emission.
+def _push_metrics(
+    *,
+    result: str,
+    backup_age_hours: float,
+    rpo_hours: int,
+    row_counts: dict | None = None,
+) -> None:
+    """Push backup-health metrics to Prometheus pushgateway.
+
+    The alert rules in ``observability/alerts.yml`` fire on these
+    metrics. Without this push, the alerts would have NO data and
+    could never fire — making the v121 alerting fix dead code.
+
+    If ``DRUGOS_PUSHGATEWAY_URL`` is empty or the pushgateway is
+    unreachable, this function is a NO-OP (logs a WARN). The restore
+    test itself still runs and exits with the correct code — metrics
+    are best-effort, not required for correctness.
+    """
+    pushgateway_url = os.environ.get("DRUGOS_PUSHGATEWAY_URL", "http://pushgateway:9091")
+    if not pushgateway_url:
+        _log("WARN", "DRUGOS_PUSHGATEWAY_URL is empty — skipping metric push")
+        return
+
+    now_seconds = int(time.time())
+    # Build the pushgateway payload. Pushgateway uses the text exposition
+    # format — same as Prometheus scrapes. We use the simplest form
+    # (no histograms, no summaries — just counters and gauges).
+    lines = [
+        f"# TYPE drugos_backup_restore_test_total counter",
+        f'drugos_backup_restore_test_total{{result="{result}"}} 1',
+        f"# TYPE drugos_backup_restore_test_timestamp_seconds gauge",
+        f"drugos_backup_restore_test_timestamp_seconds {now_seconds}",
+        f"# TYPE drugos_backup_age_hours gauge",
+        f"drugos_backup_age_hours {backup_age_hours:.4f}",
+        f"# TYPE drugos_rpo_hours gauge",
+        f"drugos_rpo_hours {rpo_hours}",
+    ]
+    if row_counts:
+        lines.append("# TYPE drugos_backup_row_count gauge")
+        for table, count in row_counts.items():
+            lines.append(f'drugos_backup_row_count{{table="{table}"}} {count}')
+    payload = "\n".join(lines) + "\n"
+    payload_bytes = payload.encode("utf-8")
+
+    # POST to /metrics/job/restore_test (the "job" label helps group
+    # these metrics in pushgateway's UI).
+    url = f"{pushgateway_url.rstrip('/')}/metrics/job/restore_test"
+    req = urllib.request.Request(
+        url, data=payload_bytes, method="POST",
+        headers={"Content-Type": "text/plain; version=0.0.4; charset=utf-8"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status >= 400:
+                _log("WARN", f"pushgateway returned HTTP {resp.status} — metrics NOT pushed")
+            else:
+                _log("INFO", f"pushed backup-health metrics to {url} (result={result})")
+    except (urllib.error.URLError, OSError) as e:
+        _log("WARN", f"could not push metrics to pushgateway ({e}) — metrics NOT pushed")
+        # Don't fail the restore test — metrics are best-effort. The
+        # restore-test result is still logged to stdout/stderr and the
+        # exit code is still correct. The Prometheus UI will show no
+        # data for the backup-health job, which is itself a signal
+        # (BackupJobNotRunning alert fires).
 
 
 def _check_backup_age(backup_path: Path, rpo_hours: int) -> bool:
@@ -100,23 +180,31 @@ def test_postgres_restore(
     backup_dir: Path,
     staging_uri: str,
     rpo_hours: int,
-) -> bool:
-    """Restore the latest Postgres backup to staging and verify schema + row counts."""
+) -> tuple[bool, dict]:
+    """Restore the latest Postgres backup to staging and verify schema + row counts.
+
+    Returns
+    -------
+    (passed, row_counts) : tuple of (bool, dict)
+        ``passed`` is True if the restore test passed.
+        ``row_counts`` maps table name → row count (for metric emission).
+    """
     _log("INFO", "=== Postgres restore test ===")
+    row_counts: dict = {}
     if not staging_uri:
         _log("WARN", "DRUGOS_RESTORE_TEST_POSTGRES_URI not set -- skipping Postgres test")
-        return True  # not a failure if PG is not used
+        return True, row_counts  # not a failure if PG is not used
 
     # Find the latest backup file
     pg_backups = sorted(backup_dir.glob("postgres_*.dump"), reverse=True)
     if not pg_backups:
         _log("ERROR", f"no Postgres backup files found in {backup_dir}")
-        return False
+        return False, row_counts
     latest = pg_backups[0]
     _log("INFO", f"latest Postgres backup: {latest}")
 
     if not _check_backup_age(latest, rpo_hours):
-        return False
+        return False, row_counts
 
     # Restore to staging
     _log("INFO", f"restoring {latest} to {staging_uri}")
@@ -128,13 +216,13 @@ def test_postgres_restore(
         )
         if result.returncode != 0:
             _log("ERROR", f"pg_restore failed: {result.stderr}")
-            return False
+            return False, row_counts
     except subprocess.TimeoutExpired:
         _log("ERROR", "pg_restore timed out after 600s")
-        return False
+        return False, row_counts
     except FileNotFoundError:
         _log("WARN", "pg_restore not installed -- skipping restore (CI environment may not have it)")
-        return True  # don't fail CI if pg_restore is missing
+        return True, row_counts  # don't fail CI if pg_restore is missing
 
     # Verify schema
     _log("INFO", "verifying schema (pg_dump --schema-only)")
@@ -145,18 +233,18 @@ def test_postgres_restore(
         )
         if result.returncode != 0:
             _log("ERROR", f"pg_dump --schema-only failed: {result.stderr}")
-            return False
+            return False, row_counts
         schema = result.stdout
         # Check for critical tables
         critical_tables = ["drugs", "proteins", "diseases", "pipeline_runs"]
         for table in critical_tables:
             if f"CREATE TABLE {table}" not in schema and f"CREATE TABLE public.{table}" not in schema:
                 _log("ERROR", f"critical table '{table}' missing from restored schema")
-                return False
+                return False, row_counts
         _log("INFO", f"schema verified: {len(critical_tables)} critical tables present")
     except subprocess.TimeoutExpired:
         _log("ERROR", "pg_dump --schema-only timed out after 120s")
-        return False
+        return False, row_counts
 
     # Verify row counts (use psql)
     _log("INFO", "verifying row counts on critical tables")
@@ -168,18 +256,19 @@ def test_postgres_restore(
             )
             if result.returncode != 0:
                 _log("ERROR", f"row count query failed for {table}: {result.stderr}")
-                return False
+                return False, row_counts
             count = int(result.stdout.strip() or "0")
+            row_counts[table] = count
             if count == 0:
                 _log("ERROR", f"table {table} has 0 rows after restore -- backup may be empty or corrupt")
-                return False
+                return False, row_counts
             _log("INFO", f"table {table}: {count} rows")
     except subprocess.TimeoutExpired:
         _log("ERROR", "psql row count query timed out after 60s")
-        return False
+        return False, row_counts
 
     _log("INFO", "Postgres restore test PASSED")
-    return True
+    return True, row_counts
 
 
 def test_neo4j_restore(
@@ -271,7 +360,7 @@ def test_neo4j_restore(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Backup restore-test (v113 IN-096)")
+    parser = argparse.ArgumentParser(description="Backup restore-test (v121 IN-096 REAL)")
     parser.add_argument("--skip-postgres", action="store_true", help="skip Postgres test")
     parser.add_argument("--skip-neo4j", action="store_true", help="skip Neo4j test")
     args = parser.parse_args()
@@ -290,11 +379,17 @@ def main() -> int:
 
     if not backup_dir.exists():
         _log("ERROR", f"backup directory does not exist: {backup_dir}")
+        # v121 IN-096 REAL: push a FAIL metric so the BackupRestoreFailed
+        # alert fires. Without this, a missing backup dir would be
+        # invisible to monitoring.
+        _push_metrics(result="fail", backup_age_hours=float(rpo_hours + 1), rpo_hours=rpo_hours)
         return 2
 
     results: dict[str, bool] = {}
+    pg_row_counts: dict = {}
     if not args.skip_postgres:
-        results["postgres"] = test_postgres_restore(backup_dir, pg_uri, rpo_hours)
+        pg_ok, pg_row_counts = test_postgres_restore(backup_dir, pg_uri, rpo_hours)
+        results["postgres"] = pg_ok
     if not args.skip_neo4j:
         results["neo4j"] = test_neo4j_restore(
             backup_dir, neo4j_uri, neo4j_user, neo4j_password, rpo_hours
@@ -304,7 +399,30 @@ def main() -> int:
     for name, ok in results.items():
         _log("INFO" if ok else "ERROR", f"  {name}: {'PASS' if ok else 'FAIL'}")
 
-    return 0 if all(results.values()) else 1
+    # v121 IN-096 REAL ROOT FIX: push metrics to pushgateway so the
+    # alert rules in observability/alerts.yml can fire. Without this,
+    # the alerts are dead code — they have no data to evaluate.
+    overall_pass = all(results.values()) if results else True
+    # Compute backup age for the metric. Use the newest backup file's
+    # mtime across both PG and Neo4j (whichever is newer).
+    newest_mtime = 0.0
+    for pattern in ("postgres_*.dump", "neo4j_*.dump"):
+        for p in backup_dir.glob(pattern):
+            if p.exists():
+                newest_mtime = max(newest_mtime, p.stat().st_mtime)
+    if newest_mtime > 0:
+        backup_age_h = (datetime.now(timezone.utc).timestamp() - newest_mtime) / 3600.0
+    else:
+        # No backup files found — age exceeds RPO so the alert fires.
+        backup_age_h = float(rpo_hours + 1)
+    _push_metrics(
+        result="pass" if overall_pass else "fail",
+        backup_age_hours=backup_age_h,
+        rpo_hours=rpo_hours,
+        row_counts=pg_row_counts,
+    )
+
+    return 0 if overall_pass else 1
 
 
 if __name__ == "__main__":
