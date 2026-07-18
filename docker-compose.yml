@@ -362,8 +362,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    command: >
-      bash -lc "cd /opt/phase1 && python -c 'from service import app; import uvicorn; uvicorn.run(app, host=\"0.0.0.0\", port=8000)'"
+    command: ["python", "/opt/phase1/service_entrypoint.py"]
     deploy:
       resources:
         limits: { memory: 1g, cpus: '1' }
@@ -836,7 +835,7 @@ services:
     profiles: [full-stack, observability]
 
   # ===========================================================================
-  # Backup sidecar (IN-005) — daily pg_dump + neo4j-admin dump
+  # Backup sidecar (IN-005) — daily pg_dump + Neo4j APOC export
   # ===========================================================================
   pg-backup:
     image: postgres:16-alpine
@@ -849,16 +848,28 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_DB: ${POSTGRES_DB:-drugos}
       NEO4J_HOST: neo4j
+      # v122 BUG-3 fix: read Neo4j password from /run/secrets/neo4j_password
+      # (file-based secret) — same pattern as POSTGRES_PASSWORD_FILE. The
+      # backup.sh script reads NEO4J_PASSWORD_FILE first, falls back to
+      # NEO4J_PASSWORD env var. Both are set here for redundancy.
+      NEO4J_PASSWORD_FILE: /run/secrets/neo4j_password
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:?ERROR — NEO4J_PASSWORD must be set}
+      # Neo4j HTTP port (for APOC export via the HTTP transactional API).
+      # The bolt port (7687) is for cypher-shell which is NOT in this image.
+      NEO4J_HTTP_PORT: "7474"
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
     volumes:
       - backups:/backups
       - ./observability/backup.sh:/backup.sh:ro
-    # IN-088 v117: mount postgres_password secret.
+    # IN-088 v117 + v122: mount both postgres + neo4j secrets so the
+    # backup script can read either via the _FILE pattern.
     secrets:
       - postgres_password
+      - neo4j_password
     networks: [data]
     depends_on:
       postgres: { condition: service_healthy }
+      neo4j: { condition: service_healthy }
     entrypoint: ["/bin/sh", "/backup.sh"]
     deploy:
       resources:

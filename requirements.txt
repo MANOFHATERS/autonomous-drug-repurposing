@@ -100,3 +100,18 @@ biopython>=1.83,<2.0
 # ─── RT-014 ROOT FIX: HTTP API layer (FastAPI) ─────────────────────────────
 fastapi>=0.110,<1.0
 uvicorn[standard]>=0.27,<1.0
+
+# ─── v122 FORENSIC ROOT FIX (BUG-4/BUG-5/BUG-6): Observability deps ────────
+# IN-040: prometheus_client is used by shared/observability/__init__.py to
+# mount /metrics on every FastAPI service. Without this, Prometheus scrapes
+# return 404 (the v116 "ROOT FIX" claim was a lie — infrastructure was
+# added but application code never exposed /metrics).
+prometheus-client>=0.20,<1.0
+# IN-042: OpenTelemetry instrumentation for FastAPI. shared/observability/
+# __init__.py calls FastAPIInstrumentor.instrument_app(app) when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set. The otel-collector + jaeger services
+# in docker-compose.yml were dead infrastructure without this dep — no
+# service emitted traces, so the collector received nothing.
+opentelemetry-instrumentation-fastapi>=0.45b0,<1.0
+opentelemetry-exporter-otlp>=1.25,<2.0
+opentelemetry-sdk>=1.25,<2.0

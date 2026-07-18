@@ -41,7 +41,22 @@ if str(_REPO_ROOT) not in sys.path:
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+# v122 FORENSIC ROOT FIX (BUG-4/BUG-5/BUG-6): wire up shared observability
+# (metrics + structured JSON logging + OpenTelemetry). The v116
+# docker-compose.yml added Prometheus + OTel + Jaeger services but the
+# application code never exposed /metrics, never used structured logging,
+# and never instrumented FastAPI. This single call fixes IN-040, IN-041,
+# IN-042 at the application level.
+try:
+    from shared.observability import configure_app as _configure_observability
+except Exception:  # Defensive fallback — service still runs without observability.
+    _configure_observability = None
+
 logger = logging.getLogger("phase1.service")
+# v122 BUG-5: structured JSON logging is now configured by
+# shared.observability.configure_app() — keep this basicConfig as a fallback
+# for when the shared module fails to import (rare, but the service must
+# still start).
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
 
 app = FastAPI(
@@ -65,6 +80,10 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+# v122 BUG-4/BUG-5/BUG-6: mount /metrics + configure JSON logging + OTel.
+if _configure_observability is not None:
+    _configure_observability(app, service_name="phase1-dataset")
 
 
 def _count_csv_rows(path: Path) -> int:

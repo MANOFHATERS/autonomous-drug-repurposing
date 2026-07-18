@@ -47,6 +47,13 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# v122 FORENSIC ROOT FIX (BUG-4/BUG-5/BUG-6): wire up shared observability
+# (metrics + structured JSON logging + OpenTelemetry).
+try:
+    from shared.observability import configure_app as _configure_observability
+except Exception:
+    _configure_observability = None
+
 # SH-035 ROOT FIX: import URL constants from the canonical
 # shared.contracts.urls module. The previous code hardcoded the path
 # strings ("/validate", "/rank", "/health") which silently drifted
@@ -125,6 +132,11 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],  # INT-030: add OPTIONS for CORS preflight
     allow_headers=["*"],
 )
+
+# v122 BUG-4/BUG-5/BUG-6: mount /metrics + configure JSON logging + OTel.
+# Must come AFTER all middleware is added.
+if _configure_observability is not None:
+    _configure_observability(app, service_name="phase4-rl")
 
 
 class RankRequest(BaseModel):

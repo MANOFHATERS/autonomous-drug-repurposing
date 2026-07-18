@@ -1,6 +1,25 @@
 # =============================================================================
 # Dockerfile.python-ml — Canonical Python ML BASE image (CI / dev only)
 # =============================================================================
+# v122 FORENSIC ROOT FIX (Teammate 15 — hostile-auditor, follow-up to v118):
+#   The v118 fix on Dockerfile.ml explicitly called out that
+#   ``python:3.14-slim`` + ``torch==2.2.0+cpu`` is BROKEN — Python 3.14
+#   was released 2025-10-15 but torch 2.2.0 (released 2024-01-15) only
+#   ships cp310/cp311/cp312 wheels. ``pip install torch==2.2.0+cpu``
+#   inside a Python 3.14 container fails with
+#   ``ERROR: No matching distribution found for torch==2.2.0``.
+#
+#   The v118 fix changed Dockerfile.ml FROM to ``python:3.12-slim``, but
+#   the SAME fix was NEVER applied to this file — Dockerfile.python-ml
+#   kept ``FROM python:3.14-slim`` while the v116 comment at the top of
+#   this file claimed "ROOT FIX". This is exactly the "comments are fakes,
+#   code is broken" pattern the user warned about. The image CANNOT BUILD.
+#
+#   ROOT FIX: change FROM to ``python:3.12-slim`` to match Dockerfile.ml
+#   (which is the canonical ML image and was already fixed in v118). All
+#   pinned deps (torch==2.2.0+cpu, pandas==2.1.4, rdkit==2024.3.5, etc.)
+#   have cp312 wheels — verified via PyPI JSON metadata.
+#
 # v116 ROOT FIX (Teammate 15, issues IN-013/IN-014):
 #   IN-013 (MEDIUM): this image is NO LONGER referenced by phase2/drugos_graph/
 #       Dockerfile (which is now self-contained — FROM python:3.11-slim).
@@ -21,7 +40,7 @@
 # Build:
 #   docker build -f Dockerfile.python-ml -t drugos-python-ml:2.0.0 .
 # =============================================================================
-FROM python:3.14-slim
+FROM python:3.12-slim
 
 # IN-012: pin pip for reproducibility.
 RUN pip install --no-cache-dir --upgrade \
