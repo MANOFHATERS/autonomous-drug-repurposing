@@ -85,7 +85,7 @@ apache-airflow>=2.10.0,<3.0.0
 rapidfuzz>=3.6.1
 
 # Utils
-python-dotenv>=1.0.0
+python-dotenv>=1.2.2
 
 # P1-003 v114 FORENSIC ROOT FIX: fastapi + uvicorn were missing from
 # phase1/requirements.txt. phase1/service.py (the Phase 1 Dataset HTTP
