@@ -69,38 +69,72 @@ class TestNodeTypeMappingConsistency(unittest.TestCase):
                 self.skipTest(f"Could not import phase2_adapter: {e}")
 
     def test_mapping_has_5_canonical_node_types(self):
-        """The mapping must have exactly 5 canonical Phase 3 node types."""
+        """The mapping must have at least 5 canonical Phase 3 node types.
+
+        v118 ROOT FIX (Teammate 4): the original `len == 5` assertion was
+        outdated — the contract now has 8 entries:
+          - 6 canonical mappings (Compound, Drug, Protein, Pathway, Disease,
+            ClinicalOutcome) — Drug was added by P2-006 root fix to prevent
+            silent dropping of literature-validated Drug nodes (the data
+            flywheel's proprietary moat per DOCX section 10).
+          - 2 None intermediates (Gene, MedDRA_Term) — explicitly mapped to
+            None to document they are dropped on purpose, not forgotten.
+        Lock the minimum canonical count, not a stale literal.
+        """
         from drugos_graph.schema_mappings import PHASE2_TO_PHASE3_NODE
-        self.assertEqual(len(PHASE2_TO_PHASE3_NODE), 5,
-                         f"Expected 5 canonical node types, got "
-                         f"{len(PHASE2_TO_PHASE3_NODE)}: "
-                         f"{list(PHASE2_TO_PHASE3_NODE.keys())}")
+        non_none = {k: v for k, v in PHASE2_TO_PHASE3_NODE.items() if v is not None}
+        self.assertGreaterEqual(
+            len(non_none), 5,
+            f"Expected at least 5 canonical node types, got "
+            f"{len(non_none)}: {list(non_none.keys())}"
+        )
 
     def test_mapping_includes_required_types(self):
-        """The mapping must include Compound, Protein, Pathway, Disease, ClinicalOutcome."""
+        """The mapping must include Compound, Protein, Pathway, Disease, ClinicalOutcome.
+
+        v118 ROOT FIX (Teammate 4): the original assertion expected the
+        mapping keys to be EXACTLY {Compound, Protein, Pathway, Disease,
+        ClinicalOutcome}. But the contract has grown to include Drug (P2-006
+        root fix — same Phase 3 type as Compound) and the None intermediates
+        Gene + MedDRA_Term. Lock the REQUIRED types as a subset, not an
+        exact set, so legitimate additions don't break the test.
+        """
         from drugos_graph.schema_mappings import PHASE2_TO_PHASE3_NODE
         required_phase2 = {
             "Compound", "Protein", "Pathway", "Disease", "ClinicalOutcome"
         }
-        self.assertEqual(
-            set(PHASE2_TO_PHASE3_NODE.keys()), required_phase2,
-            f"Mapping keys must be {required_phase2}, got "
-            f"{set(PHASE2_TO_PHASE3_NODE.keys())}"
+        actual_keys = set(PHASE2_TO_PHASE3_NODE.keys())
+        missing = required_phase2 - actual_keys
+        self.assertFalse(
+            missing,
+            f"Mapping is missing required types: {missing}. "
+            f"Got keys: {actual_keys}"
         )
 
     def test_mapping_excludes_intermediate_types(self):
-        """Gene and MedDRA_Term must NOT be in the Phase 3 mapping.
+        """Gene and MedDRA_Term must map to None (not be absent, not map to a real type).
 
-        They are Phase 2 intermediates used for derivation only and
-        intentionally dropped AFTER their derivation work is complete.
+        v118 ROOT FIX (Teammate 4): the original assertion `assertNotIn`
+        was wrong — the SH-011 root fix EXPLICITLY includes Gene and
+        MedDRA_Term in the mapping with value None, to document that they
+        are intermediates dropped on purpose (not forgotten). The contract
+        test (shared/tests/test_contract_consistency.py:200-206) verifies
+        this exact behavior. This test must match the contract.
         """
         from drugos_graph.schema_mappings import PHASE2_TO_PHASE3_NODE
-        self.assertNotIn("Gene", PHASE2_TO_PHASE3_NODE,
-                         "Gene is a Phase 2 intermediate — must NOT be in "
-                         "the Phase 3 mapping (it's dropped after derivation).")
-        self.assertNotIn("MedDRA_Term", PHASE2_TO_PHASE3_NODE,
-                         "MedDRA_Term is a Phase 2 intermediate — must NOT "
-                         "be in the Phase 3 mapping.")
+        self.assertIn("Gene", PHASE2_TO_PHASE3_NODE,
+                      "Gene must be in the mapping with value None "
+                      "(SH-011 root fix — documents it's dropped on purpose)")
+        self.assertIsNone(
+            PHASE2_TO_PHASE3_NODE["Gene"],
+            "Gene must map to None (intermediate dropped in Phase 3 projection)"
+        )
+        self.assertIn("MedDRA_Term", PHASE2_TO_PHASE3_NODE,
+                      "MedDRA_Term must be in the mapping with value None")
+        self.assertIsNone(
+            PHASE2_TO_PHASE3_NODE["MedDRA_Term"],
+            "MedDRA_Term must map to None (folded into ClinicalOutcome)"
+        )
 
     def test_no_local_mapping_definitions(self):
         """Neither pyg_builder nor phase2_adapter should define a local mapping dict.
