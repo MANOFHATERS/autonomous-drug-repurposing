@@ -56,7 +56,7 @@ pyyaml>=6.0.3,<7.0
 # immediately. The Dockerfile.ml pins fastapi==0.110.3 and
 # uvicorn[standard]==0.29.0; we use the root requirements.txt's looser
 # bounds for dev flexibility.
-fastapi>=0.110,<1.0
+fastapi>=0.139.2,<1.0
 uvicorn[standard]>=0.27,<1.0
 
 # ─── Indirect but explicitly pinned for reproducibility ────────────────────
