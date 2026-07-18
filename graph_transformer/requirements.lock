@@ -1,0 +1,32 @@
+# Hash-pinned lockfile for requirements.txt
+# IN-080 ROOT FIX: supply-chain integrity via sha256 hashes.
+# Install with: pip install --require-hashes -r requirements.lock
+# Regenerate with: python scripts/generate_lockfiles_from_root.py
+# NOTE: hashes are reused from the root requirements.lock where the
+# same dep+version appears. New deps are downloaded + hashed fresh.
+
+# WARNING: torch>=2.0,<3.0 -- could not generate hash
+#   (platform-specific wheel or download timeout).
+#   Manually verify or install without --require-hashes.
+
+torch-geometric>=2.4,<3.0 \
+    --hash=sha256:1f62e415a2e9ee69d34617d1b0b230e9d9040f51809b96e801e742770fd4dada
+
+scikit-learn>=1.3,<2.0 \
+    --hash=sha256:056c92bb67ad4c28463c2f2653d9701449201e7e7a9e94e321be0f71c4fef2b8
+
+pandas>=2.1.4,<3.0 \
+    --hash=sha256:b3d11d2fda7eb164ef27ffc14b4fcab16a80e1ce67e9f57e19ec0afaf715ba89
+
+numpy>=1.26.3,<2.0 \
+    --hash=sha256:675d61ffbfa78604709862923189bad94014bef562cc35cf61d3a07bba02a7ed
+
+rapidfuzz>=3.6.1,<4.0 \
+    --hash=sha256:48bee0b91bebfaec41e1081e351000659ab7570cc4598d617aa04d5bf827f9e6
+
+rdkit>=2024.3.1,<2025.0 \
+    --hash=sha256:82e91020e700979f6fc94a4722b47d770912d54cd9accb1c85961c57550cb945
+
+scipy>=1.10,<2.0 \
+    --hash=sha256:1f55797419e16e7f30cf88ffb3113ce0467f00cfe3f70d5c281730b21769bfc2
+

@@ -106,7 +106,15 @@ uvicorn[standard]>=0.27,<1.0
 # mount /metrics on every FastAPI service. Without this, Prometheus scrapes
 # return 404 (the v116 "ROOT FIX" claim was a lie — infrastructure was
 # added but application code never exposed /metrics).
-prometheus-client>=0.20,<1.0
+#
+# v125 FORENSIC ROOT FIX (Teammate Cosmic): REMOVED the DUPLICATE
+# `prometheus-client>=0.20,<1.0` declaration that was previously at line
+# 109 (under the "v122 FORENSIC ROOT FIX (BUG-4/BUG-5/BUG-6)" comment
+# block). The SAME package was already declared at line 81 (under "Phase
+# 2"). pip silently picks one of the two declarations (the last one wins
+# in pip's resolver), making the other dead weight that confused
+# maintainers and the verify_requirements_security.py CI check (which
+# flags duplicates as errors). The package is now declared ONCE at line 81.
 # IN-042: OpenTelemetry instrumentation for FastAPI. shared/observability/
 # __init__.py calls FastAPIInstrumentor.instrument_app(app) when
 # OTEL_EXPORTER_OTLP_ENDPOINT is set. The otel-collector + jaeger services

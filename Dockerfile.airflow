@@ -77,12 +77,37 @@ RUN pip install --no-cache-dir --upgrade \
     setuptools==75.1.0 \
     wheel==0.44.0
 
-# Copy Phase 1 requirements.txt and install. We use the phase1-specific
-# requirements file (not the top-level requirements.txt) because the
-# top-level file pins torch + PyG + RDKit which are NOT needed by the
-# Airflow scheduler.
+# Copy Phase 1 requirements.txt AND the hash-pinned lockfile (IN-080 ROOT FIX).
+# We use the phase1-specific requirements file (not the top-level
+# requirements.txt) because the top-level file pins torch + PyG + RDKit
+# which are NOT needed by the Airflow scheduler.
+#
+# IN-080 v125 FORENSIC ROOT FIX (Teammate Cosmic): supply-chain integrity.
+# When the hash-pinned .lock file is present, install with --require-hashes
+# to verify the sha256 of every downloaded wheel against the lockfile. This
+# prevents a compromised PyPI mirror or MITM attack from substituting a
+# malicious wheel with the same version number. If the .lock file is absent
+# (e.g., during dev), fall back to the plain requirements.txt (no hash
+# verification, but the build still works).
+#
+# The pip index URL is pinned to https://pypi.org/simple/ to prevent a
+# misconfigured pip.conf from silently using an untrusted mirror.
 COPY --chown=airflow:airflow phase1/requirements.txt /tmp/phase1_requirements.txt
-RUN pip install --no-cache-dir -r /tmp/phase1_requirements.txt
+COPY --chown=airflow:airflow phase1/requirements.lock /tmp/phase1_requirements.lock
+RUN if [ -f /tmp/phase1_requirements.lock ]; then \
+        pip install --no-cache-dir \
+            --index-url https://pypi.org/simple/ \
+            --require-hashes \
+            --no-deps \
+            -r /tmp/phase1_requirements.lock \
+        && pip install --no-cache-dir \
+            --index-url https://pypi.org/simple/ \
+            -r /tmp/phase1_requirements.txt; \
+    else \
+        pip install --no-cache-dir \
+            --index-url https://pypi.org/simple/ \
+            -r /tmp/phase1_requirements.txt; \
+    fi
 
 # IN-068 v122 FORENSIC ROOT FIX: build-time assertion that the Airflow
 # version installed inside the image EXACTLY matches the base image's

@@ -287,7 +287,17 @@ def test_p3_004_unknown_node_type_does_not_crash():
 
     Pre-v104: passing an index >= num_node_types caused IndexError, crashing
     inference when Phase 2 added a new node type (e.g., 'variant'). v104
-    clamps out-of-range indices to a zero-initialized 'unknown' slot.
+    clamps out-of-range indices to an 'unknown' slot.
+
+    P3-022 v114 ROOT FIX (Teammate Cosmic): the unknown slot is now
+    initialized to SMALL RANDOM (std=0.02, BERT/GPT init) instead of ZERO.
+    The previous zero-init caused the unknown slot to be stuck at the zero
+    saddle point during fine-tuning -- the gradient w.r.t. a zero embedding
+    is zero, so the slot could never learn. Small random init breaks the
+    symmetry, enabling fine-tuning to actually learn the new type's
+    embedding. This test was updated in v125 to reflect the P3-022 fix
+    (the old assertion `torch.allclose(out[2], torch.zeros(8))` is no
+    longer correct -- the slot is intentionally non-zero now).
     """
     from graph_transformer.models.embeddings import NodeTypeEmbedding
 
@@ -297,12 +307,32 @@ def test_p3_004_unknown_node_type_does_not_crash():
     # Must NOT raise
     out = emb(indices)
     assert out.shape == (5, 8)
-    # The unknown-slot embeddings (indices 5, 9 -> clamped to 5) must be ZERO.
-    assert torch.allclose(out[2], torch.zeros(8)), (
-        "P3-004 REGRESSION: unknown-type slot should be zero-initialized "
-        "to avoid perturbing trained representations."
+    # P3-022 v114: the unknown-slot embeddings (indices 5, 9 -> clamped to 5)
+    # MUST be NON-ZERO (small random init, std=0.02). The previous zero-init
+    # was a saddle point that prevented fine-tuning from learning the
+    # unknown type's embedding.
+    assert not torch.allclose(out[2], torch.zeros(8)), (
+        "P3-022 v114 REGRESSION: unknown-type slot should be SMALL RANDOM "
+        "(std=0.02), NOT zero. The zero-init was a saddle point that "
+        "prevented fine-tuning from learning new node types."
     )
-    assert torch.allclose(out[3], torch.zeros(8))
+    assert not torch.allclose(out[3], torch.zeros(8)), (
+        "P3-022 v114 REGRESSION: unknown-type slot should be SMALL RANDOM."
+    )
+    # The two unknown-type entries (indices 5 and 9 both clamp to slot 5)
+    # MUST be IDENTICAL (same slot looked up twice).
+    assert torch.allclose(out[2], out[3]), (
+        "P3-004 REGRESSION: indices 5 and 9 should both clamp to the "
+        "unknown slot and return IDENTICAL embeddings."
+    )
+    # The unknown-slot norm should be small (~0.02 * sqrt(8) = ~0.057).
+    unknown_norm = out[2].norm().item()
+    assert 0.01 < unknown_norm < 0.5, (
+        f"P3-022 v114 REGRESSION: unknown-slot norm {unknown_norm:.4f} is "
+        f"outside the expected range for small random init (std=0.02, "
+        f"dim=8 -> expected norm ~0.057). Too large = perturbs trained "
+        f"representations; zero = saddle point."
+    )
 
 
 def test_p3_004_unknown_type_warning_emitted_once(caplog):

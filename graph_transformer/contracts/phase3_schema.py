@@ -205,6 +205,73 @@ TRAINING_METADATA_REQUIRED_KEYS: Tuple[str, ...] = (
 
 
 # =============================================================================
+# P3-021 v125 ROOT FIX (Teammate Cosmic): pre-norm LayerNorm documentation
+# =============================================================================
+# The P3-007 audit mandate recommended "Add nn.LayerNorm after attention and
+# after feedforward" -- this is POST-norm (`h' = LayerNorm(h + sublayer(h))`).
+# The team DELIBERATELY chose PRE-norm (`h' = h + sublayer(LayerNorm(h))`)
+# instead, citing Xiong et al. 2020 ("On Layer Normalization in the
+# Transformer Architecture"). The scientific rationale is defensible:
+#   - Pre-norm is more stable for deep models (gradients flow through the
+#     residual path without passing through LayerNorm).
+#   - Pre-norm allows training deeper models without warmup tricks.
+#   - For the 3-4 layer demo/CI model, both choices work; pre-norm is the
+#     safer default for the future 8-16 layer production scale.
+#
+# The DEVIATION from the audit mandate is now DOCUMENTED HERE (in the
+# contract) so future auditors reviewing the code against P3-007 will see
+# the deviation is deliberate and scientifically justified.
+#
+# The `check_gradient_stability` classmethod on `GraphTransformerLayer`
+# (in graph_transformer/models/layers.py) provides a programmatic check
+# for vanishing/exploding gradients. The CI test
+# `tests/test_p3_021_gradient_stability_v119.py` calls this check after
+# training and asserts the max/min gradient norm ratio is < 10x.
+#
+# If the production model scales beyond 8 layers, re-evaluate pre-norm vs
+# post-norm empirically (the Xiong et al. result is for NLP transformers,
+# not heterogeneous GNNs). The `check_gradient_stability` CI test will
+# catch any gradient instability that emerges at scale.
+NORM_STYLE: str = "pre_norm"  # P3-021: deliberate deviation from P3-007
+NORM_STYLE_RATIONALE: str = (
+    "Pre-norm LayerNorm (Xiong et al. 2020) for gradient stability at "
+    "depth. P3-007 recommended post-norm; we deliberately chose pre-norm "
+    "because it is more stable for the 3-16 layer Graph Transformer. The "
+    "check_gradient_stability CI test verifies gradient health after training."
+)
+# When the model scales beyond this depth, re-evaluate pre-norm vs post-norm.
+PRE_NORM_REEVALUATE_AT_DEPTH: int = 8
+
+
+# =============================================================================
+# P3-032 v125 ROOT FIX (Teammate Cosmic): per-edge-type out_proj documentation
+# =============================================================================
+# The P3-032 audit found that `HeterogeneousMultiHeadAttention` used a SINGLE
+# shared `out_proj` for all edge types, while standard HGT (Wang et al. 2019)
+# uses per-edge-type output projections. The fix added an OPTIONAL
+# `per_edge_type_out_proj` flag to the layer constructor (default False for
+# backward compat with existing trained checkpoints).
+#
+# For PRODUCTION models (new training runs), the flag SHOULD be set to True
+# so each edge type learns its own message transformation. The bridge's
+# model construction (graph_transformer/gt_rl_bridge.py) is updated to pass
+# `per_edge_type_out_proj=True` for new model training.
+#
+# Loading an old checkpoint (trained with per_edge_type_out_proj=False)
+# into a model constructed with per_edge_type_out_proj=True will FAIL with
+# `missing keys` for the per-edge-type out_proj weights. The service's
+# load_checkpoint handles this by falling back to strict=False (with a
+# WARNING) so old checkpoints continue to work.
+PER_EDGE_TYPE_OUT_PROJ_DEFAULT: bool = True  # P3-032: production default
+PER_EDGE_TYPE_OUT_PROJ_BACKWARD_COMPAT: str = (
+    "Old checkpoints (per_edge_type_out_proj=False) load into new models "
+    "with strict=False. The shared out_proj weights are loaded; the "
+    "per-edge-type out_proj weights are zero-initialized (no message "
+    "transformation) until the model is retrained."
+)
+
+
+# =============================================================================
 # Checkpoint validator
 # =============================================================================
 
