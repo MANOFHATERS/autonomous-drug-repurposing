@@ -73,4 +73,4 @@ psutil>=5.9,<7.0
 # certifi: required by Bio.Entrez HTTPS calls to PubMed. Without it,
 # biopython uses the system CA bundle (which may be missing in slim
 # Docker images), causing SSL verification failures.
-certifi>=2024.0
+certifi>=2026.6.17
