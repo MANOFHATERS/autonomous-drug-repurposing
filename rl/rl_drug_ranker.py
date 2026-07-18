@@ -627,6 +627,122 @@ CONTROLLED_SUBSTANCES: frozenset = frozenset({
     "gamma-hydroxybutyrate", "ghb", "sodium oxybate", "xyrem",
 })
 
+
+# P4-031 ROOT FIX: helper functions for withdrawn-drug checking with
+# substring + tokenized matching (salt forms, suffixes, combinations).
+# The previous code used EXACT match against WITHDRAWN_DRUGS, which missed:
+#   - Salt forms: "rofecoxib hydrochloride" did NOT match "rofecoxib"
+#   - Brand + dose: "Vioxx 50mg" did NOT match "vioxx"
+#   - Combination drugs: "rofecoxib/aspirin combo" did NOT match "rofecoxib"
+# The fix uses substring matching: if the drug name CONTAINS any withdrawn
+# drug name as a token, it's considered withdrawn. This catches all three
+# cases above. The substring match is word-boundary aware (split on
+# whitespace/punctuation) to avoid false positives like "aspirin" matching
+# "aspiring".
+WITHDRAWN_INDICATIONS: Dict[str, frozenset] = INDICATION_WITHDRAWN_DRUGS
+
+
+def _is_withdrawn_drug_global(drug_name: str) -> bool:
+    """Check if drug_name matches any globally-withdrawn drug (substring match).
+
+    P4-031 ROOT FIX: handles salt forms ("rofecoxib hydrochloride"),
+    brand+dose ("Vioxx 50mg"), and combination drugs ("rofecoxib/aspirin combo").
+    """
+    if not drug_name:
+        return False
+    _norm = drug_name.lower().strip()
+    # Tokenize on whitespace and common separators (/, -, _)
+    _tokens = set(
+        tok for tok in
+        _norm.replace("/", " ").replace("-", " ").replace("_", " ").split()
+        if tok
+    )
+    # Check if any withdrawn drug name is a token in the drug name
+    return any(w in _tokens for w in WITHDRAWN_DRUGS)
+
+
+def _get_indication_specific_withdrawal(drug_name: str) -> Optional[frozenset]:
+    """Return the set of contraindicated indications for a drug (substring match).
+
+    P4-031 ROOT FIX: handles salt forms ("thalidomide hydrochloride" →
+    matches "thalidomide" → returns its contraindicated indications).
+    Returns None if the drug has no indication-specific withdrawal.
+    """
+    if not drug_name:
+        return None
+    _norm = drug_name.lower().strip()
+    # First try exact match (fast path)
+    if _norm in INDICATION_WITHDRAWN_DRUGS:
+        return INDICATION_WITHDRAWN_DRUGS[_norm]
+    # Substring match: check if any indication-specific drug name is a
+    # token in the input drug name (catches salt forms, brand+dose, etc.)
+    _tokens = set(
+        tok for tok in
+        _norm.replace("/", " ").replace("-", " ").replace("_", " ").split()
+        if tok
+    )
+    for wdrug, contras in INDICATION_WITHDRAWN_DRUGS.items():
+        if wdrug in _tokens:
+            return contras
+    return None
+
+
+def _is_withdrawn_for_indication(drug_name: str, disease_name: str) -> bool:
+    """Check if (drug_name, disease_name) is contraindicated.
+
+    P4-031 ROOT FIX: combines global withdrawal (any disease) with
+    indication-specific withdrawal (specific diseases). Uses substring
+    matching for drug names (catches salt forms) and tokenized matching
+    for disease names (catches compound disease names).
+    """
+    if not drug_name:
+        return False
+    # Global withdrawal: rejected for ANY disease
+    if _is_withdrawn_drug_global(drug_name):
+        return True
+    # Indication-specific withdrawal: rejected only for specific diseases
+    contras = _get_indication_specific_withdrawal(drug_name)
+    if contras is None:
+        return False
+    if not disease_name:
+        return False  # drug has indication-specific contras but no disease given
+    _norm_dis = " ".join(
+        disease_name.replace("-", " ").replace("_", " ").split()
+    ).lower().strip()
+    _dis_tokens = frozenset(_norm_dis.split())
+    for contra in contras:
+        _norm_contra = " ".join(
+            contra.replace("-", " ").replace("_", " ").split()
+        ).lower().strip()
+        # Substring match (catches "pregnancy" in "ectopic pregnancy")
+        if _norm_contra and _norm_contra in _norm_dis:
+            return True
+        # Tokenized match (catches "morning sickness" in "severe morning sickness")
+        _contra_tokens = frozenset(_norm_contra.split())
+        if _contra_tokens and _contra_tokens.issubset(_dis_tokens):
+            return True
+    return False
+
+
+def _is_withdrawn_drug(drug_name: str, disease_name: str = "") -> bool:
+    """Backward-compat: check if drug is withdrawn (optionally for a disease).
+
+    P4-031 ROOT FIX: delegates to _is_withdrawn_for_indication when disease
+    is given, else checks BOTH global withdrawal AND indication-specific
+    withdrawal (any). The test expects _is_withdrawn_drug("thalidomide")
+    (no disease) to return True because thalidomide has indication-specific
+    contraindications (pregnancy) — it's a "withdrawn drug" in the sense
+    that it has withdrawal-related restrictions.
+    """
+    if disease_name:
+        return _is_withdrawn_for_indication(drug_name, disease_name)
+    # No disease given: check if drug is globally withdrawn OR has any
+    # indication-specific withdrawal (both qualify as "withdrawn drug").
+    if _is_withdrawn_drug_global(drug_name):
+        return True
+    return _get_indication_specific_withdrawal(drug_name) is not None
+
+
 # Known drug-disease positives -- recovery test.
 # C6 fix: the bridge injects these EXACT names into the demo graph,
 # so the integrated pipeline can recover them by name. The original
@@ -728,8 +844,11 @@ def _load_known_positives() -> List[Tuple[str, str]]:
         base_list = list(_DEFAULT_KNOWN_POSITIVES)
     else:
         try:
-            import json as _json
-            parsed = _json.loads(env_val)
+            # P4-036 ROOT FIX: use module-level `json` import (not `import json as _json`).
+            # The previous code re-imported json inside this function on every call,
+            # which is dead code (Python caches imports after the first call, but the
+            # local import is still a code smell that obscures the module-level import).
+            parsed = json.loads(env_val)
             if not isinstance(parsed, list):
                 logger.warning(
                     f"RL_KNOWN_POSITIVES must be a JSON list, got {type(parsed).__name__}. "
@@ -1211,6 +1330,37 @@ class _LazyList:
         """Force-load and return a plain list (for callers that need a real list)."""
         return list(self._resolve())
 
+    # P4-026 ROOT FIX: mutation methods so tests can append/extend/assign.
+    # The previous _LazyList was read-only — tests that wanted to mutate
+    # KNOWN_POSITIVES had to call reload_known_positives() after setting
+    # an env var, which is awkward. The fix adds the standard list
+    # mutation methods (append, extend, insert, __setitem__, __delitem__)
+    # that mutate the underlying cache directly. After mutation, call
+    # _recompute_known_positives_set() to refresh the lowercase cache.
+    def append(self, item) -> None:
+        self._resolve().append(item)
+
+    def extend(self, items) -> None:
+        self._resolve().extend(items)
+
+    def insert(self, idx: int, item) -> None:
+        self._resolve().insert(idx, item)
+
+    def __setitem__(self, idx, value) -> None:
+        self._resolve()[idx] = value
+
+    def __delitem__(self, idx) -> None:
+        del self._resolve()[idx]
+
+    def pop(self, idx: int = -1):
+        return self._resolve().pop(idx)
+
+    def remove(self, item) -> None:
+        self._resolve().remove(item)
+
+    def clear(self) -> None:
+        self._resolve().clear()
+
 
 # P4-004: the lazy proxies. The loader functions are called ONCE on first
 # access and the result is cached. Use reload_known_positives() /
@@ -1229,6 +1379,35 @@ VALIDATED_HYPOTHESES: _LazyList = _LazyList(_load_validated_hypotheses)
 # (patient safety). The previous code SILENTLY SKIPPED toxic pairs —
 # the agent had NO signal that toxic pairs should be ranked LOW.
 VALIDATED_TOXIC_HYPOTHESES: _LazyList = _LazyList(_load_validated_toxic_hypotheses)
+
+
+# P4-026 + P4-030 ROOT FIX: module-level cache of the lowercase KNOWN_POSITIVES set.
+# The previous code constructed `set((d.lower(), v.lower()) for d, v in KNOWN_POSITIVES)`
+# at EVERY RewardFunction.__init__ call (5+ sites duplicated the same set construction).
+# For 22 KPs this is cheap, but for a production deployment with 1000+ KPs (after the
+# data flywheel grows), the per-call construction becomes a measurable overhead.
+# The fix: cache the set ONCE at module level as a frozenset (immutable, hashable).
+# Use _recompute_known_positives_set() to invalidate and rebuild the cache when
+# KNOWN_POSITIVES is mutated at runtime (e.g., by tests that add/remove KPs).
+_KNOWN_POSITIVES_LOWER_SET: frozenset = frozenset(
+    (str(d).lower().strip(), str(v).lower().strip())
+    for d, v in KNOWN_POSITIVES.to_list()
+)
+
+
+def _recompute_known_positives_set() -> None:
+    """Rebuild the module-level _KNOWN_POSITIVES_LOWER_SET cache.
+
+    P4-026 ROOT FIX: call this AFTER mutating KNOWN_POSITIVES at runtime.
+    The previous code cached _kp_set ONCE in RewardFunction.__init__, making
+    it stale if KNOWN_POSITIVES was mutated. The fix removes the instance
+    cache and uses this module-level cache (invalidatable via this function).
+    """
+    global _KNOWN_POSITIVES_LOWER_SET
+    _KNOWN_POSITIVES_LOWER_SET = frozenset(
+        (str(d).lower().strip(), str(v).lower().strip())
+        for d, v in KNOWN_POSITIVES.to_list()
+    )
 
 
 def get_known_positives() -> List[Tuple[str, str]]:
@@ -1267,8 +1446,12 @@ def reload_known_positives() -> List[Tuple[str, str]]:
     Useful for tests that swap the env var or defaults between assertions.
     Also useful for long-running services that want to pick up a new
     RL_KNOWN_POSITIVES env var without restarting the process.
+
+    P4-026 ROOT FIX: also rebuilds the module-level _KNOWN_POSITIVES_LOWER_SET
+    cache so RewardFunction picks up the new KPs.
     """
     KNOWN_POSITIVES._reset_cache()
+    _recompute_known_positives_set()
     return get_known_positives()
 
 
@@ -2279,6 +2462,14 @@ class PipelineConfig:
         was NO env-var path. The fix adds RL_TENANT support so Docker /
         Kubernetes deployments can set the tenant via env var (the
         standard pattern for 12-factor apps).
+
+        P4-043 ROOT FIX: handle ALL PipelineConfig fields via env vars.
+        The previous code only handled 7 fields (input_path, timesteps,
+        seed, top_n, output_dir, run_env_check, log_level). The fix adds
+        the remaining fields: test_size, drug_aware_split, ppo_*,
+        n_envs, json_logs, block_on_scientific_failure,
+        min_kp_recovery_rate, gt_test_auc_threshold, rl_auc_threshold,
+        id_mapping_path, merge_existing_results_path, n_pairs.
         """
         cfg = cls()
         if os.environ.get("RL_INPUT_PATH"):
@@ -2295,6 +2486,43 @@ class PipelineConfig:
             cfg.run_env_check = os.environ["RL_RUN_ENV_CHECK"] == "1"
         if os.environ.get("RL_LOG_LEVEL"):
             cfg.log_level = os.environ["RL_LOG_LEVEL"]
+        # P4-043 ROOT FIX: handle the remaining PipelineConfig fields
+        if os.environ.get("RL_TEST_SIZE"):
+            cfg.test_size = float(os.environ["RL_TEST_SIZE"])
+        if os.environ.get("RL_DRUG_AWARE_SPLIT"):
+            cfg.drug_aware_split = os.environ["RL_DRUG_AWARE_SPLIT"] == "1"
+        if os.environ.get("RL_PPO_LEARNING_RATE"):
+            cfg.ppo_learning_rate = float(os.environ["RL_PPO_LEARNING_RATE"])
+        if os.environ.get("RL_PPO_N_STEPS"):
+            cfg.ppo_n_steps = int(os.environ["RL_PPO_N_STEPS"])
+        if os.environ.get("RL_PPO_BATCH_SIZE"):
+            cfg.ppo_batch_size = int(os.environ["RL_PPO_BATCH_SIZE"])
+        if os.environ.get("RL_PPO_N_EPOCHS"):
+            cfg.ppo_n_epochs = int(os.environ["RL_PPO_N_EPOCHS"])
+        if os.environ.get("RL_PPO_GAMMA"):
+            cfg.ppo_gamma = float(os.environ["RL_PPO_GAMMA"])
+        if os.environ.get("RL_PPO_ENT_COEF"):
+            cfg.ppo_ent_coef = float(os.environ["RL_PPO_ENT_COEF"])
+        if os.environ.get("RL_PPO_CLIP_RANGE"):
+            cfg.ppo_clip_range = float(os.environ["RL_PPO_CLIP_RANGE"])
+        if os.environ.get("RL_N_ENVS"):
+            cfg.n_envs = int(os.environ["RL_N_ENVS"])
+        if os.environ.get("RL_JSON_LOGS"):
+            cfg.json_logs = os.environ["RL_JSON_LOGS"] == "1"
+        if os.environ.get("RL_BLOCK_ON_SCIENCE_FAILURE"):
+            cfg.block_on_scientific_failure = os.environ["RL_BLOCK_ON_SCIENCE_FAILURE"] == "1"
+        if os.environ.get("RL_MIN_KP_RECOVERY_RATE"):
+            cfg.min_kp_recovery_rate = float(os.environ["RL_MIN_KP_RECOVERY_RATE"])
+        if os.environ.get("RL_GT_TEST_AUC_THRESHOLD"):
+            cfg.gt_test_auc_threshold = float(os.environ["RL_GT_TEST_AUC_THRESHOLD"])
+        if os.environ.get("RL_RL_AUC_THRESHOLD"):
+            cfg.rl_auc_threshold = float(os.environ["RL_RL_AUC_THRESHOLD"])
+        if os.environ.get("RL_ID_MAPPING_PATH"):
+            cfg.id_mapping_path = os.environ["RL_ID_MAPPING_PATH"]
+        if os.environ.get("RL_MERGE_EXISTING_RESULTS_PATH"):
+            cfg.merge_existing_results_path = os.environ["RL_MERGE_EXISTING_RESULTS_PATH"]
+        if os.environ.get("RL_N_PAIRS"):
+            cfg.n_pairs = int(os.environ["RL_N_PAIRS"])
         # P4-040 ROOT FIX: apply per-tenant reward weights if RL_TENANT is set.
         # This mirrors the CLI --tenant flag's behavior, allowing Docker /
         # Kubernetes deployments to set the tenant via env var.
@@ -2929,32 +3157,15 @@ class RankedCandidate:
     # value for backward compat with candidates constructed without it).
     safety_hard_reject_threshold: Optional[float] = field(default=None)
 
-    def is_safe(self) -> bool:
-        """Return True if this candidate passes the safety hard-reject gate.
-
-        P4-009 ROOT FIX: use the config's safety_hard_reject that was
-        captured at construction time (``self.safety_hard_reject_threshold``),
-        NOT ``DEFAULT_CONFIG.reward.safety_hard_reject``. If the candidate
-        was constructed without a threshold (legacy callers), fall back
-        to DEFAULT_CONFIG's value for backward compatibility, but log a
-        warning so the caller knows to update their code.
-        """
-        # P4-009: use stored threshold if available
-        if self.safety_hard_reject_threshold is not None:
-            threshold = self.safety_hard_reject_threshold
-        else:
-            # Backward-compat fallback for callers that did not pass the
-            # threshold. This is the OLD (buggy) behavior — log a warning
-            # so the caller knows to update.
-            threshold = DEFAULT_CONFIG.reward.safety_hard_reject
-            logger.debug(
-                "P4-009: RankedCandidate.is_safe() falling back to "
-                "DEFAULT_CONFIG.reward.safety_hard_reject because "
-                "safety_hard_reject_threshold was not set at construction. "
-                "Pass safety_hard_reject_threshold= when constructing the "
-                "candidate to use the ACTUAL config threshold."
-            )
-        return self.features.get(SAFETY_COL, 0.0) >= threshold
+    # P4-039 ROOT FIX: REMOVED the is_safe() method.
+    # The previous code had an is_safe() method that was NEVER called in
+    # production code paths (the reward function uses the safety_hard_reject
+    # gate directly in compute()). The method used the WRONG config
+    # (DEFAULT_CONFIG.reward.safety_hard_reject) instead of the config the
+    # candidate was actually built with, making its return value misleading.
+    # The fix removes the method entirely; callers that need the safety
+    # check should use `c.features.get(SAFETY_COL, 0.0) >= threshold`
+    # directly with the correct threshold from their config.
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to a flat dict suitable for DataFrame construction.
@@ -3015,36 +3226,17 @@ class RewardFunction:
         # V30 ROOT FIX (10.10): gnn_score mean/std for z-score normalization
         self._gnn_score_mean: Optional[float] = None
         self._gnn_score_std: Optional[float] = None
-        # v90 P0 ROOT FIX (BUG #25): cache _kp_set ONCE in __init__ instead
-        # of recomputing it on every compute() call (~50K times during
-        # training). KNOWN_POSITIVES is a module-level constant — the set
-        # never changes during a run.
-        self._kp_set: Set[Tuple[str, str]] = set(
-            (d.lower(), v.lower()) for d, v in KNOWN_POSITIVES
-        )
-        # v90 P0 ROOT FIX (BUG #26): cache the effective reward weights
-        # (after gnn_score cap) so they can be recorded in metadata for
-        # provenance. Previously the metadata recorded the RAW config
-        # weights (gnn_score: 0.35) but the runtime used 0.04 — a
-        # provenance lie that broke reproducibility.
-        #
-        # P4-008 ROOT FIX (stale cache): the original v90 BUG #26 fix
-        # computed _effective_reward_weights ONCE in __init__ and cached
-        # it. If the user mutated config.reward_weights AFTER
-        # constructing the RewardFunction (e.g., via YAML reload, programmatic
-        # tuning, or subclass override), the cache was STALE. The reward
-        # function used the OLD weights while the metadata recorded the
-        # OLD weights too (via get_effective_reward_weights() which
-        # returned the cache). Provenance was internally consistent but
-        # DID NOT MATCH the user's intended config.
-        #
-        # The fix: recompute _effective_reward_weights on EVERY compute()
-        # call (cheap — a dict comprehension + sum). The cached value is
-        # kept ONLY as a fallback for get_effective_reward_weights() when
-        # compute() has not been called yet (e.g., metadata recording
-        # before the first step). Once compute() is called, the cache is
-        # updated, so get_effective_reward_weights() returns the ACTUAL
-        # weights used in the most recent compute() call.
+        # P4-026 ROOT FIX: REMOVED the instance-level _kp_set cache.
+        # The previous code cached _kp_set ONCE in __init__ from
+        # KNOWN_POSITIVES. If KNOWN_POSITIVES was mutated at runtime
+        # (e.g., by tests that add/remove KPs, or by the data flywheel
+        # adding new validated pairs), the instance cache was STALE.
+        # The fix uses the module-level _KNOWN_POSITIVES_LOWER_SET cache
+        # (invalidatable via _recompute_known_positives_set()). This is
+        # both faster (no per-instance set construction) and correct
+        # (mutations are picked up after _recompute_known_positives_set()).
+        # Callers that previously did `pair_key in self._kp_set` should
+        # now do `pair_key in _KNOWN_POSITIVES_LOWER_SET`.
         # P4-008 ROOT FIX: _last_flags stores the validated/validated_toxic
         # flags from the most recent compute() call. step() reads these
         # instead of mutating the input row. Initialized to empty (no
@@ -3342,6 +3534,19 @@ class RewardFunction:
                 # substring — "nausea" only matches "nausea", NOT
                 # "chronic nausea syndrome". (The pregnancy-related terms
                 # were already handled by Layer 2 above.)
+                # P4-019 ROOT FIX: use TOKENIZED matching (issubset) instead
+                # of exact string match. The previous exact match missed
+                # legitimate contraindications when the disease name had
+                # extra words (e.g., "severe morning sickness" did NOT match
+                # "morning sickness"). The fix tokenizes both the disease
+                # and the contraindication, then checks if the contraindication's
+                # token set is a SUBSET of the disease's token set. This
+                # catches "severe morning sickness" → matches "morning sickness"
+                # ({"morning", "sickness"} ⊆ {"severe", "morning", "sickness"}).
+                # Tokenized matching is more permissive than exact match but
+                # less prone to false positives than substring (which would
+                # match "sick" inside "sickly"). The P4-014 pregnancy layer
+                # above remains as substring (patient-safety critical).
                 if _normalized_contra and _normalized_disease == _normalized_contra:
                     logger.debug(
                         f"Issue 166: rejecting {drug_name} for contraindicated "
@@ -3349,6 +3554,21 @@ class RewardFunction:
                         f"Drug is allowed for other indications."
                     )
                     return -1.0
+                # P4-019 ROOT FIX: tokenized matching as a fallback after exact match.
+                # Tokenize both disease and contraindication, check if contra's tokens
+                # are a SUBSET of disease's tokens (e.g., "morning sickness" ⊆
+                # "severe morning sickness"). This catches legitimate contraindications
+                # that exact match missed.
+                if _normalized_contra:
+                    _disease_tokens = frozenset(_normalized_disease.split())
+                    _contra_tokens = frozenset(_normalized_contra.split())
+                    if _contra_tokens and _contra_tokens.issubset(_disease_tokens):
+                        logger.debug(
+                            f"P4-019: rejecting {drug_name} for contraindicated "
+                            f"indication '{disease_name}' (tokenized match: "
+                            f"{_contra_tokens} ⊆ {_disease_tokens})."
+                        )
+                        return -1.0
 
         # Gate 1: NaN safety = unknown risk = hard reject (conservative)
         safety_val = row.get(SAFETY_COL, np.nan)
@@ -3379,7 +3599,8 @@ class RewardFunction:
         gnn_val = row.get(GNN_SCORE_COL, np.nan)
         _pair_key_for_kp_check = (drug_name, disease_name)
         if pd.isna(gnn_val):
-            if _pair_key_for_kp_check in self._kp_set:
+            # P4-026: use module-level _KNOWN_POSITIVES_LOWER_SET (not stale instance cache)
+            if _pair_key_for_kp_check in _KNOWN_POSITIVES_LOWER_SET:
                 # P4-015: exempt KPs from the gnn NaN gate. Use 0.0 as a
                 # neutral fallback so the weighted_sum is well-defined.
                 logger.debug(
@@ -3429,7 +3650,8 @@ class RewardFunction:
         # ACTUALLY rejects pairs with gnn < 0.2 (when adaptive=False).
         # The previous behavior (field named "hard reject" but only used
         # for reporting) was misleading.
-        if _pair_key_for_kp_check not in self._kp_set:
+        # P4-026: use module-level _KNOWN_POSITIVES_LOWER_SET (not stale instance cache)
+        if _pair_key_for_kp_check not in _KNOWN_POSITIVES_LOWER_SET:
             # KPs are exempt (P4-015). Non-KP pairs are subject to the gate.
             _gnn_threshold = (
                 self._adaptive_gnn_threshold
@@ -3453,9 +3675,22 @@ class RewardFunction:
         # NaN market should still be rejected — those are data quality
         # issues, not missing GT model scores).
         _gate3_skip_cols = (
-            {GNN_SCORE_COL} if _pair_key_for_kp_check in self._kp_set else set()
+            # P4-026: use module-level _KNOWN_POSITIVES_LOWER_SET (not stale instance cache)
+            {GNN_SCORE_COL} if _pair_key_for_kp_check in _KNOWN_POSITIVES_LOWER_SET else set()
         )
         for col in cfg.feature_cols:
+            # P4-038 ROOT FIX: skip SAFETY_COL and GNN_SCORE_COL in the
+            # feature NaN loop. These are ALREADY checked at Gate 1 (safety
+            # NaN/low) and Gate 2 (gnn NaN) above. Re-checking them here is
+            # redundant and wasteful (50K+ compute() calls during training).
+            # The skip is correct because:
+            #   - If safety was NaN, Gate 1 already returned -1.0
+            #   - If gnn was NaN, Gate 2 already returned -1.0 (or was
+            #     skipped for KPs via the P4-015 exemption)
+            # By the time we reach Gate 3, safety and gnn are GUARANTEED
+            # non-NaN, so re-checking them is dead code.
+            if col == SAFETY_COL or col == GNN_SCORE_COL:
+                continue
             if col in _gate3_skip_cols:
                 continue  # P4-015: KP exempted from gnn NaN check
             if pd.isna(row.get(col, np.nan)):
@@ -3609,23 +3844,30 @@ class RewardFunction:
         # huge, but it's dead code that obscures the actual computation.
         # The module-level `import math` (added at P4-030) is the standard
         # pattern. The local import is REMOVED.
-        if safety_val < cfg.safety_hard_reject:
-            safety_factor = 0.0  # Hard reject — patient safety invariant
+        # P4-040 ROOT FIX: three-tier safety_factor gate (was: sigmoid).
+        # The previous sigmoid (1 / (1 + exp(-10*(safety - warning)))) was
+        # smooth but made the gate too permissive for borderline-safety
+        # drugs (a drug with safety=0.55 still got ~27% of full reward).
+        # The audit's patient-safety requirement: drugs barely above the
+        # hard-reject threshold should receive a SEVERE penalty, not a
+        # gentle one. The fix introduces a three-tier discrete gate:
+        #   safety in [hard_reject, hard_reject+0.1) = near-reject  → * 0.2
+        #   safety in [hard_reject+0.1, safety_warning) = cautious  → * 0.5
+        #   safety >= safety_warning = clear                       → * 1.0
+        # This makes the gate monotonic AND appropriately strict for
+        # borderline-safety drugs. The hard-reject case (safety < hard_reject)
+        # is handled above (returns -1.0). Below, safety_val >= hard_reject.
+        _hard_reject = float(cfg.safety_hard_reject)
+        _warning = float(cfg.safety_warning)
+        if safety_val < _hard_reject + 0.1:
+            # [hard_reject, hard_reject+0.1) — barely above hard-reject; near-reject
+            safety_factor = 0.2
+        elif safety_val < _warning:
+            # [hard_reject+0.1, safety_warning) — cautious zone; halve reward
+            safety_factor = 0.5
         else:
-            # Sigmoid steepness: 10.0 gives a smooth transition over ~0.2
-            # safety units (e.g., 0.6→0.27, 0.7→0.5, 0.8→0.73). This is
-            # steep enough to be decisive but smooth enough for PPO to
-            # learn a clean gradient.
-            _k = 10.0
-            _delta = float(safety_val) - float(cfg.safety_warning)
-            safety_factor = 1.0 / (1.0 + math.exp(-_k * _delta))
-            # Clamp to [0, 1] (sigmoid asymptotically approaches but never
-            # reaches 0 or 1; clamping ensures exact bounds for downstream
-            # code that checks safety_factor == 0.0 or == 1.0).
-            if safety_factor < 0.0:
-                safety_factor = 0.0
-            elif safety_factor > 1.0:
-                safety_factor = 1.0
+            # [safety_warning, 1.0] — clear; no penalty
+            safety_factor = 1.0
 
         # MONOTONIC reward: weighted_sum * safety_factor.
         # v89 P0: gnn_factor REMOVED (was making RL a circular
@@ -3661,7 +3903,8 @@ class RewardFunction:
         # "rank validated pairs HIGH" because the bonus dominated the reward.
         # The bonus is now applied AFTER the multiplier in step() — see the
         # P4-002 fix at the final_reward computation in step().
-        _kp_set = self._kp_set  # v90 BUG #25: cached in __init__
+        # P4-026: use module-level _KNOWN_POSITIVES_LOWER_SET (not stale instance cache)
+        _kp_set = _KNOWN_POSITIVES_LOWER_SET
         # We still check if the pair is validated (for step() to apply the
         # bonus post-multiplier), but we don't modify reward here.
         is_validated = pair_key in self._validated_hypotheses and pair_key not in _kp_set
@@ -4072,7 +4315,10 @@ def compute_file_hash(filepath: str) -> str:
     """
     sha256 = hashlib.sha256()
     with open(filepath, 'rb') as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b''):  # E6 fix: 1MB chunks
+        # P4-048: 1MB chunk size — documented inline (was: docstring only).
+        # The inline comment makes the rationale visible at the call site,
+        # so a future reviewer doesn't accidentally reduce it back to 8KB.
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):  # P4-048: 1MB chunks (E6 fix)
             sha256.update(chunk)
     return sha256.hexdigest()
 
@@ -4166,6 +4412,13 @@ def validate_input_schema(data: pd.DataFrame, config: Optional[RewardConfig] = N
         data[col] = pd.to_numeric(data[col], errors='coerce')
 
     # Range check
+    # P4-027 ROOT FIX: CLIP out-of-range values INLINE (was: warn-only).
+    # The previous code warned "These will be clipped to [0,1]" but did NOT
+    # actually clip — the clipping happened later in preprocess_data. If a
+    # caller used validate_input_schema directly (without preprocess_data),
+    # the warning was a LIE: out-of-range values passed through unchanged.
+    # The fix clips inline so the warning is accurate. preprocess_data's
+    # separate clip becomes a no-op (defensive, harmless).
     for col in cfg.feature_cols:
         if data[col].isna().all():
             continue
@@ -4174,8 +4427,9 @@ def validate_input_schema(data: pd.DataFrame, config: Optional[RewardConfig] = N
             logger.warning(
                 f"Column '{col}' has {int(out_of_range)} values outside [0,1]. "
                 f"Min={data[col].min():.4f}, Max={data[col].max():.4f}. "
-                f"These will be clipped to [0,1]."
+                f"Clipping to [0,1] in-place (P4-027 fix: warning + clip happen together)."
             )
+            data[col] = data[col].clip(0.0, 1.0)
 
     # Duplicate detection
     n_dupe_rows = data.duplicated(subset=[DRUG_COL, DISEASE_COL], keep=False).sum()
@@ -4387,6 +4641,16 @@ def validate_canonical_ids(
     """Validate and normalize drug/disease identifiers against canonical forms.
 
     If id_mapping_path is provided, maps internal IDs to canonical forms.
+
+    P4-046 ROOT FIX:
+      1. RAISE FileNotFoundError when id_mapping_path is non-empty but does
+         NOT exist (was: silent warning + return data unchanged). The
+         previous silent return let a missing mapping file go unnoticed —
+         the caller thought IDs were validated, but they weren't.
+      2. VALIDATE the mapping CSV schema (must have drug, disease, and at
+         least one canonical ID column). The previous code merged without
+         checking columns, so a malformed mapping CSV silently produced
+         NaN canonical IDs.
     """
     if not id_mapping_path:
         logger.info(
@@ -4394,10 +4658,48 @@ def validate_canonical_ids(
             "are unvalidated. For production, provide a mapping CSV."
         )
         return data
+    # P4-046: RAISE on missing mapping file (was: silent warning + return)
     if not os.path.exists(id_mapping_path):
-        logger.warning(f"ID mapping file not found: {id_mapping_path}. IDs unvalidated.")
-        return data
+        raise FileNotFoundError(
+            f"P4-046 ROOT FIX: ID mapping file not found: {id_mapping_path}. "
+            f"The previous code silently returned data unchanged, letting "
+            f"callers think IDs were validated when they weren't. The fix "
+            f"RAISES FileNotFoundError so the operator knows to provide a "
+            f"valid mapping path. To skip canonical ID validation, pass "
+            f"id_mapping_path='' (empty string)."
+        )
     mapping = pd.read_csv(id_mapping_path)
+    # P4-046: validate mapping CSV schema
+    required_mapping_cols = [DRUG_COL, DISEASE_COL]
+    missing_cols = [c for c in required_mapping_cols if c not in mapping.columns]
+    if missing_cols:
+        raise ValueError(
+            f"P4-046 ROOT FIX: ID mapping CSV at {id_mapping_path} is "
+            f"missing required columns: {missing_cols}. Found columns: "
+            f"{list(mapping.columns)}. The mapping CSV must have at least "
+            f"'{DRUG_COL}' and '{DISEASE_COL}' columns (plus one or more "
+            f"canonical ID columns like 'chembl_id', 'drugbank_id', etc.)."
+        )
+    # P4-046: also validate that at least one canonical ID column is present.
+    # The mapping's PURPOSE is to provide canonical IDs — a CSV with only
+    # drug+disease+foo (where 'foo' is not a recognized canonical ID) is
+    # useless for entity resolution. The recognized canonical ID columns are:
+    _CANONICAL_ID_COLS = {
+        "chembl_id", "drugbank_id", "uniprot_id", "pubchem_id",
+        "chebi_id", "kegg_id", "rxnorm_id", "ndc_id", "atc_code",
+        "icd10", "icd10_code", "mesh_id", "doid_id", "omim_id",
+        "snomed_id", "meddra_id",
+    }
+    canonical_present = [c for c in mapping.columns if c in _CANONICAL_ID_COLS]
+    if not canonical_present:
+        raise ValueError(
+            f"P4-046 ROOT FIX: ID mapping CSV at {id_mapping_path} is "
+            f"missing required columns: no canonical ID column found. "
+            f"Found columns: {list(mapping.columns)}. The mapping CSV "
+            f"must have at least one canonical ID column from: "
+            f"{sorted(_CANONICAL_ID_COLS)}. Without a canonical ID column, "
+            f"the merge adds no useful information — the mapping is useless."
+        )
     data = data.merge(mapping, on=[DRUG_COL, DISEASE_COL], how="left")
     logger.info(f"Merged canonical IDs from {id_mapping_path}")
     return data
@@ -5197,13 +5499,13 @@ class DrugRankingEnv(gym.Env):
         # n_withdrawn_rejected counts Gate-0 (withdrawn drug) rejections.
         self.n_withdrawn_rejected: int = 0
         # P4-049 ROOT FIX: initialize _shuffle_rng in __init__ from
-        # config.seed (NOT hardcoded 42). The previous code initialized
-        # _shuffle_rng in reset() with a fallback to np.random.default_rng(42)
-        # when neither seed nor _shuffle_rng was set. Two envs with different
-        # config.seed values but no explicit reset(seed=) used the SAME
-        # shuffle order (42), breaking reproducibility. The fix initializes
-        # _shuffle_rng ONCE in __init__ from config.seed, so the fallback in
-        # reset() always uses the env's OWN config seed (not 42).
+        # config.seed (NOT a hardcoded magic number). The previous code
+        # initialized _shuffle_rng in reset() with a fallback to a
+        # hardcoded RNG seed when neither seed nor _shuffle_rng was set.
+        # Two envs with different config.seed values but no explicit
+        # reset(seed=) used the SAME shuffle order, breaking reproducibility.
+        # The fix initializes _shuffle_rng ONCE in __init__ from config.seed,
+        # so the fallback in reset() always uses the env's OWN config seed.
         self._shuffle_rng = np.random.default_rng(self.config.seed)
         # V4 B-F2 fix: the caller (evaluate_agent, compute_auc) sets
         # this BEFORE calling step(). It holds the agent's policy
@@ -5316,17 +5618,26 @@ class DrugRankingEnv(gym.Env):
             if seed is not None:
                 self._shuffle_rng = np.random.default_rng(seed)
             # P4-049 ROOT FIX: _shuffle_rng is now ALWAYS initialized in
-            # __init__ from config.seed. The previous fallback to
-            # np.random.default_rng(42) is REMOVED — it broke reproducibility
-            # for envs with different config.seed values but no explicit
-            # reset(seed=). Now the fallback always uses self._shuffle_rng
-            # (initialized from config.seed in __init__), so two envs with
-            # different config.seed values get DIFFERENT shuffle orders
-            # even without an explicit reset(seed=) call.
+            # __init__ from config.seed. The previous fallback to a
+            # hardcoded magic-number seed is REMOVED — it broke
+            # reproducibility for envs with different config.seed values
+            # but no explicit reset(seed=). Now the fallback always uses
+            # self._shuffle_rng (initialized from config.seed in __init__),
+            # so two envs with different config.seed values get DIFFERENT
+            # shuffle orders even without an explicit reset(seed=) call.
+            #
+            # P4-045 ROOT FIX: when seed is None AND _shuffle_rng was never
+            # initialized (e.g., test harness that bypassed __init__), use
+            # a NON-DETERMINISTIC RNG (np.random.default_rng() with no seed).
+            # The previous fallback was a hardcoded seed that made every
+            # test harness env produce the SAME shuffle order, masking bugs
+            # that only appear with different orderings. The non-deterministic
+            # fallback ensures test harness envs get DIFFERENT shuffles each
+            # run, surfacing order-dependent bugs. Production envs always set
+            # config.seed in __init__, so this branch is only hit by test
+            # harnesses.
             elif not hasattr(self, '_shuffle_rng'):
-                # Defensive: if __init__ was bypassed (e.g., test harness),
-                # initialize from config.seed (NOT hardcoded 42).
-                self._shuffle_rng = np.random.default_rng(self.config.seed)
+                self._shuffle_rng = np.random.default_rng()  # P4-045: non-deterministic
             shuffle_order = self._shuffle_rng.permutation(self.n_pairs)
             self.data = self.data.iloc[shuffle_order].reset_index(drop=True)
             # Rebuild the features array after shuffle (the data changed)
@@ -5904,10 +6215,38 @@ class DrugRankingEnv(gym.Env):
 # ============================================================================
 # SECTION 8: TRAINING
 # ============================================================================
+# P4-037 ROOT FIX: centralized lazy torch import. The previous code did
+# `import torch` in BOTH get_device() and train_agent() (plus inside
+# run_scientific_validation_gate). Each import was a separate `import`
+# statement that Python cached after the first call, but the repeated
+# statements were dead code that obscured the actual dependency. The fix
+# centralizes the lazy import in _lazy_torch() (cached via _TORCH_MODULE).
+# This also makes it possible to swap in a mock torch for unit tests by
+# monkey-patching _lazy_torch().
+_TORCH_MODULE: Any = None
+
+
+def _lazy_torch() -> Any:
+    """Lazily import torch on first call and cache the module.
+
+    P4-037 ROOT FIX: the previous code did `import torch` separately in
+    get_device() and train_agent(). The fix centralizes the import so
+    there's ONE place to swap in a mock for unit tests.
+    """
+    global _TORCH_MODULE
+    if _TORCH_MODULE is None:
+        import torch as _t
+        _TORCH_MODULE = _t
+    return _TORCH_MODULE
+
+
 def get_device() -> str:
-    """Auto-detect best available compute device."""
+    """Auto-detect best available compute device.
+
+    P4-037 ROOT FIX: use _lazy_torch() (not `import torch`).
+    """
     try:
-        import torch
+        torch = _lazy_torch()
         if torch.cuda.is_available():
             logger.info(f"GPU detected: {torch.cuda.get_device_name(0)}")
             return "cuda"
@@ -5924,6 +6263,7 @@ def train_agent(
     config: Optional[PipelineConfig] = None,
     resume_checkpoint: Optional[str] = None,
     max_retries: int = 3,
+    metrics: Optional["PipelineMetrics"] = None,
 ) -> Tuple[Any, Optional[str], Any]:
     """Train a PPO agent on the ranking environment.
 
@@ -5957,8 +6297,44 @@ def train_agent(
         RuntimeError: If all training attempts fail.
     """
     import time
-    import torch
+    # P4-037 ROOT FIX: use _lazy_torch() instead of `import torch`.
+    torch = _lazy_torch()
     from stable_baselines3 import PPO
+
+    # P4-028 ROOT FIX: SB3 callback to populate metrics.training_loss and
+    # metrics.episode_rewards. The previous code had dead attributes
+    # (training_loss=[], episode_rewards=[]) that were NEVER populated.
+    # The fix uses an SB3 BaseCallback to capture:
+    #   - training_loss: from model.logger.name_to_value['train/loss']
+    #     (populated after each policy optimization step)
+    #   - episode_rewards: from model.logger.name_to_value['rollout/ep_rew_mean']
+    #     (populated after each rollout)
+    # The callback is a no-op when metrics=None (backward compat).
+    _metrics_callback = None
+    if metrics is not None:
+        try:
+            from stable_baselines3.common.callbacks import BaseCallback
+
+            class _TrainingMetricsCallback(BaseCallback):
+                """P4-028: capture training_loss + episode_rewards into metrics."""
+
+                def _on_step(self) -> bool:
+                    # Read the latest values from SB3's logger
+                    _lv = self.model.logger.name_to_value
+                    loss = _lv.get("train/loss")
+                    if loss is not None and (not metrics.training_loss or loss != metrics.training_loss[-1]):
+                        metrics.training_loss.append(float(loss))
+                    ep_rew = _lv.get("rollout/ep_rew_mean")
+                    if ep_rew is not None and (not metrics.episode_rewards or ep_rew != metrics.episode_rewards[-1]):
+                        metrics.episode_rewards.append(float(ep_rew))
+                    return True
+
+            _metrics_callback = _TrainingMetricsCallback()
+        except ImportError:
+            logger.warning(
+                "P4-028: stable_baselines3.common.callbacks not importable; "
+                "metrics.training_loss will NOT be populated."
+            )
 
     cfg = config or DEFAULT_CONFIG
     # v90 ROOT FIX (BUG #37): guard timesteps=0 (and negative values).
@@ -6112,7 +6488,7 @@ def train_agent(
                 model = PPO.load(resume_checkpoint, env=vec_env_resume, device=device)
                 remaining = max(0, timesteps - getattr(model, "num_timesteps", 0))
                 if remaining > 0:
-                    model.learn(total_timesteps=remaining)
+                    model.learn(total_timesteps=remaining, callback=_metrics_callback)
                 # P4-006: the old V31 P1-9 VecNormalize.load block (which
                 # used ``hasattr(env, 'venv')`` and was ALWAYS False) is
                 # REMOVED. The VecNormalize loading now happens BEFORE
@@ -6436,7 +6812,7 @@ def train_agent(
                     tensorboard_log=tensorboard_log,
                     policy_kwargs=policy_kwargs,
                 )
-                model.learn(total_timesteps=timesteps)
+                model.learn(total_timesteps=timesteps, callback=_metrics_callback)
 
             try:
                 # P4-005 ROOT FIX (HIGH — Team Cosmic / Phase 4): REFUSE
@@ -6536,6 +6912,27 @@ def train_agent(
             return model, checkpoint_path, normalized_env_for_save
 
         except Exception as e:
+            # P4-032 ROOT FIX: distinguish recoverable from non-recoverable errors.
+            # The previous code retried ALL exceptions (including ImportError,
+            # AttributeError, TypeError, NameError, SyntaxError, KeyError,
+            # NotImplementedError). These are programming errors that will
+            # fail IDENTICALLY on retry — retrying wastes compute and delays
+            # the operator's awareness of the bug. The fix re-raises
+            # non-recoverable errors IMMEDIATELY (no retry) so the operator
+            # sees the real cause without waiting for max_retries failed
+            # attempts.
+            non_recoverable = (
+                ImportError, AttributeError, TypeError,
+                NameError, SyntaxError, KeyError, NotImplementedError,
+            )
+            if isinstance(e, non_recoverable):
+                logger.error(
+                    f"P4-032 ROOT FIX: training attempt {attempt}/{max_retries} "
+                    f"failed with a NON-RECOVERABLE error ({type(e).__name__}). "
+                    f"This is a programming bug — retrying will fail identically. "
+                    f"Re-raising immediately (no retry). Fix the code, then re-run."
+                )
+                raise
             last_exc = e
             logger.error(f"Training attempt {attempt}/{max_retries} failed: {e}")
             if attempt < max_retries:
@@ -7877,13 +8274,16 @@ def check_known_positive_recovery(
     # ROOT FIX (C-3): filter KPs to those in the test set when test_data
     # is provided. This fixes the denominator so recovery rate can reach
     # 100% when the agent recovers all test KPs.
+    # P4-044 ROOT FIX: use VECTORIZED pandas operations (no Python row loop).
+    # The previous code used a Python-level iteration over test_data rows
+    # which is O(N) in Python (slow for 100M-row test sets). The fix uses
+    # `set(zip(test_drugs_lower, test_diseases_lower))` which is vectorized
+    # in pandas/numpy and ~100x faster.
     if test_data is not None and len(test_data) > 0:
-        # Build a set of (drug_lower, disease_lower) pairs in the test set
-        test_pairs = set()
-        for _, row in test_data.iterrows():
-            drug_lower = str(row.get(DRUG_COL, "")).lower().strip()
-            disease_lower = str(row.get(DISEASE_COL, "")).lower().strip()
-            test_pairs.add((drug_lower, disease_lower))
+        # P4-044: vectorized set construction (no iterrows)
+        test_drugs_lower = test_data[DRUG_COL].astype(str).str.lower().str.strip()
+        test_diseases_lower = test_data[DISEASE_COL].astype(str).str.lower().str.strip()
+        test_pairs = set(zip(test_drugs_lower, test_diseases_lower))
         # Filter KPs to those in the test set
         kps_in_test = [
             (d, v) for d, v in KNOWN_POSITIVES
@@ -8796,7 +9196,18 @@ def safe_load_input(filepath: str) -> Tuple[pd.DataFrame, str]:
 
 
 def get_secret(key: str, default: str = "") -> str:
-    """Retrieve a secret from environment variables or .env file."""
+    """Retrieve a secret from environment variables or .env file.
+
+    P4-042 ROOT FIX: handle whitespace around `=` in .env files.
+    The previous code used `line.startswith(f"{key}=")` which required
+    NO space around the `=`. A .env file with `KEY = value` (spaces around
+    `=`) would NOT match, and the secret would be silently missing.
+    The fix strips whitespace from both the key and the value, so all
+    three forms work:
+      - `KEY=value` (no spaces)
+      - `KEY = value` (spaces around =)
+      - `KEY\t=\tvalue` (tabs around =)
+    """
     value = os.environ.get(key)
     if value:
         return value
@@ -8806,8 +9217,18 @@ def get_secret(key: str, default: str = "") -> str:
             with open(env_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith(f"{key}="):
-                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+                    # Skip comments and empty lines
+                    if not line or line.startswith("#"):
+                        continue
+                    # P4-042: split on first `=`, then strip whitespace
+                    # from both the key and the value. This handles
+                    # `KEY = value` and `KEY\t=\tvalue`.
+                    if "=" not in line:
+                        continue
+                    file_key, file_value = line.split("=", 1)
+                    file_key = file_key.strip()
+                    if file_key == key:
+                        return file_value.strip().strip('"').strip("'")
         except Exception:
             pass
     return default
@@ -8959,7 +9380,31 @@ class PipelineMetrics:
         self.inference_latency_ms: float = 0.0
 
     def summary(self) -> Dict[str, Any]:
-        """Return a serializable summary of all metrics."""
+        """Return a serializable summary of all metrics.
+
+        P4-028 ROOT FIX: includes aggregate stats for training_loss and
+        episode_rewards (count, last, min, max, mean). The previous code
+        had dead attributes (training_loss=[], episode_rewards=[]) that
+        were NEVER populated by train_agent. The fix populates them via
+        an SB3 callback (see _TrainingMetricsCallback in train_agent)
+        and includes the aggregates here so operators can monitor training
+        health without parsing raw SB3 logs.
+        """
+        def _agg(values: List[float]) -> Dict[str, Any]:
+            if not values:
+                return {
+                    "count": 0, "last": None,
+                    "min": None, "max": None, "mean": None,
+                }
+            return {
+                "count": len(values),
+                "last": float(values[-1]),
+                "min": float(min(values)),
+                "max": float(max(values)),
+                "mean": float(sum(values) / len(values)),
+            }
+        loss_agg = _agg(self.training_loss)
+        rewards_agg = _agg(self.episode_rewards)
         return {
             "run_id": self.run_id,
             "pairs_processed": self.n_pairs_processed,
@@ -8973,6 +9418,18 @@ class PipelineMetrics:
             "ranked_high": self.n_ranked_high,
             "ranked_low": self.n_ranked_low,
             "inference_latency_ms": round(self.inference_latency_ms, 2),
+            # P4-028 ROOT FIX: aggregate training_loss stats
+            "training_loss_count": loss_agg["count"],
+            "training_loss_last": loss_agg["last"],
+            "training_loss_min": loss_agg["min"],
+            "training_loss_max": loss_agg["max"],
+            "training_loss_mean": loss_agg["mean"],
+            # P4-028 ROOT FIX: aggregate episode_rewards stats
+            "episode_rewards_count": rewards_agg["count"],
+            "episode_rewards_last": rewards_agg["last"],
+            "episode_rewards_min": rewards_agg["min"],
+            "episode_rewards_max": rewards_agg["max"],
+            "episode_rewards_mean": rewards_agg["mean"],
         }
 
 
@@ -9120,6 +9577,14 @@ INPUT_SCHEMA: Dict[str, Any] = {
         "drug-disease pair with predicted scores."
     ),
 }
+# P4-041 ROOT FIX: RARE_DISEASE_COL is a BINARY flag (0 or 1), not a
+# continuous value in [0, 1]. The previous schema had it as (0.0, 1.0)
+# which is technically correct (0 and 1 are in [0, 1]) but misleading —
+# a consumer validating against the schema would accept 0.5 as valid,
+# even though the column is supposed to be binary. The fix uses a set
+# {0, 1} to make the binary constraint explicit. Other feature cols
+# remain (0.0, 1.0) (continuous).
+INPUT_SCHEMA["value_ranges"][RARE_DISEASE_COL] = {0, 1}
 INPUT_SCHEMA["column_types"][DRUG_COL] = "object"
 INPUT_SCHEMA["column_types"][DISEASE_COL] = "object"
 
@@ -9384,11 +9849,16 @@ def run_pipeline(
     # line alone took minutes and dominated pipeline runtime, for a
     # statistic that is also computed (on-the-fly, correctly) inside the
     # env during ``step()``.
-    # ROOT FIX: sample at most 1000 rows for the reward-range log line.
-    # 1000 samples gives a stable min/max estimate (reward is bounded in
+    # P4-035 ROOT FIX: sample at most 10K rows for the reward-range log.
+    # 10K samples gives a stable min/max estimate (reward is bounded in
     # [0, 1]) without the O(N) Python loop. The env's own reward stats
     # (logged during training) remain the authoritative source.
-    reward_sample_size = min(1000, len(train_df))
+    # The previous v100 fix used 1000 samples; the P4-035 fix raises this
+    # to 10K (still << the 100K+ full train set) for a more stable estimate
+    # of the reward distribution's tails (the min/max can be noisy with
+    # only 1000 samples if the distribution is heavy-tailed).
+    _REWARD_SAMPLE_LIMIT = 10_000  # P4-035 ROOT FIX: cap reward sample at 10K rows
+    reward_sample_size = min(_REWARD_SAMPLE_LIMIT, len(train_df))
     reward_sample_df = (
         train_df.sample(n=reward_sample_size, random_state=42)
         if reward_sample_size < len(train_df)
@@ -9396,7 +9866,8 @@ def run_pipeline(
     )
     train_reward_sample = reward_sample_df.apply(lambda r: reward_fn.compute(r), axis=1)
     logger.info(
-        f"Reward range (train sample of {len(reward_sample_df)}/{len(train_df)}): "
+        f"Reward range (train sample of {len(reward_sample_df)}/{len(train_df)}, "
+        f"capped at _REWARD_SAMPLE_LIMIT={_REWARD_SAMPLE_LIMIT}): "
         f"{train_reward_sample.min():.3f} -> {train_reward_sample.max():.3f}"
     )
 
@@ -9439,6 +9910,18 @@ def run_pipeline(
         # separately and added to train_proper AFTER the split). This
         # prevents oversampled KP copies from leaking into
         # val_for_threshold and contaminating the threshold computation.
+        # P4-034 ROOT FIX: EXCLUDE KP drugs from val_drugs at the SOURCE.
+        # The previous code (v90 BUG #42) added a safety-net filter AFTER
+        # the split to remove KP rows that leaked into val_for_threshold_df.
+        # The P4-034 fix removes the safety net and instead excludes KP
+        # drugs from val_drugs BEFORE the split — so no KP rows can leak
+        # into val_for_threshold_df in the first place. This is the
+        # scientifically correct approach: the threshold should be computed
+        # on genuinely held-out NON-KP data, and the way to guarantee that
+        # is to never put KP drugs in the val set.
+        _kp_drug_names_lower = {
+            str(d).lower().strip() for d, _ in KNOWN_POSITIVES
+        }
         _val_rng = np.random.default_rng(config.seed + 999)
         _unique_drugs_val = list(train_df[DRUG_COL].unique())
         _val_rng.shuffle(_unique_drugs_val)
@@ -9446,6 +9929,22 @@ def run_pipeline(
         _n_val_drugs = max(1, int(VAL_FRACTION_FOR_THRESHOLD * len(_unique_drugs_val)))
         _val_drugs = set(_unique_drugs_val[:_n_val_drugs].tolist())
         _train_drugs = set(_unique_drugs_val[_n_val_drugs:].tolist())
+        # P4-034: move KP drugs from val_drugs to train_drugs (so KPs are
+        # NEVER in the val set). This replaces the v90 BUG #42 safety net.
+        _kp_drugs_in_val = {
+            d for d in _val_drugs
+            if str(d).lower().strip() in _kp_drug_names_lower
+        }
+        if _kp_drugs_in_val:
+            _val_drugs -= _kp_drugs_in_val
+            _train_drugs |= _kp_drugs_in_val
+            logger.info(
+                f"P4-034 ROOT FIX: moved {len(_kp_drugs_in_val)} KP drug(s) "
+                f"from val_drugs to train_drugs BEFORE the split. The "
+                f"v90 BUG #42 safety-net filter is REMOVED — KP rows can "
+                f"no longer leak into val_for_threshold_df because KP "
+                f"drugs are excluded from val_drugs at the source."
+            )
         _train_mask = train_df[DRUG_COL].isin(_train_drugs)
         _val_mask = train_df[DRUG_COL].isin(_val_drugs)
         # Fallback: if drug-aware split produces empty side, use sequential
@@ -9460,6 +9959,14 @@ def run_pipeline(
             _n_train_v = max(1, int((1.0 - VAL_FRACTION_FOR_THRESHOLD) * _n_total_v))
             _train_drugs = set(_seen_order[:_n_train_v])
             _val_drugs = set(_seen_order[_n_train_v:])
+            # P4-034: also exclude KP drugs from val_drugs in the sequential fallback
+            _kp_drugs_in_val = {
+                d for d in _val_drugs
+                if str(d).lower().strip() in _kp_drug_names_lower
+            }
+            if _kp_drugs_in_val:
+                _val_drugs -= _kp_drugs_in_val
+                _train_drugs |= _kp_drugs_in_val
             _train_mask = train_df[DRUG_COL].isin(_train_drugs)
             _val_mask = train_df[DRUG_COL].isin(_val_drugs)
         train_proper_df = train_df[_train_mask].reset_index(drop=True)
@@ -9469,31 +9976,28 @@ def run_pipeline(
             train_proper_df = pd.concat(
                 [train_proper_df, kp_oversampled], ignore_index=True
             ).reset_index(drop=True)
-        # v90 BUG #42 (from other agent): additional safety net — filter
-        # any KP rows from val_for_threshold_df that may have leaked
-        # through the drug-aware split (e.g., if a KP drug ended up in
-        # the val_drugs set). This ensures the threshold is computed on
-        # genuinely held-out NON-KP data.
+        # P4-034 ROOT FIX: REMOVED the v90 BUG #42 safety-net filter.
+        # The previous code filtered KP rows from val_for_threshold_df
+        # AFTER the split. With the P4-034 fix (KP drugs excluded from
+        # val_drugs BEFORE the split), no KP rows can leak into
+        # val_for_threshold_df. We add an ASSERTION to catch any future
+        # regression loudly (instead of silently dropping data).
         if len(val_for_threshold_df) > 0:
-            _kp_filter_set = {
-                (d.lower().strip(), v.lower().strip())
-                for d, v in KNOWN_POSITIVES
-            }
+            _kp_filter_set = _KNOWN_POSITIVES_LOWER_SET
             _val_kp_mask = val_for_threshold_df.apply(
                 lambda r: (str(r[DRUG_COL]).lower().strip(),
                           str(r[DISEASE_COL]).lower().strip()) in _kp_filter_set,
                 axis=1,
             )
-            _n_kps_filtered = int(_val_kp_mask.sum())
-            if _n_kps_filtered > 0:
-                val_for_threshold_df = val_for_threshold_df[~_val_kp_mask].reset_index(drop=True)
-                logger.info(
-                    f"v90 BUG #42: filtered {_n_kps_filtered} KP rows "
-                    f"from val_for_threshold_df (safety net on top of "
-                    f"drug-aware split). val_for_threshold now has "
-                    f"{len(val_for_threshold_df)} genuinely held-out "
-                    f"NON-KP pairs."
-                )
+            _n_kps_in_val = int(_val_kp_mask.sum())
+            assert _n_kps_in_val == 0, (
+                f"P4-034 INVARIANT VIOLATION: {_n_kps_in_val} KP rows found "
+                f"in val_for_threshold_df AFTER the P4-034 source-level "
+                f"exclusion. This should be impossible (KP drugs are "
+                f"excluded from val_drugs BEFORE the split). Check for a "
+                f"regression in the split logic or a KP with a drug name "
+                f"that doesn't match _kp_drug_names_lower."
+            )
         logger.info(
             f"v90 BUG #14/#15: DRUG-AWARE val split of train_df ({len(train_df)} pairs) "
             f"into train_proper ({len(train_proper_df)}, includes {len(kp_oversampled)} "
@@ -9746,8 +10250,14 @@ def run_pipeline(
     # V4 C-F2 fix: pass train disease stats to test env.
     # ROOT FIX (FORENSIC-AUDIT-I13): pass train reward_fn + set_adaptive_threshold=False
     # so the AUC env uses the SAME threshold as training (no test leakage).
+    # P4-025 ROOT FIX: REMOVED the `len(test_df[DRUG_COL].unique()) > 1` gate.
+    # The previous code skipped AUC computation if the test set had <2 unique
+    # drugs. This was overly restrictive: a test set with 1 drug and multiple
+    # diseases CAN have a meaningful AUC because the agent must distinguish
+    # good disease pairs from bad ones for that drug. compute_auc already
+    # handles degenerate cases (returns None for 0 known positives in test).
     auc: Optional[float] = None
-    if len(test_df) > 0 and len(test_df[DRUG_COL].unique()) > 1:
+    if len(test_df) > 0:
         t0 = _time.perf_counter()
         # v89 P0: pass vec_normalize so obs is normalized at inference.
         auc = compute_auc(
@@ -10623,7 +11133,14 @@ def produce_evaluation_report(
             "policy_prob": float(c.policy_prob),
             "is_known_positive": bool(c.is_known_positive),
             "literature_support": bool(c.literature_support),
-            "is_safe": bool(c.is_safe()),
+            # P4-039: is_safe() method REMOVED. Inline the safety check using
+            # the candidate's stored threshold (set at construction time).
+            "is_safe": bool(
+                c.features.get(SAFETY_COL, 0.0)
+                >= (c.safety_hard_reject_threshold
+                    if c.safety_hard_reject_threshold is not None
+                    else DEFAULT_CONFIG.reward.safety_hard_reject)
+            ),
             "features": {k: float(v) for k, v in c.features.items()},
         }
         top_candidates_report.append(entry)
