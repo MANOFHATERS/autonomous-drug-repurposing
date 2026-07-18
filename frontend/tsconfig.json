@@ -42,7 +42,15 @@
     "tests",
     "uploaded_code",
     "scripts",
+    "src_backup",
     "src/lib/services/__tests__",
-    "src/app/api/**/__tests__"
+    "src/lib/auth/__tests__",
+    "src/components/**/__tests__",
+    "src/app/api/**/__tests__",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.test.js",
+    "**/*.spec.ts",
+    "**/*.spec.tsx"
   ]
 }
