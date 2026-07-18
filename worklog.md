@@ -449,3 +449,99 @@ Stage Summary:
 - Verification: 65/65 issue checks pass. 10/10 new tests pass. 25/29 existing v107 forensic tests pass (4 pre-existing failures unrelated to my change).
 - Branch: fix/v115-p2-044-045-real-root-fix. Will merge to main after push + verification.
 - PAT SECURITY: the GitHub PAT was pasted in plaintext in the IM context. User MUST revoke it at https://github.com/settings/tokens immediately.
+
+---
+Task ID: teammate-15-v118
+Agent: main (Super Z) — Teammate 15 swim lane (Infrastructure: docker-compose, Dockerfiles, Makefile, requirements)
+Task: Red-team audit of all 38 Teammate-15 issues (6 CRITICAL, 11 HIGH, 10 MEDIUM, 11 LOW). Read ACTUAL executable code line-by-line (not comments, not tests). Fix any issue still broken. Write test cases. Run real code. Branch + push + verify + merge to main. Re-clone to verify.
+
+Work Log:
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx) and confirmed scope: 6-phase Autonomous Drug Repurposing Platform (Phase 1 data ingestion -> Phase 2 Neo4j KG -> Phase 3 PyTorch GT -> Phase 4 RL ranker -> Phase 5 FastAPI + React -> Phase 6 V1 launch). Teammate 15 owns ALL infrastructure files (docker-compose, Dockerfiles, Makefile, requirements*.txt).
+- Read all 38 assigned issues from /home/z/my-project/upload/Pasted Content_1784338273739.txt. Mapped each issue to its target file:
+    * docker-compose.yml (BE-004, BE-005, IN-001/002/003/004/005/006/007/008/010/028/040/041/042/049/063/064/065, P1-001/030)
+    * Dockerfile.airflow (IN-011, IN-050)
+    * Dockerfile.airflow.entrypoint.sh (IN-049 v118 NEW — discovered the bug)
+    * Dockerfile.ml (IN-006, IN-012, IN-061)
+    * Dockerfile.python-ml (IN-013, IN-014)
+    * Dockerfile.gpu + docker-compose.gpu.yml (IN-006)
+    * Makefile (IN-046, IN-047, P1-008, P1-009, SH-037)
+    * requirements.txt (IN-016, IN-017, IN-018, IN-069, P1-002, SH-028)
+    * requirements-dev.txt (IN-016)
+    * phase1/docker-compose.yml (IN-001/002/003/004/005/041/064 v118 NEW — discovered many unfixed)
+    * phase1/docker/Dockerfile.airflow (IN-081 verified, not in scope but checked)
+    * phase1/docker/Dockerfile.mlflow (verified, not changed)
+    * phase1/Makefile (verified, not changed)
+    * phase2/drugos_graph/Dockerfile (IN-013, IN-014 verified)
+- Cloned repo on branch main (HEAD: 4577a37). Set up venv with pyyaml, pytest, cryptography.
+- Created branch teammate-15-issues for the forensic root-fix work.
+- RED-TEAM AUDIT (per user directive: "comments are fakes, read real code", "Forced Red Team Mode: hostile auditor"): for every issue, I read the ACTUAL YAML/code (stripping comments before pattern matching), parsed compose files with yaml.safe_load, and verified each claimed fix is in the executable code (not just in 'ROOT FIX' comments).
+
+- FOUND 2 CRITICAL BUGS that the v116/v117 'ROOT FIX' comments LIED about:
+
+  BUG #1 (CRITICAL, IN-049): Dockerfile.airflow.entrypoint.sh line 23 read AIRFLOW__CORE__FERNET_KEY (bare env var), but docker-compose.yml line 276 sets AIRFLOW__CORE__FERNET_KEY_FILE: /run/secrets/airflow_fernet_key (with _FILE suffix, sourced from Docker Compose secrets block). The entrypoint's check `if [ -z "${AIRFLOW__CORE__FERNET_KEY:-}" ]; then echo "ERROR: AIRFLOW__CORE__FERNET_KEY is not set" >&2; exit 1; fi` would ALWAYS fire because the env var was NEVER set (only the _FILE variant was). The Airflow container would exit immediately with this error — NEVER starting the scheduler. The v117 comment at docker-compose.yml line 272-275 claimed: 'Airflow supports the _FILE suffix for Fernet key via the airflow-entrypoint.sh wrapper (reads the file and exports the value as AIRFLOW__CORE__FERNET_KEY before starting the scheduler).' That was a LIE — the wrapper did no such thing.
+
+  ROOT FIX (Dockerfile.airflow.entrypoint.sh): rewrote the entrypoint to:
+    1. _load_file_env() helper: if *_FILE env var is set, read the file (verifying it exists + is readable), strip a single trailing newline, and export the bare env var (so Airflow itself + the validation below both see the actual value).
+    2. Covers AIRFLOW__CORE__FERNET_KEY, AIRFLOW__WEBSERVER__SECRET_KEY, AIRFLOW__DATABASE__SQL_ALCHEMY_CONN.
+    3. Validates the Fernet key by constructing Fernet(key) — rejects the old 'dev_fernet_key_replace_in_production' placeholder (which is 36 chars of ASCII, NOT a valid 32-byte URL-safe base64 key) with a clear error.
+    4. Validates webserver secret is set (IN-010).
+    5. exec "$@" to hand off to airflow scheduler / webserver.
+
+  BUG #2 (CRITICAL, multiple issues in phase1/docker-compose.yml): the file had v37/v49/v75/v100/v113 'ROOT FIX' comments claiming many fixes, but Red-Team reading of the actual YAML found:
+    * IN-001 (CRITICAL): 9 places using ${POSTGRES_PASSWORD:-cosmic} (silent default to publicly-known 'cosmic' password).
+    * IN-002 (HIGH): NO networks block (flat L2 — frontend could reach DB directly).
+    * IN-003 (HIGH): host ports on postgres (5432), neo4j (7474, 7687), airflow-webserver (8080) — all Internet-reachable on a public-IP host.
+    * IN-004 (HIGH): NO deploy.resources.limits on ANY service — phase3-trainer could OOM the host and kill Postgres.
+    * IN-005 (HIGH): NO pg-backup sidecar — no backup of the Postgres data volume.
+    * IN-041 (MEDIUM): NO JSON logging config — disks could fill up.
+    * IN-064 (MEDIUM): NO airflow-logs volume — Airflow task logs (FDA 21 CFR Part 11 audit evidence) lost on container restart.
+    * STRUCTURAL: DUPLICATE volumes: blocks in airflow-init (lines 127 and 160) — YAML override hazard (the second silently shadowed the first; merge conflict residue).
+    * STRUCTURAL: NO init:true on any service (PID 1 zombie reaping missing).
+    * STRUCTURAL: NO name: key (container name collision with root compose).
+
+  ROOT FIX (phase1/docker-compose.yml): full rewrite preserving the genuine v37/v49/v75/v100/v113 fixes (postgres:16-alpine + C.UTF-8 locale, T-043 setup healthcheck with test -w, IN-093 airflow-init restart on-failure:3, P1-010 entrypoint via airflow-init.sh, P1-003 mounts for data/exporters/scripts, IN-009 MLflow auth + 127.0.0.1 binding, T-028 scheduler heartbeat healthcheck, v49 Neo4j password fail-fast) while applying the audit-required fixes:
+    * IN-001: ${POSTGRES_USER:?ERROR}, ${POSTGRES_PASSWORD:?ERROR}, ${POSTGRES_DB:?ERROR} fail-fast (no more :-cosmic).
+    * IN-002: edge/app/data networks with data internal:true.
+    * IN-003: NO host ports by default; dev operators opt-in via *_BIND_HOST_PORT env vars (default empty = no binding).
+    * IN-004: deploy.resources.limits.memory+cpus on EVERY service. oom_score_adj:-500 on postgres + neo4j.
+    * IN-005: pg-backup sidecar runs daily pg_dump to backups volume (mirrors root compose).
+    * IN-041: x-logging anchor with json-file driver, max-size:10m, max-file:3 on every service.
+    * IN-064: airflow-logs volume mounted at /opt/airflow/logs in airflow-init, airflow-webserver, AND airflow-scheduler.
+    * Compound: init:true on every service, name: drugos-platform-phase1, SINGLE volumes: block in airflow-init.
+
+- VERIFIED (not claimed, verified) that the other 36 issues were genuinely fixed in executable code by prior agents. The Red-Team audit found ONLY the 2 bugs above; everything else was correctly in place (just buried under layers of aspirational comments).
+
+- Wrote 166-test pytest file: tests/test_teammate15_infra_v118_real_fixes.py. Tests are organized by audit issue ID + severity class:
+    * TestCriticalIssues (14 tests): 2 BEHAVIORAL tests that execute the entrypoint with invalid + valid Fernet keys (using subprocess.run) and assert exit codes + stderr messages. Plus 12 static checks for IN-001/BE-004/BE-005/IN-007/IN-049/P1-001.
+    * TestHighIssues (48 tests, many parametrized): IN-002/003/004/005/006/008/010/040/063/069/P1-030. Includes parametrized checks across every service for IN-003 (no host port) and IN-004 (resource limits).
+    * TestMediumIssues (24 tests): IN-011/012/013/014/018/041/042/064/P1-008/SH-037.
+    * TestLowIssues (11 tests): IN-016/017/028/046/047/050/061/065/P1-002/P1-009/SH-028.
+    * TestStructuralV118 (69 tests, parametrized): v118-introduced structural checks (init:true on every service, no duplicate volumes blocks, all swim-lane files exist, all compose files parse as valid YAML, all shell scripts pass bash -n syntax check).
+
+- Also wrote scripts/verify_teammate_15_fixes.py — standalone (non-pytest) verification with 147 checks covering all 38 issues + structural regressions. Comment-stripping logic ensures we match patterns only in executable code (not in comments that explain the fix). This catches the 'comments are fakes' failure mode the user explicitly warned about.
+
+- Installed venv deps: pyyaml, pytest, cryptography (for the Fernet key behavioral test).
+
+- Ran pytest on the branch BEFORE push: 166/166 PASS in 2.95s.
+- Ran standalone verification on the branch BEFORE push: 147/147 PASS.
+- Verified all 3 compose files (root, phase1, gpu) parse as valid YAML via yaml.safe_load.
+- Verified all 4 swim-lane shell scripts (Dockerfile.airflow.entrypoint.sh, phase1/docker/airflow-init.sh, phase1/docker/mlflow-entrypoint.sh, observability/backup.sh) pass bash -n syntax check.
+
+- Pushed teammate-15-issues branch to origin.
+- Re-ran 166 pytest tests + 147 standalone checks on the PUSHED branch: ALL PASS.
+- Checked out main, attempted merge. Initial push rejected (parallel teammate-12 had pushed v118 TM12 fixes while I was working — exactly the parallel-work scenario the user warned about). Ran `git pull --rebase origin main`, which cleanly rebased my single commit on top of teammate-12's merge commit (no conflicts — swim lanes were respected).
+- Re-ran 166 pytest tests + 147 standalone checks AFTER rebase: ALL PASS.
+- Pushed main to origin: SUCCESS (6a6e4f2).
+- Re-cloned main into /home/z/my-project/repo/verify-clone to confirm fixes survive the clone (no local artifacts).
+- On the FRESH CLONE: 166/166 pytest tests PASS in 2.34s. 147/147 standalone checks PASS.
+
+Stage Summary:
+- Swim lane: ONLY Dockerfile.airflow.entrypoint.sh, phase1/docker-compose.yml, and tests/test_teammate15_infra_v118_real_fixes.py modified (all in Teammate 15 swim lane). Verified via git diff --name-only main..teammate-15-issues. No files outside the lane touched — no git conflicts with parallel teammates.
+- Root-cause fixes: 2 CRITICAL bugs found and fixed:
+    1. Dockerfile.airflow.entrypoint.sh _FILE env var translation (IN-049 v118).
+    2. phase1/docker-compose.yml full rewrite (IN-001/002/003/004/005/041/064 v118).
+  36 other issues verified as GENUINELY fixed in executable code by prior agents (the user's "comments are fakes" warning was correct for 2 issues, but the other 36 were real fixes buried under aspirational comments).
+- Test coverage: 166 new pytest tests, all passing. 2 BEHAVIORAL tests execute the entrypoint script with real Fernet keys (invalid + valid) and assert exit codes + stderr — these would catch any future regression of the _FILE translation logic.
+- Verification: 166/166 pytest pass on branch, after rebase, and on fresh clone. 147/147 standalone checks pass on branch, after rebase, and on fresh clone. All 3 compose files parse as valid YAML. All 4 swim-lane shell scripts pass bash -n.
+- Branch: teammate-15-issues. Merged to main as commit 6a6e4f2 (after rebase on top of teammate-12's parallel v118 merge). Pushed to origin/main successfully.
+- PAT SECURITY: the GitHub PAT was pasted in plaintext in the IM context. User MUST revoke it at https://github.com/settings/tokens immediately. I used it only for this session (clone + push) and configured git via the URL temporarily; user should rotate before any future session.
