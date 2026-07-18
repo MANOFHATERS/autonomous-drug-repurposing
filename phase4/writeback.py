@@ -493,33 +493,6 @@ def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
             ),
         )
 
-        # SH-021 v117 ROOT FIX (Teammate 8): DEFENSE-IN-DEPTH Cypher
-        # identifier validation. The shared contract validates these
-        # constants at IMPORT time, but this function uses values from
-        # NEO4J_DRUG_LABELS / NEO4J_DISEASE_LABEL etc. which were
-        # imported at the TOP of this function inside a try/except.
-        # If the shared import failed (and the hardcoded fallback was
-        # used), the values are safe (only "Drug", "Compound", "Disease",
-        # "name" — all alphanumeric). But if a future edit adds a
-        # backtick, semicolon, or other Cypher metacharacter to the
-        # fallback, the import-time validation in shared/contracts/
-        # writeback.py would NOT catch it (because the fallback is
-        # local). This local validation catches that case.
-        #
-        # We validate EVERY label and property name BEFORE building the
-        # Cypher query. If any fails, we raise ValueError (fail-closed)
-        # — better to refuse the writeback than to inject a malicious
-        # label into Neo4j.
-        for _lbl in (drug_label_try_1, drug_label_try_2, NEO4J_DISEASE_LABEL):
-            _validate_cypher_identifier(_lbl, f"NEO4J_label_{_lbl!r}")
-        for _prop in (drug_prop, disease_prop):
-            _validate_cypher_identifier(_prop, f"NEO4J_prop_{_prop!r}")
-        _validate_cypher_identifier(_edge_label, f"edge_label_{_edge_label!r}")
-        # Note: drug_original, drug_title, drug_lower, disease_* are
-        # PARAMETERIZED in the Cypher query ($drug_lower, $drug_title,
-        # etc.) — they CANNOT inject. Only the LABEL and PROPERTY names
-        # are string-concatenated, so only those need validation.
-
         # ISSUE #341 ROOT FIX: try BOTH :Drug (TM 17 contract) and
         # :Compound (current Phase 2 KG) labels. Try drug_id first
         # (canonical), fall back to name (legacy). This prevents node
@@ -538,25 +511,61 @@ def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
         # explicit: drug is toxic FOR this disease.
         _edge_label = edge_label_for_outcome(vh.outcome)
 
-        # Build a Cypher UNION query that tries each (label, prop)
-        # combination to find the existing drug node. We use CALL { ... }
-        # subqueries (Neo4j 5+) for scoping; fall back to a simpler
-        # pattern for older Neo4j.
-        #
-        # The query tries:
-        #   1. :Drug match by drug_id (TM 17 canonical)
-        #   2. :Drug match by name (TM 17 with name)
-        #   3. :Compound match by name (current KG)
-        # Then does the same for Disease (single label).
-        # If no existing node is found, MERGE creates one with the
-        # PREFERRED label (:Drug) and both name and drug_id properties.
+        # drug_label_try_1 / drug_label_try_2: the primary and fallback
+        # Neo4j labels for a drug node. The kg_builder uses :Compound
+        # (current), TM 17 contract uses :Drug (canonical future). We
+        # try BOTH to avoid node fragmentation.
         drug_label_try_1, drug_label_try_2 = NEO4J_DRUG_LABELS[0], NEO4J_DRUG_LABELS[-1]
 
-        # Build the Cypher query using plain string concatenation (NOT
-        # f-strings) because Cypher's CALL { ... } blocks use { and }
-        # which conflict with f-string expression syntax.
+        # drug_prop / disease_prop: the Neo4j property name on the node
+        # that holds the human-readable name (e.g., "Metformin"). Used
+        # in the MATCH WHERE clause to find the existing node.
         drug_prop = NEO4J_DRUG_NAME_PROP
         disease_prop = NEO4J_DISEASE_NAME_PROP
+
+        # SH-021 v118 ROOT FIX (Teammate 8 — HOSTILE AUDITOR): the
+        # previous "ROOT FIX" comment block (v117) placed the Cypher
+        # identifier validation ABOVE the variable definitions, causing
+        # Python to raise ``UnboundLocalError: cannot access local
+        # variable 'drug_label_try_1' where it is not associated with a
+        # value`` the moment ANY real Neo4j URI was set. The function
+        # silently swallowed the error via the broad ``except Exception``
+        # below, logging "Neo4j write failed" and returning False —
+        # making it LOOK like Neo4j was unreachable, when in fact the
+        # function was structurally unable to ever write a single edge.
+        #
+        # The user's audit ("comments and tests are fakes ... when I
+        # manually check code it's 100 percent broken") was dead right:
+        # the v117 fix was aspirational, not actual. This v118 fix MOVES
+        # the validation block to AFTER every variable it references is
+        # defined, so the validation actually executes.
+        #
+        # DEFENSE-IN-DEPTH Cypher identifier validation: the shared
+        # contract validates these constants at IMPORT time, but this
+        # function uses values from NEO4J_DRUG_LABELS /
+        # NEO4J_DISEASE_LABEL etc. which were imported at the TOP of
+        # this function inside a try/except. If the shared import failed
+        # (and the hardcoded fallback was used), the values are safe
+        # (only "Drug", "Compound", "Disease", "name" — all
+        # alphanumeric). But if a future edit adds a backtick,
+        # semicolon, or other Cypher metacharacter to the fallback, the
+        # import-time validation in shared/contracts/writeback.py would
+        # NOT catch it (because the fallback is local). This local
+        # validation catches that case.
+        #
+        # We validate EVERY label and property name BEFORE building the
+        # Cypher query. If any fails, we raise ValueError (fail-closed)
+        # — better to refuse the writeback than to inject a malicious
+        # label into Neo4j.
+        for _lbl in (drug_label_try_1, drug_label_try_2, NEO4J_DISEASE_LABEL):
+            _validate_cypher_identifier(_lbl, f"NEO4J_label_{_lbl!r}")
+        for _prop in (drug_prop, disease_prop):
+            _validate_cypher_identifier(_prop, f"NEO4J_prop_{_prop!r}")
+        _validate_cypher_identifier(_edge_label, f"edge_label_{_edge_label!r}")
+        # Note: drug_original, drug_title, drug_lower, disease_* are
+        # PARAMETERIZED in the Cypher query ($drug_lower, $drug_title,
+        # etc.) — they CANNOT inject. Only the LABEL and PROPERTY names
+        # are string-concatenated, so only those need validation.
         cypher = (
             """
         // ISSUE #341 ROOT FIX: try multiple (label, prop) combos to find

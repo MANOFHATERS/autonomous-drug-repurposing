@@ -1,0 +1,113 @@
+# phase1/.dockerignore — IN-030 v118 ROOT FIX (Teammate 8)
+# =========================================================================
+# The root .dockerignore covers the WHOLE repo context, but the
+# phase1 Dockerfile (phase1/docker/Dockerfile.mlflow) builds with
+# ``context: ./phase1`` (the phase1 directory) — meaning this file
+# applies whenever someone builds the MLflow image or any phase1-
+# specific image directly from the phase1/ directory.
+#
+# Without this file, ``docker build -t drugos-mlflow ./phase1`` sends
+# ``raw_data/`` (10+ GB of ChEMBL, DrugBank, UniProt, STRING, DisGeNET,
+# OMIM, PubChem downloads), ``processed_data/`` (CSVs with real drug-
+# disease associations), ``tests/``, ``__pycache__``, ``.venv``, and
+# ``phase1.db`` to the daemon as the build context — a 10+ GB tarball
+# that exhausts Docker daemon memory and risks shipping real biomedical
+# data + potentially-PHI annotations to a registry.
+#
+# This file mirrors the patterns from the root .dockerignore but adds
+# phase1-specific patterns (raw_data, processed_data, the local SQLite
+# dev DB, Airflow logs).
+#
+# The phase1 Dockerfiles only COPY:
+#   - phase1/requirements.txt
+#   - phase1/dags/
+#   - phase1/pipelines/
+#   - phase1/database/
+#   - phase1/service/
+#   - phase1/contracts/
+#   - phase1/docker/ (entrypoint scripts)
+# So everything else here is excluded from the build context.
+
+# Raw biomedical data downloads — NEVER in the build context.
+# These can be 10+ GB total (ChEMBL ~3GB, DrugBank ~500MB, UniProt ~2GB,
+# STRING ~3GB, DisGeNET ~500MB, OMIM ~100MB, PubChem ~1GB).
+# They are downloaded by the Airflow ETL pipelines at RUNTIME, not at
+# BUILD time. Shipping them in the image would:
+#   1. Make the image 10+ GB.
+#   2. Pin the data to a specific snapshot (no auto-refresh).
+#   3. Risk shipping potentially-licensed data to a public registry
+#      (ChEMBL CC BY-SA, DrugBank requires license, etc.).
+raw_data
+raw_data/**
+
+# Processed data — NEVER in the build context.
+# These are the CSVs produced by the ETL pipelines (drugbank_indications.csv,
+# chembl_activities.csv, etc.). They are regenerated on every ETL run.
+# Shipping them in the image pins the KG to a specific data vintage.
+processed_data
+processed_data/**
+
+# Local SQLite DB — NEVER in production images.
+# ``phase1.db`` is a dev convenience for running the phase1 service
+# without a Postgres instance. Shipping it to a registry leaks any
+# locally-loaded drug-disease associations.
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+phase1.db
+
+# Python bytecode caches — never needed inside a container.
+__pycache__
+__pycache__/**
+**/__pycache__
+**/__pycache__/**
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual envs — NEVER in the build context.
+.venv
+.venv/**
+venv
+venv/**
+
+# Tests and test artifacts — NEVER in production images.
+tests
+tests/**
+*.test.py
+*_test.py
+
+# Airflow logs and DB — NEVER in the build context.
+# ``airflow.db`` is the LocalExecutor metadata DB. ``logs/`` contains
+# task instance logs which may include sensitive DAG parameters.
+airflow.db
+airflow.db-journal
+logs
+logs/**
+
+# IDE / editor config — never needed inside a container.
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Version control — never needed inside a container.
+.git
+.gitignore
+.gitattributes
+
+# Local env files — NEVER in production images.
+.env
+.env.local
+.env.*.local
+*.env
+
+# Tooling configs that are not needed at build time.
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov

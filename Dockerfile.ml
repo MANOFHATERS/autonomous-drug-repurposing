@@ -1,6 +1,32 @@
 # =============================================================================
 # Dockerfile.ml — Multi-stage ML image for Phase 3 (GT) + Phase 4 (RL)
 # =============================================================================
+# v118 ROOT FIX (Teammate 8 — hostile-auditor, IN-092 follow-up):
+#   The previous Dockerfile used ``python:3.14-slim`` while pinning
+#   ``torch==2.2.0+cpu`` (released 2024-01-15) and ``pandas==2.1.4``
+#   (released 2023-08-15). Neither has Python 3.14 wheels:
+#
+#     * torch 2.2.0 wheels: cp310, cp311, cp312 only (verified via
+#       https://pypi.org/pypi/torch/2.2.0/json — the ``requires_python``
+#       is >=3.8 but the actual wheel set only covers up to cp312).
+#     * pandas 2.1.4 wheels: cp39-cp312 only.
+#     * rdkit 2024.3.5 wheels: cp310-cp312 only.
+#
+#   Python 3.14 was released 2025-10-15 — AFTER all these package
+#   versions. ``pip install torch==2.2.0+cpu`` inside a Python 3.14
+#   container fails with ``ERROR: No matching distribution found for
+#   torch==2.2.0``. The Docker image CANNOT BUILD.
+#
+#   The fix is to downgrade the base image to ``python:3.12-slim``,
+#   which is the LATEST Python version supported by ALL pinned packages.
+#   Python 3.12 is also the version used in the dev/CI venv
+#   (``python3 --version`` → 3.12.13), so dev and prod now match.
+#
+#   This is exactly the "comments are fakes, code is broken" pattern:
+#   the v116 comment claimed "ROOT FIX" but the FROM line was
+#   incompatible with every heavy dep in the file. The image would
+#   fail to build on day one of any real Docker build run.
+#
 # v116 ROOT FIX (Teammate 15, issues IN-006/IN-012/IN-061):
 #   IN-012 (MEDIUM): added ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 #       PYTHONHASHSEED=0 for reproducible builds + no .pyc bloat. Pinned
@@ -17,7 +43,7 @@
 #   Stage 1 (builder): compile heavy deps (torch, PyG, RDKit wheels)
 #   Stage 2 (runtime): copy only installed site-packages + repo source
 # =============================================================================
-FROM python:3.14-slim AS builder
+FROM python:3.12-slim AS builder
 
 # IN-012: pin pip for reproducible builder stage.
 RUN pip install --no-cache-dir --upgrade \
@@ -79,7 +105,11 @@ RUN pip install --no-cache-dir --prefix=/install \
 # =============================================================================
 # Stage 2 — Runtime image
 # =============================================================================
-FROM python:3.14-slim AS runtime
+# v118: also changed to python:3.12-slim (must match the builder stage
+# Python version, or the copied site-packages won't load — extension
+# modules compiled for cp314 cannot be imported by cp312, and vice
+# versa). Match the builder's Python exactly.
+FROM python:3.12-slim AS runtime
 
 # IN-012: reproducibility env vars.
 ENV PYTHONDONTWRITEBYTECODE=1 \
