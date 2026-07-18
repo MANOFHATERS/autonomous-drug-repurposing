@@ -176,47 +176,124 @@ export interface KgExploreResponse {
 }
 
 // ─── Phase 3 (GT service) ────────────────────────────────────────────────
+//
+// SH-025 + SH-006 + SH-031 ROOT FIX (v120 forensic, hostile-auditor):
+// The previous static ``PredictResponse`` interface described a SINGLE
+// prediction object with fields ``drug, disease, gnn_score,
+// gnn_score_calibrated, confidence, gnn_score_timestamp, cached,
+// model_version`` (snake_case). That shape NEVER matched the actual
+// Python service response. The real shape (served by BOTH
+// ``graph_transformer/service.py`` AND ``scripts/gt_api.py``) is a
+// WRAPPER object: ``{predictions: Prediction[], source, modelVersion,
+// generatedAt, count, checkpointPath, error_count?, error_rate?}``.
+// The runtime Zod schema in ``frontend/src/lib/ml-contracts.ts``
+// (``GtPredictResponseSchema``) already matches the real shape — only
+// this static interface was stale. The audit (SH-025) also flagged
+// that the ``source`` field's enum in the static contract
+// (``"gt_service" | "gt_subprocess" | "stub"``) did NOT include
+// ``"gt_checkpoint"`` — the value the Python service actually returns.
+// The runtime Zod schema uses ``z.string()`` (no enum constraint), so
+// it accepted any string — but the static type would have rejected
+// ``"gt_checkpoint"`` at compile time. This fix aligns the static
+// contract with the runtime Zod schema AND with the Python service.
+//
+// ``error_count`` and ``error_rate`` (SH-031) are kept as OPTIONAL
+// fields — they are returned by ``graph_transformer/service.py`` for
+// monitoring but are NOT required by the frontend (the Zod schema
+// marks them optional). The previous comment in ``service.py`` claimed
+// they were "returned as HTTP response HEADERS (not in the JSON body)"
+// — that comment was a LIE (the code returns them in the body). The
+// comment has been corrected to match the code.
 
-export interface PredictResponse {
+/**
+ * Single prediction item (one element of ``PredictResponse.predictions``).
+ * Matches ``GtPredictionSchema`` in ``frontend/src/lib/ml-contracts.ts``.
+ */
+export interface GtPrediction {
   /** Drug name (echoed from request). */
   drug: string;
   /** Disease name (echoed from request). */
   disease: string;
-  /** Raw GT sigmoid probability in [0, 1]. */
-  gnn_score: number;
-  /** Temperature-scaled (Guo 2017) probability in [0, 1]. */
-  gnn_score_calibrated: number;
-  /** 1 - 2 * entropy(gnn_score), clipped to [0, 1]. */
-  confidence: number;
-  /** ISO 8601 UTC timestamp of the GT prediction. */
-  gnn_score_timestamp: string;
-  /** Whether the prediction was served from cache. */
-  cached: boolean;
-  /** Model version (checkpoint SHA or semantic version). */
-  model_version: string;
+  /** GT probability score in [0, 1] (temperature-calibrated per P3-004). */
+  score: number;
+  /** Binary-entropy confidence in [0, 1] (P3-010 fix). */
+  confidence?: number;
+  /** Optional note (e.g., "drug not in graph" for error cases). */
+  note?: string;
 }
 
+/**
+ * Response shape for ``POST /predict`` — the WRAPPER object.
+ * Matches ``GtPredictResponseSchema`` in ``frontend/src/lib/ml-contracts.ts``
+ * and the Python service in ``graph_transformer/service.py`` +
+ * ``scripts/gt_api.py``.
+ *
+ * The ``source`` field is the canonical enum: ``"gt_checkpoint"`` (the
+ * production value, served when a trained checkpoint is loaded),
+ * ``"gt_service"`` / ``"gt_subprocess"`` (legacy aliases), or ``"stub"``
+ * (test-only). The Python service currently always returns
+ * ``"gt_checkpoint"`` in production.
+ */
+export interface PredictResponse {
+  /** List of per-pair predictions (one per requested pair). */
+  predictions: GtPrediction[];
+  /** Canonical source enum. Production value: ``"gt_checkpoint"``. */
+  source: "gt_checkpoint" | "gt_service" | "gt_subprocess" | "stub";
+  /** Model version (camelCase — matches Python service). */
+  modelVersion: string;
+  /** ISO 8601 UTC timestamp when the response was generated. */
+  generatedAt: string;
+  /** Number of predictions returned (== predictions.length). */
+  count: number;
+  /** Filesystem path to the checkpoint used for inference. */
+  checkpointPath: string | null;
+  /** Optional: number of pairs that failed scoring (monitoring). */
+  error_count?: number;
+  /** Optional: fraction of pairs that failed (monitoring). */
+  error_rate?: number;
+}
+
+/**
+ * Single top-K novel prediction item.
+ * Matches the prediction shape returned by ``GET /top-k``.
+ */
 export interface TopKNovelPrediction {
   drug: string;
   disease: string;
-  gnn_score: number;
-  gnn_score_calibrated: number;
-  confidence: number;
+  /** GT score (temperature-calibrated per P3-004 fix). */
+  score: number;
   /** Rank position (1-indexed). */
-  rank: number;
+  rank?: number;
   /** Key biological pathways driving the prediction (for explainability). */
   key_pathways?: string[];
 }
 
+/**
+ * Response shape for ``GET /top-k`` — the WRAPPER object.
+ * Matches ``GtTopKResponseSchema`` in ``frontend/src/lib/ml-contracts.ts``
+ * and the Python service in ``graph_transformer/service.py`` +
+ * ``scripts/gt_api.py``.
+ *
+ * SH-025 ROOT FIX (v120): the previous static interface used
+ * ``total_considered``, ``k``, and ``model_version`` (snake_case) —
+ * NONE of which are returned by the Python service. The real shape is
+ * ``{predictions, source, modelVersion, generatedAt, count,
+ * checkpointPath}`` (camelCase). This fix aligns the static contract
+ * with the runtime Zod schema and the Python service.
+ */
 export interface TopKResponse {
-  /** Top-k novel predictions, sorted by gnn_score_calibrated descending. */
+  /** Top-k novel predictions, sorted by score descending. */
   predictions: TopKNovelPrediction[];
-  /** Total number of novel predictions considered before truncation. */
-  total_considered: number;
-  /** The k value used for this request. */
-  k: number;
-  /** Model version (checkpoint SHA or semantic version). */
-  model_version: string;
+  /** Canonical source enum. Production value: ``"gt_checkpoint"``. */
+  source: "gt_checkpoint" | "gt_service" | "gt_subprocess" | "stub";
+  /** Model version (camelCase — matches Python service). */
+  modelVersion: string;
+  /** ISO 8601 UTC timestamp when the response was generated. */
+  generatedAt: string;
+  /** Number of predictions returned (== predictions.length). */
+  count: number;
+  /** Filesystem path to the checkpoint used for inference. */
+  checkpointPath: string | null;
 }
 
 // ─── Phase 4 (RL service) ────────────────────────────────────────────────
