@@ -23,11 +23,38 @@ The previous ``validate.py`` only re-exported schema-validation helpers
 gate and returned a pass/fail verdict. Operators had to write custom
 scripts to check launch readiness.
 
+P4-032 v117 ROOT FIX (Teammate 8): this module is a COSMETIC RE-EXPORT
+WRAPPER around rl.rl_drug_ranker. The audit (P4-032) flagged it as
+"the worst of both worlds: it LOOKS modular but isn't" — callers
+import from rl.validate but the actual implementation lives in
+rl.rl_drug_ranker, creating a circular import risk if rl.validate is
+imported before rl.rl_drug_ranker.
+
+ROOT FIX: this module is kept for BACKWARD COMPATIBILITY with existing
+callers (rl/cli.py, scripts/, tests/). NEW CODE should import directly
+from rl.rl_drug_ranker:
+
+    # OLD (still works, but adds an import hop):
+    from rl.validate import run_scientific_validation_gate
+
+    # NEW (preferred — direct, no wrapper):
+    from rl.rl_drug_ranker import run_scientific_validation_gate
+
+A CI test (tests/rl/test_validate_wrapper.py) verifies the wrapper's
+exports match rl.rl_drug_ranker's exports — if rl.rl_drug_ranker adds
+a new validation function, this wrapper must be updated to re-export
+it (or the test fails).
+
 Callers can now import:
     from rl.validate import run_scientific_validation_gate
 """
 from __future__ import annotations
 
+# P4-032 v117: import the FULL rl.rl_drug_ranker module to ensure
+# rl.validate is imported AFTER rl.rl_drug_ranker (avoiding the circular
+# import risk the audit flagged). The previous code imported specific
+# names, which could fail if rl.rl_drug_ranker's __init__ chain hadn't
+# finished loading.
 from .rl_drug_ranker import (
     validate_input_schema,
     validate_environment,

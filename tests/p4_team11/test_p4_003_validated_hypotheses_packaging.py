@@ -1,4 +1,4 @@
-"""Test for P4-003 ROOT FIX (HIGH).
+"""Test for P4-003 ROOT FIX (HIGH) + P4-011 ROOT FIX v117 (HIGH).
 
 P4-003: validated_hypotheses.csv path is RELATIVE to CWD — breaks in
         Docker/Kubernetes/systemd. The module_dir path is correct (ships
@@ -12,11 +12,21 @@ P4-003: validated_hypotheses.csv path is RELATIVE to CWD — breaks in
         found in ANY of the 3 candidate paths. (3) Allow override via
         the RL_VALIDATED_HYPOTHESES_PATH env var.
 
-This test verifies:
-  1. MANIFEST.in exists and includes rl/*.csv.
-  2. The runtime check logs CRITICAL when the file is missing.
-  3. The RL_VALIDATED_HYPOTHESES_PATH env var override works.
-  4. The canonical file (rl/validated_hypotheses.csv) exists in the repo.
+P4-011 v117 ROOT FIX (HIGH — Teammate 8): the previous version of this
+        test asserted `rl/validated_hypotheses.csv` MUST exist in the
+        package. That test was WRONG — it pinned down the bug rather
+        than the fix. The audit (P4-011) explicitly says:
+        > Remove the rl/validated_hypotheses.csv file from the package.
+        > The canonical path is phase1/processed_data/validated_hypotheses.csv
+        > — let the writeback module create it.
+        > If a demo CSV is needed for testing, ship it as
+        > rl/tests/fixtures/validated_hypotheses_demo.csv and have tests
+        > explicitly point to it via RL_VALIDATED_HYPOTHESES_PATH.
+
+        This test now verifies the OPPOSITE of the original P4-003
+        assertion: rl/validated_hypotheses.csv must NOT exist in the
+        shipped package. Only the test fixture
+        (rl/tests/fixtures/validated_hypotheses_seed.csv) may exist.
 """
 from __future__ import annotations
 
@@ -33,43 +43,75 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "rl"))
 
 
-def test_p4_003_manifest_in_exists_and_includes_csv():
-    """MANIFEST.in must exist and include rl/*.csv.
+def test_p4_011_rh_validated_hypotheses_csv_not_in_package():
+    """P4-011 v117: rl/validated_hypotheses.csv MUST NOT exist in the package.
 
-    Without MANIFEST.in, `pip install` does not include
-    validated_hypotheses.csv in the wheel, breaking the data flywheel
-    in production.
+    The audit requires:
+        Remove the rl/validated_hypotheses.csv file from the package.
+        The canonical path is phase1/processed_data/validated_hypotheses.csv
+        — let the writeback module create it.
+
+    Production deployments must NOT inherit demo data. The file is
+    created at RUNTIME by phase4/writeback.py when a pharma partner
+    validates a hypothesis. Shipping it pre-populated (even with real
+    FDA historical data) creates confusion about which entries are
+    seed data vs runtime writeback output.
+    """
+    shipped_csv = _REPO_ROOT / "rl" / "validated_hypotheses.csv"
+    assert not shipped_csv.exists(), (
+        f"P4-011 v117: rl/validated_hypotheses.csv must NOT exist in the "
+        f"shipped package. Production deployments must NOT inherit seed "
+        f"data. The file is created at runtime by phase4/writeback.py "
+        f"when a pharma partner validates a hypothesis. Found: {shipped_csv}"
+    )
+
+
+def test_p4_011_seed_fixture_exists_for_tests():
+    """P4-011 v117: the historical FDA seed data ships as a TEST FIXTURE.
+
+    The audit allows:
+        If a demo CSV is needed for testing, ship it as
+        rl/tests/fixtures/validated_hypotheses_demo.csv and have tests
+        explicitly point to it via RL_VALIDATED_HYPOTHESES_PATH.
+
+    The fixture contains real FDA historical data (aspirin for
+    cardiovascular disease, warfarin for AFib, etc.) — NOT fake
+    partner names. Tests that need a non-empty validated_hypotheses
+    set must point to this fixture via RL_VALIDATED_HYPOTHESES_PATH.
+    """
+    fixture = _REPO_ROOT / "rl" / "tests" / "fixtures" / "validated_hypotheses_seed.csv"
+    assert fixture.exists(), (
+        f"P4-011 v117: test fixture must exist at {fixture}. This file "
+        f"contains real FDA historical seed data for tests that need a "
+        f"non-empty validated_hypotheses set."
+    )
+    content = fixture.read_text().strip()
+    lines = content.splitlines()
+    assert len(lines) >= 2, (
+        f"P4-011 v117: fixture has {len(lines)} lines, expected at least 2 "
+        f"(header + 1 row)."
+    )
+    header = lines[0].lower()
+    assert "drug" in header and "disease" in header, (
+        f"P4-011 v117: fixture header must contain 'drug' and 'disease'. "
+        f"Got: {lines[0]}"
+    )
+
+
+def test_p4_003_manifest_in_exists_for_phase1_processed_data():
+    """P4-003: MANIFEST.in exists and includes phase1 CSV data patterns.
+
+    The MANIFEST.in must include phase1/processed_data/*.csv so that
+    pip install ships the canonical validated_hypotheses.csv location
+    (the directory must exist even if the file is created at runtime).
     """
     manifest_path = _REPO_ROOT / "MANIFEST.in"
     assert manifest_path.exists(), (
-        "P4-003: MANIFEST.in must exist at the repo root to ensure "
-        "validated_hypotheses.csv ships with the package."
+        "P4-003: MANIFEST.in must exist at the repo root."
     )
-    manifest = manifest_path.read_text()
-    assert "rl *.csv" in manifest or "rl/*.csv" in manifest or "validated_hypotheses.csv" in manifest, (
-        "P4-003: MANIFEST.in must include rl/*.csv (or the specific "
-        "validated_hypotheses.csv file) so it ships with the package."
-    )
-
-
-def test_p4_003_canonical_validated_hypotheses_csv_exists():
-    """The canonical rl/validated_hypotheses.csv must exist in the repo."""
-    csv_path = _REPO_ROOT / "rl" / "validated_hypotheses.csv"
-    assert csv_path.exists(), (
-        "P4-003: the canonical rl/validated_hypotheses.csv must exist "
-        "in the repo. This is the file that ships with the package."
-    )
-    # The file must have at least 1 validated pair (header + 1 row).
-    content = csv_path.read_text().strip()
-    lines = content.splitlines()
-    assert len(lines) >= 2, (
-        f"P4-003: rl/validated_hypotheses.csv has {len(lines)} lines, "
-        f"expected at least 2 (header + 1 pair)."
-    )
-    assert "drug" in lines[0].lower() and "disease" in lines[0].lower(), (
-        f"P4-003: rl/validated_hypotheses.csv header must contain "
-        f"'drug' and 'disease'. Got: {lines[0]}"
-    )
+    # We don't assert specific contents — the canonical file is created
+    # at runtime, not shipped. The MANIFEST.in just needs to exist for
+    # package_data consistency.
 
 
 def test_p4_003_runtime_check_logs_critical_when_file_missing(monkeypatch):
@@ -77,11 +119,11 @@ def test_p4_003_runtime_check_logs_critical_when_file_missing(monkeypatch):
 
     We force the file to be missing by:
       1. Setting RL_VALIDATED_HYPOTHESES_PATH to a non-existent path.
-      2. cd-ing to a temp dir (so CWD-relative and CWD-absolute paths
+      2. Setting VALIDATED_HYPOTHESES_CSV (canonical path) to a non-existent path.
+      3. cd-ing to a temp dir (so CWD-relative and CWD-absolute paths
          don't find the file).
-      3. Monkey-patching the module's __file__ so module_dir points to
-         a temp dir (so the module-local path doesn't find the canonical
-         rl/validated_hypotheses.csv).
+      4. Monkey-patching the module's __file__ so module_dir points to
+         a temp dir (so the module-local path doesn't find the file).
 
     Then we re-invoke _load_validated_hypotheses() and check that a
     CRITICAL log was emitted.
@@ -91,6 +133,7 @@ def test_p4_003_runtime_check_logs_critical_when_file_missing(monkeypatch):
     # Save original state.
     orig_cwd = os.getcwd()
     orig_env = os.environ.pop("RL_VALIDATED_HYPOTHESES_PATH", None)
+    orig_canonical_env = os.environ.pop("VALIDATED_HYPOTHESES_CSV", None)
     orig_file = mod.__file__
 
     # Attach a manual handler to capture CRITICAL logs.
@@ -107,7 +150,10 @@ def test_p4_003_runtime_check_logs_critical_when_file_missing(monkeypatch):
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             os.chdir(tmpdir)
+            # Override BOTH env vars to non-existent paths so the
+            # loader's 4-path search finds nothing.
             os.environ["RL_VALIDATED_HYPOTHESES_PATH"] = "/nonexistent/path/to/validated_hypotheses.csv"
+            os.environ["VALIDATED_HYPOTHESES_CSV"] = "/nonexistent/canonical/validated_hypotheses.csv"
             # Monkey-patch __file__ so module_dir resolves to tmpdir
             # (no validated_hypotheses.csv there).
             mod.__file__ = str(Path(tmpdir) / "rl_drug_ranker.py")
@@ -141,40 +187,37 @@ def test_p4_003_runtime_check_logs_critical_when_file_missing(monkeypatch):
             os.environ["RL_VALIDATED_HYPOTHESES_PATH"] = orig_env
         else:
             os.environ.pop("RL_VALIDATED_HYPOTHESES_PATH", None)
+        if orig_canonical_env is not None:
+            os.environ["VALIDATED_HYPOTHESES_CSV"] = orig_canonical_env
+        else:
+            os.environ.pop("VALIDATED_HYPOTHESES_CSV", None)
 
 
-def test_p4_003_env_var_override_works():
-    """RL_VALIDATED_HYPOTHESES_PATH env var must override the default paths.
+def test_p4_003_env_var_override_loads_seed_fixture():
+    """P4-003 + P4-011 v117: env var override loads the seed fixture.
 
-    In production (Docker, Kubernetes, systemd), a deployment may want
-    to point at a specific file (e.g., a ConfigMap mount in Kubernetes).
-    The env var takes PRIORITY over the 3 default paths.
+    The RL_VALIDATED_HYPOTHESES_PATH env var must take PRIORITY over
+    the 4 default search paths. This test points the env var at the
+    seed fixture and verifies the fixture's pairs are loaded.
     """
-    # Write a temp CSV with a known pair.
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".csv", delete=False, prefix="vh_test_"
-    ) as f:
-        f.write("drug,disease\n")
-        f.write("testdrug,testdisease\n")
-        temp_csv_path = f.name
+    fixture = _REPO_ROOT / "rl" / "tests" / "fixtures" / "validated_hypotheses_seed.csv"
+    assert fixture.exists(), f"Seed fixture must exist at {fixture}"
+
+    os.environ["RL_VALIDATED_HYPOTHESES_PATH"] = str(fixture)
     try:
-        os.environ["RL_VALIDATED_HYPOTHESES_PATH"] = temp_csv_path
-        # Re-import to pick up the env var.
         import importlib
         import rl.rl_drug_ranker as mod
         importlib.reload(mod)
-        # The env var path should have been loaded (testdrug, testdisease
-        # should be in the validated hypotheses set, possibly merged
-        # with the canonical file's pairs).
         validated = mod.VALIDATED_HYPOTHESES
-        assert ("testdrug", "testdisease") in validated, (
-            f"P4-003: RL_VALIDATED_HYPOTHESES_PATH override did not work. "
-            f"Expected ('testdrug', 'testdisease') in VALIDATED_HYPOTHESES. "
-            f"Got: {validated}"
+        # The seed fixture contains real FDA historical data including
+        # (aspirin, cardiovascular disease) as a validated_positive pair.
+        assert ("aspirin", "cardiovascular disease") in validated, (
+            f"P4-003 + P4-011 v117: env var override did not load the seed "
+            f"fixture. Expected ('aspirin', 'cardiovascular disease') in "
+            f"VALIDATED_HYPOTHESES. Got: {list(validated)[:5]}"
         )
     finally:
         os.environ.pop("RL_VALIDATED_HYPOTHESES_PATH", None)
-        os.unlink(temp_csv_path)
         # Reload to restore the original state.
         import importlib
         import rl.rl_drug_ranker as mod

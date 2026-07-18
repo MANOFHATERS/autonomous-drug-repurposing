@@ -101,10 +101,49 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ─── Copy installed Python packages from builder ────────────────────────
 COPY --from=builder /install /usr/local
 
-# ─── Working directory + non-root user ──────────────────────────────────
+# IN-092 v117 ROOT FIX (Teammate 8): COPY the repo source directories
+# into the runtime image. The previous runtime stage had NO COPY
+# statements for source dirs — only the installed Python packages
+# were copied. This meant `docker run drugos-phase3-gt` (without the
+# docker-compose bind mount) failed with:
+#     ModuleNotFoundError: No module named 'scripts'
+# because /opt/repo was empty (only WORKDIR created the directory).
+#
+# The docker-compose.yml bind-mounts `./:/opt/repo` for phase3-trainer
+# and phase4-rl, which SHADOWS this COPY at runtime. But `docker run`
+# (without compose) is broken without these COPYs. The audit (IN-092)
+# explicitly requires:
+#   "Add COPY --chown=drugos:drugos phase1/ ./phase1/, etc. (matching
+#    phase2/drugos_graph/Dockerfile pattern). The docker-compose bind
+#    mount will shadow this, but `docker run` will work."
+#
+# This matches the phase2/drugos_graph/Dockerfile pattern (lines 75-79).
+# All directories the ML services (phase3-trainer, phase3-gt-api,
+# phase4-rl) need at runtime are COPYed:
+#   - phase1/    : Phase 1 processed_data (CSVs) + service code
+#   - phase2/    : Phase 2 KG builder + bridge code
+#   - phase4/    : Phase 4 writeback module (rl/rl_drug_ranker imports it)
+#   - rl/        : Phase 4 RL ranker code
+#   - graph_transformer/ : Phase 3 GT model code
+#   - shared/    : Shared contracts (writeback, feature_names, etc.)
+#   - common/    : Common utilities
+#   - scripts/   : gt_api.py, rl_api.py (the FastAPI apps)
+#   - run_4phase.py : the 4-phase pipeline entrypoint
 WORKDIR /opt/repo
 # IN-012: uid 10001 (not 1000) to avoid host uid collisions.
 RUN useradd -m -u 10001 drugos && chown -R drugos:drugos /opt/repo
+# IN-092: COPY source dirs with --chown so the drugos user owns them.
+# These are COPYed BEFORE USER drugos so the COPY runs as root (Docker
+# requirement) but the files are owned by drugos after COPY.
+COPY --chown=drugos:drugos phase1/ ./phase1/
+COPY --chown=drugos:drugos phase2/ ./phase2/
+COPY --chown=drugos:drugos phase4/ ./phase4/
+COPY --chown=drugos:drugos rl/ ./rl/
+COPY --chown=drugos:drugos graph_transformer/ ./graph_transformer/
+COPY --chown=drugos:drugos shared/ ./shared/
+COPY --chown=drugos:drugos common/ ./common/
+COPY --chown=drugos:drugos scripts/ ./scripts/
+COPY --chown=drugos:drugos run_4phase.py ./
 USER drugos
 
 # IN-061: EXPOSE both ports since this image is shared by phase3 (8002) and

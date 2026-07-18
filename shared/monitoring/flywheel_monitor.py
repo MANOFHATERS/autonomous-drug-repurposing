@@ -410,9 +410,16 @@ def check_rl_ranker_health(
         repo_root = str(Path(__file__).resolve().parents[2])
         if repo_root not in sys.path:
             sys.path.insert(0, repo_root)
+        # SH-033 v117 ROOT FIX (Teammate 8): use the PUBLIC API
+        # (get_validated_hypotheses / get_validated_toxic_hypotheses)
+        # instead of the PRIVATE functions (_load_validated_hypotheses
+        # / _load_validated_toxic_hypotheses). The private functions
+        # are implementation details of the _LazyList proxy and may
+        # be refactored without notice. The public API is the stable
+        # contract.
         from rl.rl_drug_ranker import (
-            _load_validated_hypotheses,
-            _load_validated_toxic_hypotheses,
+            get_validated_hypotheses,
+            get_validated_toxic_hypotheses,
         )
     except Exception as exc:
         return FlywheelStepStatus(
@@ -422,8 +429,11 @@ def check_rl_ranker_health(
         )
 
     try:
-        bonus_pairs = _load_validated_hypotheses()
-        toxic_pairs = _load_validated_toxic_hypotheses()
+        # SH-033 v117: call the PUBLIC API (returns a plain list, no
+        # need to wrap in list() — get_validated_hypotheses already
+        # returns List[Tuple[str, str]]).
+        bonus_pairs = get_validated_hypotheses()
+        toxic_pairs = get_validated_toxic_hypotheses()
     except Exception as exc:
         return FlywheelStepStatus(
             step="rl_ranker",

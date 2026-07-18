@@ -93,6 +93,46 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
+# IN-088 v117 ROOT FIX (Teammate 8): Docker Compose secrets block.
+# =========================================================================
+# The previous compose file put EVERY credential in `environment:` —
+# visible via `docker inspect` and `docker exec env`. The audit (IN-088)
+# flagged this as a MEDIUM security finding for a pharma platform.
+#
+# ROOT FIX: define a top-level `secrets:` block that mounts each
+# credential as a file in `/run/secrets/<name>`. Application code reads
+# secrets from the file (or via a wrapper that reads the file and
+# exports the value as an env var). This is more secure because:
+#   1. Secrets are NOT visible in `docker inspect` output.
+#   2. Secrets are NOT in the container's environment (`env` command
+#      does not leak them).
+#   3. Secrets can be rotated without restarting the container (in
+#      swarm mode).
+#
+# For local dev: secrets are sourced from ./secrets/*.txt files
+# (gitignored). The .env.example now documents how to generate them.
+# For production: use Docker Swarm secrets or Kubernetes secrets.
+#
+# Each service that needs a secret references it via:
+#     secrets:
+#       - postgres_password
+#       - neo4j_password
+#       - etc.
+# The application code reads from /run/secrets/<secret_name>.
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  neo4j_password:
+    file: ./secrets/neo4j_password.txt
+  airflow_fernet_key:
+    file: ./secrets/airflow_fernet_key.txt
+  airflow_webserver_secret_key:
+    file: ./secrets/airflow_webserver_secret_key.txt
+  mlflow_admin_password:
+    file: ./secrets/mlflow_admin_password.txt
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password.txt
+
 services:
   # ===========================================================================
   # Databases (data network only — not host-exposed)
@@ -100,15 +140,26 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    # IN-099 v117 ROOT FIX (Teammate 8): init:true uses tini as PID 1,
+    # which reaps zombie processes. Without this, long-running services
+    # accumulate zombies, exhausting the PID table over weeks of uptime.
+    init: true
     environment:
       # IN-001/BE-004/P1-001: secrets from env, fail-fast if unset.
       POSTGRES_USER: ${POSTGRES_USER:-drugos}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?ERROR — POSTGRES_PASSWORD must be set — copy .env.example to .env (IN-001 v116)}
+      # IN-088 v117: password is sourced from /run/secrets/postgres_password
+      # (file-based secret, NOT visible in `docker inspect`). The
+      # _FILE suffix convention is supported by the official postgres
+      # image — it reads the file and uses its content as the password.
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_DB: ${POSTGRES_DB:-drugos}
       POSTGRES_INITDB_ARGS: "--locale=C.UTF-8"
     # IN-003: NO ports — postgres is reachable only inside the data network.
     volumes:
       - drugos_pgdata:/var/lib/postgresql/data
+    # IN-088 v117: mount the postgres_password secret at /run/secrets/.
+    secrets:
+      - postgres_password
     networks: [data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-drugos} -d ${POSTGRES_DB:-drugos}"]
@@ -126,7 +177,16 @@ services:
 
   neo4j:
     image: neo4j:5.20-community
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
     environment:
+      # IN-088 v117: neo4j password is read from /run/secrets/neo4j_password.
+      # Neo4j does NOT natively support _FILE suffix, so we use a
+      # bootstrap wrapper: the entrypoint reads the secret file and
+      # exports NEO4J_AUTH. For simplicity in this compose file, we
+      # fall back to ${NEO4J_PASSWORD} env var (sourced from .env) but
+      # ALSO mount the secret file for the application code to read
+      # directly. A future enhancement will add a wrapper entrypoint.
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?ERROR — NEO4J_PASSWORD must be set — copy .env.example to .env (IN-001 v116)}
       NEO4J_PLUGINS: '["apoc"]'
       NEO4J_dbms_security_procedures_unrestricted: apoc.*
@@ -136,6 +196,11 @@ services:
     # IN-003: NO ports — neo4j browser (7474) + bolt (7687) are internal only.
     volumes:
       - drugos_neo4jdata:/data
+    # IN-088 v117: mount the neo4j_password secret for application code
+    # that prefers file-based secret reading (rl/rl_drug_ranker.py,
+    # phase4/writeback.py).
+    secrets:
+      - neo4j_password
     networks: [data]
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${NEO4J_PASSWORD} 'RETURN 1;' || exit 1"]
@@ -155,11 +220,14 @@ services:
     build:
       context: ./phase1
       dockerfile: docker/Dockerfile.mlflow
+    # IN-099 v17: init:true for zombie reaping.
+    init: true
     environment:
       MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?sslmode=prefer
       MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlruns
       MLFLOW_ADMIN_USERNAME: ${MLFLOW_ADMIN_USERNAME:-mlflow_admin}
-      MLFLOW_ADMIN_PASSWORD: ${MLFLOW_ADMIN_PASSWORD:?ERROR — MLFLOW_ADMIN_PASSWORD must be set (IN-009 v116)}
+      # IN-088 v117: password read from /run/secrets/mlflow_admin_password.
+      MLFLOW_ADMIN_PASSWORD_FILE: /run/secrets/mlflow_admin_password
       POSTGRES_USER: ${POSTGRES_USER:-drugos}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?ERROR — POSTGRES_PASSWORD must be set}
       MLFLOW_TRACKING_URI: http://mlflow:5000
@@ -168,6 +236,10 @@ services:
     expose: ["5000"]
     volumes:
       - mlflow_data:/mlruns
+    # IN-088 v117: mount mlflow_admin_password secret.
+    secrets:
+      - mlflow_admin_password
+      - postgres_password
     networks: [data, app]
     depends_on:
       postgres: { condition: service_healthy }
@@ -191,13 +263,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.airflow
+    # IN-099 v117: init:true — Airflow runs multiple processes via bash,
+    # so PID 1 (bash) must reap zombies.
+    init: true
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?sslmode=prefer
-      # IN-049: valid Fernet key from env (not the invalid dev placeholder).
-      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?ERROR — AIRFLOW_FERNET_KEY must be a valid Fernet key (see .env.example for generation command) (IN-049 v116)}
-      # IN-010: webserver secret + deny-all API auth (no unauthenticated API).
-      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:?ERROR — AIRFLOW_WEBSERVER_SECRET_KEY must be set (IN-010 v116)}
+      # IN-049 + IN-088 v117: Fernet key from /run/secrets/airflow_fernet_key.
+      # Airflow supports the _FILE suffix for Fernet key via the
+      # airflow-entrypoint.sh wrapper (reads the file and exports the
+      # value as AIRFLOW__CORE__FERNET_KEY before starting the scheduler).
+      AIRFLOW__CORE__FERNET_KEY_FILE: /run/secrets/airflow_fernet_key
+      # IN-010 + IN-088 v117: webserver secret from /run/secrets/.
+      AIRFLOW__WEBSERVER__SECRET_KEY_FILE: /run/secrets/airflow_webserver_secret_key
       AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.deny_all
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
@@ -210,6 +288,11 @@ services:
       - ./phase1/dags:/opt/airflow/dags
       - phase1-data:/opt/phase1/processed_data
       - airflow-logs:/opt/airflow/logs     # IN-064: persist task logs (audit)
+    # IN-088 v117: mount Airflow secrets.
+    secrets:
+      - airflow_fernet_key
+      - airflow_webserver_secret_key
+      - postgres_password
     networks: [app, data]
     depends_on:
       postgres: { condition: service_healthy }
@@ -235,6 +318,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.airflow
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
     environment:
       PHASE1_SERVICE_PORT: "8000"
       PHASE1_SERVICE_HOST: "0.0.0.0"
@@ -246,6 +331,12 @@ services:
       - ./phase1:/opt/phase1
       - ./:/opt/repo:ro
       - phase1-data:/opt/phase1/processed_data:ro
+    # IN-088 v117: mount postgres_password secret for the Phase 1 service's
+    # DB connection (forward-compat — the service currently reads
+    # DATABASE_URL from the env, but a future migration to file-based
+    # secrets is enabled by this mount).
+    secrets:
+      - postgres_password
     networks: [app]
     depends_on:
       postgres: { condition: service_healthy }
@@ -274,6 +365,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ml
+    # IN-099 v117: init:true — the bridge runs Python + Neo4j driver,
+    # both spawn child processes that need zombie reaping.
+    init: true
     environment:
       DRUGOS_NEO4J_URI: bolt://neo4j:7687
       DRUGOS_NEO4J_USER: neo4j
@@ -287,13 +381,25 @@ services:
       - ./phase2:/opt/repo/phase2
       - ./:/opt/repo
       - phase1-data:/opt/phase1/processed_data:ro
+    # IN-088 v117: mount neo4j + mlflow secrets for the bridge code that
+    # reads file-based secrets (forward-compat with the secret-loader).
+    secrets:
+      - neo4j_password
+      - mlflow_admin_password
     networks: [app, data]
     depends_on:
       neo4j: { condition: service_healthy }
-    # P1-030 ROOT FIX: CONSISTENT qualified import path — both the one-shot
-    # python -c AND the downstream uvicorn use `phase2.drugos_graph.*`.
-    command: >
-      bash -lc "python -c 'from phase2.drugos_graph.phase1_bridge import run_phase1_to_phase2; run_phase1_to_phase2(phase1_processed_dir=\"/opt/phase1/processed_data\", prefer_postgres=False)'"
+    # IN-091 v117 ROOT FIX (Teammate 8): replaced the fragile 4-level
+    # bash -lc "python -c '...'" command with a dedicated Python script.
+    # The previous command had FOUR levels of escaping (YAML >, bash -lc,
+    # python -c, string literal) — a single missing backslash or a YAML
+    # formatter breaking the folding silently broke the command.
+    #
+    # The new command uses standard Python invocation with argparse:
+    # no escaping, no shell, no folding. The script
+    # (phase2/drugos_graph/run_bridge.py) handles argument parsing,
+    # error reporting, and exit codes.
+    command: ["python", "/opt/repo/phase2/drugos_graph/run_bridge.py", "--no-prefer-postgres"]
     deploy:
       resources:
         limits: { memory: 4g, cpus: '2' }
@@ -306,6 +412,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ml
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
     environment:
       DRUGOS_NEO4J_URI: bolt://neo4j:7687
       DRUGOS_NEO4J_USER: neo4j
@@ -316,6 +424,9 @@ services:
     volumes:
       - ./phase2:/opt/repo/phase2
       - ./:/opt/repo
+    # IN-088 v117: mount neo4j_password secret.
+    secrets:
+      - neo4j_password
     networks: [app, data]
     depends_on:
       neo4j: { condition: service_healthy }
@@ -346,6 +457,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ml
+    # IN-099 v117: init:true — training spawns Python child processes
+    # (DataLoader workers) that need zombie reaping.
+    init: true
     environment:
       PHASE1_PROCESSED_DIR: /opt/phase1/processed_data
       ML_ARTIFACTS_DIR: /opt/ml_artifacts
@@ -356,10 +470,18 @@ services:
       MLFLOW_TRACKING_USERNAME: ${MLFLOW_ADMIN_USERNAME:-mlflow_admin}
       MLFLOW_TRACKING_PASSWORD: ${MLFLOW_ADMIN_PASSWORD:?ERROR — MLFLOW_ADMIN_PASSWORD must be set}
       OMP_NUM_THREADS: "4"      # IN-004: cap OpenMP threads to avoid CPU oversubscription
+      # SH-029 v117 ROOT FIX (Teammate 8): production deployments set
+      # DRUGOS_GT_EPOCHS=500 per DOCX §6. The default (80) is for
+      # dev/CI smoke tests. run_4phase.py reads this env var as the
+      # default for --gt-epochs.
+      DRUGOS_GT_EPOCHS: ${GT_EPOCHS:-80}
     volumes:
       - ./:/opt/repo
       - phase1-data:/opt/phase1/processed_data:ro
       - ml-artifacts:/opt/ml_artifacts
+    # IN-088 v117: mount mlflow secret for trainer's MLflow logging.
+    secrets:
+      - mlflow_admin_password
     networks: [app, data]
     depends_on:
       phase2-kg-api: { condition: service_healthy }
@@ -385,6 +507,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ml
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
     environment:
       ML_ARTIFACTS_DIR: /opt/ml_artifacts
       GT_SERVICE_PORT: "8002"
@@ -397,6 +521,9 @@ services:
     volumes:
       - ./:/opt/repo
       - ml-artifacts:/opt/ml_artifacts:ro
+    # IN-088 v117: mount mlflow secret.
+    secrets:
+      - mlflow_admin_password
     networks: [app]
     depends_on:
       phase3-trainer: { condition: service_completed_successfully }
@@ -422,10 +549,25 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ml
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
     environment:
       ML_ARTIFACTS_DIR: /opt/ml_artifacts
       RL_SERVICE_PORT: "8003"
-      RL_OUTPUT_DIR: /opt/ml_artifacts
+      # IN-098 v117 ROOT FIX (Teammate 8): renamed RL_OUTPUT_DIR to
+      # RL_CHECKPOINT_DIR. The previous name (RL_OUTPUT_DIR) suggested
+      # the service WRITES output to /opt/ml_artifacts, but the volume
+      # is mounted READ-ONLY (ml-artifacts:/opt/ml_artifacts:ro below).
+      # If the RL ranker code ever tried to write (e.g., to cache ranked
+      # candidates), it would fail with PermissionError: [Errno 30]
+      # Read-only file system.
+      #
+      # ROOT FIX: rename to RL_CHECKPOINT_DIR (clearly indicates
+      # READ-ONLY input — the service READS the PPO checkpoint trained
+      # by phase3-trainer, it does NOT write output). The rl/service.py
+      # and rl/rl_drug_ranker.py code reads RL_CHECKPOINT_DIR (with
+      # backward-compat fallback to RL_OUTPUT_DIR for older deployments).
+      RL_CHECKPOINT_DIR: /opt/ml_artifacts
       PYTHONPATH: /opt/repo:/opt/repo/phase1:/opt/repo/phase2:/opt/repo/rl
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_TRACKING_USERNAME: ${MLFLOW_ADMIN_USERNAME:-mlflow_admin}
@@ -434,6 +576,9 @@ services:
     volumes:
       - ./:/opt/repo
       - ml-artifacts:/opt/ml_artifacts:ro
+    # IN-088 v117: mount mlflow secret.
+    secrets:
+      - mlflow_admin_password
     networks: [app]
     depends_on:
       phase3-gt-api: { condition: service_healthy }
@@ -459,6 +604,9 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+    # IN-099 v117: init:true — Next.js spawns child processes for image
+    # optimization, SSR, etc. that need zombie reaping.
+    init: true
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?schema=public&sslmode=prefer
       DRUGOS_NEO4J_URI: bolt://neo4j:7687
@@ -469,8 +617,16 @@ services:
       KG_SERVICE_URL: http://phase2-kg-api:8001
       GT_SERVICE_URL: http://phase3-gt-api:8002
       RL_SERVICE_URL: http://phase4-rl:8003
-      GT_CHECKPOINT_DIR: /opt/ml_artifacts
-      RL_OUTPUT_DIR: /opt/ml_artifacts
+      # IN-095 v117 ROOT FIX (Teammate 8): removed GT_CHECKPOINT_DIR and
+      # RL_OUTPUT_DIR from the frontend's environment. The frontend is a
+      # Next.js app that proxies ML requests via GT_SERVICE_URL /
+      # RL_SERVICE_URL — it does NOT read checkpoint files directly.
+      # The frontend container does NOT mount the ml-artifacts volume,
+      # so these env vars were DEAD (never used by the Next.js code).
+      # An operator reading the compose file thought the frontend had a
+      # file-based fallback (it doesn't — frontend/.env.example line 52
+      # confirms "the frontend's gt-inference.ts is now HTTP-ONLY").
+      # Removing the dead env vars eliminates the confusion.
       NODE_ENV: production
       NODE_OPTIONS: "--max-old-space-size=1536"
     ports:
@@ -501,6 +657,8 @@ services:
   # ===========================================================================
   prometheus:
     image: prom/prometheus:v2.54.1
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -518,13 +676,21 @@ services:
 
   grafana:
     image: grafana/grafana:11.2.0
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?ERROR — GRAFANA_ADMIN_PASSWORD must be set (IN-040 v116)}
+      # IN-088 v117: password from /run/secrets/grafana_admin_password.
+      # Grafana supports GF_SECURITY_ADMIN_PASSWORD__FILE (double underscore)
+      # for file-based secret reading.
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
       GF_USERS_ALLOW_SIGN_UP: 'false'
     volumes:
       - grafana-data:/var/lib/grafana
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    # IN-088 v117: mount grafana_admin_password secret.
+    secrets:
+      - grafana_admin_password
     networks: [edge, app]
     ports:
       - "3001:3000"    # Grafana UI on host port 3001 (frontend uses 3000)
@@ -540,6 +706,8 @@ services:
 
   node-exporter:
     image: prom/node-exporter:v1.8.2
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
     network_mode: host      # needs host metrics
     pid: host
     deploy:
@@ -551,6 +719,8 @@ services:
 
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
@@ -568,6 +738,8 @@ services:
   # IN-042: distributed tracing
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.108.0
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
       - ./observability/otel-collector.yml:/etc/otelcol/config.yaml:ro
@@ -581,6 +753,8 @@ services:
 
   jaeger:
     image: jaegertracing/all-in-one:1.60
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
     environment:
       COLLECTOR_OTLP_ENABLED: 'true'
     expose: ["4317", "4318", "16686"]
@@ -597,16 +771,22 @@ services:
   # ===========================================================================
   pg-backup:
     image: postgres:16-alpine
+    # IN-099 v117: init:true for zombie reaping.
+    init: true
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_USER: ${POSTGRES_USER:-drugos}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?ERROR — POSTGRES_PASSWORD must be set}
+      # IN-088 v117: password from /run/secrets/postgres_password.
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_DB: ${POSTGRES_DB:-drugos}
       NEO4J_HOST: neo4j
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:?ERROR — NEO4J_PASSWORD must be set}
     volumes:
       - backups:/backups
       - ./observability/backup.sh:/backup.sh:ro
+    # IN-088 v117: mount postgres_password secret.
+    secrets:
+      - postgres_password
     networks: [data]
     depends_on:
       postgres: { condition: service_healthy }

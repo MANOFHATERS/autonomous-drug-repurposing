@@ -480,8 +480,25 @@ def main() -> int:
         help="Output directory for GT/RL artifacts",
     )
     parser.add_argument(
-        "--gt-epochs", type=int, default=80,
-        help="GT training epochs (default: 80 for demo; 500 for production)",
+        # SH-029 v117 ROOT FIX (Teammate 8): the previous default was
+        # hardcoded to 80 with a help text saying "500 for production"
+        # — but there was NO way to actually use 500 in production
+        # without editing the CLI invocation. The audit (SH-029)
+        # flagged this as contradicting the DOCX §6 production spec.
+        #
+        # ROOT FIX: read DRUGOS_GT_EPOCHS env var at CLI construction
+        # time so the default is ENV-DRIVEN. Production deployments
+        # set DRUGOS_GT_EPOCHS=500 in their .env / k8s ConfigMap.
+        # Dev/CI/smoke tests leave it unset (defaults to 80).
+        # The --gt-epochs CLI flag still takes PRECEDENCE over the env
+        # var (explicit > implicit), so operators can override per-run.
+        "--gt-epochs", type=int,
+        default=int(os.environ.get("DRUGOS_GT_EPOCHS", "80")),
+        help="GT training epochs. Default: 80 (dev/CI), or the value of "
+             "DRUGOS_GT_EPOCHS env var if set. Production deployments "
+             "set DRUGOS_GT_EPOCHS=500 per DOCX §6 (500 epochs for "
+             "production-grade AUC > 0.85). The --gt-epochs CLI flag "
+             "takes precedence over the env var.",
     )
     parser.add_argument(
         "--rl-timesteps", type=int, default=5000,

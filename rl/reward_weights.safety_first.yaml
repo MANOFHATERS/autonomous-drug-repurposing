@@ -1,0 +1,44 @@
+# P4-005 + P4-043 v117 ROOT FIX (Teammate 8): Per-Tenant Reward Weights
+# =========================================================================
+# This is the "safety_first_partner" tenant profile — a pharma partner
+# whose primary concern is safety (e.g., a partner repurposing drugs
+# for chronic conditions where patients will take the drug for years).
+# Their reward weights prioritize:
+#   - safety_score (0.45, up from 0.25) — DOMINANT weight. A drug with
+#     safety_score < 0.5 is hard-rejected regardless of efficacy.
+#   - pathway_score (0.12, same) — mechanistic evidence still matters.
+#   - market_score (0.08, down from 0.12) — commercial opportunity is
+#     secondary to safety for this partner.
+#   - rare_disease_flag (0.05, down from 0.08) — orphan drugs have
+#     less post-market safety data, so this partner avoids them.
+#
+# This file was previously a commented-out block in reward_weights.yaml
+# (lines 108-121). See reward_weights.rare_disease_partner.yaml for the
+# full P4-043 ROOT FIX rationale.
+#
+# Usage:
+#   python -m rl.rl_drug_ranker show-weights --tenant safety_first
+#   python -m rl.rl_drug_ranker set-weights --tenant safety_first \
+#       --weight safety_score=0.50 --weight market_score=0.05
+
+profile_name: "safety_first_partner"
+profile_description: >
+  Reward-weights profile for a pharma partner whose primary concern is
+  safety (e.g., chronic indications where patients take the drug for
+  years). safety_score is the DOMINANT weight (0.45). Market opportunity
+  is secondary. Rare-disease flag is reduced because orphan drugs have
+  less post-market safety data.
+profile_version: "1.0"
+
+reward_weights:
+  gnn_score: 0.04
+  safety_score: 0.45
+  market_score: 0.08
+  confidence: 0.08
+  pathway_score: 0.12
+  patent_score: 0.05
+  rare_disease_flag: 0.05
+  unmet_need_score: 0.08
+  efficacy_score: 0.03
+  adme_score: 0.02
+  # Sum = 1.00

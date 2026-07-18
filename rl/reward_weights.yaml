@@ -87,35 +87,19 @@ reward_weights:
 
   # Sum = 1.00
 
-# Example tenant profiles (NOT loaded by default — create separate files
-# named reward_weights.{tenant_id}.yaml to use them):
+# P4-043 v117 ROOT FIX (Teammate 8): the two example tenant profiles
+# that were previously COMMENTED OUT here are now SHIPPED as actual
+# files in this directory:
+#   - reward_weights.rare_disease_partner.yaml
+#   - reward_weights.safety_first.yaml
 #
-# --- RARE DISEASE PARTNER (reward_weights.rare_disease_partner.yaml) ---
-# profile_name: "rare_disease_partner"
-# reward_weights:
-#   gnn_score: 0.04
-#   safety_score: 0.20
-#   market_score: 0.08
-#   confidence: 0.08
-#   pathway_score: 0.12
-#   patent_score: 0.06
-#   rare_disease_flag: 0.25   # INCREASED from 0.08 — rare disease focus
-#   unmet_need_score: 0.12    # INCREASED from 0.10
-#   efficacy_score: 0.03
-#   adme_score: 0.02
-#   # Sum = 1.00
+# The load_reward_weights_for_tenant() function discovers them via the
+# convention reward_weights.{tenant_id}.yaml. To use a tenant profile:
+#   python -m rl.rl_drug_ranker show-weights --tenant rare_disease_partner
+#   python -m rl.rl_drug_ranker show-weights --tenant safety_first
 #
-# --- SAFETY-FIRST PARTNER (reward_weights.safety_first.yaml) ---
-# profile_name: "safety_first_partner"
-# reward_weights:
-#   gnn_score: 0.04
-#   safety_score: 0.45       # INCREASED from 0.25 — safety focus
-#   market_score: 0.08
-#   confidence: 0.08
-#   pathway_score: 0.12
-#   patent_score: 0.05
-#   rare_disease_flag: 0.05
-#   unmet_need_score: 0.08
-#   efficacy_score: 0.03
-#   adme_score: 0.02
-#   # Sum = 1.00
+# To create a NEW tenant profile, copy one of the existing files to
+# reward_weights.{your_tenant_id}.yaml and adjust the weights. The
+# weights MUST sum to 1.0 (±1e-6) and the keys MUST match the
+# REWARD_FEATURE_COLS schema in shared/contracts/feature_names.py.
+# A CI test (tests/rl/test_tenant_profiles.py) verifies both invariants.
