@@ -3,6 +3,8 @@
 # For optional features, see the extras below.
 
 # Core dependencies
+neo4j>=5.0,<7.0
+pandas>=2.0,<3.0
 neo4j>=5.0,<6.0
 pandas>=2.0,<4.0
 networkx>=3.0,<4.0
