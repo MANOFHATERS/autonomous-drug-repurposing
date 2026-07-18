@@ -310,7 +310,22 @@ async function runTests() {
 async function main() {
   // If a dev server is already running (e.g., on port 3000), reuse it
   // instead of starting a new one. This avoids Next.js lock conflicts.
-  let server = null;
+  //
+  // IN-067 REAL ROOT FIX (Teammate 13, round 2): the previous "ROOT FIX"
+  // claimed the cleanup logic was wired up, but it introduced a NEW bug —
+  // a local `let server = null;` declaration here SHADOWED the module-level
+  // `server` (line 42). Because `killServerGroup()` (line 44) closes over
+  // the MODULE-LEVEL binding, it ALWAYS saw `null` and returned at line 45
+  // without killing anything. The `finally` block at line 362-366 referenced
+  // the LOCAL `server` (which WAS the spawned child), so the `if (server)`
+  // check passed and `killServerGroup()` was invoked — but inside that
+  // function `server` was still the module-level null. Result: the dev
+  // server was NEVER killed, zombie Next.js processes accumulated on
+  // port 3010, and subsequent test runs failed with "port already in use".
+  //
+  // ROOT FIX: do NOT redeclare `server` locally. Assign to the module-level
+  // binding so `killServerGroup()` (and the process.on("exit") / SIGINT /
+  // SIGTERM / uncaughtException handlers) all see the real ChildProcess.
   let baseUrl = BASE_URL;
 
   const existingUrl = process.env.E2E_BASE_URL || "http://localhost:3000";
