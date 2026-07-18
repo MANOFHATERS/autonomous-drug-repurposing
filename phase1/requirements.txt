@@ -3,7 +3,7 @@ requests>=2.31.0
 
 # Data processing
 pandas>=2.1.4
-numpy>=1.26.3
+numpy>=2.2.6
 
 # Chemistry (InChIKey conversion)
 # RDKit — chemistry toolkit for SMILES to InChIKey conversion
@@ -26,10 +26,10 @@ numpy>=1.26.3
 # official `rdkit` package has wheels for all Python versions (3.8+
 # including 3.13). Both provide the same `from rdkit import Chem`
 # import — code is unchanged.
-rdkit>=2022.9.5; python_version>="3.8"
+rdkit>=2026.3.4; python_version>="3.8"
 
 # Database
-sqlalchemy>=2.0.25
+sqlalchemy>=2.0.51
 psycopg2-binary>=2.9.9
 
 # XML parsing (DrugBank)
@@ -85,7 +85,7 @@ apache-airflow>=2.10.0,<3.0.0
 rapidfuzz>=3.6.1
 
 # Utils
-python-dotenv>=1.0.0
+python-dotenv>=1.2.2
 
 # P1-003 v114 FORENSIC ROOT FIX: fastapi + uvicorn were missing from
 # phase1/requirements.txt. phase1/service.py (the Phase 1 Dataset HTTP
@@ -109,5 +109,5 @@ uvicorn[standard]>=0.27
 # filelock=None and _count_parquet_records would fail if a .parquet
 # file is encountered. pyarrow is needed for parquet support. Adding
 # them as explicit deps ensures they're always available.
-filelock>=3.13.0
+filelock>=3.30.3
 pyarrow>=14.0.0
