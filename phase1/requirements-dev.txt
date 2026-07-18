@@ -4,4 +4,4 @@ pytest-cov>=4.1.0
 # [v3.0.0] Property-based testing for deduplicator
 hypothesis>=6.92.0
 # [v3.0.0] Performance regression tests
-pytest-benchmark>=4.0.0
+pytest-benchmark>=5.2.3
