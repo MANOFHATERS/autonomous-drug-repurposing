@@ -1130,6 +1130,35 @@ def _trigger_phase2() -> None:
 # On failure, the task raises AirflowFailException (no retry) so the DAG
 # fails RED and trigger_phase2 is blocked — preventing Phase 2 from
 # building a knowledge graph on top of corrupted/empty Phase 1 data.
+#
+# P1-045 v124 FORENSIC CLARIFICATION (Teammate 3 -- hostile-auditor pass):
+#   The P1-045 audit claimed this task is REDUNDANT with
+#   ``_validate_phase1_contract`` (line 662) because "both call
+#   ``validate_output_dir``." This is FALSE. The two tasks serve
+#   DIFFERENT, COMPLEMENTARY purposes:
+#
+#   ``_validate_phase1_contract`` (line 662):
+#     - Calls ``contracts.validate_output.validate_output_dir``.
+#     - Validates the CSV file STRUCTURE: do the files exist, do they
+#       have the expected columns, are the dtypes correct, do they meet
+#       min_row requirements? This is a SCHEMA-level check.
+#     - Catches: missing files, wrong columns, dtype mismatches.
+#
+#   ``validate_output`` (THIS function, line 1135):
+#     - Does NOT call ``validate_output_dir``. It runs 4 SEPARATE checks
+#       (see the docstring below): identifier format validation,
+#       fake/synthesized data detection (SYNTH% in production),
+#       entity resolution completeness, and database row count sanity.
+#     - Catches: real-data corruption that passes the schema check
+#       (e.g., a CSV with the right columns but full of SYNTH placeholders,
+#       or a pipeline that wrote 0 rows to the DB but produced a valid
+#       empty CSV).
+#
+#   Deleting ``validate_output`` (as P1-045 suggested) would LOSE checks
+#   1-4 and let corrupted/empty-data Phase 1 outputs flow to Phase 2.
+#   The two tasks are NOT redundant -- they are a defense-in-depth pair.
+#   This comment exists to prevent future audits from re-flagging this
+#   as a redundancy.
 @task(retries=0, execution_timeout=TASK_TIMEOUT, trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
 @fail_fast_on_http_4xx
 def validate_output() -> None:

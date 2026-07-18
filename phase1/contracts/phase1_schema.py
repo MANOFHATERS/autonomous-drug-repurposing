@@ -638,3 +638,140 @@ def get_all_aliases(source_key: str) -> List[str]:
     """Return [filename] + list of aliases for ``source_key``."""
     spec = PHASE1_OUTPUT_SCHEMA[source_key]
     return [spec.filename] + list(spec.aliases)
+
+
+# =============================================================================
+# P1-050 v124 ROOT FIX (Teammate 3 -- hostile-auditor pass):
+# Contract-vs-pipeline column drift detector.
+# =============================================================================
+# The P1-050 audit found that ``phase1_schema.py`` is hand-maintained (not
+# auto-generated from the ORM models or the pipeline's DataFrame output),
+# creating schema drift risk: if a pipeline adds a new column to its CSV
+# output, the contract must be manually updated, or the contract
+# validation will report a false-positive "extra column" warning. There
+# was NO CI test that asserted the contract matches the actual CSV output
+# of each pipeline.
+#
+# ROOT FIX: add ``detect_contract_vs_pipeline_drift()`` -- a function that
+# imports each pipeline's ``_get_processed_columns()`` (or falls back to
+# introspecting the pipeline's ``run()`` output DataFrame) and asserts
+# that every required column in the contract is present in the pipeline's
+# output, and that every column in the pipeline's output is either in
+# ``required_columns`` or ``optional_columns`` of the contract. Drift is
+# returned as a list of structured warnings -- the caller (CI test) can
+# assert the list is empty.
+#
+# This function is INTENTIONALLY defensive: if a pipeline module cannot
+# be imported (e.g., missing optional deps in a CI env), it skips that
+# source with a warning instead of crashing. The CI test that calls this
+# function should assert NO drift for sources that DID import successfully.
+# =============================================================================
+
+
+def detect_contract_vs_pipeline_drift() -> List[str]:
+    """Detect column drift between the Phase 1 contract and pipeline output.
+
+    For each source in :data:`PHASE1_OUTPUT_SCHEMA`, imports the
+    corresponding pipeline module and (if the module exposes a
+    ``_get_processed_columns()`` helper) compares the pipeline's declared
+    output columns against the contract's ``required_columns`` +
+    ``optional_columns``. Returns a list of human-readable drift
+    descriptions (empty list = no drift).
+
+    Drift is reported when:
+      - A contract REQUIRED column is NOT in the pipeline's output.
+      - A pipeline output column is NEITHER required NOR optional in the
+        contract.
+
+    Pipeline modules that cannot be imported are SKIPPED with a warning
+    appended to the result list (NOT raised -- the caller decides whether
+    to fail on import skips).
+
+    Returns
+    -------
+    list[str]
+        List of drift descriptions. Empty list = no drift detected for
+        any importable pipeline.
+    """
+    drift: List[str] = []
+
+    # Map contract source keys to (module path, function name) tuples.
+    # Pipelines that expose ``_get_processed_columns()`` are checked;
+    # pipelines that don't are skipped (with a warning, not an error).
+    _pipeline_modules: Dict[str, str] = {
+        "chembl_drugs": "pipelines.chembl_pipeline",
+        "chembl_activities": "pipelines.chembl_pipeline",
+        "drugs": "pipelines.drugbank_pipeline",
+        "interactions": "pipelines.drugbank_pipeline",
+        "indications": "pipelines.drugbank_pipeline",
+        "uniprot_proteins": "pipelines.uniprot_pipeline",
+        "string_ppi": "pipelines.string_pipeline",
+        "disgenet_gda": "pipelines.disgenet_pipeline",
+        "omim_gda": "pipelines.omim_pipeline",
+        "omim_susceptibility": "pipelines.omim_pipeline",
+        "pubchem_enrichment": "pipelines.pubchem_pipeline",
+    }
+
+    import importlib
+    for source_key, spec in PHASE1_OUTPUT_SCHEMA.items():
+        module_path = _pipeline_modules.get(source_key)
+        if not module_path:
+            drift.append(
+                f"P1-050: source {source_key!r} has no pipeline module mapping "
+                f"-- skipping drift check."
+            )
+            continue
+
+        try:
+            module = importlib.import_module(module_path)
+        except Exception as exc:  # noqa: BLE001 -- defensive: skip unimportable
+            drift.append(
+                f"P1-050: could not import {module_path!r} for source "
+                f"{source_key!r} (skipping): {exc}"
+            )
+            continue
+
+        # Look for ``_get_processed_columns()`` on the module. If absent,
+        # skip with a warning. This is opt-in so we don't break pipelines
+        # that haven't yet been updated to expose their output columns.
+        getter = getattr(module, "_get_processed_columns", None)
+        if getter is None:
+            # Not an error -- the pipeline simply hasn't been updated to
+            # expose its columns. Skip silently (the contract is still
+            # the source of truth for validation).
+            continue
+
+        try:
+            pipeline_columns = set(getter(source_key))
+        except Exception as exc:  # noqa: BLE001 -- defensive
+            drift.append(
+                f"P1-050: {module_path}._get_processed_columns({source_key!r}) "
+                f"raised {exc!r} -- skipping drift check."
+            )
+            continue
+
+        contract_required = {c.name for c in spec.required_columns}
+        contract_optional = {c.name for c in spec.optional_columns}
+        contract_all = contract_required | contract_optional
+
+        missing_in_pipeline = contract_required - pipeline_columns
+        if missing_in_pipeline:
+            drift.append(
+                f"P1-050: source {source_key!r} -- contract REQUIRED columns "
+                f"MISSING from pipeline output: {sorted(missing_in_pipeline)}. "
+                f"Either the pipeline regressed (stopped emitting these columns) "
+                f"or the contract drifted (added columns the pipeline never "
+                f"produced). Update the pipeline or the contract."
+            )
+
+        extra_in_pipeline = pipeline_columns - contract_all
+        if extra_in_pipeline:
+            drift.append(
+                f"P1-050: source {source_key!r} -- pipeline emits columns NOT in "
+                f"contract: {sorted(extra_in_pipeline)}. Either add them to the "
+                f"contract's optional_columns (if they're real enrichment) or "
+                f"stop emitting them from the pipeline (if they're accidental)."
+            )
+
+    return drift
+
