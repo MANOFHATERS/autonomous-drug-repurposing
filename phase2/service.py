@@ -831,43 +831,39 @@ def _explore_subgraph_neo4j(
                 """
                 result = session.run(q, drug=drug, disease=disease, limit=limit)
                 for record in result:
+                    # v113 P2-044/045 REAL ROOT FIX (applied v115): the
+                    # previous code in this branch STILL used ``d_node.id``,
+                    # ``dis_node.id``, ``sn.id``, ``en.id`` (Neo4j INTERNAL
+                    # IDs) for the response ``id`` field, and
+                    # ``r.start_node.id`` / ``r.end_node.id`` for edge
+                    # source/target. The sibling ``elif drug:`` branch was
+                    # fixed to use ``_business_id()`` + ``_node_record()``
+                    # but THIS branch was missed -- exactly the "comments
+                    # are fakes" pattern the audit warned about. The
+                    # comments above claimed a ROOT FIX but the executable
+                    # code in this branch was never touched. REAL FIX:
+                    # use ``_node_record()`` for every node and
+                    # ``_business_id(sn)`` / ``_business_id(en)`` for
+                    # edge endpoints (the query already returns sn and en
+                    # as the storage-direction endpoints of r, so we use
+                    # their business IDs -- NOT their internal IDs).
                     d_node = record["d"]
-                    nodes.append({
-                        "id": d_node.id,
-                        "label": list(d_node.labels)[0] if d_node.labels else "Unknown",
-                        "labels": list(d_node.labels),
-                        "properties": dict(d_node),
-                    })
+                    nodes.append(_node_record(d_node))
                     dis_node = record["dis"]
-                    nodes.append({
-                        "id": dis_node.id,
-                        "label": list(dis_node.labels)[0] if dis_node.labels else "Unknown",
-                        "labels": list(dis_node.labels),
-                        "properties": dict(dis_node),
-                    })
+                    nodes.append(_node_record(dis_node))
                     r = record["r"]
-                    if r is not None:
+                    sn = record["sn"]
+                    en = record["en"]
+                    if r is not None and sn is not None and en is not None:
                         edges.append({
-                            "source": r.start_node.id,
-                            "target": r.end_node.id,
+                            "source": _business_id(sn),
+                            "target": _business_id(en),
                             "type": r.type,
                         })
-                    sn = record["sn"]
                     if sn is not None:
-                        nodes.append({
-                            "id": sn.id,
-                            "label": list(sn.labels)[0] if sn.labels else "Unknown",
-                            "labels": list(sn.labels),
-                            "properties": dict(sn),
-                        })
-                    en = record["en"]
+                        nodes.append(_node_record(sn))
                     if en is not None:
-                        nodes.append({
-                            "id": en.id,
-                            "label": list(en.labels)[0] if en.labels else "Unknown",
-                            "labels": list(en.labels),
-                            "properties": dict(en),
-                        })
+                        nodes.append(_node_record(en))
             elif drug:
                 # P2-030 ROOT FIX (v107): bounded 2-hop traversal using
                 # subqueries with LIMIT inside each hop. The previous

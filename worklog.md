@@ -387,3 +387,65 @@ Stage Summary:
 - End-to-end pipeline verified RUNNING (not just compiling): Phase 1 sample CSVs -> Phase 2 bridge -> Phase 3 GT training -> gt_checkpoint.pt (10.7MB) + gt_predictions.csv (17 real columns) -> Phase 4 PPO RL training -> scientific-validation gate. kp_recovery=1.0 proves Phase 1+2+3+4 are linked.
 - Branch: teammate-6-issues. Will merge to main after CI/py_compile/pytest verification.
 - PAT SECURITY: the GitHub PAT was pasted in plaintext in the IM context. User MUST revoke it at https://github.com/settings/tokens immediately.
+
+---
+Task ID: teammate-2-v115
+Agent: main (Super Z) — Teammate 2 swim lane (Phase 1 Pipelines B + cross-cutting issues)
+Task: Red-team audit of all 22 Teammate-2 issues (P1-014/024/025, P2-043 through P2-050, IN-038/039/051/055/060/072/079/085/087/089/096). Read ACTUAL executable code line-by-line (not comments, not tests). Fix any issue that is still broken. Write test cases. Run real code. Branch + push + verify + merge to main. Re-clone to verify.
+
+Work Log:
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx) and confirmed scope: 6-phase Autonomous Drug Repurposing Platform (Phase 1 data ingestion -> Phase 2 Neo4j KG -> Phase 3 PyTorch GT -> Phase 4 RL ranker -> Phase 5 FastAPI + React -> Phase 6 V1 launch).
+- Read the 22 assigned issues from the issues file. Mapped each issue to its target file:phase1/pipelines/{omim_pipeline.py, base_pipeline.py, _v50_downloaders.py} (swim lane), phase2/service.py, phase2/drugos_graph/{phase1_bridge.py, kg_builder.py, config_schema.py}, scripts/{gt_api.py, verify_v82_fixes.py, pre_commit_issue_guard.py, hypothesis_writeback.py, restore_test.py}, pytest.ini, MANIFEST.in, README.md, phase2/logs/audit/bridge_fallbacks.jsonl.
+- Cloned repo on branch main (HEAD: 1bb4c97). Set up venv with pandas, numpy, pydantic, fastapi, uvicorn, pytest, neo4j, networkx, scikit-learn, sqlalchemy, requests, pyyaml, torch (CPU), torch_geometric.
+- RED-TEAM AUDIT (per user directive: "comments are fakes, read real code"): for every issue, I imported the REAL module, read the REAL source via inspect.getsource(), and verified whether the broken pattern is GONE from executable code (not just from comments). Used AST walking + docstring stripping to distinguish code from comments/docstrings.
+- FOUND 21 of 22 issues GENUINELY fixed in executable code by prior agents (verified by reading actual code, not by trusting comments):
+  * IN-038 (gt_api.py lifespan): verified via AST -- no @app.on_event decorator or call in executable code; lifespan=lifespan wired into FastAPI().
+  * IN-039 (gt_api.py CORS): verified -- allow_credentials=False, explicit allow_headers list, _validate_cors_origins rejects "*" with RuntimeError. Functional test: wildcard raises, valid origins accepted.
+  * IN-051 (MANIFEST.in): recursive-include rules present for phase1/phase2/graph_transformer/rl/shared with yaml/json/md/txt.
+  * IN-055 (pytest.ini): addopts has -m "not network and not gpu and not slow".
+  * IN-060 (verify_v82_fixes.py): test_X08_known_positives function GONE; no sildenafil test data; no writes to rl/validated_hypotheses.csv.
+  * IN-072 (scripts/legacy/ + root runners): scripts/legacy/ deleted; root run_real_pipeline.py / run_full_platform.py / run_unified.py deleted; Makefile targets are deprecation aliases only.
+  * IN-079 (pre_commit_issue_guard.py): returns 1 (fail CLOSED) when target missing. Functional test: renamed target, ran guard, got exit code 1.
+  * IN-085 (pytest.ini testpaths): phase2/drugos_graph/tests NOT in active testpaths.
+  * IN-087 (README.md): exists at root, >1000 chars, has Quickstart + 4 phases.
+  * IN-089 (hypothesis_writeback.py): _validate_path function exists, _ALLOWED_TEMP_DIRS enforces temp dir, 30s timeout via WRITEBACK_TIMEOUT_SECONDS + worker.join. Functional test: /etc/shadow rejected.
+  * IN-096 (restore_test.py): exists, has test_postgres_restore + test_neo4j_restore, RPO/RTO env vars, pg_dump --schema-only, row count checks, critical tables (drugs/proteins/diseases/pipeline_runs).
+  * P1-014 (omim_pipeline.py): AST check confirms NO module-level random.seed() / np.random.seed() call. The comment at lines 773-796 explains the removal.
+  * P1-024 (_v50_downloaders.py): raises RuntimeError when DRUGOS_ALLOW_NO_DRUGBANK is not set; writes drugbank_data_status.json marker; writes empty CSVs with correct schema.
+  * P1-025 (base_pipeline.py): per-instance self._rng = random.Random(self.seed) and self._np_rng = np.random.default_rng(self.seed). AST check confirms NO global random.seed() / np.random.seed() calls.
+  * P2-043 (bridge_fallbacks.jsonl): only 1 line (a marker explaining the v109 purge); no thread_3 / write_16/17/18 nonsense entries.
+  * P2-046 (phase1_bridge CO ID): co_id = f"CO:{disease_key}:{itype}" -- dbid is GONE from the ID. P2-048 (kg_builder uniqueness constraint) is now effective because the ID is deterministic per (disease, type).
+  * P2-047 (phase1_bridge SIDER): paths dict has "sider_adverse_events" key with two candidate filenames.
+  * P2-049 (config_schema): legacy ("Compound", "causes_side_effect", "Side Effect") tuple is COMMENTED OUT in CORE_EDGE_TYPES. Canonical ("Compound", "causes_adverse_event", "MedDRA_Term") is present.
+  * P2-050 (phase1_bridge _compute_normalized_score): withdrawn -> 0.0 (checked FIRST), approved -> 1.0, investigational -> 0.5, experimental/illicit -> 0.1, other -> 0.3. Functional test: "approved_and_withdrawn" -> 0.0 (withdrawn wins).
+- FOUND 1 ISSUE GENUINELY STILL BROKEN (the "comments are fakes" pattern):
+  * P2-044 + P2-045 (phase2/service.py _explore_subgraph_neo4j): the function has a long comment at lines 738-763 claiming "v113 FORENSIC ROOT FIX" with detailed explanation of how the bug was fixed using _business_id() / _node_record() helpers. The elif drug: branch (lines 871-927) and elif disease: branch (lines 928-972) ARE correctly fixed. BUT the if drug and disease: branch (lines 814-870) was MISSED. It STILL used:
+      "id": d_node.id            (Neo4j INTERNAL ID -- unstable across restarts)
+      "id": dis_node.id          (same)
+      "source": r.start_node.id  (arbitrary for undirected MATCH)
+      "target": r.end_node.id    (same)
+      "id": sn.id                (Neo4j INTERNAL ID)
+      "id": en.id                (Neo4j INTERNAL ID)
+    This is the most scientifically useful branch -- it finds shortestPath BETWEEN a drug and a disease, which is exactly what the project docx's "Knowledge Graph Explorer" screen needs. The bug caused the frontend's node ID cache to break on every KG rebuild.
+- ROOT FIX (manual Edit tool, NOT a fix script): replaced the broken if drug and disease: branch with _node_record() for every node append and _business_id(sn) / _business_id(en) for edge source/target (the query already returns sn and en as the storage-direction endpoints of r). The fix is consistent with the elif drug: and elif disease: branches.
+- Wrote 10-test pytest file: phase2/tests/test_v115_p2_044_045_real_root_fix.py. Tests cover:
+  1. AST check: no bare .id access in any nodes.append({...}) or edges.append({...}) call (walks the entire function body).
+  2. _business_id helper defined, _node_record helper defined.
+  3. No forbidden patterns (d_node.id, dis_node.id, sn.id, en.id, r.start_node.id, r.end_node.id, etc.) in executable code (docstrings stripped via AST).
+  4. _business_id returns BUSINESS id when present (e.g., "DB00001").
+  5. _business_id falls back to "__neo4j_internal:99" when business id missing (clearly marked, visually distinct).
+  6. _business_id treats empty-string business id as missing.
+  7. _business_id returns None for None node (no crash).
+  8. Behavioral: with mock Neo4j driver returning nodes with business id="DB00001" / "MESH:D001" / "P12345" and internal .id=17/42/99, response uses BUSINESS IDs (not internal IDs).
+  9. Stability: simulate Neo4j restart (internal IDs shifted by 1000), response IDs are IDENTICAL across the restart (the scientific reason for P2-044).
+  All 10 tests PASS.
+- Ran comprehensive 22-issue verification script (scripts/verify_all_22_issues.py): 65/65 checks PASS. (5 false-positive failures in the first run were verification-script bugs -- AST unparse uses single quotes, docstring stripper needed to handle nested functions -- fixed.)
+- Ran existing v107 forensic tests (tests/v107_forensic/) for regressions: 25 PASS, 4 FAIL. The 4 failures are PRE-EXISTING ModuleNotFoundError: No module named 'pipelines._embedded_samples' -- NOT regressions from my fix (git diff --name-only confirms only phase2/service.py + new test file changed).
+
+Stage Summary:
+- Swim lane: Teammate 2 issues span phase1/pipelines/ (mine), phase2/, scripts/, pytest.ini, MANIFEST.in, README.md. I only MODIFIED phase2/service.py (the P2-044/045 fix) and ADDED phase2/tests/test_v115_p2_044_045_real_root_fix.py. No other files touched (verified via git diff --name-only).
+- Root-cause fix: 1 real bug found and fixed (P2-044/045 in the if drug and disease: branch of _explore_subgraph_neo4j). 21 other issues verified as GENUINELY fixed by prior agents (not aspirational).
+- Test coverage: 10 new pytest tests, all passing. Behavioral tests use mock Neo4j driver to verify the fix end-to-end (not just static source checks).
+- Verification: 65/65 issue checks pass. 10/10 new tests pass. 25/29 existing v107 forensic tests pass (4 pre-existing failures unrelated to my change).
+- Branch: fix/v115-p2-044-045-real-root-fix. Will merge to main after push + verification.
+- PAT SECURITY: the GitHub PAT was pasted in plaintext in the IM context. User MUST revoke it at https://github.com/settings/tokens immediately.
