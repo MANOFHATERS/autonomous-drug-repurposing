@@ -13,7 +13,7 @@
 #
 # Build context: repo root (so we can COPY phase1/requirements.txt).
 # =============================================================================
-FROM apache/airflow:2.10.5-python3.11
+FROM apache/airflow:3.3.0-python3.11
 
 USER root
 
