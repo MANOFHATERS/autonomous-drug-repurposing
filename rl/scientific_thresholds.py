@@ -346,78 +346,29 @@ predictions can be valuable) but is down-ranked relative to
 literature-supported predictions.
 """
 
-
-def resolve_kp_recovery_threshold(config_threshold: float) -> float:
-    """P4-013 ROOT FIX (v2 — Team Member 12): the SINGLE source of truth
-    for computing the KP recovery threshold from a caller-provided config
-    value.
-
-    The previous "fix" for P4-013 left a subtle inconsistency between the
-    RL ranker and the GT-RL bridge:
-
-      * ``rl/rl_drug_ranker.py`` used ``config.min_kp_recovery_rate``
-        DIRECTLY at its gate (no floor).
-      * ``graph_transformer/gt_rl_bridge.py`` used
-        ``max(rl_config.min_kp_recovery_rate, KP_RECOVERY_THRESHOLD)``
-        (with a floor at the shared constant 0.5).
-
-    When a caller explicitly set ``min_kp_recovery_rate=0.2`` (e.g., for
-    a demo run on a tiny graph where 50% recovery is mathematically
-    impossible), the ranker's gate used 0.2 but the bridge's gate used
-    ``max(0.2, 0.5) = 0.5``. A run with ``kp_recovery_rate = 0.3``
-    PASSED the ranker's gate (0.3 >= 0.2) but FAILED the bridge's gate
-    (0.3 < 0.5). The bridge wrote its CSV; the ranker refused to; the
-    pipeline state was inconsistent — the exact bug P4-013 was supposed
-    to fix.
-
-    The user's audit caught this: "comments and tests are fakes they
-    have fixed when I manually check code it's 100 percent broken."
-    The comments claimed P4-013 was fixed, the CI test passed (because
-    it only exercised the default-config case where both happen to be
-    0.5), but the actual code DISAGREED whenever a caller overrode the
-    threshold.
-
-    This function is the ROOT FIX. Both the ranker and the bridge call
-    this SAME function with the SAME argument
-    (``config.min_kp_recovery_rate``), so they are GUARANTEED to compute
-    the SAME threshold. The formula is:
-
-        max(config_threshold, KP_RECOVERY_THRESHOLD)
-
-    A caller can RAISE the threshold above the shared constant (e.g.,
-    0.75 for a stricter production gate) but cannot lower it below the
-    shared constant (0.5). This preserves the V90 BUG #31 safety net
-    while guaranteeing the ranker and bridge agree.
-
-    Args:
-        config_threshold: The caller-provided threshold from
-            ``PipelineConfig.min_kp_recovery_rate``. May be any float;
-            values below ``KP_RECOVERY_THRESHOLD`` are clamped up to it.
-
-    Returns:
-        The resolved threshold to use in the ``kp_recovery_pass`` check.
-        Always ``>= KP_RECOVERY_THRESHOLD``.
-    """
-    try:
-        cfg = float(config_threshold)
-    except (TypeError, ValueError):
-        # Defensive: if the caller passed a non-numeric value (e.g., None
-        # or a string), fall back to the shared constant. This should
-        # never happen in practice because PipelineConfig.__post_init__
-        # validates the field, but we guard against it here so the gate
-        # never crashes on a malformed config.
-        return float(KP_RECOVERY_THRESHOLD)
-    # P4-013: reject NaN and infinity — these would silently make the gate
-    # always fail (kp_recovery_rate >= nan is always False) or always pass
-    # (kp_recovery_rate >= -inf is always True). Fall back to the shared
-    # constant so the gate behaves predictably.
-    import math as _math
-    if _math.isnan(cfg) or _math.isinf(cfg):
-        return float(KP_RECOVERY_THRESHOLD)
-    if cfg < 0.0 or cfg > 1.0:
-        # Out-of-range: fall back to the shared constant. Same rationale.
-        return float(KP_RECOVERY_THRESHOLD)
-    return max(cfg, float(KP_RECOVERY_THRESHOLD))
+# v120 FORENSIC ROOT FIX (hostile-auditor): the OLD
+# ``resolve_kp_recovery_threshold(config_threshold)`` definition that
+# lived here (lines 350-420 in the previous revision) has been DELETED.
+# It was a STALE DUPLICATE of the correct scale-aware definition at
+# line 127 (``resolve_kp_recovery_threshold(config_threshold=0.0,
+# n_test_kps=0)``). Python module-level execution bound the LAST
+# definition, so the OLD signature ``(config_threshold) -> float``
+# SHADOWED the correct scale-aware version. This caused:
+#
+#   TypeError: resolve_kp_recovery_threshold() got an unexpected
+#   keyword argument 'n_test_kps'
+#
+# at ``rl/rl_drug_ranker.py`` line 10814 (inside ``run_pipeline`` ->
+# ``scientific_validation``), because the ranker passes ``n_test_kps``
+# per the Issue 180 fix. The crash made the ENTIRE production pipeline
+# exit with code 5 (Unexpected exception) — Phase 4 was unreachable
+# even though Phases 1-3 ran correctly. The user's audit
+# ("comments and tests are fakes ... when I manually check code it's
+# 100 percent broken") was dead right: the file had BOTH signatures
+# side-by-side, the docstring of the OLD one claimed it was the
+# "SINGLE source of truth", and CI did not catch the shadowing because
+# the default-config test path never passes ``n_test_kps``. The correct
+# scale-aware definition at line 127 is now the ONLY definition.
 
 
 __all__ = [

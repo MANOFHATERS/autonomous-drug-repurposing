@@ -324,7 +324,7 @@ CONTROLLED_SUBSTANCE_COL: str = "controlled_substance"
 
 # Default feature columns. The environment may EXTEND this list with disease
 # context features at runtime.
-FEATURE_COLS: List[str] = [
+#
 # P4-021 ROOT FIX (Team Member 9): column constants are now imported from
 # rl/constants.py (the SELF-CONTAINED constants module). This is the FIRST
 # REAL extraction step toward P4-021's goal of actual decoupling. Both
@@ -332,6 +332,20 @@ FEATURE_COLS: List[str] = [
 # from rl/constants.py, so a column-name change lives in ONE place and the
 # wrapper modules no longer transitively depend on the 9000-line monolith
 # for constants. The constants are re-exported below for backward compat.
+#
+# v120 FORENSIC ROOT FIX (hostile-auditor): the previous code had an
+# orphaned `FEATURE_COLS: List[str] = [` opening bracket on the line
+# below the comment, but the list body was NEVER written and the bracket
+# was NEVER closed. The developer intended to REPLACE the inline
+# definition with the import from `.constants` (below), but forgot to
+# delete the opening `FEATURE_COLS: List[str] = [` line. This caused
+# `SyntaxError: '[' was never closed` at line 327, which made the entire
+# `rl_drug_ranker.py` module UN-IMPORTABLE, which cascaded into
+# `phase2_adapter.py` line 1463 crashing on `from rl.rl_drug_ranker
+# import KNOWN_POSITIVES`, which made `run_4phase.py` (the canonical
+# Phase 1→2→3→4 production entry point) exit with code 5. The ENTIRE
+# production pipeline was DEAD. The orphaned opening bracket has been
+# removed; `FEATURE_COLS` is now defined solely by the import below.
 from .constants import (
     DRUG_COL,
     DISEASE_COL,
@@ -10772,19 +10786,29 @@ def run_pipeline(
         # bridge, leaving the pipeline state inconsistent. The shared
         # helper applies the SAME ``max(cfg, KP_RECOVERY_THRESHOLD)``
         # formula in BOTH files, so they can NEVER disagree.
-        "kp_recovery_pass": (
-            recovery["recovery_rate"]
-            >= _resolve_kp_recovery_threshold(config.min_kp_recovery_rate)
-        #
-        # Issue 180 ROOT FIX: pass n_test_kps (the number of KPs in the
-        # test set) so the threshold is SCALE-AWARE. The previous call
-        # passed only config.min_kp_recovery_rate, so the scale-aware
+        # P4-013 + Issue 180 ROOT FIX: pass n_test_kps (the number of KPs
+        # in the test set) so the threshold is SCALE-AWARE. The previous
+        # call passed only config.min_kp_recovery_rate, so the scale-aware
         # base threshold (0.5 for ≥1000 KPs, 0.4 for 100-1000, 0.34 for
         # <100) was NEVER applied — the function always used the fixed
         # 0.5 fallback. On small demo graphs (2 KPs in test), the 0.5
         # threshold meant "recover BOTH test KPs" which is not a
         # meaningful bar. The fix passes n_test_kps from the recovery
         # dict so the scale-aware base is actually computed.
+        #
+        # v120 FORENSIC ROOT FIX (hostile-auditor): the previous code had
+        # a DUPLICATE, UNCLOSED `kp_recovery_pass` definition above this
+        # comment block — the OLD definition opened `(` on line 10775 but
+        # never closed it, then this NEW definition opened another `(`.
+        # This caused `SyntaxError: closing parenthesis '}' does not match
+        # opening parenthesis '('` which made `rl_drug_ranker.py`
+        # UN-IMPORTABLE, which cascaded into `phase2_adapter.py` line 1463
+        # (`from rl.rl_drug_ranker import KNOWN_POSITIVES`) crashing, which
+        # made `adapt_phase2_to_phase3` unreachable, which made
+        # `run_4phase.py` (the canonical Phase 1→2→3→4 production entry
+        # point) exit with code 5 (Unexpected exception). The ENTIRE
+        # production pipeline was DEAD. The old incomplete definition has
+        # been removed; only the correct scale-aware definition remains.
         "kp_recovery_pass": (
             recovery["recovery_rate"]
             >= _resolve_kp_recovery_threshold(
