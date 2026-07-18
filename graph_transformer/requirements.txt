@@ -8,7 +8,7 @@
 # to install ONLY Phase 3 deps (e.g. a GPU-only training container that
 # does not need Phase 1's airflow/psycopg2).
 torch>=2.0
-torch-geometric>=2.4
+torch-geometric>=2.8.0
 scikit-learn>=1.3
 pandas>=2.1.4
 numpy>=1.26.3
