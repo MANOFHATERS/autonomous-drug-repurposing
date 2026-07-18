@@ -132,6 +132,29 @@ from drugos_graph.schema_mappings import (
     ALL_PHASE3_NODE_TYPES,
     is_intermediate_node_type,
 )
+# P3-002 v123 FORENSIC ROOT FIX: import `map_edge_with_reason` from the
+# TM14-owned contract module so the adapter LOGS every dropped edge with
+# a documented scientific reason (instead of silently incrementing a
+# counter). The contract module is the SINGLE source of truth for the
+# Phase 2 -> Phase 3 edge mapping; the adapter was previously using
+# `PHASE2_TO_PHASE3_EDGE.get()` directly, which returned None for
+# dropped edges and the adapter silently `continue`d — losing the
+# scientific reason (PPI shortcut, DDI scope, no Anatomy node, etc.).
+# The contract module's `map_edge_with_reason` returns (phase3_edge, reason)
+# where reason is "mapped", "dropped:<reason>", or "unknown:<key>" —
+# the adapter logs the reason so operators can see EXACTLY which edge
+# types are dropped and WHY, instead of just a count.
+try:
+    from shared.contracts.phase_edge_mapping import map_edge_with_reason
+    _P3_002_MAP_EDGE_WITH_REASON_AVAILABLE = True
+except ImportError as _p3_002_exc:  # pragma: no cover — degraded mode
+    _P3_002_MAP_EDGE_WITH_REASON_AVAILABLE = False
+    import logging as _p3_002_logging
+    _p3_002_logging.getLogger(__name__).warning(
+        "P3-002 v123: shared.contracts.phase_edge_mapping not available "
+        "(%s). The adapter will fall back to the silent-drop pattern. "
+        "Install shared/ or fix the import path.", _p3_002_exc,
+    )
 
 # P3-001 ROOT FIX (v113 forensic): The previous import referenced a
 # NON-EXISTENT symbol ``is_phase2_intermediate_dropped``. The real
@@ -1358,11 +1381,50 @@ def adapt_phase2_to_phase3(
     edges_added = 0           # NEW edges (add_edge returned True)
     edges_already_present = 0 # Edges that already existed (add_edge False)
     edges_dropped = 0         # Edges with missing names (real loss)
+    # P3-002 v123: track dropped-by-edge-type so the log message can show
+    # WHICH edge types were dropped and WHY (instead of just a count).
+    # This is the visible replacement for the previous silent-drop pattern.
+    edges_dropped_by_type: Dict[Tuple[str, str, str], int] = {}
+    edges_dropped_reasons: Dict[Tuple[str, str, str], str] = {}
     for (src_label, rel, dst_label), edge_list in p2_edges.items():
-        p3_key = PHASE2_TO_PHASE3_EDGE.get((src_label, rel, dst_label))
-        if p3_key is None:
-            edges_dropped += len(edge_list)
-            continue
+        # P3-002 v123 FORENSIC ROOT FIX: use `map_edge_with_reason` instead
+        # of `PHASE2_TO_PHASE3_EDGE.get()`. The contract module returns
+        # (phase3_edge, reason) where reason is "mapped",
+        # "dropped:<scientific_reason>", or "unknown:<key>" (a programming
+        # error — the completeness assertion should have caught it at
+        # import time). The adapter logs the reason so operators can see
+        # EXACTLY which edge types are dropped and WHY (PPI shortcut,
+        # DDI scope, no Anatomy node, etc.), instead of just a count.
+        p3_key = None
+        if _P3_002_MAP_EDGE_WITH_REASON_AVAILABLE:
+            p3_key, reason = map_edge_with_reason((src_label, rel, dst_label))
+            if p3_key is None:
+                # Edge is dropped. Record the count + reason so the log
+                # message at the end of the loop can show them.
+                edges_dropped += len(edge_list)
+                edges_dropped_by_type[(src_label, rel, dst_label)] = len(edge_list)
+                edges_dropped_reasons[(src_label, rel, dst_label)] = reason
+                # Log at INFO so operators see it in normal operation.
+                # The reason is truncated to 100 chars for log readability
+                # (the full reason is in EDGE_DROP_REASONS for audit).
+                _p3_002_logger = logger  # alias for clarity
+                _p3_002_logger.info(
+                    "P3-002: dropped %d edge(s) of type (%s, %s, %s) — reason: %s",
+                    len(edge_list), src_label, rel, dst_label, reason[:100],
+                )
+                continue
+        else:
+            # Fallback: contract module unavailable — use the silent-drop
+            # pattern (with a log warning so operators know the reason
+            # is missing).
+            p3_key = PHASE2_TO_PHASE3_EDGE.get((src_label, rel, dst_label))
+            if p3_key is None:
+                edges_dropped += len(edge_list)
+                edges_dropped_by_type[(src_label, rel, dst_label)] = len(edge_list)
+                edges_dropped_reasons[(src_label, rel, dst_label)] = (
+                    "unknown (shared.contracts.phase_edge_mapping not importable)"
+                )
+                continue
         p3_src_type, p3_rel, p3_dst_type = p3_key
         for src_id, dst_id in edge_list:
             src_name = p2_id_to_p3_name.get(src_id)
@@ -1403,6 +1465,23 @@ def adapt_phase2_to_phase3(
         f"{edges_already_present} already present (deduped, no loss), "
         f"{edges_dropped} dropped (missing names). v107 ISSUE-P2-042 fix."
     )
+    # P3-002 v123: log the dropped-by-edge-type breakdown so operators can
+    # see EXACTLY which edge types were dropped and WHY (instead of just a
+    # count). This is the visible replacement for the previous silent-drop
+    # pattern. The reason for each drop comes from EDGE_DROP_REASONS in
+    # shared/contracts/phase_edge_mapping.py (TM14-owned contract module).
+    if edges_dropped_by_type:
+        logger.info(
+            "P3-002: dropped-edge breakdown by type (reason: count):"
+        )
+        for edge_type, count in sorted(
+            edges_dropped_by_type.items(), key=lambda x: -x[1]
+        ):
+            reason = edges_dropped_reasons.get(edge_type, "no reason documented")
+            logger.info(
+                "  (%s, %s, %s): %d edge(s) — %s",
+                edge_type[0], edge_type[1], edge_type[2], count, reason[:120],
+            )
 
     # ─── Step 8: Build reverse edges + finalize ────────────────────────
     # v100 ROOT FIX (CRITICAL -- reverse edges discarded bug):

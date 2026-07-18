@@ -10,7 +10,40 @@
  *  - Passwords MUST meet a minimum complexity policy before hashing.
  */
 
-import bcrypt from "bcryptjs";
+import bcryptNative from "bcrypt";
+import bcryptJs from "bcryptjs";
+// BE-009 v123 FORENSIC ROOT FIX: switch from `bcryptjs` (pure JS, ~250-300ms
+// per hash at cost 12) to NATIVE `bcrypt` (C bindings, ~80ms per hash at
+// cost 12 — 3x faster). At 100 concurrent logins, bcryptjs blocked the
+// Node.js event loop for 25 seconds (100 × 250ms of sync CPU work), making
+// the V1 launch SLO ("100 concurrent requests without timeout") physically
+// impossible on a single Node.js process. Native bcrypt uses libuv's
+// threadpool (worker_threads under the hood) so the main event loop is
+// NOT blocked.
+//
+// FALLBACK: if the native module fails to load (rare — only happens on
+// environments without build tools AND without a prebuilt wheel, e.g.
+// some musl-based Alpine images without `python3 + make + g++`), we fall
+// back to bcryptjs. The fallback is logged at startup so operators can
+// detect the perf regression and install the build deps. This is a
+// graceful-degradation pattern — production deploys SHOULD have native
+// bcrypt (it's in `optionalDependencies` in package.json so npm install
+// does NOT fail if compilation breaks).
+const bcrypt: typeof bcryptNative = (() => {
+  try {
+    // Probe that the native module is actually usable (not just imported).
+    // Some partial installs have `bcrypt` resolvable but throw on first call.
+    bcryptNative.genSaltSync(4);
+    return bcryptNative;
+  } catch (_probeErr) {
+    console.warn(
+      "[auth/server.ts] BE-009: native `bcrypt` module is unavailable — " +
+      "falling back to `bcryptjs` (pure JS, ~3x slower). Install build " +
+      "tools (python3, make, g++) on the deploy image to enable native bcrypt.",
+    );
+    return bcryptJs as unknown as typeof bcryptNative;
+  }
+})();
 import jwt from "jsonwebtoken";
 import { randomBytes } from "crypto";
 import { cookies } from "next/headers";

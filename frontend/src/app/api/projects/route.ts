@@ -5,7 +5,7 @@ import { db } from "@/lib/db";
 
 /**
  * FE-044 ROOT FIX: project creation used to check `User.role` (a global
- * platform role like "researcher", "data-scientist", "pi", "business-dev").
+ * platform role like "researcher", "data_scientist", "pi", "business_dev").
  * But the correct granularity for org-scoped permissions is
  * `OrganizationMember.role` (owner | admin | member | viewer | billing).
  * A user with User.role="researcher" who has been DEMOTED to

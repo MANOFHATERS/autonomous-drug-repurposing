@@ -179,7 +179,7 @@ export async function POST(req: NextRequest) {
   // FE-008 ROOT FIX layer 1: ROLE GATE.
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
-  const roleCheck = await requireRole(auth.user, "data-scientist", "pi", "developer");
+  const roleCheck = await requireRole(auth.user, "data_scientist", "pi", "developer");
   if (roleCheck.user === null) return roleCheck.response;
 
   let body: { cypher?: string; params?: Record<string, unknown> };

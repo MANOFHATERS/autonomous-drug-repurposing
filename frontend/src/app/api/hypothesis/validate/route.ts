@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
   if (auth.user === null) return auth.response;
 
   // RT-010: only analytics roles can submit validation results.
-  const roleCheck = await requireRole(auth.user, "data-scientist", "pi", "developer");
+  const roleCheck = await requireRole(auth.user, "data_scientist", "pi", "developer");
   if (roleCheck.user === null) return roleCheck.response;
 
   let body: {

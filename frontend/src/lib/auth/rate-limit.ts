@@ -961,6 +961,82 @@ export async function checkUserApiRateLimitDistributed(userId: string): Promise<
   };
 }
 
+// =============================================================================
+// BE-027 v123 FORENSIC ROOT FIX: per-user rate limit for /api/auth/2fa/setup.
+// =============================================================================
+// The previous /api/auth/2fa/setup route had NO rate limit. Each call
+// generated a new TOTP secret + setup token and stored them in the
+// in-memory `pending` Map (bounded at 10000 entries with LRU eviction).
+// A single user could call /api/auth/2fa/setup 10001 times to fill the
+// LRU, after which every new call evicted the OLDEST entry — which may
+// belong to a different user mid-enrollment. The evicted user's
+// /api/auth/2fa/verify call failed with "token_not_found" — their 2FA
+// enrollment was silently sabotaged.
+//
+// ROOT FIX: dedicated distributed rate limiter for 2FA setup. The limit
+// is 5 setup attempts per 5 minutes per user (generous — a legitimate
+// user rarely retries enrollment more than once or twice). When Redis
+// is unavailable, falls back to a per-process in-memory bucket (same
+// contract as the distributed path; same fallback semantics as
+// checkIpRateLimitDistributed).
+// =============================================================================
+const SETUP_2FA_MAX_ATTEMPTS = 5;
+const SETUP_2FA_WINDOW_MINUTES = 5;
+// Per-process fallback bucket (only used when Redis is unavailable).
+const _setup2faBuckets = new Map<string, { timestamps: number[] }>();
+
+export async function check2faSetupRateLimitDistributed(
+  userId: string,
+): Promise<{ blocked: boolean; retryAfterSeconds: number; remaining: number }> {
+  const redis = await getRedisBackend().catch(() => null);
+  const now = Date.now();
+  const windowMs = SETUP_2FA_WINDOW_MINUTES * 60 * 1000;
+
+  if (!redis) {
+    // In-memory fallback (per-process — weaker than Redis but better
+    // than nothing). Prune expired timestamps, append the current one,
+    // and check the count.
+    const bucket = _setup2faBuckets.get(userId) ?? { timestamps: [] };
+    bucket.timestamps = bucket.timestamps.filter((t) => t > now - windowMs);
+    bucket.timestamps.push(now);
+    _setup2faBuckets.set(userId, bucket);
+    if (bucket.timestamps.length > SETUP_2FA_MAX_ATTEMPTS) {
+      const oldest = bucket.timestamps[0] ?? now;
+      const retryAfter = Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
+      return { blocked: true, retryAfterSeconds: retryAfter, remaining: 0 };
+    }
+    return {
+      blocked: false,
+      retryAfterSeconds: 0,
+      remaining: Math.max(0, SETUP_2FA_MAX_ATTEMPTS - bucket.timestamps.length),
+    };
+  }
+
+  // Redis path: atomic prune → add → count → expire.
+  const key = `drugos:rl:2fa_setup:${userId}`;
+  const member = `${now}:${randomBytesStr(8)}`;
+  const results = await redis
+    .multi()
+    .zremrangebyscore(key, "-inf", now - windowMs)
+    .zadd(key, now, member)
+    .zcard(key)
+    .pexpire(key, windowMs + 60_000)
+    .exec();
+  const count = typeof results?.[2]?.[1] === "number" ? results[2][1] : 0;
+  if (count > SETUP_2FA_MAX_ATTEMPTS) {
+    return {
+      blocked: true,
+      retryAfterSeconds: SETUP_2FA_WINDOW_MINUTES * 60,
+      remaining: 0,
+    };
+  }
+  return {
+    blocked: false,
+    retryAfterSeconds: 0,
+    remaining: Math.max(0, SETUP_2FA_MAX_ATTEMPTS - count),
+  };
+}
+
 // Tiny helper to avoid pulling `crypto` into this file (the sync versions
 // don't need it). Generates an 8-byte hex suffix for Redis sorted-set
 // member uniqueness.

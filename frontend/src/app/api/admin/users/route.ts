@@ -275,11 +275,34 @@ export async function DELETE(req: NextRequest) {
 
   // Revoke all refresh tokens so existing sessions stop working.
   const revokedCount = await revokeAllRefreshTokensForUser(updated.id);
+
+  // BE-030 v123 FORENSIC ROOT FIX: also revoke all API keys for the user.
+  // The prior code only revoked refresh tokens — but the ApiKey rows
+  // kept `revokedAt: null`, so they appeared ACTIVE in the developer
+  // platform UI. Although `authenticateApiKey` checks `user.status !==
+  // "active"` (so the keys are effectively unusable while the user is
+  // suspended), the UI lie confused admins ("I suspended them, why are
+  // their keys active?"). Worse, if the user was later UN-suspended
+  // (status flipped back to "active"), the previously-"revoked" keys
+  // would silently start working again — a real security gap.
+  //
+  // ROOT FIX: stamp revokedAt=now() on every non-revoked ApiKey row for
+  // this user. This is durable (survives un-suspension), matches the UI
+  // expectation, and is the same pattern used for refresh tokens.
+  const revokedApiKeyCount = await db.apiKey.updateMany({
+    where: { userId: updated.id, revokedAt: null },
+    data: { revokedAt: new Date() },
+  });
   await writeAuditLog({
     user: auth.user,
     action: "platform_admin_user_deleted_tokens_revoked",
     resource: `user:${updated.id}`,
-    metadata: { revokedRefreshTokenCount: revokedCount },
+    metadata: {
+      revokedRefreshTokenCount: revokedCount,
+      // BE-030: track the API key revocation too so the audit trail
+      // reflects the full security action (not just refresh tokens).
+      revokedApiKeyCount: revokedApiKeyCount.count,
+    },
   }).catch(() => {
     // Non-critical — the deletion itself was already audited above.
   });

@@ -196,14 +196,39 @@ accommodate biologics documented in DrugBank.
 
 Scientific Note on Knowledge-Graph Node/Edge Mapping
 -----------------------------------------------------
-The platform's Phase 2 knowledge graph has 5 node types and 5 edge types.
-Each pipeline contributes a specific subset:
+The platform's Phase 2 knowledge graph has 6 node types and 5+ edge types.
+Each pipeline contributes a specific subset.
 
-- **5 node types:** Drugs, Proteins, Biological Pathways, Diseases,
-  Clinical Outcomes.
-- **5 edge types:** Drug->inhibits/activates->Protein,
+P1-038 v123 FORENSIC ROOT FIX: the previous version of this docstring
+said "5 node types: Drugs, Proteins, Biological Pathways, Diseases,
+Clinical Outcomes" — but the actual `phase1/exporters/neo4j_exporter.py`
+emits 6 node types: `Compound`, `Protein`, `Gene`, `Disease`,
+`ClinicalOutcome`, `Pathway`. The mismatch had two parts:
+  (a) The DOCX marketing spec says "Drugs (10,000 FDA-approved compounds)"
+      — it uses the user-facing term "Drug". The exporter uses the
+      chemically-precise term "Compound" (ChEMBL/DrugBank canonical label).
+      A new developer reading the spec writes `MATCH (d:Drug) RETURN d`
+      and gets zero results (the actual label is `:Compound`).
+  (b) The docstring omitted `Gene` (a Phase 2 intermediate node type
+      sourced from OMIM/DisGeNET for gene-disease associations).
+
+ROOT FIX: update this docstring to match the actual implementation.
+Use "Compound (Drug)" in the docstring to make the mapping explicit.
+The full rename from `:Compound` to `:Drug` would break every existing
+KG and every Cypher query in the codebase — it's tracked as a future
+enhancement (P1-038-backward-compat-alias: emit BOTH `:Drug` and
+`:Compound` labels on the same nodes so queries using either label work).
+
+- **6 node types:** Compound (the DOCX calls these "Drugs"), Proteins,
+  Genes (intermediate — bridged to Proteins via the Gene-encodes-Protein
+  edge), Biological Pathways, Diseases, Clinical Outcomes.
+- **5+ edge types:** Compound->inhibits/activates->Protein,
   Protein->is part of->Pathway, Pathway->is disrupted in->Disease,
-  Drug->treats/is tested for->Disease, Drug->causes->Adverse Event.
+  Compound->treats/is tested for->Disease,
+  Compound->causes->ClinicalOutcome (adverse events),
+  Gene->associated_with->Disease (DRKG/OMIM/DisGeNET),
+  Gene->encodes->Protein (gene-to-protein-product bridge),
+  Drug->validated_treats->Disease (data-flywheel writeback from Phase 4).
 
 Pipeline-to-node/edge mapping (verified against each pipeline's
 ``clean()`` return type):

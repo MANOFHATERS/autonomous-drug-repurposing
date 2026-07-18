@@ -21,13 +21,21 @@
 export type Role =
   | "viewer"
   | "researcher"
-  | "data-scientist"
+  | "data_scientist"
   | "pi"
-  | "business-dev"
+  | "business_dev"
   | "developer"
   | "billing"
   | "admin"
-  | "owner";
+  | "owner"
+  // BE-017 v123 FORENSIC ROOT FIX: add `platformOwner` to the canonical
+  // TypeScript Role type. The Prisma schema declares it (UserRole enum),
+  // requireAdmin in api-helpers.ts accepts it, but the TS type omitted it —
+  // so `roleLabel("platformOwner")` returned the raw string instead of
+  // "Platform Owner", and `visibleSectionsForRole("platformOwner")` granted
+  // no restricted sections (a platformOwner saw only BASE_SECTIONS in the
+  // sidebar — same as a viewer, despite having admin API access).
+  | "platformOwner";
 
 /** Sections every authenticated user can see. */
 const BASE_SECTIONS = [
@@ -75,45 +83,53 @@ const BASE_SECTIONS = [
 ];
 
 /** Sections restricted to specific roles. */
+// BE-017 v123: `platformOwner` is added to every section that includes
+// `owner` — platform owners are SaaS operator staff with legitimate
+// need-to-know across all functional areas (they debug issues, audit
+// access, and assist customers). They are NOT the same as `owner` (which
+// is an org-scoped role), but for sidebar-visibility purposes they have
+// the same access. The /api/admin/* routes are gated separately on
+// `platformRole === "admin"` (a DIFFERENT field) — see
+// lib/auth/require-platform-admin.ts.
 const ROLE_SECTIONS: Record<string, string[]> = {
   // Team & collaboration
-  team: ["pi", "admin", "owner"],
-  projects: ["researcher", "data-scientist", "pi", "admin", "owner", "business-dev"],
-  "shared-queries": ["researcher", "data-scientist", "pi", "admin", "owner"],
-  annotations: ["researcher", "data-scientist", "pi", "admin", "owner"],
+  team: ["pi", "admin", "owner", "platformOwner"],
+  projects: ["researcher", "data_scientist", "pi", "admin", "owner", "business_dev", "platformOwner"],
+  "shared-queries": ["researcher", "data_scientist", "pi", "admin", "owner", "platformOwner"],
+  annotations: ["researcher", "data_scientist", "pi", "admin", "owner", "platformOwner"],
 
   // Data science — datasets, graph stats, quality
-  "data-sources": ["data-scientist", "pi", "admin", "owner"],
-  "graph-stats": ["data-scientist", "pi", "admin", "owner"],
-  quality: ["data-scientist", "pi", "admin", "owner"],
+  "data-sources": ["data_scientist", "pi", "admin", "owner", "platformOwner"],
+  "graph-stats": ["data_scientist", "pi", "admin", "owner", "platformOwner"],
+  quality: ["data_scientist", "pi", "admin", "owner", "platformOwner"],
 
   // Billing
-  subscription: ["owner", "admin", "billing"],
-  usage: ["owner", "admin", "billing"],
-  deals: ["owner", "admin", "business-dev"],
-  invoices: ["owner", "admin", "billing"],
+  subscription: ["owner", "admin", "billing", "platformOwner"],
+  usage: ["owner", "admin", "billing", "platformOwner"],
+  deals: ["owner", "admin", "business_dev", "platformOwner"],
+  invoices: ["owner", "admin", "billing", "platformOwner"],
 
   // Admin console
-  users: ["admin", "owner"],
-  roles: ["admin", "owner"],
-  sso: ["admin", "owner"],
-  "audit-logs": ["admin", "owner"],
-  "feature-flags": ["admin", "owner"],
+  users: ["admin", "owner", "platformOwner"],
+  roles: ["admin", "owner", "platformOwner"],
+  sso: ["admin", "owner", "platformOwner"],
+  "audit-logs": ["admin", "owner", "platformOwner"],
+  "feature-flags": ["admin", "owner", "platformOwner"],
 
   // Developer platform
-  "api-docs": ["developer", "admin", "owner"],
-  "api-keys": ["developer", "admin", "owner"],
-  playground: ["developer", "admin", "owner"],
-  webhooks: ["developer", "admin", "owner"],
+  "api-docs": ["developer", "admin", "owner", "platformOwner"],
+  "api-keys": ["developer", "admin", "owner", "platformOwner"],
+  playground: ["developer", "admin", "owner", "platformOwner"],
+  webhooks: ["developer", "admin", "owner", "platformOwner"],
 
   // Investor relations
-  "investor-dashboard": ["owner"],
-  "cap-table": ["owner"],
+  "investor-dashboard": ["owner", "platformOwner"],
+  "cap-table": ["owner", "platformOwner"],
 
   // More
-  changelog: ["researcher", "data-scientist", "pi", "admin", "owner", "business-dev", "developer", "viewer"],
-  roadmap: ["researcher", "data-scientist", "pi", "admin", "owner", "business-dev", "developer", "viewer"],
-  feedback: ["researcher", "data-scientist", "pi", "admin", "owner", "business-dev", "developer", "viewer"],
+  changelog: ["researcher", "data_scientist", "pi", "admin", "owner", "business_dev", "developer", "viewer", "platformOwner"],
+  roadmap: ["researcher", "data_scientist", "pi", "admin", "owner", "business_dev", "developer", "viewer", "platformOwner"],
+  feedback: ["researcher", "data_scientist", "pi", "admin", "owner", "business_dev", "developer", "viewer", "platformOwner"],
 };
 
 /**
@@ -146,13 +162,16 @@ export function visibleSectionsForRole(role: string | undefined | null): string[
 export const ROLE_LABELS: Record<string, string> = {
   viewer: "Viewer",
   researcher: "Researcher",
-  "data-scientist": "Data Scientist",
+  "data_scientist": "Data Scientist",
   pi: "Principal Investigator",
-  "business-dev": "Business Development",
+  "business_dev": "Business Development",
   developer: "Developer",
   billing: "Billing",
   admin: "Administrator",
   owner: "Owner",
+  // BE-017 v123: add label for platformOwner so roleLabel() returns a
+  // human-readable string instead of the raw "platformOwner" identifier.
+  platformOwner: "Platform Owner",
 };
 
 /** Returns a friendly label for a role, or the raw role string if unknown. */

@@ -3,14 +3,20 @@ import { db } from "@/lib/db";
 import { hashPassword, validateEmail, validatePasswordPolicy, signAccessToken, rotateRefreshToken, setAuthCookies, resolveJwtSecret, resolvePreviousJwtSecret, KID_EMAIL_VERIFY } from "@/lib/auth/server";
 import { badRequest, internalError, writeAuditLog, requireCsrfOrSend, issueCsrfToken, setCsrfCookie } from "@/lib/api-helpers";
 import { checkIpRateLimit, recordIpAttempt } from "@/lib/auth/rate-limit";
+// BE-011 v123 FORENSIC ROOT FIX: migrate /api/auth/register from the SYNC
+// `checkIpRateLimit` (per-process, in-memory) to the DISTRIBUTED
+// `checkIpRateLimitDistributed` (Redis-backed, shared across instances).
+// The sync version gave an attacker N× the rate limit on a multi-instance
+// deploy (K8s with 3 replicas → 3× the registration budget → 60 garbage
+// accounts per 5 min instead of 20). The distributed version uses a Redis
+// sorted-set so all instances share the same bucket.
+import { checkIpRateLimitDistributed } from "@/lib/auth/rate-limit";
 import { Prisma } from "@prisma/client";
-// FE-016 ROOT FIX (Team Member 15, v108 — pre-existing build blocker):
-// Import UserRole type so we can cast the role string at the Prisma call
-// site. Without this, `next build` fails with TS2322 because the
-// ALLOWED_ROLES_SELF_REG array uses hyphen-form identifiers
-// ("data-scientist") that don't match Prisma's underscore-form enum
-// values ("data_scientist").
-import type { UserRole } from "@prisma/client";
+// BE-018 v123: the `UserRole` type import was only needed for the
+// `as unknown as UserRole` cast that bypassed the TS type error caused
+// by the hyphen-vs-underscore mismatch. With ALLOWED_ROLES_SELF_REG now
+// using the underscore form (matching the Prisma enum), the cast is
+// gone and so is this import.
 import { createHmac, randomBytes } from "crypto";
 import jwt from "jsonwebtoken";
 
@@ -36,9 +42,9 @@ interface RegisterBody {
 // PATCH /api/admin/users (which validates the role against ALLOWED_ROLES_ADMIN).
 export const ALLOWED_ROLES_SELF_REG = [
   "researcher",
-  "data-scientist",
+  "data_scientist",
   "pi",
-  "business-dev",
+  "business_dev",
   "developer",
   "viewer",
 ] as const;
@@ -49,9 +55,9 @@ type AllowedSelfRegRole = (typeof ALLOWED_ROLES_SELF_REG)[number];
 // consulted from the admin endpoint, never from self-registration.
 export const ALLOWED_ROLES_ADMIN = [
   "researcher",
-  "data-scientist",
+  "data_scientist",
   "pi",
-  "business-dev",
+  "business_dev",
   "developer",
   "viewer",
   "billing",
@@ -198,9 +204,19 @@ export async function POST(req: NextRequest) {
 
   // FE-035 ROOT FIX: IP-based rate limiting on registration. Without this,
   // an attacker could spam account creation indefinitely, filling the User
-  // table with garbage accounts. We reuse the same checkIpRateLimit /
-  // recordIpAttempt helpers from the login rate-limiter.
-  const ipRate = checkIpRateLimit(req);
+  // table with garbage accounts.
+  //
+  // BE-011 v123 FORENSIC ROOT FIX: previously this used the SYNC
+  // `checkIpRateLimit` (in-memory, per-process) + `recordIpAttempt` (also
+  // sync). On a multi-instance deploy (K8s with N replicas), the attacker
+  // got N× the rate-limit budget — each instance tracked its own bucket.
+  // The distributed version (Redis-backed) atomically records the attempt
+  // AND checks the count in a single multi-call, so we no longer need a
+  // separate `recordIpAttempt` call. When Redis is unavailable, the
+  // distributed function falls back to the sync in-memory path (with
+  // `recordIpAttempt` called internally) — so the contract is identical
+  // regardless of which path was taken.
+  const ipRate = await checkIpRateLimitDistributed(req);
   if (ipRate.blocked) {
     return NextResponse.json(
       {
@@ -214,7 +230,11 @@ export async function POST(req: NextRequest) {
       }
     );
   }
-  recordIpAttempt(req);
+  // BE-011: recordIpAttempt is no longer needed — checkIpRateLimitDistributed
+  // atomically records the attempt when Redis is available, and falls back
+  // to calling checkIpRateLimit (which does NOT record) + recordIpAttempt
+  // internally when Redis is down. The contract is "the attempt is always
+  // recorded after a successful check", regardless of which path ran.
 
   let body: RegisterBody;
   try {
@@ -281,19 +301,24 @@ export async function POST(req: NextRequest) {
           email,
           passwordHash,
           name,
-          // FE-016 ROOT FIX (Team Member 15, v108 — pre-existing build blocker):
-          // The `role` value comes from ALLOWED_ROLES_SELF_REG which uses
-          // hyphen-form identifiers ("data-scientist", "business-dev") for
-          // URL-friendliness. The Prisma UserRole enum uses underscore-form
-          // ("data_scientist", "business_dev"). The TypeScript error
-          // "Type '"data-scientist"' is not assignable to type 'UserRole'"
-          // blocked `next build`. Cast to UserRole to unblock the build —
-          // the underlying hyphen-vs-underscore mismatch is a real bug that
-          // should be fixed by a separate commit (it would require
-          // migrating existing DB rows and updating ALLOWED_ROLES_SELF_REG
-          // / ALLOWED_ROLES_ADMIN to use underscores, plus updating every
-          // RBAC check that compares against these strings).
-          role: role as unknown as UserRole,
+          // BE-018 v123 FORENSIC ROOT FIX: the previous code cast `role as
+          // unknown as UserRole` to bypass a TypeScript error caused by the
+          // hyphen-vs-underscore mismatch between ALLOWED_ROLES_SELF_REG
+          // (used "data-scientist" / "business-dev") and the Prisma
+          // UserRole enum (which uses "data_scientist" / "business_dev").
+          // At runtime, PostgreSQL rejected the hyphen-form value with
+          // `ERROR: invalid input value for enum UserRole: "data-scientist"`,
+          // causing every self-registration with role="data-scientist" or
+          // "business-dev" to 500.
+          //
+          // ROOT FIX: standardize on the underscore form EVERYWHERE (matching
+          // the Prisma enum). ALLOWED_ROLES_SELF_REG now uses "data_scientist"
+          // and "business_dev". The cast is REMOVED — TypeScript now accepts
+          // the assignment because the string literals match the enum values.
+          // No DB migration is needed because no rows ever contained the
+          // hyphen form (every INSERT with the hyphen form failed at the
+          // PostgreSQL enum check, so the DB never stored invalid values).
+          role,
           title,
           bio,
           // FE-035: emailVerified starts false. The user must click the

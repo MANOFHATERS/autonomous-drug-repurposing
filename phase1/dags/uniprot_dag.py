@@ -6,10 +6,10 @@ cursor-based pagination, cleans and normalises records, and bulk-upserts
 into the ``proteins`` table.
 
 Can be triggered independently or as part of the master pipeline.
-Schedule: 15th of every month at 04:00 UTC (cron ``0 4 15 * *``). UniProt's
-Swiss-Prot human reviewed set updates monthly; the standalone DAG runs
-on the 15th of every month so ad-hoc / per-source refreshes work without
-requiring the master DAG.
+Schedule: every Friday at 04:00 UTC (cron ``0 4 * * 5`` — P1-047 root fix).
+UniProt's Swiss-Prot human reviewed set updates monthly; the standalone DAG
+runs every Friday so ad-hoc / per-source refreshes work without requiring
+the master DAG. The Friday slot avoids the Sunday master-DAG window.
 
 v89 FORENSIC ROOT FIX (BUG #8 P1 -- Sunday Morning Pile-Up):
   Moved from ``0 4 1 * *`` (1st of month) to ``0 4 15 * *`` (15th of

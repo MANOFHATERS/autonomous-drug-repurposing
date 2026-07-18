@@ -204,8 +204,20 @@ function normalizeTrial(p: any): ClinicalTrial {
  * value to prevent CT.gov query-syntax injection.
  */
 export function escapeQuery(s: string): string {
+  // BE-054 v123 FORENSIC ROOT FIX: the previous regex `/[\s()"]/` did NOT
+  // include square brackets, so an attacker could submit
+  // `condition = "AREA[Phase]PHASE3 AND cancer"` and CT.gov would interpret
+  // the `[Phase]` qualifier as a field selector — returning only Phase 3
+  // cancer trials. The researcher would see a biased result set and
+  // over-estimate the drug's clinical maturity, leading to a wrong
+  // go/no-go decision.
+  //
+  // ROOT FIX: add `[` and `]` to the trigger regex. Any string containing
+  // whitespace, parens, square brackets, or double quotes is wrapped in
+  // double quotes (with internal double quotes escaped) so CT.gov treats
+  // the entire value as a literal phrase, NOT a query expression.
   if (typeof s !== "string" || s.length === 0) return '""';
-  if (/[\s()"]/.test(s)) {
+  if (/[\s()\[\]"]/.test(s)) {
     return `"${s.replace(/"/g, '\\"')}"`;
   }
   return s;

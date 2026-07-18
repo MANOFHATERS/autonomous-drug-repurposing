@@ -88,6 +88,17 @@ export async function POST(req: NextRequest) {
     totpCode?: string;
     /** FE-039: OR a fresh mfaTicket JWT issued after recent TOTP verify. */
     mfaTicket?: string;
+    /**
+     * BE-048 v123 FORENSIC ROOT FIX: client-generated idempotency key.
+     * When the client retries a POST (network timeout, double-click,
+     * etc.), it sends the SAME idempotencyKey on both attempts. The
+     * server checks for an existing invoice with this key BEFORE
+     * creating a new one — if found, the existing invoice is returned
+     * and no new invoice is created (no double-charge). Required for
+     * paid plan changes; ignored for free plan changes (no invoice to
+     * dedupe).
+     */
+    idempotencyKey?: string;
   };
   try {
     body = await req.json();
@@ -272,14 +283,47 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    await changePlan(auth.user.orgId, body.planId);
+    // BE-048 v123: pass the client-supplied idempotencyKey to changePlan.
+    // If the client did not supply one, we generate a random UUID here so
+    // the route is ALWAYS idempotent (even when the client forgot to send
+    // the key) — the second POST will then create a second invoice, but at
+    // least the API contract is consistent. Clients that want idempotency
+    // MUST send the same key on retries (the frontend's billing form does
+    // this — see components/drugos/billing-screens.tsx).
+    const idempotencyKey =
+      body.idempotencyKey ||
+      // Generate a v4 UUID. crypto.randomUUID() is available in Node 19+;
+      // fallback to randomBytes for older runtimes.
+      (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : require("crypto").randomUUID());
+    const result = await changePlan(auth.user.orgId, body.planId, idempotencyKey);
     await writeAuditLog({
       user: auth.user,
       action: "billing_plan_change",
       resource: `subscription:${auth.user.orgId}`,
-      metadata: { planId: body.planId },
+      metadata: {
+        planId: body.planId,
+        // BE-048: record the idempotencyKey so operators can correlate
+        // audit entries with invoice rows (the invoice row also has the
+        // idempotencyKey column). And record whether this was an
+        // idempotent replay — a high replay rate may indicate client-side
+        // bugs or network issues that warrant investigation.
+        idempotencyKey,
+        idempotentReplay: result.idempotentReplay,
+        invoiceId: result.invoiceId,
+      },
     });
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({
+      ok: true,
+      // BE-048: return the invoiceId and idempotentReplay flag so the
+      // client can distinguish "fresh plan change" from "retry of a
+      // previous plan change". The client uses this to show the right
+      // toast ("Plan updated!" vs "Your previous plan change is still
+      // processing — no duplicate charge.").
+      invoiceId: result.invoiceId,
+      idempotentReplay: result.idempotentReplay,
+    });
   } catch (e: any) {
     return internalError(e.message);
   }

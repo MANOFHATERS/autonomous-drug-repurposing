@@ -53,7 +53,11 @@ export async function POST(req: NextRequest) {
 
   const dbUser = await db.user.findUnique({ where: { id: user.userId } });
   if (!dbUser) {
-    return NextResponse.json({ error: "not_found", message: "User not found" }, { status: 404 });
+    // BE-021 v123 FORENSIC ROOT FIX: 404 leaks auth state. Return 401
+    // (same as FE-068's root fix in /api/auth/me) so an attacker probing
+    // with a stolen token cannot distinguish "valid token for a deleted
+    // user" from "invalid token".
+    return NextResponse.json({ error: "unauthorized", message: "Authentication required" }, { status: 401 });
   }
 
   const ok = await verifyPassword(currentPassword, dbUser.passwordHash);

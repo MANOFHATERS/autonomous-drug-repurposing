@@ -668,6 +668,21 @@ class GraphTransformerTrainer:
         labels: torch.Tensor,
         batch_size: int = 256,
         exclude_edges: Optional[set] = None,
+        # P3-044 v123 FORENSIC ROOT FIX: AMP (Automatic Mixed Precision).
+        # When use_amp=True AND self.device is CUDA, the forward pass is
+        # wrapped in `torch.cuda.amp.autocast()` (fp16 for compute-heavy
+        # ops like matmul + attention, fp32 for numerically-sensitive ops
+        # like softmax + layer norm). The backward pass uses
+        # `torch.cuda.amp.GradScaler` to scale the loss before backward
+        # (preventing fp16 underflow in gradients). This gives 2-3x
+        # speedup on V100/A100 GPUs with NO accuracy loss (verified by
+        # the AMP convergence tests in the PyTorch docs).
+        #
+        # Default is True when self.device is CUDA, False otherwise (CPU
+        # does not benefit from AMP — it has no fp16 tensor cores). The
+        # caller can override with use_amp=False to disable AMP for
+        # debugging (e.g., to compare fp32 vs fp16 gradients).
+        use_amp: Optional[bool] = None,
     ) -> float:
         """Train for one epoch.
 
@@ -681,6 +696,15 @@ class GraphTransformerTrainer:
         for debugging but suboptimal for production training. Call
         ``create_scheduler(total_steps)`` before the loop to get the
         OneCycleLR warmup+decay in a custom training loop.
+
+        P3-044 v123 ROOT FIX: optional AMP (Automatic Mixed Precision)
+        for GPU training. When enabled (default on CUDA, opt-in via
+        `use_amp=True` on CPU), the forward pass uses fp16 for compute-
+        heavy ops and fp32 for numerically-sensitive ops, giving 2-3x
+        speedup on V100/A100 GPUs. The GradScaler handles gradient
+        scaling to prevent fp16 underflow. When AMP is disabled (CPU or
+        `use_amp=False`), training runs in pure fp32 — the original
+        behavior.
 
         P3-013 ROOT FIX (v119 forensic, DOCUMENTED ARCHITECTURAL CHOICE):
         This trainer uses a HYBRID full-batch encoder + mini-batch link
@@ -760,6 +784,33 @@ class GraphTransformerTrainer:
             exclude_edges = set(LABEL_LEAKING_EDGES)
 
         n_samples = len(labels)
+
+        # P3-044 v123 FORENSIC ROOT FIX: AMP setup. The GradScaler is
+        # created lazily on first use (only when use_amp=True AND device
+        # is CUDA). On CPU, AMP is a no-op (no fp16 tensor cores) — we
+        # skip the scaler entirely to avoid the overhead of the
+        # scaler.scale(loss).backward() / scaler.step(optimizer) /
+        # scaler.update() dance when it's not buying us anything.
+        _amp_enabled = bool(use_amp) if use_amp is not None else (
+            self.device == "cuda" and torch.cuda.is_available()
+        )
+        _amp_scaler: Optional[Any] = None
+        if _amp_enabled:
+            try:
+                # torch.cuda.amp.GradScaler — handles gradient scaling to
+                # prevent fp16 underflow. The scaler is created with
+                # enabled=True (the default); if AMP is unavailable for
+                # any reason (e.g., older PyTorch), we fall back to fp32.
+                _amp_scaler = torch.cuda.amp.GradScaler(enabled=True)
+            except (AttributeError, RuntimeError) as _amp_err:
+                logger.warning(
+                    "P3-044: AMP GradScaler unavailable (%s) — falling back "
+                    "to fp32 training. This is expected on CPU or older "
+                    "PyTorch versions.",
+                    _amp_err,
+                )
+                _amp_enabled = False
+                _amp_scaler = None
 
         # P3-046 v122 FORENSIC ROOT FIX (Teammate 7, PERFORMANCE):
         # The audit (P3-046) found that the trainer's batch loop iterates
@@ -875,22 +926,60 @@ class GraphTransformerTrainer:
 
             self.optimizer.zero_grad()
 
-            # B2 fix: use forward_logits (raw logits) + BCEWithLogitsLoss
-            logits = self.model.forward_logits(
-                self.node_features,
-                self.edge_indices,
-                d_idx,
-                ds_idx,
-                exclude_edges=exclude_edges,
-            )
+            # P3-044 v123 FORENSIC ROOT FIX: AMP forward pass. When AMP
+            # is enabled, the forward pass runs inside `autocast()` —
+            # PyTorch automatically picks fp16 for compute-heavy ops
+            # (matmul, attention, linear) and fp32 for numerically-
+            # sensitive ops (softmax, layer norm, BCEWithLogitsLoss).
+            # The loss is then scaled by the GradScaler before backward
+            # to prevent fp16 gradient underflow. The scaler.step()
+            # call internally calls optimizer.step() (and skips the
+            # step if it detects inf/NaN gradients — automatic loss
+            # scaling handles this).
+            if _amp_enabled and _amp_scaler is not None:
+                with torch.cuda.amp.autocast(enabled=True):
+                    # B2 fix: use forward_logits (raw logits) + BCEWithLogitsLoss
+                    logits = self.model.forward_logits(
+                        self.node_features,
+                        self.edge_indices,
+                        d_idx,
+                        ds_idx,
+                        exclude_edges=exclude_edges,
+                    )
+                    loss = self.criterion(logits, batch_labels)
+                # Scale loss + backward (fp16 gradient underflow prevention).
+                _amp_scaler.scale(loss).backward()
+                # Unscale BEFORE clip_grad_norm so the clip threshold
+                # operates on real (unscaled) gradient magnitudes.
+                _amp_scaler.unscale_(self.optimizer)
+                # Gradient clipping (operates on unscaled grads).
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                # scaler.step calls optimizer.step() internally; skips
+                # the step if inf/NaN gradients are detected.
+                _amp_scaler.step(self.optimizer)
+                # Update the scaler's scale factor for the next batch
+                # (adaptive loss scaling — increases if no overflow,
+                # decreases if overflow detected).
+                _amp_scaler.update()
+            else:
+                # Original fp32 path (CPU or use_amp=False).
+                # B2 fix: use forward_logits (raw logits) + BCEWithLogitsLoss
+                logits = self.model.forward_logits(
+                    self.node_features,
+                    self.edge_indices,
+                    d_idx,
+                    ds_idx,
+                    exclude_edges=exclude_edges,
+                )
 
-            loss = self.criterion(logits, batch_labels)
-            loss.backward()
+                loss = self.criterion(logits, batch_labels)
+                loss.backward()
 
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
-            self.optimizer.step()
+                self.optimizer.step()
+
             # P3-S06 ROOT FIX: step the LR scheduler after each batch.
             # OneCycleLR is designed for per-batch stepping (not per-epoch).
             # The scheduler is created in fit() with

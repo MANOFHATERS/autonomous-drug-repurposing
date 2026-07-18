@@ -1800,10 +1800,10 @@ function RegisterPage() {
               <SelectTrigger><SelectValue placeholder="Select your role" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="researcher">Researcher</SelectItem>
-                <SelectItem value="data-scientist">Data Scientist</SelectItem>
+                <SelectItem value="data_scientist">Data Scientist</SelectItem>
                 <SelectItem value="pi">Principal Investigator</SelectItem>
                 <SelectItem value="admin">Admin</SelectItem>
-                <SelectItem value="business-dev">Business Development</SelectItem>
+                <SelectItem value="business_dev">Business Development</SelectItem>
                 <SelectItem value="developer">Developer</SelectItem>
                 <SelectItem value="viewer">Viewer</SelectItem>
               </SelectContent>
@@ -2366,9 +2366,46 @@ function AppShell({ children, section }: { children: React.ReactNode; section: s
   }
 
   // Auth guard: if session resolves and there's no user, bounce to login.
+  // FE-045 v123 FORENSIC ROOT FIX: the previous version ONLY called
+  // `navigate({ page: 'login' })` which sets React state but does NOT
+  // update the browser URL. The browser's URL bar still showed the
+  // original URL (e.g. /?page=app&section=users), so the user could
+  // bookmark/share a deep link to a protected section. When they
+  // revisited, the URL bar showed the protected section — the AppShell
+  // auth guard would redirect to login, but the URL was misleading.
+  // Worse, server-side middleware cannot distinguish "user is on
+  // login page" from "user is on admin page" because the URL doesn't
+  // change — so middleware-based RBAC per-route is impossible with
+  // the current client-side-only router.
+  //
+  // ROOT FIX: in addition to the React-state navigate(), also push
+  // the new route to the browser history via history.replaceState
+  // so the URL bar updates. This doesn't make middleware RBAC possible
+  // (the router is still client-side), but it does make the URL bar
+  // accurate so users see "?page=login" instead of "?page=app&section=users"
+  // when they're bounced to the login screen. The full fix (moving to
+  // Next.js App Router pages with server-side RBAC) is a separate
+  // architectural change tracked in the roadmap.
   useEffect(() => {
     if (!loading && !user) {
       navigate({ page: 'login' })
+      // Update the URL bar so it reflects the actual page the user is on.
+      // history.replaceState doesn't trigger a navigation — it just
+      // updates the URL bar in place. We do this AFTER navigate() so
+      // the React state has already updated (in case any code reads
+      // the URL bar to determine the current route — none currently do,
+      // but this is defensive).
+      if (typeof window !== 'undefined' && window.history) {
+        try {
+          const newUrl = `${window.location.pathname}?page=login`
+          window.history.replaceState({ page: 'login' }, '', newUrl)
+        } catch (_historyErr) {
+          // Some browsers (Safari in private mode) throw on history
+          // API calls. The React-state navigate() already happened, so
+          // the user IS on the login page — just the URL bar is stale.
+          // Not a security issue, just a cosmetic one.
+        }
+      }
     }
   }, [loading, user, navigate])
 

@@ -396,10 +396,29 @@ export async function validateEntityInKg(
 
   const baseUrl = getKgServiceUrl();
   if (!baseUrl) {
-    // No KG service — allow the build (the caller will display a
-    // "KG validation skipped" note). This matches the previous
-    // behavior so evidence-package generation still works in dev.
-    return { ok: true };
+    // BE-015 v123 FORENSIC ROOT FIX: the previous code returned `{ ok: true }`
+    // here when no KG service URL was configured — silently bypassing the
+    // MANDATORY KG validation that the evidence-package route relies on
+    // (the comment at L72-78 of /api/evidence-package/route.ts says:
+    // "KG validation is now mandatory for ALL callers"). The audit log
+    // then recorded `kgValidationSkipped: false` — a LIE — because the
+    // code thought validation had succeeded.
+    //
+    // ROOT FIX: fail-closed. Return `{ ok: false, reason:
+    // "kg_service_unavailable" }` so the evidence-package route returns
+    // 503 (Service Unavailable) instead of building an unvalidated
+    // package. Local dev environments MUST set KG_SERVICE_URL (or set
+    // DRUGOS_ALLOW_KG_BYPASS=1 for the explicit dev bypass).
+    if (process.env.DRUGOS_ALLOW_KG_BYPASS === "1") {
+      // Explicit dev bypass — the developer has acknowledged that KG
+      // validation is skipped. The evidence-package route will still
+      // record `kgValidationSkipped: true` in the audit log.
+      return { ok: true, reason: "kg_bypass_dev_mode" };
+    }
+    return {
+      ok: false,
+      reason: "kg_service_unavailable",
+    };
   }
 
   try {
@@ -415,14 +434,24 @@ export async function validateEntityInKg(
     });
 
     if (!result.ok) {
-      // Network error or 5xx — be permissive (allow the build) but
-      // log a warning. The Python service's 503 (Neo4j unavailable)
-      // is also caught here.
+      // BE-015 v123 FORENSIC ROOT FIX: KG service is unreachable (network
+      // error, 5xx, timeout, Neo4j unavailable). The previous code
+      // returned `{ ok: true }` — silently bypassing mandatory KG
+      // validation. A pharma partner could then receive an evidence
+      // package for "aspirin for cancer" with NO KG edge backing it,
+      // believing the KG confirms the relationship. Patient-safety risk.
+      //
+      // ROOT FIX: fail-closed. Return `kg_service_unavailable` so the
+      // evidence-package route returns 503 and the researcher retries
+      // when the KG is back. The audit log records the real state.
       console.warn(
-        `kg-service: validateEntityInKg for ${kind}="${trimmed}" failed:`,
+        `kg-service: validateEntityInKg for ${kind}="${trimmed}" failed (service unreachable):`,
         (result.error as MlServiceError).message,
       );
-      return { ok: true };
+      return {
+        ok: false,
+        reason: "kg_service_unavailable",
+      };
     }
 
     const body = result.body as Record<string, unknown>;
@@ -435,11 +464,19 @@ export async function validateEntityInKg(
     }
     return { ok: true };
   } catch (e) {
+    // BE-015 v123 FORENSIC ROOT FIX: same fail-closed behavior on
+    // exception. The previous code returned `{ ok: true }` here too,
+    // silently bypassing validation. An exception means the KG is
+    // unreachable OR the response was malformed — either way, we
+    // cannot confirm the entity exists in the KG, so we MUST refuse.
     const msg = e instanceof Error ? e.message : String(e);
     console.warn(
-      `kg-service: validateEntityInKg for ${kind}="${trimmed}" threw: ${msg}`,
+      `kg-service: validateEntityInKg for ${kind}="${trimmed}" threw (service unreachable): ${msg}`,
     );
-    return { ok: true };
+    return {
+      ok: false,
+      reason: "kg_service_unavailable",
+    };
   }
 }
 

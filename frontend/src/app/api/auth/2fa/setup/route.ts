@@ -4,6 +4,8 @@ import { getAuthenticatedUser } from "@/lib/auth/server";
 import { generateTotpSecret, buildOtpAuthUri } from "@/lib/auth/totp";
 import { internalError, requireCsrfOrSend } from "@/lib/api-helpers";
 import { issue2faSetupToken } from "@/lib/auth/two-factor-setup-token";
+// BE-027 v123: distributed per-user rate limit for 2FA setup.
+import { check2faSetupRateLimitDistributed } from "@/lib/auth/rate-limit";
 
 /**
  * POST /api/auth/2fa/setup
@@ -40,6 +42,29 @@ export async function POST(req: NextRequest) {
   const user = await getAuthenticatedUser();
   if (!user) {
     return NextResponse.json({ error: "unauthorized", message: "Authentication required" }, { status: 401 });
+  }
+
+  // BE-027 v123 FORENSIC ROOT FIX: rate-limit /api/auth/2fa/setup per user.
+  // The previous route had NO rate limit. A malicious user could call it
+  // 10001 times to fill the in-memory LRU (two-factor-setup-token.ts),
+  // evicting other users' pending tokens and sabotaging their 2FA
+  // enrollment. The limit is 5 attempts per 5 minutes per user (generous
+  // — a legitimate user rarely retries enrollment more than once or
+  // twice). Distributed via Redis when available, with per-process
+  // in-memory fallback (same fallback semantics as the IP rate limiter).
+  const rl = await check2faSetupRateLimitDistributed(user.userId);
+  if (rl.blocked) {
+    return NextResponse.json(
+      {
+        error: "rate_limited",
+        message: "Too many 2FA setup attempts. Please wait and try again.",
+        retryAfterSeconds: rl.retryAfterSeconds,
+      },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfterSeconds) },
+      },
+    );
   }
 
   try {

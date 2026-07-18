@@ -1867,9 +1867,9 @@ function UsersAdminScreen() {
                           <SelectItem value="admin">Admin</SelectItem>
                           <SelectItem value="owner">Owner</SelectItem>
                           <SelectItem value="researcher">Researcher</SelectItem>
-                          <SelectItem value="data-scientist">Data Scientist</SelectItem>
+                          <SelectItem value="data_scientist">Data Scientist</SelectItem>
                           <SelectItem value="pi">Principal Investigator</SelectItem>
-                          <SelectItem value="business-dev">Business Dev</SelectItem>
+                          <SelectItem value="business_dev">Business Dev</SelectItem>
                           <SelectItem value="developer">Developer</SelectItem>
                           <SelectItem value="viewer">Viewer</SelectItem>
                           <SelectItem value="billing">Billing</SelectItem>
@@ -1900,7 +1900,7 @@ function UsersAdminScreen() {
                 <SelectContent>
                   <SelectItem value="admin">Admin</SelectItem>
                   <SelectItem value="researcher">Researcher</SelectItem>
-                  <SelectItem value="data-scientist">Data Scientist</SelectItem>
+                  <SelectItem value="data_scientist">Data Scientist</SelectItem>
                   <SelectItem value="viewer">Viewer</SelectItem>
                 </SelectContent>
               </Select>

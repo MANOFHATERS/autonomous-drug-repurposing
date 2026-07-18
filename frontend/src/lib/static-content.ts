@@ -152,11 +152,20 @@ export interface TrendingDisease {
   id: string;
   name: string;
   category: string;
+  // FE-043 v123: add `queries` and `change` fields so the dashboard's
+  // "Trending Diseases" card can render the query count and the
+  // percentage change vs. last week. These are CURATED values (not
+  // live data) — the dashboard uses them as a marketing/research
+  // prompt to surface under-served diseases. For live trending data,
+  // use the useRecentQueries hook + the real /api/diseases/search
+  // endpoint.
+  queries: number;
+  change: number;
 }
 
 export const trendingDiseases: TrendingDisease[] = [
-  { id: 'td-001', name: "Huntington's Disease", category: 'Neurology' },
-  { id: 'td-002', name: "Alzheimer's Disease", category: 'Neurology' },
-  { id: 'td-003', name: 'Pancreatic Cancer', category: 'Oncology' },
-  { id: 'td-004', name: 'ALS', category: 'Neurology' },
+  { id: 'td-001', name: "Huntington's Disease", category: 'Neurology', queries: 342, change: 18 },
+  { id: 'td-002', name: "Alzheimer's Disease", category: 'Neurology', queries: 1284, change: 7 },
+  { id: 'td-003', name: 'Pancreatic Cancer', category: 'Oncology', queries: 891, change: 12 },
+  { id: 'td-004', name: 'ALS', category: 'Neurology', queries: 478, change: 22 },
 ];
