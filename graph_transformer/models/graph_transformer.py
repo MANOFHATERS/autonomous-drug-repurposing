@@ -253,6 +253,28 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # full canonical schema on the production path; the parameter
         # is the escape hatch for ablation research.
         min_edge_types: int = 18,
+        # P3-032 ROOT FIX (v119 forensic, SCIENTIFIC-ML CORRECTNESS):
+        # Optional per-edge-type output projections in the
+        # HeterogeneousMultiHeadAttention. When True, each edge type
+        # gets its own out_proj module (standard HGT, Wang et al. 2019).
+        # When False (default), a single shared out_proj is used
+        # (backward compat with existing trained checkpoints).
+        #
+        # The audit (P3-032) found that the shared out_proj forces ALL
+        # edge types to share the same output projection. For the V1
+        # production graph (18 edge types), this limits the model's
+        # expressiveness. Production deployments targeting the V1 AUC
+        # 0.85 target SHOULD set this to True and retrain from scratch.
+        # Demo / CI runs may leave it False.
+        #
+        # State_dict compatibility: when True, the model has additional
+        # ``graph_transformer_layers.{i}.attention.out_proj_per_edge_type.*``
+        # keys. Old checkpoints (trained with False) do NOT have these
+        # keys — load_state_dict(strict=True) will FAIL with missing
+        # keys. This is the desired behavior: silently initializing the
+        # new modules to zero would make all per-edge-type messages zero
+        # (the model would only see self-loops), corrupting the model.
+        per_edge_type_out_proj: bool = False,
     ) -> None:
         super().__init__()
 
@@ -409,6 +431,9 @@ class DrugRepurposingGraphTransformer(nn.Module):
 
         # Graph Transformer layers (pre-populate LayerNorm for every known
         # node type so state_dict is stable -- B18 fix)
+        # P3-032 ROOT FIX (v119): propagate per_edge_type_out_proj to every
+        # GraphTransformerLayer (which propagates it to the attention).
+        self.per_edge_type_out_proj: bool = bool(per_edge_type_out_proj)
         self.graph_transformer_layers = nn.ModuleList([
             GraphTransformerLayer(
                 embedding_dim=embedding_dim,
@@ -418,6 +443,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
                 dropout=dropout,
                 attention_dropout=attention_dropout,
                 node_types=self.node_types,
+                per_edge_type_out_proj=self.per_edge_type_out_proj,  # P3-032 v119
             )
             for _ in range(num_layers)
         ])
@@ -1067,71 +1093,92 @@ class DrugRepurposingGraphTransformer(nn.Module):
             is ``(num_drugs, num_diseases)`` with probabilities in [0, 1].
             ``raw_matrix`` is ``sigmoid(logits)``; ``calibrated_matrix``
             is ``sigmoid(logits / T)`` where T is the fitted temperature.
+
+        P3-014 ROOT FIX (v119 forensic, THREAD-SAFE INFERENCE): the
+        previous implementation toggled ``self.eval()`` /
+        ``self.train(prior_training)``. ``nn.Module.training`` is SHARED
+        MUTABLE STATE across all threads. Under concurrent inference
+        (V1 contract: 100 concurrent requests), the train/eval toggle
+        became a race condition: a concurrent training thread's
+        ``model.train()`` call could be silently overwritten by this
+        method's ``self.train(prior_training=False)`` restore, leaving
+        the model in eval mode (dropout disabled, BatchNorm frozen)
+        for the rest of the epoch.
+
+        ROOT FIX (v119): do NOT toggle ``self.eval()`` /
+        ``self.train()`` inside this method. The ``@torch.no_grad()``
+        decorator already disables gradient computation (per-thread,
+        thread-safe). Callers that need eval-mode behavior (dropout
+        off, BN using running stats) MUST call ``model.eval()`` BEFORE
+        invoking this method -- the standard PyTorch inference contract
+        (identical to ``predict_all_pairs``). The bridge's
+        ``generate_rl_input`` and ``top_k_novel_predictions`` already
+        set ``model.eval()`` before calling this method. For the rare
+        mid-epoch-inference case (training thread calls this
+        mid-epoch), the caller MUST use a separate model replica.
         """
-        self.eval()
         device = next(self.parameters()).device
-        prior_training = self.training
         effective_exclude = (
             set(exclude_edges) if exclude_edges is not None else self.exclude_edges
         )
-        try:
-            embeddings = self.encode(
-                node_features, edge_indices,
-                exclude_edges_override=effective_exclude,
-            )
-            drug_emb_all = embeddings["drug"]  # (num_drugs, D)
-            disease_emb_all = embeddings["disease"]  # (num_diseases, D)
+        # P3-014 v119: NO self.eval() / self.train() toggle here.
+        # @torch.no_grad() (decorator) handles grad disabling per-thread.
+        # Caller is responsible for model.eval() (standard PyTorch contract).
+        embeddings = self.encode(
+            node_features, edge_indices,
+            exclude_edges_override=effective_exclude,
+        )
+        drug_emb_all = embeddings["drug"]  # (num_drugs, D)
+        disease_emb_all = embeddings["disease"]  # (num_diseases, D)
 
-            raw_matrix = torch.zeros(num_drugs, num_diseases, device=device)
-            calibrated_matrix = torch.zeros(num_drugs, num_diseases, device=device)
+        raw_matrix = torch.zeros(num_drugs, num_diseases, device=device)
+        calibrated_matrix = torch.zeros(num_drugs, num_diseases, device=device)
 
-            for d_idx in range(num_drugs):
-                d_emb_row = drug_emb_all[d_idx:d_idx + 1]  # (1, D)
-                for ds_start in range(0, num_diseases, batch_size_diseases):
-                    ds_end = min(ds_start + batch_size_diseases, num_diseases)
-                    ds_emb_batch = disease_emb_all[ds_start:ds_end]  # (B_ds, D)
-                    d_emb_expanded = d_emb_row.expand(ds_end - ds_start, -1)
+        for d_idx in range(num_drugs):
+            d_emb_row = drug_emb_all[d_idx:d_idx + 1]  # (1, D)
+            for ds_start in range(0, num_diseases, batch_size_diseases):
+                ds_end = min(ds_start + batch_size_diseases, num_diseases)
+                ds_emb_batch = disease_emb_all[ds_start:ds_end]  # (B_ds, D)
+                d_emb_expanded = d_emb_row.expand(ds_end - ds_start, -1)
 
-                    # P3-005 ROOT FIX: compute the logits ONCE via the
-                    # link predictor's forward, then apply both sigmoid
-                    # transforms to the SAME logits. The link predictor's
-                    # ``forward_logits`` returns raw logits (no sigmoid,
-                    # no temperature) -- exactly what we need. Shape is
-                    # (B_ds, 1) so we squeeze to (B_ds,).
-                    logits = self.link_predictor.forward_logits(
-                        d_emb_expanded, ds_emb_batch,
-                    ).squeeze(-1)  # (B_ds,)
-                    raw_matrix[d_idx, ds_start:ds_end] = torch.sigmoid(logits)
-                    # Calibrated: sigmoid(logits / T). The temperature T
-                    # is stored on the link predictor after fit_temperature.
-                    # P3-005 v113/v114: temperature is an nn.Parameter of
-                    # shape (2,) (per-class, v114 P3-016 fix). At inference
-                    # time the true label is unknown, so we use the MEAN
-                    # of the two per-class temperatures (the same
-                    # approximation the link predictor's forward() uses
-                    # when labels=None). The clamp to [0.5, 2.0] matches
-                    # the link predictor's TEMPERATURE_CLAMP_MIN/MAX.
-                    T_param = getattr(self.link_predictor, "temperature", None)
-                    if T_param is None:
-                        T = 1.0
-                    else:
+                # P3-005 ROOT FIX: compute the logits ONCE via the
+                # link predictor's forward, then apply both sigmoid
+                # transforms to the SAME logits. The link predictor's
+                # ``forward_logits`` returns raw logits (no sigmoid,
+                # no temperature) -- exactly what we need. Shape is
+                # (B_ds, 1) so we squeeze to (B_ds,).
+                logits = self.link_predictor.forward_logits(
+                    d_emb_expanded, ds_emb_batch,
+                ).squeeze(-1)  # (B_ds,)
+                raw_matrix[d_idx, ds_start:ds_end] = torch.sigmoid(logits)
+                # Calibrated: sigmoid(logits / T). The temperature T
+                # is stored on the link predictor after fit_temperature.
+                # P3-005 v113/v114: temperature is an nn.Parameter of
+                # shape (2,) (per-class, v114 P3-016 fix). At inference
+                # time the true label is unknown, so we use the MEAN
+                # of the two per-class temperatures (the same
+                # approximation the link predictor's forward() uses
+                # when labels=None). The clamp to [0.5, 2.0] matches
+                # the link predictor's TEMPERATURE_CLAMP_MIN/MAX.
+                T_param = getattr(self.link_predictor, "temperature", None)
+                if T_param is None:
+                    T = 1.0
+                else:
+                    try:
+                        # v114: temperature is shape (2,) per-class.
+                        # Use the mean (inference-time approximation).
+                        t_clamped = T_param.clamp(min=0.5, max=2.0)
+                        T = float(t_clamped.mean().item())
+                    except (ValueError, TypeError, RuntimeError):
                         try:
-                            # v114: temperature is shape (2,) per-class.
-                            # Use the mean (inference-time approximation).
-                            t_clamped = T_param.clamp(min=0.5, max=2.0)
-                            T = float(t_clamped.mean().item())
-                        except (ValueError, TypeError, RuntimeError):
-                            try:
-                                T = float(T_param.item())
-                            except (ValueError, RuntimeError):
-                                T = 1.0
-                    if T <= 0 or not math.isfinite(T):
-                        T = 1.0  # degenerate -- treat as identity
-                    calibrated_matrix[d_idx, ds_start:ds_end] = torch.sigmoid(logits / T)
+                            T = float(T_param.item())
+                        except (ValueError, RuntimeError):
+                            T = 1.0
+                if T <= 0 or not math.isfinite(T):
+                    T = 1.0  # degenerate -- treat as identity
+                calibrated_matrix[d_idx, ds_start:ds_end] = torch.sigmoid(logits / T)
 
-            return raw_matrix, calibrated_matrix
-        finally:
-            self.train(prior_training)
+        return raw_matrix, calibrated_matrix
 
     @classmethod
     def from_config(cls, config: Any) -> "DrugRepurposingGraphTransformer":

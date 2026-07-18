@@ -321,131 +321,148 @@ def evaluate_link_prediction(
 
     # V90 ROOT FIX (BUG #19, P1): save the prior training state and
     # restore it in a finally block.
-    prior_training = model.training
-    model.eval()
-    try:
-        model.to(device)
-        nf = {k: v.to(device) for k, v in node_features.items()}
-        ei = {k: v.to(device) for k, v in edge_indices.items()}
+    #
+    # P3-014 ROOT FIX (v119 forensic, THREAD-SAFE INFERENCE): the V90
+    # BUG #19 fix used ``model.eval()`` / ``model.train(prior_training)``
+    # to save/restore the training mode. This is the SAME racy pattern
+    # that P3-014 flagged in ``predict_all_pairs``: ``nn.Module.training``
+    # is SHARED MUTABLE STATE across all threads. Under concurrent
+    # inference (V1 contract: 100 concurrent API requests), a concurrent
+    # training thread's ``model.train()`` call could be silently
+    # overwritten by this function's ``model.train(prior_training=False)``
+    # restore.
+    #
+    # ROOT FIX (v119): do NOT toggle ``model.eval()`` /
+    # ``model.train(prior_training)`` inside this function. The
+    # ``@torch.no_grad()`` decorator (on the function signature) already
+    # disables gradient computation (per-thread, thread-safe). Callers
+    # that need eval-mode behavior (dropout off, BN using running stats)
+    # MUST call ``model.eval()`` BEFORE invoking this function -- the
+    # standard PyTorch inference contract. The trainer's ``fit()`` method
+    # sets ``model.eval()`` before calling this function per epoch
+    # (P3-011 ROOT FIX path). The Phase 5 API service sets
+    # ``model.eval()`` once at startup. For the rare mid-epoch-inference
+    # case (training thread calls this mid-epoch), the caller MUST use a
+    # separate model replica.
+    model.to(device)
+    nf = {k: v.to(device) for k, v in node_features.items()}
+    ei = {k: v.to(device) for k, v in edge_indices.items()}
 
-        # P3-017 ROOT FIX: encode the graph ONCE for the entire evaluation.
-        embeddings = model.encode(
-            nf, ei,
-            exclude_edges_override=set(exclude_edges),
-        )
-        drug_emb_all = embeddings["drug"]
-        disease_emb_all = embeddings["disease"]
+    # P3-017 ROOT FIX: encode the graph ONCE for the entire evaluation.
+    embeddings = model.encode(
+        nf, ei,
+        exclude_edges_override=set(exclude_edges),
+    )
+    drug_emb_all = embeddings["drug"]
+    disease_emb_all = embeddings["disease"]
 
-        all_probs = []
-        # V90 ROOT FIX (BUG #27, P1): use a FRESH BCEWithLogitsLoss()
-        # (no pos_weight) to match trainer.evaluate's _eval_criterion
-        # (BUG #26 fix). Both paths now use unweighted BCEWithLogitsLoss.
-        criterion = nn.BCEWithLogitsLoss()
-        total_loss = 0.0
-        n_samples = len(labels)
+    all_probs = []
+    # V90 ROOT FIX (BUG #27, P1): use a FRESH BCEWithLogitsLoss()
+    # (no pos_weight) to match trainer.evaluate's _eval_criterion
+    # (BUG #26 fix). Both paths now use unweighted BCEWithLogitsLoss.
+    criterion = nn.BCEWithLogitsLoss()
+    total_loss = 0.0
+    n_samples = len(labels)
 
-        for start in range(0, n_samples, batch_size):
-            end = min(start + batch_size, n_samples)
-            d_idx = drug_indices[start:end].to(device)
-            ds_idx = disease_indices[start:end].to(device)
-            batch_labels = labels[start:end].float().to(device)
+    for start in range(0, n_samples, batch_size):
+        end = min(start + batch_size, n_samples)
+        d_idx = drug_indices[start:end].to(device)
+        ds_idx = disease_indices[start:end].to(device)
+        batch_labels = labels[start:end].float().to(device)
 
-            # Index into the pre-computed embeddings (NO redundant encode).
-            drug_emb_batch = drug_emb_all[d_idx]
-            disease_emb_batch = disease_emb_all[ds_idx]
+        # Index into the pre-computed embeddings (NO redundant encode).
+        drug_emb_batch = drug_emb_all[d_idx]
+        disease_emb_batch = disease_emb_all[ds_idx]
 
-            # P3-017: call link_predictor methods directly on the
-            # pre-computed batch embeddings (no encode call inside).
-            logits = model.link_predictor.forward_logits(
+        # P3-017: call link_predictor methods directly on the
+        # pre-computed batch embeddings (no encode call inside).
+        logits = model.link_predictor.forward_logits(
+            drug_emb_batch, disease_emb_batch,
+        ).squeeze(-1)
+        loss = criterion(logits, batch_labels)
+        total_loss += loss.item()
+
+        # Compute probabilities from the SAME pre-computed embeddings.
+        if apply_temperature:
+            probs = model.link_predictor.forward(
                 drug_emb_batch, disease_emb_batch,
-            ).squeeze(-1)
-            loss = criterion(logits, batch_labels)
-            total_loss += loss.item()
-
-            # Compute probabilities from the SAME pre-computed embeddings.
-            if apply_temperature:
-                probs = model.link_predictor.forward(
-                    drug_emb_batch, disease_emb_batch,
-                    apply_temperature=True,
-                ).squeeze(-1).cpu()
-            else:
-                probs = torch.sigmoid(logits).cpu()
-            all_probs.append(probs)
-
-        all_probs = torch.cat(all_probs).numpy()
-        all_labels = labels.detach().cpu().numpy()
-
-        pred_binary = (all_probs > 0.5).astype(int)
-        accuracy = float(accuracy_score(all_labels, pred_binary))
-
-        if len(np.unique(all_labels)) < 2:
-            logger.warning(
-                "evaluate_link_prediction: only one class in labels "
-                f"({np.unique(all_labels)}). AUC is undefined; returning 0.5."
-            )
-            auc = 0.5
-            auc_mannwhitney = 0.5
-            auc_dotproduct = 0.5
+                apply_temperature=True,
+            ).squeeze(-1).cpu()
         else:
-            try:
-                auc = float(roc_auc_score(all_labels, all_probs))
-            except ValueError:
-                auc = 0.5
-            # P3-017 ROOT FIX: independent Mann-Whitney U AUC on the
-            # SAME MLP probabilities. This is a from-scratch
-            # implementation of the AUC formula -- if it disagrees
-            # with sklearn, one of them has a bug.
-            auc_mannwhitney = _mann_whitney_auc(all_probs, all_labels)
-            # P3-017 ROOT FIX: independent dot-product AUC. Bypasses
-            # the link_predictor MLP entirely -- uses cosine similarity
-            # of drug/disease embeddings. If the MLP's AUC is below
-            # this, the MLP is OVERFITTING (worse than a linear scorer).
-            dot_scores = _dot_product_scores(
-                drug_emb_all, disease_emb_all,
-                drug_indices.to(device), disease_indices.to(device),
-            )
-            auc_dotproduct = _mann_whitney_auc(dot_scores, all_labels)
+            probs = torch.sigmoid(logits).cpu()
+        all_probs.append(probs)
 
-        # P3-017 ROOT FIX: compute the agreement between the three AUCs.
-        # sklearn vs Mann-Whitney should agree to within 0.001 (they
-        # compute the same quantity via different implementations).
-        # The dot-product AUC may legitimately differ (it's a different
-        # scorer) -- we log it but don't require agreement.
-        auc_agreement = max(
-            abs(auc - auc_mannwhitney),
-            abs(auc - auc_dotproduct),
-            abs(auc_mannwhitney - auc_dotproduct),
+    all_probs = torch.cat(all_probs).numpy()
+    all_labels = labels.detach().cpu().numpy()
+
+    pred_binary = (all_probs > 0.5).astype(int)
+    accuracy = float(accuracy_score(all_labels, pred_binary))
+
+    if len(np.unique(all_labels)) < 2:
+        logger.warning(
+            "evaluate_link_prediction: only one class in labels "
+            f"({np.unique(all_labels)}). AUC is undefined; returning 0.5."
         )
-        if abs(auc - auc_mannwhitney) > 0.001:
-            logger.error(
-                f"P3-017 ROOT FIX: sklearn AUC ({auc:.6f}) and from-scratch "
-                f"Mann-Whitney AUC ({auc_mannwhitney:.6f}) DISAGREE by "
-                f"{abs(auc - auc_mannwhitney):.6f} (threshold: 0.001). One "
-                f"of the two implementations has a bug. Investigate the "
-                f"label/score ordering and the tie-breaking logic."
-            )
-        else:
-            logger.info(
-                f"P3-017 ROOT FIX: independent AUC verification PASSED. "
-                f"sklearn AUC={auc:.6f}, Mann-Whitney AUC="
-                f"{auc_mannwhitney:.6f} (agree within "
-                f"{abs(auc - auc_mannwhitney):.6f}). Dot-product AUC="
-                f"{auc_dotproduct:.6f} (independent scorer; MLP is "
-                f"{'learning useful signal' if auc >= auc_dotproduct else 'OVERFITTING (worse than linear)'})."
-            )
+        auc = 0.5
+        auc_mannwhitney = 0.5
+        auc_dotproduct = 0.5
+    else:
+        try:
+            auc = float(roc_auc_score(all_labels, all_probs))
+        except ValueError:
+            auc = 0.5
+        # P3-017 ROOT FIX: independent Mann-Whitney U AUC on the
+        # SAME MLP probabilities. This is a from-scratch
+        # implementation of the AUC formula -- if it disagrees
+        # with sklearn, one of them has a bug.
+        auc_mannwhitney = _mann_whitney_auc(all_probs, all_labels)
+        # P3-017 ROOT FIX: independent dot-product AUC. Bypasses
+        # the link_predictor MLP entirely -- uses cosine similarity
+        # of drug/disease embeddings. If the MLP's AUC is below
+        # this, the MLP is OVERFITTING (worse than a linear scorer).
+        dot_scores = _dot_product_scores(
+            drug_emb_all, disease_emb_all,
+            drug_indices.to(device), disease_indices.to(device),
+        )
+        auc_dotproduct = _mann_whitney_auc(dot_scores, all_labels)
 
-        avg_loss = total_loss / max(1, (n_samples + batch_size - 1) // batch_size)
-        return {
-            "loss": avg_loss,
-            "auc": auc,
-            "accuracy": accuracy,
-            # P3-017 ROOT FIX: expose the independent AUCs so callers
-            # (gt_rl_bridge, the scientific_validation gate, CI tests)
-            # can verify agreement and detect MLP overfitting.
-            "auc_mannwhitney": auc_mannwhitney,
-            "auc_dotproduct": auc_dotproduct,
-            "auc_agreement": float(auc_agreement),
-        }
-    finally:
-        # V90 ROOT FIX (BUG #19): restore the prior training state.
-        model.train(prior_training)
+    # P3-017 ROOT FIX: compute the agreement between the three AUCs.
+    # sklearn vs Mann-Whitney should agree to within 0.001 (they
+    # compute the same quantity via different implementations).
+    # The dot-product AUC may legitimately differ (it's a different
+    # scorer) -- we log it but don't require agreement.
+    auc_agreement = max(
+        abs(auc - auc_mannwhitney),
+        abs(auc - auc_dotproduct),
+        abs(auc_mannwhitney - auc_dotproduct),
+    )
+    if abs(auc - auc_mannwhitney) > 0.001:
+        logger.error(
+            f"P3-017 ROOT FIX: sklearn AUC ({auc:.6f}) and from-scratch "
+            f"Mann-Whitney AUC ({auc_mannwhitney:.6f}) DISAGREE by "
+            f"{abs(auc - auc_mannwhitney):.6f} (threshold: 0.001). One "
+            f"of the two implementations has a bug. Investigate the "
+            f"label/score ordering and the tie-breaking logic."
+        )
+    else:
+        logger.info(
+            f"P3-017 ROOT FIX: independent AUC verification PASSED. "
+            f"sklearn AUC={auc:.6f}, Mann-Whitney AUC="
+            f"{auc_mannwhitney:.6f} (agree within "
+            f"{abs(auc - auc_mannwhitney):.6f}). Dot-product AUC="
+            f"{auc_dotproduct:.6f} (independent scorer; MLP is "
+            f"{'learning useful signal' if auc >= auc_dotproduct else 'OVERFITTING (worse than linear)'})."
+        )
+
+    avg_loss = total_loss / max(1, (n_samples + batch_size - 1) // batch_size)
+    return {
+        "loss": avg_loss,
+        "auc": auc,
+        "accuracy": accuracy,
+        # P3-017 ROOT FIX: expose the independent AUCs so callers
+        # (gt_rl_bridge, the scientific_validation gate, CI tests)
+        # can verify agreement and detect MLP overfitting.
+        "auc_mannwhitney": auc_mannwhitney,
+        "auc_dotproduct": auc_dotproduct,
+        "auc_agreement": float(auc_agreement),
+    }
