@@ -601,3 +601,28 @@ Stage Summary (POST-FIX):
 - Task 7.5: ROOT FIX — added write_predictions_to_neo4j() that MERGEs PREDICTED_TREATS edges via UNWIND batches; added GET /predictions endpoint; wired writeback into /predict. 13 tests including runtime test with mocked Neo4j driver.
 - 52 new hostile-auditor tests, all pass. 97 existing P3 tests still pass (no regressions). Real end-to-end code execution verified.
 - Branch teammate-7-phase3-root-fixes-v127 merged to main.
+
+---
+Task ID: TM7-v127-verification (POST-MERGE)
+Agent: Teammate 7 (Phase 3)
+Task: Re-clone main branch and verify all 5 fixes landed.
+
+Work Log:
+- Pushed branch `teammate-7-phase3-root-fixes-v127` to remote.
+- Merged to main with --no-ff (commit a307ea0).
+- Pushed main to remote.
+- Fresh-cloned the repo to `/home/z/my-project/adr_verify`.
+- Verified all 5 tasks are present in the fresh clone's source code:
+  - Task 7.1: per-epoch AUC + early stopping logic in fit() source.
+  - Task 7.2: AMP + clip_grad_norm_ in DataLoader production path.
+  - Task 7.3: graph_aware_split + detect_data_leakage, zero leakage on 50x30 graph.
+  - Task 7.4: MLflowRunTracker wired into __init__, fit(), save_checkpoint().
+  - Task 7.5: write_predictions_to_neo4j + /predictions endpoint + wired into /predict.
+- Ran the 52-test hostile-auditor suite on the fresh clone: ALL 52 PASS.
+
+Stage Summary:
+- All 5 TM7 Phase 3 tasks are ROOT-CAUSE FIXED on main branch.
+- 52 hostile-auditor tests verify both source code AND runtime behavior.
+- 97 existing P3 tests still pass (zero regressions).
+- Fresh-clone verification PASSED -- the fixes the user complained prior AI sessions
+  were missing are now actually on main, verified by re-cloning.
