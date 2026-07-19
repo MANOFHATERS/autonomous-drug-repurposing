@@ -715,6 +715,19 @@ GDA_REQUIRED_COLUMNS: list[tuple[str, Any]] = [
     ("association_modifier",     None),
     ("is_susceptibility",        False),
     ("inheritance_pattern",      None),
+    # Teammate-2 Task 2.3 ROOT FIX: genetic_basis column.
+    # Captures the SAME information as association_type but under the
+    # contract name expected by downstream phase2 omim_loader (which
+    # reads `genetic_basis` to create (Gene)-[:CAUSES]->(Disease)
+    # edges for mendelian_phenotype and causal entries). Without this
+    # field, the loader cannot distinguish causal from susceptibility
+    # associations — they all collapse to "associated_with" (the
+    # default rel_type in omim_loader's _OMIM_ASSOC_TYPE_TO_REL dict).
+    # Values: 'mendelian_phenotype' (marker '%'), 'gene_locus'
+    # (marker '*' or '+'), 'phenotype' (marker '#'), 'susceptibility'
+    # (marker '{}'), 'non_disease' (marker '[]'), 'provisional'
+    # (marker '?'), or 'causal' (default for unmarked records).
+    ("genetic_basis",            None),
     ("mapping_key",              0),
     ("cyto_location",            None),
     ("cyto_location_valid",      True),
@@ -1711,6 +1724,40 @@ class OMIMPipeline(BasePipeline):
         else:
             df["association_type"] = ASSOCIATION_TYPE_DEFAULT
             df["is_susceptibility"] = False
+
+        # Teammate-2 Task 2.3 ROOT FIX: populate genetic_basis from
+        # association_type. The genetic_basis field captures the SAME
+        # information as association_type but under the contract name
+        # expected by downstream phase2 omim_loader. The loader's
+        # _OMIM_ASSOC_TYPE_TO_REL dict maps association_type values to
+        # edge rel_types — but it does NOT have a "causal" -> "CAUSES"
+        # mapping. With genetic_basis populated, the loader can be
+        # updated (by the loader owner, TM4) to create
+        # (Gene)-[:CAUSES]->(Disease) edges for rows where
+        # genetic_basis in {'mendelian_phenotype', 'causal'}.
+        # This is a NO-OP if association_type is already set.
+        if "association_type" in df.columns:
+            # The association_type values already encode the genetic
+            # basis (mendelian_phenotype, gene_locus, susceptibility,
+            # etc.). We copy them to genetic_basis verbatim. Rows
+            # with association_type == ASSOCIATION_TYPE_DEFAULT
+            # ('causal') get 'causal' in genetic_basis.
+            df["genetic_basis"] = df["association_type"]
+        else:
+            df["genetic_basis"] = None
+        # Log the distribution for monitoring.
+        if "genetic_basis" in df.columns and not df.empty:
+            try:
+                gb_counts = df["genetic_basis"].fillna("(none)").value_counts().to_dict()
+                logger.info(
+                    "[omim] Task 2.3 ROOT FIX: genetic_basis distribution: %s. "
+                    "Downstream phase2 omim_loader can use this to create "
+                    "(Gene)-[:CAUSES]->(Disease) edges for "
+                    "mendelian_phenotype and causal entries.",
+                    gb_counts,
+                )
+            except Exception:  # noqa: BLE001 -- logging best-effort
+                pass
 
         # Step 14: BUG-3.2 / BUG-3.3 / BUG-4.5 -- vectorized scoring.
         df = self._compute_scores(df)

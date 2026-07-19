@@ -1265,27 +1265,41 @@ class PubChemPipeline(BasePipeline):
                 # Identity
                 "inchikey": inchikey,
                 "pubchem_cid": pubchem_cid,
-                # Structural (not provided by v50 CSV -- leave None)
-                "molecular_formula": None,
-                "molecular_weight": None,
-                "exact_mass": None,
+                # Teammate-2 Task 2.4 ROOT FIX (P2-036): the previous
+                # code hard-coded these to None because the v50
+                # downloader only requested 6 properties. Now that the
+                # v50 downloader requests the full 15-property list
+                # (MolecularFormula, MolecularWeight, InChI, InChIKey,
+                # CanonicalSMILES, IsomericSMILES, IUPACName, XLogP,
+                # ExactMass, TPSA, Complexity, HBondDonorCount,
+                # HBondAcceptorCount, RotatableBondCount,
+                # HeavyAtomCount), we read ALL of them from the CSV.
+                # This restores:
+                #   - molecular_formula + molecular_weight (needed by
+                #     Phase 3 biomedical_tables.py RDKit ADME proxy)
+                #   - isomeric_smiles (LIFE-SAFETY: required for chiral
+                #     drug fingerprinting — (R)- vs (S)-thalidomide)
+                #   - iupac_name, complexity, heavy_atom_count, exact_mass, inchi
+                "molecular_formula": str(row.get("molecular_formula") or "").strip() or None,
+                "molecular_weight": _parse_float(row.get("molecular_weight")),
+                "exact_mass": _parse_float(row.get("exact_mass")),
                 "canonical_smiles": str(row.get("canonical_smiles") or "").strip() or None,
-                "isomeric_smiles": None,
-                "inchi": None,
-                "iupac_name": None,
-                "cas_number": None,
+                "isomeric_smiles": str(row.get("isomeric_smiles") or "").strip() or None,
+                "inchi": str(row.get("inchi") or "").strip() or None,
+                "iupac_name": str(row.get("iupac_name") or "").strip() or None,
+                "cas_number": None,  # not in PUG-REST property list; requires /synonyms call
                 # Physicochemical
                 "xlogp": _parse_float(row.get("xlogp")),
                 "xlogp_source": "pubchem_pug_rest" if _parse_float(row.get("xlogp")) is not None else None,
                 "tpsa": _parse_float(row.get("tpsa")),
                 "tpsa_source": "pubchem_pug_rest" if _parse_float(row.get("tpsa")) is not None else None,
-                "complexity": None,
+                "complexity": _parse_float(row.get("complexity")),
                 # Counts
                 "h_bond_donor_count": _parse_int(row.get("h_bond_donor_count")),
                 "h_bond_acceptor_count": _parse_int(row.get("h_bond_acceptor_count")),
                 "rotatable_bond_count": _parse_int(row.get("rotatable_bond_count")),
-                "heavy_atom_count": None,
-                "formal_charge": None,
+                "heavy_atom_count": _parse_int(row.get("heavy_atom_count")),
+                "formal_charge": None,  # not in PUG-REST property list
                 "isotope_info": None,
                 "salt_form": None,
                 "protonation_state": None,
