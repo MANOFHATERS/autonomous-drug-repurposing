@@ -77,7 +77,14 @@ app.add_middleware(
     allow_origins=os.environ.get(
         "PHASE1_CORS_ORIGINS", "http://localhost:3000"
     ).split(","),
-    allow_methods=["GET"],
+    # TM3 Task 3.3 v127 ROOT FIX: was ``allow_methods=["GET"]`` which
+    # blocked the new POST /datasets/validated_hypotheses endpoint
+    # (the data flywheel writeback). The CORS preflight OPTIONS request
+    # is auto-handled by CORSMiddleware (it returns 200 without the
+    # caller declaring OPTIONS in allow_methods). Adding POST enables
+    # the writeback endpoint while keeping the surface minimal — no
+    # PUT / DELETE / PATCH (the flywheel is append-only by design).
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -524,6 +531,364 @@ def _now_iso() -> str:
 def drug_mechanism(drug: str) -> Dict[str, Any]:
     """Return the mechanism-of-action (targets + indications) for a drug."""
     return _load_drug_mechanism(drug)
+
+
+# =============================================================================
+# TM3 Task 3.3 v127 ROOT FIX — POST /datasets/validated_hypotheses
+# -----------------------------------------------------------------------------
+# RED-TEAM AUDIT FINDING (v127, hostile-auditor pass):
+#   The DOCX §10 (Data Flywheel) mandates that validated drug-disease
+#   hypotheses be fed back to the platform as new labeled data points so
+#   the Graph Transformer retrains on proprietary data. Phase 4's
+#   ``rl/service.py`` (line 873) calls ``write_validated_hypothesis()``
+#   which writes ONLY to a CSV file (phase1/processed_data/
+#   validated_hypotheses.csv per the TM14 ``shared/contracts/writeback.py``
+#   contract). The CSV is a transport format — ephemeral, not queryable,
+#   no transactional guarantees, no FK integrity. A wet-lab-validated
+#   hypothesis (the platform's core proprietary moat) was being persisted
+#   to a flat file that any operator could ``rm``.
+#
+# ROOT FIX (this endpoint + migration 019 + ORM model):
+#   Add a POST endpoint that accepts a validated hypothesis payload (in
+#   the TM14 CSV-shape contract — ``drug``, ``disease``, ``outcome``, etc.)
+#   and persists it to the PostgreSQL ``validated_hypotheses`` table
+#   (migration 019). The CSV remains as a transport format; this table is
+#   the AUTHORITATIVE durable store.
+#
+# CONTRACT (request body — matches TM14's WRITEBACK_CSV_COLUMNS):
+#   {
+#     "drug": "Aspirin",                   # -> drug_name (drug_id looked up)
+#     "disease": "Cardiovascular Disease", # -> disease_name (disease_id looked up)
+#     "outcome": "validated_positive",     # one of VALID_OUTCOMES
+#     "validated_by": "pharma_partner_acme",
+#     "validation_study_id": "NCT01234567",# -> source
+#     "validated_at": "2026-07-19T12:34:56Z",  # ISO-8601
+#     "notes": "Phase 3 RCT confirmed efficacy",
+#     "original_gt_score": 0.92,           # -> score
+#     "original_rl_rank": 1,               # ignored (not in 10-col schema)
+#     "writeback_version": "2.0.0-shared-contract"  # ignored
+#   }
+#
+# RESPONSE (201 Created):
+#   {
+#     "status": "ok",
+#     "id": 42,
+#     "validated_hypothesis": { ... full row ... },
+#     "flywheel_status": "persisted_to_postgresql"
+#   }
+#
+# ERROR RESPONSES:
+#   - 400 Bad Request: validation error (bad outcome, bad score, etc.)
+#   - 503 Service Unavailable: DB unavailable (DATABASE_URL unset or
+#     connection refused). The service does NOT fall back to CSV write
+#     here — the operator must fix the DB. CSV writeback remains the
+#     responsibility of TM14's ``write_validated_hypothesis()`` function;
+#     this endpoint is the PostgreSQL persistence path only.
+# =============================================================================
+
+# --- Pydantic request model (matches TM14's WRITEBACK_CSV_COLUMNS) ----------
+# We accept the TM14 CSV-shape payload so TM9 (rl/service.py owner) does NOT
+# need to change the writeback call shape when migrating from CSV to DB.
+# We translate the CSV column names to the table's column names at write time.
+try:
+    # Pydantic v2 (current) — ``from pydantic import BaseModel``.
+    from pydantic import BaseModel, Field, field_validator
+    _PYDANTIC_AVAILABLE = True
+except ImportError:  # pragma: no cover — fastapi always pulls pydantic
+    _PYDANTIC_AVAILABLE = False
+    BaseModel = object  # type: ignore[assignment, misc]
+
+# Validated hypothesis outcome values (mirror TM14's VALID_OUTCOMES).
+# Imported lazily inside the endpoint to avoid a hard dependency on the
+# shared.contracts module at service startup (the service must still boot
+# even if shared/ is unimportable in stripped-down dev envs).
+_VH_OUTCOME_VALUES: tuple[str, ...] = (
+    "validated_positive",
+    "validated_toxic",
+    "validated_negative",
+    "invalidated",
+)
+
+
+if _PYDANTIC_AVAILABLE:
+
+    class ValidatedHypothesisRequest(BaseModel):
+        """Request body for POST /datasets/validated_hypotheses.
+
+        Mirrors the TM14 ``shared/contracts/writeback.py`` WRITEBACK_CSV_COLUMNS
+        so the rl/service.py writeback call shape is unchanged.
+        """
+
+        # Required fields (TM14's REQUIRED_COLUMNS).
+        drug: str = Field(..., min_length=1, description="Drug name")
+        disease: str = Field(..., min_length=1, description="Disease name")
+        outcome: str = Field(..., description="Validation outcome")
+        validated_at: str = Field(..., description="ISO-8601 validation timestamp")
+
+        # Optional audit metadata (TM14's optional columns).
+        validated_by: Optional[str] = Field(None, max_length=200)
+        validation_study_id: Optional[str] = Field(None, max_length=200)
+        notes: Optional[str] = Field(None)
+        original_gt_score: Optional[float] = Field(None, ge=0.0, le=1.0)
+        original_rl_rank: Optional[int] = Field(None, ge=0)
+        writeback_version: Optional[str] = Field(None, max_length=50)
+
+        @field_validator("outcome")
+        @classmethod
+        def _validate_outcome(cls, v: str) -> str:
+            if v not in _VH_OUTCOME_VALUES:
+                raise ValueError(
+                    f"outcome must be one of {_VH_OUTCOME_VALUES}, got {v!r}"
+                )
+            return v
+
+        @field_validator("drug", "disease")
+        @classmethod
+        def _strip_and_nonempty(cls, v: str) -> str:
+            v2 = v.strip()
+            if not v2:
+                raise ValueError("must not be empty / whitespace-only")
+            return v2
+
+else:  # pragma: no cover — fastapi always pulls pydantic
+    ValidatedHypothesisRequest = None  # type: ignore[assignment, misc]
+
+
+def _get_db_session():
+    """Lazily create a SQLAlchemy session to the Phase 1 PostgreSQL DB.
+
+    Returns ``None`` if DATABASE_URL is unset or the connection fails —
+    the caller (the POST endpoint) returns a 503 in that case so the
+    operator knows to fix the DB. The existing GET endpoints (/datasets,
+    /health, /stats) do NOT use the DB — they read CSVs — so a DB failure
+    does not affect the existing service surface.
+    """
+    db_url = os.environ.get("DATABASE_URL") or os.environ.get("PHASE1_DB_URL")
+    if not db_url:
+        return None, "DATABASE_URL and PHASE1_DB_URL are both unset"
+    try:
+        # Lazy import so the service starts even if SQLAlchemy / psycopg2
+        # are not installed (e.g. in a CI environment that only tests the
+        # CSV-backed GET endpoints). The POST endpoint will return 503
+        # with a clear error message in that case.
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session
+        # Import the models so Base.metadata has the ValidatedHypothesis
+        # table registered (needed if the DB is empty and create_all is
+        # called — but we do NOT call create_all here; migrations are
+        # owned by the migration runner).
+        import phase1.database.models  # noqa: F401
+        from phase1.database.models import ValidatedHypothesis  # noqa: F401
+
+        # check_same_thread is False only for SQLite; for Postgres it's
+        # a no-op. The engine is per-call (not cached) because the POST
+        # endpoint is low-traffic (validated hypotheses arrive at human
+        # speed — wet-lab results, not ML inference throughput).
+        # For production-grade connection pooling, callers should use
+        # phase1.database.connection.get_db_session() instead.
+        connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
+        engine = create_engine(db_url, connect_args=connect_args, pool_pre_ping=True)
+        return Session(engine), None
+    except Exception as exc:
+        return None, f"DB connection failed: {exc!r}"
+
+
+@app.post("/datasets/validated_hypotheses", status_code=201)
+def create_validated_hypothesis(payload: "ValidatedHypothesisRequest") -> Dict[str, Any]:
+    """Persist a validated drug-disease hypothesis to PostgreSQL.
+
+    This is the data flywheel writeback endpoint (TM3 Task 3.3 v127).
+    Accepts the TM14 CSV-shape payload, translates it to the 10-column
+    canonical schema, and INSERTs into the validated_hypotheses table.
+    """
+    if not _PYDANTIC_AVAILABLE or ValidatedHypothesisRequest is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Pydantic is not installed — cannot validate request body. "
+                   "Install pydantic (it is a fastapi dependency, so this should "
+                   "not happen).",
+        )
+
+    session, err = _get_db_session()
+    if session is None:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database unavailable — cannot persist validated hypothesis. "
+                   f"The data flywheel requires PostgreSQL. Error: {err}",
+        )
+
+    try:
+        from phase1.database.models import ValidatedHypothesis
+        from sqlalchemy import select
+        from datetime import datetime
+
+        # --- Translate TM14 CSV-shape payload -> 10-column canonical schema ---
+        # drug_id / disease_id: look up from the drugs table by name. If the
+        # drug is not in the drugs table (e.g. newly-validated drug not yet
+        # loaded by Phase 1 ETL), drug_id stays NULL — the row is still
+        # accepted (drug_name is the NOT NULL column).
+        drug_id: Optional[str] = None
+        disease_id: Optional[str] = None
+
+        try:
+            # Look up drug_id from the drugs table (match by name, case-
+            # insensitive). Take the InChIKey as the canonical ID if
+            # present, else drugbank_id, else chembl_id. This is a best-
+            # effort enrichment — failure to find a drug_id is NOT an error.
+            #
+            # PERF/ROBUSTNESS FIX: select ONLY the three ID columns we
+            # need (inchikey, drugbank_id, chembl_id) — do NOT load the
+            # full Drug ORM object. Loading the full object triggers
+            # SQLAlchemy's lazy-load of Drug.drug_protein_interactions
+            # (cascade='all, delete-orphan' relationship), which issues a
+            # second SELECT against drug_protein_interactions. That second
+            # query (a) is wasted work (we don't need the interactions),
+            # and (b) FAILS if the drug_protein_interactions table is
+            # empty/missing in a minimal schema bootstrap, causing the
+            # drug_id lookup to silently fail and the row to be persisted
+            # with drug_id=NULL. The column-only SELECT avoids both issues.
+            from phase1.database.models import Drug
+            from sqlalchemy import select as _sel
+            _drug_cols = session.execute(
+                _sel(Drug.inchikey, Drug.drugbank_id, Drug.chembl_id).where(
+                    func_lower_or_self(Drug.name) == payload.drug.lower()
+                ).limit(1)
+            ).first()
+            if _drug_cols is not None:
+                drug_id = _drug_cols[0] or _drug_cols[1] or _drug_cols[2] or None
+        except Exception as exc:
+            logger.warning(
+                "phase1.service POST /datasets/validated_hypotheses: "
+                "drug_id lookup failed for %r: %s. Proceeding with "
+                "drug_id=NULL (drug_name is the NOT NULL column).",
+                payload.drug, exc,
+            )
+
+        # disease_id lookup: gene_disease_associations has disease_id +
+        # disease_name. Best-effort match by disease_name (case-insensitive).
+        # Same column-only SELECT pattern as the drug_id lookup above.
+        try:
+            from phase1.database.models import GeneDiseaseAssociation
+            from sqlalchemy import select as _sel2
+            _disease_col = session.execute(
+                _sel2(GeneDiseaseAssociation.disease_id).where(
+                    func_lower_or_self(GeneDiseaseAssociation.disease_name) == payload.disease.lower()
+                ).limit(1)
+            ).scalar()
+            if _disease_col is not None:
+                disease_id = _disease_col
+        except Exception as exc:
+            logger.warning(
+                "phase1.service POST /datasets/validated_hypotheses: "
+                "disease_id lookup failed for %r: %s. Proceeding with "
+                "disease_id=NULL.",
+                payload.disease, exc,
+            )
+
+        # Parse validated_at (ISO-8601). Pydantic already validated the
+        # string is present; we just convert to datetime.
+        try:
+            validated_at_dt = datetime.fromisoformat(
+                payload.validated_at.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"validated_at must be ISO-8601, got {payload.validated_at!r}: {exc}",
+            )
+
+        # Compose the notes field — combine TM14 notes + writeback_version
+        # + original_rl_rank (which is not in the 10-col schema).
+        notes_parts: list[str] = []
+        if payload.notes:
+            notes_parts.append(payload.notes)
+        if payload.writeback_version:
+            notes_parts.append(f"[writeback_version={payload.writeback_version}]")
+        if payload.original_rl_rank is not None:
+            notes_parts.append(f"[original_rl_rank={payload.original_rl_rank}]")
+        combined_notes = " ".join(notes_parts) if notes_parts else None
+
+        # Build the ORM object.
+        vh = ValidatedHypothesis(
+            drug_id=drug_id,
+            drug_name=payload.drug,
+            disease_id=disease_id,
+            disease_name=payload.disease,
+            score=payload.original_gt_score,
+            outcome=payload.outcome,
+            validated_at=validated_at_dt,
+            validated_by=payload.validated_by,
+            source=payload.validation_study_id,
+            notes=combined_notes,
+        )
+        session.add(vh)
+        session.commit()
+        session.refresh(vh)
+
+        logger.info(
+            "phase1.service POST /datasets/validated_hypotheses: persisted "
+            "id=%d drug=%r disease=%r outcome=%r score=%s drug_id=%r disease_id=%r",
+            vh.id, vh.drug_name, vh.disease_name, vh.outcome, vh.score,
+            vh.drug_id, vh.disease_id,
+        )
+
+        return {
+            "status": "ok",
+            "id": vh.id,
+            "validated_hypothesis": {
+                "id": vh.id,
+                "drug_id": vh.drug_id,
+                "drug_name": vh.drug_name,
+                "disease_id": vh.disease_id,
+                "disease_name": vh.disease_name,
+                "score": float(vh.score) if vh.score is not None else None,
+                "outcome": vh.outcome,
+                "validated_at": vh.validated_at.isoformat() if vh.validated_at else None,
+                "validated_by": vh.validated_by,
+                "source": vh.source,
+                "notes": vh.notes,
+                "created_at": vh.created_at.isoformat() if vh.created_at else None,
+            },
+            "flywheel_status": "persisted_to_postgresql",
+        }
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception as exc:
+        session.rollback()
+        # Check for unique-constraint violation (duplicate writeback).
+        # The error message differs between Postgres and SQLite; check both.
+        err_msg = str(exc).lower()
+        if "unique" in err_msg or "duplicate" in err_msg:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Duplicate validated hypothesis (drug_id, disease_id, "
+                       f"validated_at) — already persisted. Original: {exc}",
+            )
+        logger.exception(
+            "phase1.service POST /datasets/validated_hypotheses: "
+            "unexpected error persisting hypothesis."
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to persist validated hypothesis: {type(exc).__name__}: {exc}",
+        )
+    finally:
+        session.close()
+
+
+def func_lower_or_self(column):
+    """Return ``func.lower(column)`` if SQLAlchemy is available, else column.
+
+    Helper for case-insensitive name lookups. Imported here to keep the
+    endpoint code readable. The ``func`` import is local so the service
+    starts even if SQLAlchemy is unimportable (the GET endpoints don't need it).
+    """
+    try:
+        from sqlalchemy import func
+        return func.lower(column)
+    except ImportError:
+        return column
 
 
 if __name__ == "__main__":
