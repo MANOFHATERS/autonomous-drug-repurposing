@@ -25,6 +25,7 @@ FIX vs original codebase:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -248,6 +249,49 @@ class GraphTransformerTrainer:
         self.best_val_auc = 0.0
         self.best_val_loss: float = float("inf")
         self.best_state_dict: Optional[Dict[str, Any]] = None
+        # TM7-v127 ROOT FIX (Task 7.4, hostile-auditor pass):
+        # The codebase has a fully-implemented ``MLflowRunTracker`` wrapper
+        # at ``graph_transformer/utils/mlflow_integration.py`` (250 lines,
+        # probe-for-mlflow, env-gated, non-blocking) but it was NEVER
+        # IMPORTED OR CALLED by the trainer. grep "mlflow" trainer.py = 0
+        # matches. The wrapper was dead code -- comments in the module
+        # docstring claimed "the trainer and bridge can call" it, but no
+        # code actually did. Hostile-auditor confirmed.
+        #
+        # ROOT FIX: instantiate the tracker here so ``fit()`` and
+        # ``save_checkpoint()`` can call log_params / log_metrics /
+        # log_artifact / register_model. The tracker is OPT-IN (no-op
+        # when ``mlflow`` is not installed OR ``MLFLOW_TRACKING_URI`` is
+        # not set), so dev/CI environments without MLflow still work.
+        # Production sets ``MLFLOW_TRACKING_URI=http://mlflow:5001`` (see
+        # docker-compose.yml) and gets full tracking.
+        #
+        # The tracker instance is REUSED across multiple fit() calls on
+        # the same trainer (each fit() calls start_run + end_run, which
+        # creates a NEW MLflow run inside the same experiment). This
+        # matches the standard MLflow usage pattern.
+        try:
+            from ..utils.mlflow_integration import MLflowRunTracker
+            self.mlflow_tracker = MLflowRunTracker(
+                experiment_name=os.environ.get(
+                    "GT_MLFLOW_EXPERIMENT", "drugos_phase3_gt"
+                )
+            )
+            self._mlflow_available = True
+        except ImportError:
+            # If the import itself fails (e.g. utils module moved), make
+            # the tracker a no-op object with the same methods. This is
+            # a defense-in-depth fallback -- the wrapper already degrades
+            # to no-op when mlflow is not installed, but this catches the
+            # case where the wrapper module itself is unavailable.
+            logger.warning(
+                "TM7-v127 (Task 7.4): could not import MLflowRunTracker "
+                "from graph_transformer.utils.mlflow_integration. MLflow "
+                "tracking is DISABLED for this trainer. Install mlflow "
+                "and set MLFLOW_TRACKING_URI to enable."
+            )
+            self.mlflow_tracker = None
+            self._mlflow_available = False
         # FORENSIC ROOT FIX (audit Issue 138): checkpoint selection is now
         # driven by ``val_auc`` (the scientific success metric), NOT
         # ``val_loss``. The previous implementation argued that val_loss is
@@ -875,17 +919,56 @@ class GraphTransformerTrainer:
                 batch_labels = batch_labels.to(self.device)
 
                 self.optimizer.zero_grad()
-                logits = self.model.forward_logits(
-                    self.node_features,
-                    self.edge_indices,
-                    d_idx,
-                    ds_idx,
-                    exclude_edges=exclude_edges,
-                )
-                loss = self.criterion(logits, batch_labels)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                self.optimizer.step()
+
+                # ------------------------------------------------------------------
+                # TM7-v127 ROOT FIX (Task 7.2, hostile-auditor pass):
+                # The DataLoader production path (n_samples >= 8192) previously
+                # ran PURE fp32 forward+backward even when ``_amp_enabled`` was
+                # True (i.e. on CUDA). The AMP setup code (lines 788-813) built
+                # a ``GradScaler`` and set ``_amp_enabled=True``, but the
+                # DataLoader branch (this block) then called plain
+                # ``loss.backward()`` and ``self.optimizer.step()`` -- the
+                # scaler was never used. Exactly when AMP matters most
+                # (production 6M-node KG, the 8192-pair threshold), it was
+                # silently disabled. The comments at lines 670-685 claimed AMP
+                # was wired in; the inline batching path (lines 939-963) was,
+                # but THIS path was not. Hostile-auditor confirmed: comments
+                # were a lie.
+                #
+                # ROOT FIX: replicate the inline path's AMP block here. When
+                # AMP is enabled, wrap forward in ``autocast`` and use the
+                # scaler for backward + step (with unscale_ before clip_grad_norm_
+                # so the clip threshold operates on real gradient magnitudes,
+                # not the scaled ones). When AMP is disabled (CPU or
+                # use_amp=False), use the original fp32 path.
+                # ------------------------------------------------------------------
+                if _amp_enabled and _amp_scaler is not None:
+                    with torch.cuda.amp.autocast(enabled=True):
+                        logits = self.model.forward_logits(
+                            self.node_features,
+                            self.edge_indices,
+                            d_idx,
+                            ds_idx,
+                            exclude_edges=exclude_edges,
+                        )
+                        loss = self.criterion(logits, batch_labels)
+                    _amp_scaler.scale(loss).backward()
+                    _amp_scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    _amp_scaler.step(self.optimizer)
+                    _amp_scaler.update()
+                else:
+                    logits = self.model.forward_logits(
+                        self.node_features,
+                        self.edge_indices,
+                        d_idx,
+                        ds_idx,
+                        exclude_edges=exclude_edges,
+                    )
+                    loss = self.criterion(logits, batch_labels)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    self.optimizer.step()
                 if self.scheduler is not None:
                     self.scheduler.step()
                 total_loss += loss.item()
@@ -1489,6 +1572,92 @@ class GraphTransformerTrainer:
         logger.info(f"Training set: {len(train_labels)} pairs, Validation: {len(val_labels)} pairs")
         logger.info(f"Excluding edges: {exclude_edges}")
 
+        # ------------------------------------------------------------------
+        # TM7-v127 ROOT FIX (Task 7.4, hostile-auditor pass):
+        # Start an MLflow run + log all hyperparams ONCE at the start of
+        # fit(). The previous code instantiated the tracker in __init__
+        # (above) but NEVER called start_run / log_params / log_metrics /
+        # log_artifact / end_run. The wrapper was wired to a tracker
+        # instance that no one ever talked to. Hostile-auditor confirmed
+        # zero MLflow calls anywhere in trainer.py.
+        #
+        # The run is named with the seed + timestamp so multiple fit()
+        # calls on the same trainer (e.g. hyperparam sweeps) get distinct
+        # runs in the MLflow UI. We use ``datetime.utcnow().strftime``
+        # (not ``time.time()``) because the run name should be human-
+        # readable in the MLflow UI.
+        #
+        # The try/except is defense-in-depth: the wrapper itself is non-
+        # blocking (each method swallows exceptions), but if start_run
+        # raises something the wrapper doesn't catch (e.g. the wrapper
+        # module was monkey-patched), we still don't want to fail training.
+        # MLflow tracking is OBSERVABILITY -- it must never break the
+        # actual training.
+        # ------------------------------------------------------------------
+        _mlflow_run_started = False
+        if self.mlflow_tracker is not None:
+            try:
+                from datetime import datetime as _dt_mod, timezone as _tz_mod
+                _run_name = f"gt_seed{self.seed}_{_dt_mod.now(_tz_mod.utc).strftime('%Y%m%d_%H%M%S')}"
+                self.mlflow_tracker.start_run(run_name=_run_name)
+                _mlflow_run_started = True
+                # Log all hyperparams (V1 launch criterion reproducibility).
+                # These are the params the team lead needs to reproduce a
+                # reported AUC. The graph hash + git commit are logged as
+                # TAGS (not params) because they're string identifiers, not
+                # numeric hyperparams.
+                self.mlflow_tracker.log_params({
+                    "epochs": epochs,
+                    "batch_size": batch_size,
+                    "patience": patience,
+                    "learning_rate": self.learning_rate,
+                    "weight_decay": self.weight_decay,
+                    "seed": self.seed,
+                    "device": self.device,
+                    "pos_weight_clamp_max": pos_weight_clamp_max,
+                    "calibrate_temperature": calibrate_temperature,
+                    "n_train_pairs": int(len(train_labels)),
+                    "n_val_pairs": int(len(val_labels)),
+                    "n_pos_train": int(n_pos),
+                    "n_neg_train": int(n_neg),
+                    "pos_weight_value": float(pos_weight_val),
+                    "checkpoint_selection_metric": self.checkpoint_selection_metric,
+                    "val_auc_min_improvement": self.val_auc_min_improvement,
+                })
+                # Log tags for traceability (graph hash + git commit +
+                # data version). The git_commit helper is in the mlflow
+                # integration module.
+                try:
+                    from ..utils.mlflow_integration import get_git_commit
+                    _git_commit = get_git_commit()
+                except Exception:
+                    _git_commit = "unknown"
+                self.mlflow_tracker.log_tags({
+                    "git_commit": _git_commit,
+                    "trainer_class": type(self).__name__,
+                    "model_class": type(self.model).__name__,
+                    "phase": "phase3_gt",
+                    "v1_criterion": "auc_gt_0.85",
+                })
+                logger.info(
+                    "TM7-v127 (Task 7.4): MLflow run started (name=%s, "
+                    "experiment=%s). Hyperparams + tags logged.",
+                    _run_name,
+                    getattr(self.mlflow_tracker, "experiment_name", "?"),
+                )
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as _mlflow_exc:
+                # Non-blocking: MLflow must never break training.
+                logger.warning(
+                    "TM7-v127 (Task 7.4): MLflow start_run/log_params "
+                    "failed (%s). Training will continue WITHOUT MLflow "
+                    "tracking. Check MLFLOW_TRACKING_URI and mlflow server "
+                    "availability.",
+                    _mlflow_exc,
+                )
+                _mlflow_run_started = False
+
         for epoch in range(1, epochs + 1):
             # Train
             train_loss = self.train_epoch(
@@ -1615,6 +1784,47 @@ class GraphTransformerTrainer:
             gpu_metrics = self._log_gpu_utilization(epoch)
             epoch_record.update(gpu_metrics)
             self.training_history.append(epoch_record)
+
+            # ------------------------------------------------------------------
+            # TM7-v127 ROOT FIX (Task 7.4): log per-epoch metrics to MLflow.
+            # The previous code maintained ``self.training_history`` (a list
+            # of per-epoch dicts) but NEVER pushed these metrics to MLflow.
+            # The team lead had no way to compare runs in the MLflow UI --
+            # every training run was a black box. This fix logs:
+            #   - train_loss, val_loss, val_auc (the core scientific metrics)
+            #   - val_auc_trainer + val_auc_discrepancy (the cross-check
+            #     signals from the P3-011 verified-AUC fix)
+            #   - val_accuracy (for monitoring)
+            #   - gpu_utilization_pct + gpu_memory_allocated_mb (P3-018
+            #     ops diagnostics, no-op on CPU)
+            #   - best_val_auc_so_far (so the MLflow UI can plot the
+            #     running best alongside per-epoch noise)
+            # The step=epoch argument lets the MLflow UI plot metrics vs
+            # epoch on the X-axis (the standard MLflow pattern).
+            # ------------------------------------------------------------------
+            if _mlflow_run_started and self.mlflow_tracker is not None:
+                try:
+                    self.mlflow_tracker.log_metrics({
+                        "train_loss": float(train_loss),
+                        "val_loss": float(val_metrics["loss"]),
+                        "val_auc": float(verified_val_auc),
+                        "val_auc_trainer": float(trainer_auc),
+                        "val_auc_mannwhitney": float(verified_auc_mannwhitney),
+                        "val_auc_discrepancy": float(auc_discrepancy),
+                        "val_accuracy": float(val_metrics["accuracy"]),
+                        "gpu_utilization_pct": float(gpu_metrics.get("gpu_utilization_pct", 0.0)),
+                        "gpu_memory_allocated_mb": float(gpu_metrics.get("gpu_memory_allocated_mb", 0.0)),
+                        "best_val_auc_so_far": float(self.best_val_auc),
+                    }, step=epoch)
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except Exception as _mlflow_metric_exc:
+                    # Non-blocking: MLflow must never break training.
+                    logger.debug(
+                        "TM7-v127 (Task 7.4): MLflow log_metrics failed at "
+                        "epoch %d (%s). Training continues.",
+                        epoch, _mlflow_metric_exc,
+                    )
 
             if epoch % 5 == 0 or epoch == 1:
                 logger.info(
@@ -1875,6 +2085,60 @@ class GraphTransformerTrainer:
                 f"ROOT FIX (D-10): HeterogeneousMultiHeadAttention not "
                 f"importable; skipping self_loop_weight logging."
             )
+
+        # ------------------------------------------------------------------
+        # TM7-v127 ROOT FIX (Task 7.4): end the MLflow run + log final
+        # summary metrics. The previous code NEVER called end_run, so
+        # MLflow runs were left in "RUNNING" state forever (the run
+        # never reached FINISHED). The MLflow UI showed stale "RUNNING"
+        # runs that could not be compared or deleted. This fix:
+        #   1. Logs the FINAL best_val_auc + best_epoch + epochs_trained
+        #      as summary metrics (so the MLflow UI's "Metrics" panel
+        #      shows them without needing to plot per-epoch history).
+        #   2. Logs a final tag indicating whether early stopping fired.
+        #   3. Calls end_run() to transition the run to FINISHED.
+        # The non-blocking pattern is preserved (try/except around each
+        # call). The run is ended in a ``finally`` block so it reaches
+        # FINISHED even if a downstream exception fires.
+        # ------------------------------------------------------------------
+        if _mlflow_run_started and self.mlflow_tracker is not None:
+            try:
+                self.mlflow_tracker.log_metrics({
+                    "final_best_val_auc": float(self.best_val_auc),
+                    "final_best_epoch": float(self.best_epoch),
+                    "final_epochs_trained": float(epoch),
+                    "final_val_auc_min_improvement": float(self.val_auc_min_improvement),
+                })
+                self.mlflow_tracker.log_tags({
+                    "final_status": "early_stopped" if no_improve_count >= patience else "completed_all_epochs",
+                    "final_best_val_auc": f"{self.best_val_auc:.4f}",
+                    "v1_criterion_met": str(self.best_val_auc > 0.85),
+                })
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as _mlflow_final_exc:
+                logger.debug(
+                    "TM7-v127 (Task 7.4): MLflow final metric/tag log "
+                    "failed (%s). Run will still be ended.",
+                    _mlflow_final_exc,
+                )
+            finally:
+                try:
+                    self.mlflow_tracker.end_run()
+                    logger.info(
+                        "TM7-v127 (Task 7.4): MLflow run ended (FINISHED). "
+                        "Final best_val_auc=%.4f at epoch %d, v1_criterion_met=%s.",
+                        self.best_val_auc, self.best_epoch,
+                        self.best_val_auc > 0.85,
+                    )
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except Exception as _mlflow_end_exc:
+                    logger.debug(
+                        "TM7-v127 (Task 7.4): MLflow end_run failed (%s). "
+                        "Run may be left in RUNNING state -- check MLflow UI.",
+                        _mlflow_end_exc,
+                    )
 
         return {
             "best_val_auc": self.best_val_auc,
@@ -2182,6 +2446,61 @@ class GraphTransformerTrainer:
             f"Checkpoint saved to {path} (full schema, best_epoch={self.best_epoch}, "
             f"best_state_dict={'present' if self.best_state_dict is not None else 'None (skipped)'})"
         )
+
+        # ------------------------------------------------------------------
+        # TM7-v127 ROOT FIX (Task 7.4): log the checkpoint as an MLflow
+        # artifact + register it in the Model Registry. The previous code
+        # saved the checkpoint to a local file but never told MLflow about
+        # it. The team lead had to manually find the .pt file on disk to
+        # share it. This fix:
+        #   1. ``log_artifact(path)`` uploads the .pt to the MLflow run's
+        #      artifact store (so the checkpoint is reproducible from the
+        #      MLflow run alone -- no need to know the local file path).
+        #   2. ``register_model(path, ...)`` registers the checkpoint in
+        #      the MLflow Model Registry with a version number and stage.
+        #      The team lead can transition Staging -> Production from
+        #      the MLflow UI when the model passes the V1 AUC criterion.
+        # The tracker is non-blocking (no-op when MLflow is not
+        # configured), so dev/CI environments without MLflow still work.
+        # ------------------------------------------------------------------
+        if self.mlflow_tracker is not None:
+            try:
+                self.mlflow_tracker.log_artifact(path)
+                # Register the model in the Model Registry. Stage is
+                # "Staging" by default -- the team lead transitions to
+                # "Production" after verifying AUC > 0.85 in the MLflow UI.
+                # The tags capture the val_auc + best_epoch so the
+                # registry UI shows them inline.
+                self.mlflow_tracker.register_model(
+                    local_checkpoint_path=path,
+                    model_name=os.environ.get("GT_MLFLOW_MODEL_NAME", "drugos_gt"),
+                    stage="Staging",
+                    tags={
+                        "val_auc": f"{self.best_val_auc:.4f}",
+                        "best_epoch": str(self.best_epoch),
+                        "v1_criterion_met": str(self.best_val_auc > 0.85),
+                    },
+                )
+                logger.info(
+                    "TM7-v127 (Task 7.4): checkpoint logged as MLflow "
+                    "artifact + registered in Model Registry (name=%s, "
+                    "stage=Staging, val_auc=%.4f).",
+                    os.environ.get("GT_MLFLOW_MODEL_NAME", "drugos_gt"),
+                    self.best_val_auc,
+                )
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as _mlflow_artifact_exc:
+                # Non-blocking: the checkpoint is still saved locally;
+                # only the MLflow registration failed.
+                logger.warning(
+                    "TM7-v127 (Task 7.4): MLflow log_artifact / "
+                    "register_model failed (%s). The checkpoint is still "
+                    "saved locally at %s but is NOT in the MLflow Model "
+                    "Registry. Check MLFLOW_TRACKING_URI and mlflow server "
+                    "availability.",
+                    _mlflow_artifact_exc, path,
+                )
 
     def load_checkpoint(self, path: str) -> None:
         """Load model checkpoint.

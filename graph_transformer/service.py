@@ -801,6 +801,18 @@ async def _predict_inner(req: PredictRequest, state: Dict[str, Any]) -> Dict[str
     # P3-002 ROOT FIX: aligned response shape (camelCase wrapper fields
     # matching the frontend contract; snake_case optional monitoring
     # fields that the frontend ignores if it doesn't need them).
+    #
+    # TM7-v127 ROOT FIX (Task 7.5): write the predictions back to Neo4j
+    # as PREDICTED_TREATS edges. The writeback is NON-BLOCKING -- if
+    # Neo4j is not configured (no NEO4J_PASSWORD), it is a no-op and
+    # the HTTP response is unchanged. The writeback result is included
+    # in the response as an optional ``neo4j_writeback`` field so the
+    # caller can verify the writeback happened (or see why it didn't).
+    neo4j_writeback = write_predictions_to_neo4j(
+        predictions=predictions,
+        checkpoint_path=state.get("checkpoint_path"),
+        model_version="gt_v127",
+    )
     return {
         "predictions": predictions,
         "source": "gt_checkpoint",
@@ -811,6 +823,13 @@ async def _predict_inner(req: PredictRequest, state: Dict[str, Any]) -> Dict[str
         # SH-031 v120: optional monitoring fields (see comment above).
         "error_count": error_count,
         "error_rate": round(error_rate, 4),
+        # TM7-v127 (Task 7.5): Neo4j writeback result. The frontend
+        # contract's Zod schema ignores unknown fields, so adding this
+        # is backward-compatible. The field is ``None`` when Neo4j is
+        # not configured (no NEO4J_PASSWORD) -- callers can check
+        # ``neo4j_writeback.neo4j_configured`` to determine if the KG
+        # was enriched.
+        "neo4j_writeback": neo4j_writeback,
     }
 
 
@@ -873,6 +892,443 @@ def top_k(k: int = 10) -> Dict[str, Any]:
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "count": len(predictions),
         "checkpointPath": state.get("checkpoint_path"),
+    }
+
+
+# ======================================================================
+# TM7-v127 ROOT FIX (Task 7.5, hostile-auditor pass):
+# Neo4j writeback of GT predictions as PREDICTED_TREATS edges.
+# ======================================================================
+# The audit (Task 7.5) found that the service's /predict endpoint
+# returned predictions ONLY in the HTTP response body. The predictions
+# were NEVER written back to Neo4j -- the Phase 2 KG was enriched with
+# PREDICTED_TREATS edges ONLY by an external batch job that read
+# gt_predictions.csv (which itself is written by gt_rl_bridge.py, not
+# by service.py). For an interactive researcher querying the platform
+# via the dashboard, the PREDICTED_TREATS edges were stale (only
+# updated by the nightly batch) or missing entirely.
+#
+# The docx (Phase 3 -> Model Outputs) says: "For every drug-disease
+# pair in the database, the model outputs a numerical score, confidence
+# bounds, and the key biological pathways." Phase 2's KG is the
+# canonical store for biomedical relationships -- writing PREDICTED_TREATS
+# back to Neo4j makes the GT model's output queryable via the SAME KG
+# queries the dashboard already uses for known relationships.
+#
+# ROOT FIX: this block adds:
+#   1. ``write_predictions_to_neo4j()`` -- takes a list of prediction
+#      dicts (the same shape /predict returns) and MERGEs a
+#      PREDICTED_TREATS edge for each, with score, confidence,
+#      model_version, and generated_at as edge properties. MERGE is
+#      idempotent -- re-running /predict for the same pair UPDATES the
+#      edge properties instead of creating duplicates.
+#   2. ``GET /predictions`` endpoint -- retrieves PREDICTED_TREATS
+#      edges from Neo4j for the backend / frontend to consume. Filters
+#      by drug, disease, min_score, or returns the top-K by score.
+#
+# COORDINATION WITH TM5 (Phase 2 owner):
+#   The PREDICTED_TREATS edge type is a NEW edge type in the Phase 2
+#   contract. TM5 owns phase2/ -- we DO NOT modify phase2/ files (per
+#   the task's "Do Not Touch" constraint). Instead, we add the edge
+#   type to the Phase 3 contract (graph_transformer/contracts/) so the
+#   GT service's writeback is documented as a Phase 3 responsibility.
+#   TM5 can add a read-only query for PREDICTED_TREATS to phase2/kg_api.py
+#   at a later date -- the edge type is in the SAME Neo4j database so
+#   phase2's existing driver/session infrastructure can read it without
+#   changes.
+#
+# NON-BLOCKING: when Neo4j is not configured (no NEO4J_PASSWORD), the
+# writeback is a no-op with a WARNING. /predict still returns the HTTP
+# response. This preserves the dev/CI workflow (no Neo4j running).
+# ======================================================================
+
+
+# The PREDICTED_TREATS edge type contract. The edge connects a Drug
+# node to a Disease node with the following properties:
+#   - score: float in [0, 1] -- the GT model's predicted probability
+#     of a therapeutic relationship.
+#   - confidence: float in [0, 1] -- the binary-entropy confidence
+#     (see _compute_confidence above).
+#   - model_version: str -- the GT service's version (matches the
+#     ``modelVersion`` field in the /predict response).
+#   - generated_at: str -- ISO 8601 timestamp of the prediction.
+#   - checkpoint_path: str -- the path to the GT checkpoint that
+#     produced this prediction (for reproducibility).
+PREDICTED_TREATS_EDGE_TYPE = "PREDICTED_TREATS"
+PREDICTED_TREATS_EDGE_PROPERTIES = (
+    "score", "confidence", "model_version", "generated_at", "checkpoint_path",
+)
+
+
+def _get_neo4j_driver():
+    """Construct a Neo4j driver from env vars.
+
+    Returns None when Neo4j is not configured (no password). This
+    preserves the dev/CI workflow -- the writeback becomes a no-op.
+
+    Supports BOTH the Phase 2 env var conventions:
+      - DRUGOS_NEO4J_PASSWORD (the v107 canonical name)
+      - NEO4J_PASSWORD (the legacy name, still used by some services)
+    AND the Phase 3 conventions:
+      - GT_NEO4J_PASSWORD (Phase 3-specific override)
+      - GT_NEO4J_URI, GT_NEO4J_USER
+
+    The GT_NEO4J_* vars take precedence so the GT service can use a
+    separate Neo4j user with write privileges (Phase 2 typically uses
+    a read-only user for /query and /cypher endpoints).
+    """
+    password = (
+        os.environ.get("GT_NEO4J_PASSWORD")
+        or os.environ.get("DRUGOS_NEO4J_PASSWORD")
+        or os.environ.get("NEO4J_PASSWORD", "")
+    )
+    if not password:
+        return None
+    try:
+        from neo4j import GraphDatabase  # local import
+    except ImportError:
+        logger.warning(
+            "TM7-v127 (Task 7.5): neo4j package not installed. "
+            "Install with `pip install neo4j` to enable PREDICTED_TREATS "
+            "writeback."
+        )
+        return None
+    uri = (
+        os.environ.get("GT_NEO4J_URI")
+        or os.environ.get("DRUGOS_NEO4J_URI")
+        or os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+    )
+    user = (
+        os.environ.get("GT_NEO4J_USER")
+        or os.environ.get("DRUGOS_NEO4J_USER")
+        or os.environ.get("NEO4J_USER", "neo4j")
+    )
+    try:
+        return GraphDatabase.driver(uri, auth=(user, password))
+    except Exception as exc:
+        logger.warning(
+            "TM7-v127 (Task 7.5): Neo4j driver construction failed (%s). "
+            "PREDICTED_TREATS writeback is DISABLED. Check Neo4j URI/user/password.",
+            exc,
+        )
+        return None
+
+
+def write_predictions_to_neo4j(
+    predictions: List[Dict[str, Any]],
+    checkpoint_path: Optional[str] = None,
+    model_version: str = "gt_v127",
+    batch_size: int = 500,
+) -> Dict[str, Any]:
+    """MERGE GT predictions into Neo4j as PREDICTED_TREATS edges.
+
+    TM7-v127 ROOT FIX (Task 7.5): after each /predict batch, write the
+    predictions back to Neo4j so the Phase 2 KG is enriched in real
+    time (not just by the nightly batch job that reads
+    gt_predictions.csv).
+
+    The MERGE is idempotent: re-running /predict for the same
+    (drug, disease) pair UPDATES the edge properties instead of
+    creating duplicates. The Cypher query uses MERGE on the edge
+    (not CREATE) so multiple /predict calls for the same pair
+    converge to a single edge with the latest score.
+
+    Args:
+        predictions: List of dicts with keys 'drug', 'disease', 'score',
+            'confidence' (the same shape /predict returns). Predictions
+            with score=0.0 and a 'note' field (drug/disease not in graph)
+            are SKIPPED -- they are error entries, not real predictions.
+        checkpoint_path: Path to the GT checkpoint that produced these
+            predictions. Stored as an edge property for reproducibility.
+        model_version: GT model version string. Stored as an edge property.
+        batch_size: Number of predictions per UNWIND batch. Neo4j
+            recommends <= 10000 per transaction; 500 is conservative for
+            mixed workloads.
+
+    Returns:
+        Dict with keys:
+          - 'written': int -- number of PREDICTED_TREATS edges MERGEd.
+          - 'skipped': int -- number of predictions skipped (error entries).
+          - 'failed': int -- number of predictions that failed to MERGE.
+          - 'neo4j_configured': bool -- False if Neo4j is not configured
+            (writeback was a no-op).
+          - 'error': Optional[str] -- error message if the writeback failed.
+    """
+    if not predictions:
+        return {
+            "written": 0, "skipped": 0, "failed": 0,
+            "neo4j_configured": False,
+            "error": "no predictions to write",
+        }
+
+    # Filter out error entries (score=0.0 with a 'note' field). These
+    # are pairs where the drug or disease was not in the graph -- they
+    # are NOT real predictions and must not pollute the KG.
+    real_predictions = [
+        p for p in predictions
+        if "note" not in p and float(p.get("score", 0.0)) > 0.0
+    ]
+    n_skipped = len(predictions) - len(real_predictions)
+
+    driver = _get_neo4j_driver()
+    if driver is None:
+        # Non-blocking: Neo4j not configured. The HTTP response is
+        # still returned to the caller. The writeback is a no-op.
+        logger.info(
+            "TM7-v127 (Task 7.5): Neo4j not configured "
+            "(GT_NEO4J_PASSWORD / DRUGOS_NEO4J_PASSWORD / NEO4J_PASSWORD "
+            "not set). PREDICTED_TREATS writeback is a NO-OP. The /predict "
+            "HTTP response is unchanged. Set the env var to enable "
+            "real-time KG enrichment."
+        )
+        return {
+            "written": 0,
+            "skipped": n_skipped,
+            "failed": 0,
+            "neo4j_configured": False,
+            "error": None,
+        }
+
+    # The Cypher MERGE query. We use UNWIND to batch predictions in a
+    # single transaction (much faster than per-pair queries). The
+    # MERGE matches the (Drug)-[r:PREDICTED_TREATS]->(Disease) pattern;
+    # if the edge does not exist, it is created. If it exists, the
+    # ON MATCH SET clause updates the properties.
+    #
+    # We also MERGE the Drug and Disease nodes themselves (with
+    # ``MERGE (d:Drug {name: $drug})``) so the writeback works even if
+    # the KG does not yet have a node for that drug/disease (rare, but
+    # possible if the GT model was trained on a graph that included
+    # drugs not yet in the Phase 2 KG -- e.g., a newly approved drug).
+    cypher_query = """
+    UNWIND $batch AS row
+    MERGE (d:Drug {name: row.drug})
+    MERGE (dis:Disease {name: row.disease})
+    MERGE (d)-[r:PREDICTED_TREATS]->(dis)
+    ON CREATE SET
+        r.score = row.score,
+        r.confidence = row.confidence,
+        r.model_version = row.model_version,
+        r.generated_at = row.generated_at,
+        r.checkpoint_path = row.checkpoint_path,
+        r.created_at = coalesce(r.created_at, datetime())
+    ON MATCH SET
+        r.score = row.score,
+        r.confidence = row.confidence,
+        r.model_version = row.model_version,
+        r.generated_at = row.generated_at,
+        r.checkpoint_path = row.checkpoint_path,
+        r.updated_at = datetime()
+    """
+
+    from datetime import datetime, timezone
+    generated_at = datetime.now(timezone.utc).isoformat()
+
+    n_written = 0
+    n_failed = 0
+    try:
+        with driver.session() as session:
+            # Batch the predictions to avoid huge transactions on the
+            # production graph (1M+ pairs in a single /predict call).
+            for batch_start in range(0, len(real_predictions), batch_size):
+                batch = real_predictions[batch_start: batch_start + batch_size]
+                # Build the parameter list for UNWIND. Each row is a
+                # dict with all the edge properties.
+                rows = [
+                    {
+                        "drug": str(p["drug"]),
+                        "disease": str(p["disease"]),
+                        "score": float(p.get("score", 0.0)),
+                        "confidence": float(p.get("confidence", 0.0)),
+                        "model_version": str(model_version),
+                        "generated_at": generated_at,
+                        "checkpoint_path": str(checkpoint_path or ""),
+                    }
+                    for p in batch
+                ]
+                try:
+                    result = session.run(cypher_query, batch=rows)
+                    # ``consume()`` forces the query to fully execute
+                    # before we move on (Neo4j's lazy evaluation would
+                    # otherwise defer the writes until the session is
+                    # closed, hiding errors).
+                    result.consume()
+                    n_written += len(rows)
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except Exception as batch_exc:
+                    n_failed += len(rows)
+                    logger.error(
+                        "TM7-v127 (Task 7.5): Neo4j MERGE batch failed "
+                        "(batch_start=%d, batch_size=%d, error=%s). The "
+                        "batch is SKIPPED -- the HTTP response is still "
+                        "returned to the caller. Check Neo4j connectivity "
+                        "and the PREDICTED_TREATS edge contract.",
+                        batch_start, len(rows), batch_exc,
+                    )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        # The session itself failed (driver issue, network error, etc.).
+        # Non-blocking: /predict still returns its HTTP response.
+        logger.error(
+            "TM7-v127 (Task 7.5): Neo4j session failed (%s). "
+            "PREDICTED_TREATS writeback is INCOMPLETE. The HTTP response "
+            "is still returned. Check Neo4j server availability.",
+            exc,
+        )
+        return {
+            "written": n_written,
+            "skipped": n_skipped,
+            "failed": n_failed + (len(real_predictions) - n_written - n_failed),
+            "neo4j_configured": True,
+            "error": str(exc),
+        }
+    finally:
+        try:
+            driver.close()
+        except Exception as close_exc:
+            logger.warning(
+                "TM7-v127 (Task 7.5): driver.close() failed (%s). "
+                "Connection may leak -- monitor Neo4j connection pool.",
+                close_exc,
+            )
+
+    logger.info(
+        "TM7-v127 (Task 7.5): PREDICTED_TREATS writeback complete. "
+        "written=%d, skipped=%d, failed=%d, total_input=%d, "
+        "model_version=%s, checkpoint=%s.",
+        n_written, n_skipped, n_failed, len(predictions),
+        model_version, checkpoint_path,
+    )
+
+    return {
+        "written": n_written,
+        "skipped": n_skipped,
+        "failed": n_failed,
+        "neo4j_configured": True,
+        "error": None,
+    }
+
+
+@app.get("/predictions")
+def get_predictions(
+    drug: Optional[str] = None,
+    disease: Optional[str] = None,
+    min_score: float = 0.0,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """Retrieve PREDICTED_TREATS edges from Neo4j.
+
+    TM7-v127 ROOT FIX (Task 7.5): the audit requires "a query to
+    retrieve predictions from Neo4j for the backend." This endpoint
+    lets the backend / frontend query the GT model's predictions
+    DIRECTLY from the Phase 2 KG (no separate gt_predictions.csv
+    read).
+
+    Args (query params):
+        drug: Filter by drug name (case-insensitive). If None, all drugs.
+        disease: Filter by disease name (case-insensitive). If None, all diseases.
+        min_score: Only return edges with score >= min_score (default 0.0).
+        limit: Max number of edges to return (default 50, max 500).
+
+    Returns:
+        Dict with keys:
+          - 'predictions': list of {drug, disease, score, confidence,
+            model_version, generated_at}.
+          - 'count': int.
+          - 'source': 'neo4j' or 'no_neo4j'.
+          - 'neo4j_configured': bool.
+    """
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be in [1, 500]")
+    if not 0.0 <= min_score <= 1.0:
+        raise HTTPException(status_code=400, detail="min_score must be in [0, 1]")
+
+    driver = _get_neo4j_driver()
+    if driver is None:
+        # Non-blocking: Neo4j not configured. Return an empty list with
+        # a clear source field so the frontend knows the backend is
+        # unavailable (not just empty).
+        return {
+            "predictions": [],
+            "count": 0,
+            "source": "no_neo4j",
+            "neo4j_configured": False,
+            "error": "Neo4j not configured. Set GT_NEO4J_PASSWORD to enable.",
+        }
+
+    # Build the Cypher query. We use parameterized inputs to prevent
+    # Cypher injection (the drug/disease names come from the HTTP
+    # request, so they are untrusted).
+    #
+    # The query:
+    #   1. MATCHes the PREDICTED_TREATS edge pattern.
+    #   2. Filters by drug name (if provided, case-insensitive).
+    #   3. Filters by disease name (if provided, case-insensitive).
+    #   4. Filters by min_score.
+    #   5. Orders by score descending (top predictions first).
+    #   6. Limits to ``limit``.
+    #
+    # The toLower() call makes the match case-insensitive (the GT
+    # service stores drug/disease names as the model's training-graph
+    # names, which are typically lowercase).
+    cypher_query = """
+    MATCH (d:Drug)-[r:PREDICTED_TREATS]->(dis:Disease)
+    WHERE ($drug IS NULL OR toLower(d.name) = toLower($drug))
+      AND ($disease IS NULL OR toLower(dis.name) = toLower($disease))
+      AND r.score >= $min_score
+    RETURN d.name AS drug, dis.name AS disease, r.score AS score,
+           r.confidence AS confidence, r.model_version AS model_version,
+           r.generated_at AS generated_at
+    ORDER BY r.score DESC
+    LIMIT $limit
+    """
+    try:
+        with driver.session() as session:
+            result = session.run(
+                cypher_query,
+                drug=drug,
+                disease=disease,
+                min_score=float(min_score),
+                limit=int(limit),
+            )
+            predictions = []
+            for record in result:
+                predictions.append({
+                    "drug": record["drug"],
+                    "disease": record["disease"],
+                    "score": float(record["score"]),
+                    "confidence": float(record["confidence"]),
+                    "model_version": record["model_version"],
+                    "generated_at": record["generated_at"],
+                })
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        logger.error(
+            "TM7-v127 (Task 7.5): /predictions Neo4j query failed (%s). "
+            "Returning 502 to the caller. Check Neo4j server availability.",
+            exc,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Neo4j query failed: {exc}",
+        )
+    finally:
+        try:
+            driver.close()
+        except Exception as close_exc:
+            logger.warning(
+                "TM7-v127 (Task 7.5): driver.close() failed after /predictions (%s).",
+                close_exc,
+            )
+
+    return {
+        "predictions": predictions,
+        "count": len(predictions),
+        "source": "neo4j",
+        "neo4j_configured": True,
     }
 
 

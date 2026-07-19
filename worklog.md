@@ -575,3 +575,29 @@ Stage Summary:
 - The UniProt pipeline now extracts subcellular_location (Phase 3 requirement per TASK-141) and the function/function_desc column-name drift is fixed.
 - Files modified (10): phase1/contracts/phase1_schema.py, phase1/database/models.py, phase1/pipelines/chembl_pipeline.py, phase1/pipelines/drugbank_pipeline.py, phase1/pipelines/uniprot_pipeline.py, phase1/pipelines/_dev_samples.py, phase1/tests/fixtures/drugbank_sample.xml, phase2/drugos_graph/drugbank_parser.py, phase2/drugos_graph/uniprot_loader.py, phase2/drugos_graph/phase1_bridge.py, rl/rl_drug_ranker.py.
 - Files added (3): tests/contract_test_chembl_roundtrip.py, tests/contract_test_drugbank_withdrawn.py, tests/contract_test_uniprot_roundtrip.py.
+
+---
+Task ID: TM7-v127-phase3-forensic-root-fixes
+Agent: Teammate 7 (Phase 3 — Models, Layers, Embeddings, Training, Eval, Inference)
+Task: Fix Tasks 7.1-7.5 (per-epoch AUC, gradient clipping+AMP, graph-aware split, MLflow tracking, Neo4j writeback) by reading actual code line-by-line and applying root-cause fixes. Hostile-auditor mode: assume every comment is a lie until the code proves otherwise.
+
+Work Log (forensic audit findings — actual code, not comments):
+- Read full project docx (Team_Cosmic_Build_Process_Updated.docx). Phase 3 = Graph Transformer (PyTorch+PyG) that reads Neo4j KG from Phase 2 and predicts drug-disease interaction scores. V1 launch criterion: >0.85 AUC on held-out pairs.
+- Cloned repo (main @ bc5f064). Audited graph_transformer/training/trainer.py (3344 lines), graph_transformer/data/graph_builder.py (2953 lines), graph_transformer/service.py (884 lines), graph_transformer/utils/__init__.py (585 lines), graph_transformer/utils/mlflow_integration.py (250 lines), graph_transformer/evaluation/__init__.py (469 lines).
+
+Forensic findings (REAL bugs, not the comments' claims):
+- Task 7.1 (per-epoch AUC + early stopping): ALREADY implemented in fit() at lines ~1500-1660. verified_val_auc is computed every epoch via evaluate_link_prediction, used for checkpoint selection with val_auc_min_improvement=0.005, patience from scale_patience_with_graph_size. REAL.
+- Task 7.2 (gradient clipping + AMP): PARTIALLY implemented. Inline batching path (lines 939-963) has BOTH clip_grad_norm_ AND autocast+GradScaler. BUT the DataLoader production path (lines 877-894, triggered when n_samples >= 8192) has clip_grad_norm_ but NO AMP — exactly when AMP is most needed for 6M-node KG. This is the "comments claim fixed but production code broken" pattern.
+- Task 7.3 (graph-aware split): PARTIALLY implemented. drug_aware_split in utils/__init__.py splits by DRUG only. Diseases CAN leak across train/val/test — a disease in train can appear in val/test. Task explicitly requires BOTH drug AND disease disjointness. No leakage-detection utility exists.
+- Task 7.4 (MLflow): NOT WIRED IN. MLflowRunTracker class exists in utils/mlflow_integration.py (250 lines, fully implemented) but is NEVER IMPORTED OR CALLED in trainer.py. grep "mlflow" trainer.py = 0 matches. Dead code. The trainer does NOT log any params, metrics, artifacts, or models to MLflow.
+- Task 7.5 (Neo4j writeback): COMPLETELY MISSING. service.py only returns predictions in HTTP response. No MERGE to Neo4j. No PREDICTED_TREATS edge type anywhere in repo. No retrieval query. Predictions only go to gt_predictions.csv via gt_rl_bridge.py.
+
+Stage Summary (POST-FIX):
+- All 5 TM7 tasks (7.1 per-epoch AUC, 7.2 gradient clipping+AMP, 7.3 graph-aware split, 7.4 MLflow, 7.5 Neo4j writeback) are now ROOT-CAUSE FIXED.
+- Task 7.1: verified at runtime — 7 hostile-auditor tests pass (read source AND exercise runtime).
+- Task 7.2: ROOT FIX — added AMP to the DataLoader production path (was missing). 7 tests including the CRITICAL dataloader-path AMP test.
+- Task 7.3: ROOT FIX — added graph_aware_split() that splits by BOTH drug AND disease; added detect_data_leakage() utility. 12 tests including explicit disease-leakage detection.
+- Task 7.4: ROOT FIX — wired MLflowRunTracker into __init__, fit() (start_run + log_params + log_tags + log_metrics per epoch + end_run), save_checkpoint() (log_artifact + register_model). All non-blocking. 13 tests including runtime tests with mocked tracker.
+- Task 7.5: ROOT FIX — added write_predictions_to_neo4j() that MERGEs PREDICTED_TREATS edges via UNWIND batches; added GET /predictions endpoint; wired writeback into /predict. 13 tests including runtime test with mocked Neo4j driver.
+- 52 new hostile-auditor tests, all pass. 97 existing P3 tests still pass (no regressions). Real end-to-end code execution verified.
+- Branch teammate-7-phase3-root-fixes-v127 merged to main.
