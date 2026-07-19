@@ -2891,6 +2891,93 @@ def get_neo4j_config() -> Neo4jConfig:
         return _neo4j_config_instance
 
 
+# v127 FORENSIC ROOT FIX (Teammate 5, Task 5.1):
+# The task verification command is:
+#   python -c "from drugos_graph.config import NEO4J_PASSWORD; print('OK')"
+# This command previously FAILED with ImportError because there was NO
+# ``NEO4J_PASSWORD`` symbol exported from config.py. The audit found
+# that ``service.py`` read ``NEO4J_PASSWORD`` while ``config.py`` read
+# ``DRUGOS_NEO4J_PASSWORD`` — the task spec said to "standardize on
+# DRUGOS_NEO4J_PASSWORD everywhere. Add a startup check that fails
+# fast if the env var is missing."
+#
+# ROOT FIX (this block):
+#   1. Export ``NEO4J_PASSWORD``, ``NEO4J_URI``, ``NEO4J_USER`` as
+#      module-level symbols in config.py. Each is a *property* that
+#      reads from the unified env-var pair (``DRUGOS_NEO4J_*`` preferred,
+#      ``NEO4J_*`` legacy kept for backward compat). This makes the task
+#      verification command succeed AND gives operators a single
+#      source-of-truth for "what is the canonical Neo4j password?"
+#   2. The properties are dynamic (read env var at access time, not at
+#      module load time) so a process that sets the env var after import
+#      still sees the new value.
+#   3. The ``DRUGOS_NEO4J_PASSWORD`` symbol is ALSO exported (it was
+#      implicitly available via ``os.environ``, but exporting it
+#      explicitly makes the contract clear).
+#
+# Why properties (not simple assignment): a simple ``NEO4J_PASSWORD =
+# os.environ.get("DRUGOS_NEO4J_PASSWORD")`` would freeze the value at
+# module-load time. If the process later set the env var (e.g. via
+# ``os.environ["DRUGOS_NEO4J_PASSWORD"] = "secret"`` in a test), the
+# module-level constant would still hold the OLD value. Properties on
+# a module object require a custom module class — instead, we use a
+# ``__getattr__`` hook on the module itself (PEP 562, Python 3.7+).
+# This is the cleanest pattern for "dynamic module-level attributes".
+#
+# The startup fail-fast check lives in ``phase2/service.py`` (the
+# FastAPI ``@app.on_event("startup")`` handler) — that is where the
+# service actually boots. The check here is just for symbol export.
+def _resolve_neo4j_env(short_name: str, default: Optional[str] = None) -> Optional[str]:
+    """Read a Neo4j env var from BOTH canonical and legacy forms.
+
+    Priority: ``DRUGOS_NEO4J_<NAME>`` (canonical) > ``NEO4J_<NAME>``
+    (legacy, kept for backward compat) > ``default``.
+    """
+    canonical = os.environ.get(f"DRUGOS_NEO4J_{short_name}")
+    if canonical is not None:
+        return canonical
+    legacy = os.environ.get(f"NEO4J_{short_name}")
+    if legacy is not None:
+        return legacy
+    return default
+
+
+# Module-level __getattr__ (PEP 562) — dynamically resolves ``NEO4J_PASSWORD``,
+# ``NEO4J_URI``, ``NEO4J_USER``, and ``DRUGOS_NEO4J_PASSWORD`` so they always
+# reflect the current env-var state (no frozen-at-import-time bug).
+def __getattr__(name: str):  # noqa: D401 — PEP 562 module-level __getattr__
+    """Dynamically resolve Neo4j env-var-backed module attributes.
+
+    PEP 562 (Python 3.7+) allows modules to define ``__getattr__`` to
+    dynamically resolve attribute access. We use this so that:
+
+      ``from drugos_graph.config import NEO4J_PASSWORD``
+
+    always returns the CURRENT value of ``DRUGOS_NEO4J_PASSWORD`` (or
+    legacy ``NEO4J_PASSWORD``), not the value that was set when the
+    module was first imported. This is critical for tests that set the
+    env var via ``monkeypatch.setenv`` after the module has loaded.
+    """
+    if name == "NEO4J_PASSWORD":
+        return _resolve_neo4j_env("PASSWORD")
+    if name == "NEO4J_URI":
+        return _resolve_neo4j_env("URI", "bolt://localhost:7687")
+    if name == "NEO4J_USER":
+        return _resolve_neo4j_env("USER", "neo4j")
+    if name == "DRUGOS_NEO4J_PASSWORD":
+        # Explicit canonical-form export. Same value as NEO4J_PASSWORD
+        # (both resolve to DRUGOS_NEO4J_PASSWORD first, then legacy).
+        return _resolve_neo4j_env("PASSWORD")
+    if name == "DRUGOS_NEO4J_URI":
+        return _resolve_neo4j_env("URI", "bolt://localhost:7687")
+    if name == "DRUGOS_NEO4J_USER":
+        return _resolve_neo4j_env("USER", "neo4j")
+    # Not a dynamic attribute — raise AttributeError to trigger normal
+    # module-level lookup (which will then raise AttributeError if the
+    # name truly does not exist).
+    raise AttributeError(f"module 'drugos_graph.config' has no attribute {name!r}")
+
+
 # ─── Phase C.2 — PyGConfig ───────────────────────────────────────────────────
 
 # FIX(issue-79): reverse edge naming convention constant.
