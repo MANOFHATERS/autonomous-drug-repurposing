@@ -105,6 +105,9 @@
   </drug>
 
   <!-- 2. WITHDRAWN killer drug (Baycol / cerivastatin) - retains 'approved' tag -->
+  <!-- TM1 Task 1.2: includes <withdrawn-notice> element so the pipeline
+       can extract withdrawn_reason / withdrawn_country / withdrawn_year
+       and propagate them Phase 1 -> Phase 2 -> Phase 4 RL safety_score. -->
   <drug type="small molecule" created="2005-06-13">
     <drugbank-id primary="true">DB00463</drugbank-id>
     <name>Cerivastatin</name>
@@ -114,6 +117,16 @@
       <group>approved</group>
       <group>withdrawn</group>
     </groups>
+    <withdrawn-notice>
+      <country>US</country>
+      <year>2001</year>
+      <reason>rhabdomyolysis</reason>
+    </withdrawn-notice>
+    <withdrawn-notice>
+      <country>DE</country>
+      <year>2001</year>
+      <reason>rhabdomyolysis</reason>
+    </withdrawn-notice>
     <calculated-properties>
       <property>
         <kind>InChIKey</kind>

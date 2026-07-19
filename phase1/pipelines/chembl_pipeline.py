@@ -381,6 +381,72 @@ from cleaning._constants import CANONICAL_INCHIKEY_REGEX as _INCHIKEY_RE  # noqa
 _CHEMBL_ID_RE: re.Pattern[str] = re.compile(r"^CHEMBL[1-9]\d{0,8}$")
 
 
+def _is_valid_chembl_id(value: object) -> bool:
+    """Return True iff *value* is a syntactically valid ChEMBL ID.
+
+    A valid ChEMBL ID matches ``CHEMBL[1-9]\\d{0,8}`` — i.e. the literal
+    prefix ``CHEMBL`` followed by 1–9 digits with no leading zero. This
+    is the SINGLE source of truth for ChEMBL ID validation across the
+    pipeline; phase2 loaders and the phase1 bridge MUST call this helper
+    (or import the regex directly) instead of re-defining their own.
+
+    Accepts ``None`` / non-string inputs by returning ``False``.
+    """
+    if not isinstance(value, str):
+        return False
+    return bool(_CHEMBL_ID_RE.match(value.strip().upper()))
+
+
+def _get_processed_columns(source_key: str) -> list[str]:
+    """Return the canonical CSV columns this pipeline emits for ``source_key``.
+
+    TM1 Task 1.1 ROOT FIX: this function exists so that
+    :func:`phase1.contracts.phase1_schema.detect_contract_vs_pipeline_drift`
+    can verify the pipeline's actual output schema matches the contract
+    declared in :data:`PHASE1_OUTPUT_SCHEMA`. Without this function the
+    drift detector silently skips ChEMBL sources — which is exactly how
+    the v82 P0-D4b censor columns (``activity_censored``,
+    ``activity_censor_direction``) ended up emitted by the pipeline but
+    missing from the contract for 4 months.
+
+    Parameters
+    ----------
+    source_key : str
+        One of ``"chembl_drugs"`` or ``"chembl_activities"``.
+
+    Returns
+    -------
+    list[str]
+        The ordered list of column names the pipeline writes to the CSV
+        for the requested source. Raises ``ValueError`` if the source
+        key is not a ChEMBL source owned by this pipeline.
+    """
+    if source_key == "chembl_drugs":
+        # Matches the ``expected_cols`` list in ``_parse_molecules`` +
+        # the ``_ensure_drug_columns`` defaults. Update both places
+        # together when adding a new column.
+        return [
+            "chembl_id", "name", "inchikey", "smiles",
+            "molecular_weight", "drug_type", "max_phase",
+            "is_globally_approved", "is_fda_approved",
+        ]
+    if source_key == "chembl_activities":
+        # Matches the record dict in ``_parse_activities`` +
+        # ``_ensure_activity_columns`` defaults + the v82 P0-D4b censor
+        # columns added in ``_step_normalize_activity_values``.
+        return [
+            "activity_id", "molecule_chembl_id", "target_chembl_id",
+            "target_pref_name", "activity_type", "activity_value",
+            "activity_units", "pchembl_value", "assay_id",
+            "standard_relation", "assay_type", "target_accession",
+            "activity_censored", "activity_censor_direction",
+        ]
+    raise ValueError(
+        f"_get_processed_columns: unknown source_key {source_key!r} "
+        f"(expected 'chembl_drugs' or 'chembl_activities')."
+    )
+
+
 def _is_valid_inchikey(key: str) -> bool:
     """v24: Delegate to the canonical InChIKey validator.
 
@@ -2243,13 +2309,29 @@ class ChEMBLPipeline(BasePipeline):
                 logger.warning("[chembl] SAMPLE MODE: API returned 0 molecules.")
                 return pd.DataFrame()
             except (OSError, ValueError, ConnectionError, TimeoutError) as exc:  # v85 FORENSIC ROOT FIX (BUG #51)
+                # TM1 Task 1.1 ROOT FIX (hostile-auditor pass):
+                # The previous code fell back to ``_embedded_sample_molecules``
+                # silently on any API error. This is a SEPARATE copy of the
+                # 10-fake-drug sample data that lives directly in the production
+                # pipeline file, WITHOUT the ``_assert_not_production`` guard
+                # that ``_dev_samples.embedded_chembl_molecules`` enforces.
+                # A production deployment with a transient ChEMBL outage
+                # would silently load 10 fake drugs (with hardcoded
+                # ``is_fda_approved=True`` / ``is_globally_approved=True``)
+                # into the KG, corrupting the RL ranker's safety filter.
+                # ROOT FIX: delegate to ``_dev_samples.embedded_chembl_molecules``
+                # which enforces the production guard. If production, raise
+                # RuntimeError (caught below and re-raised — do NOT silently
+                # return fake data).
+                from . import _dev_samples
                 logger.warning(
                     "[chembl] SAMPLE MODE: live API fetch failed (%s). "
-                    "Falling back to embedded sample dataset (5 FDA-approved "
-                    "drugs) so the pipeline can still run end-to-end.",
+                    "Falling back to embedded sample dataset via "
+                    "_dev_samples.embedded_chembl_molecules (which enforces "
+                    "the P1-019 production guard).",
                     exc,
                 )
-                return self._embedded_sample_molecules()
+                return _dev_samples.embedded_chembl_molecules()
 
         all_chunks: list[pd.DataFrame] = []
         offset = 0
@@ -2833,6 +2915,15 @@ class ChEMBLPipeline(BasePipeline):
             chembl_id = str(mol.get("molecule_chembl_id", "")).strip()
             if not chembl_id:
                 continue  # DQ-5: skip records without a chembl_id
+            # INV-1 (Task 1.1): chembl_id MUST match ^CHEMBL[1-9]\d{0,8}$.
+            # Rejects leading zeros, malformed prefixes, and non-numeric IDs.
+            if not _is_valid_chembl_id(chembl_id):
+                logger.warning(
+                    "[%s] Invalid chembl_id %r — does not match CHEMBL\\d+ "
+                    "pattern; skipping record.",
+                    self.source_name, chembl_id,
+                )
+                continue
 
             # pref_name — C13: default to None; synthesize later if needed.
             pref_name = mol.get("pref_name")
@@ -2964,6 +3055,21 @@ class ChEMBLPipeline(BasePipeline):
             target_chembl_id = str(act.get("target_chembl_id", "")).strip()
             if not mol_chembl_id or not target_chembl_id:
                 continue  # DQ: skip records missing required FKs
+            # INV-5 (Task 1.1): both molecule_chembl_id AND target_chembl_id
+            # MUST match ^CHEMBL[1-9]\d{0,8}$. Rejects malformed IDs that
+            # would otherwise become invalid edge endpoints in the KG.
+            if not _is_valid_chembl_id(mol_chembl_id):
+                logger.warning(
+                    "[%s] Invalid molecule_chembl_id %r — skipping activity %s",
+                    self.source_name, mol_chembl_id, activity_id,
+                )
+                continue
+            if not _is_valid_chembl_id(target_chembl_id):
+                logger.warning(
+                    "[%s] Invalid target_chembl_id %r — skipping activity %s",
+                    self.source_name, target_chembl_id, activity_id,
+                )
+                continue
 
             target_pref_name = act.get("target_pref_name")
             if target_pref_name is not None:
@@ -3942,11 +4048,26 @@ class ChEMBLPipeline(BasePipeline):
     # ==================================================================
 
     def _filter_activities_by_type(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Filter activities by ``activity_type ∈ CHEMBL_ACTIVITY_TYPES`` (S10)."""
+        """Filter activities by ``activity_type ∈ CHEMBL_ACTIVITY_TYPES`` (S10).
+
+        INV-4 (Task 1.1): activity_type MUST be one of the canonical
+        biochemical potency types {IC50, Ki, Kd, EC50, Potency, AC50, ...}.
+        Rows whose activity_type does not match are dead-lettered and dropped
+        — they cannot be compared on the same potency scale and would
+        silently poison the KG. Comparison is case-insensitive so a stray
+        lowercase "ic50" from a misbehaving upstream is still matched
+        against the canonical "IC50".
+        """
         if "activity_type" not in df.columns:
             return df
         before = len(df)
-        mask = df["activity_type"].isin(CHEMBL_ACTIVITY_TYPES)
+        # INV-4: normalize activity_type — strip whitespace, then compare
+        # case-insensitively against the canonical set. The stored value
+        # preserves canonical case (e.g. "IC50") so downstream consumers
+        # see the contract-canonical form, not the upstream's case.
+        df["activity_type"] = df["activity_type"].astype(str).str.strip()
+        canonical_upper = {t.upper() for t in CHEMBL_ACTIVITY_TYPES}
+        mask = df["activity_type"].str.upper().isin(canonical_upper)
         df = df[mask].copy()
         dropped = before - len(df)
         if dropped > 0:
@@ -4156,12 +4277,44 @@ class ChEMBLPipeline(BasePipeline):
         # with DataFrames from older pipeline runs).
         df["activity_censored"] = norm_censored
         df["activity_censor_direction"] = norm_censor_dir
+        # INV-3 (Task 1.1): after normalization, activity_units MUST be
+        # "nM" or None. The CHEMBL_STANDARD_UNITS env-var escape hatch
+        # could let non-molar units (e.g. "%") through _filter_activities_by_units,
+        # and normalize_activity_value returns the unit unchanged for
+        # unknown units. Any non-nM value here would silently corrupt
+        # the KG (a "50" with units "%" would be interpreted as 50 nM
+        # by every downstream consumer — 9 orders of magnitude wrong
+        # for a percentage, and a patient-safety-scale magnitude error).
+        # Root fix: drop rows whose normalized unit is neither "nM" nor
+        # None/empty, and dead-letter them so the operator can audit.
+        bad_unit_mask = ~df["activity_units"].isin(["nM", None])
+        bad_unit_mask = bad_unit_mask & df["activity_units"].notna()
+        bad_unit_mask = bad_unit_mask & (df["activity_units"].astype(str).str.strip() != "")
+        bad_count = int(bad_unit_mask.sum())
+        if bad_count > 0:
+            bad_examples = df.loc[bad_unit_mask, "activity_units"].unique()[:5].tolist()
+            self._write_dead_letter(
+                df=None,  # type: ignore[arg-type]
+                step="normalize_activity_values_enforce_nM",
+                reason=(
+                    f"activity_units not in {{'nM', None}} after normalization: "
+                    f"{bad_examples} (env CHEMBL_STANDARD_UNITS escape hatch?)"
+                ),
+                count=bad_count,
+            )
+            logger.error(
+                "[%s] INV-3 violation: %d rows have activity_units not in "
+                "{{'nM', None}} after normalization (examples: %s). Dropping.",
+                self.source_name, bad_count, bad_examples,
+            )
+            df = df[~bad_unit_mask].copy()
         self._log_transformation(
             step="normalize_activity_values",
             rows_affected=len(df),
             details={
                 "target_unit": "nM",
                 "censored_count": int(sum(norm_censored)),
+                "non_nM_dropped": bad_count,
             },
         )
         return df

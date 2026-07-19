@@ -5428,7 +5428,7 @@ def parse_drugbank_interactions_from_phase1_csv(
 
 
 def drugbank_to_node_records_from_phase1(
-    df: pd.DataFrame,
+    df: "pd.DataFrame",
 ) -> List[Dict[str, Any]]:
     """Convert Phase 1's DrugBank DataFrame to Compound node records.
 
@@ -5444,6 +5444,8 @@ def drugbank_to_node_records_from_phase1(
     kg_builder.ID_PATTERNS["Compound"] requires uppercase), falling back
     to ``drugbank_id`` when no structure was resolved.
     """
+    # TM1 Task 1.2: ensure pandas is available for pd.notna() below.
+    import pandas as pd  # noqa: WPS433  (lazy import — module-level uses plain dicts)
     nodes: List[Dict[str, Any]] = []
     for idx, row in df.iterrows():
         # v28 ROOT FIX (P2-L-10): canonical ``id`` is required by
@@ -5477,6 +5479,18 @@ def drugbank_to_node_records_from_phase1(
             "atc_codes": str(row.get("atc_codes", "")).strip() or None,
             "approved": bool(row.get("is_fda_approved", False)),
             "withdrawn": bool(row.get("is_withdrawn", False)),
+            # TM1 Task 1.2: propagate structured withdrawal metadata
+            # from the Phase 1 CSV to the KG node so the RL ranker's
+            # safety_score has access to the WHY/WHERE/WHEN context
+            # (not just the boolean is_withdrawn). When is_withdrawn
+            # is False these remain None.
+            "withdrawn_reason": str(row.get("withdrawn_reason", "")).strip() or None,
+            "withdrawn_country": str(row.get("withdrawn_country", "")).strip() or None,
+            "withdrawn_year": (
+                int(row["withdrawn_year"])
+                if pd.notna(row.get("withdrawn_year"))
+                else None
+            ),
             "cas_number": str(row.get("cas_number", "")).strip() or None,
             "pubchem_cid": str(row.get("pubchem_cid", "")).strip() or None,
             "description": str(row.get("description", "")).strip() or None,

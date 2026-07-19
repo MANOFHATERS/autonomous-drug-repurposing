@@ -204,6 +204,12 @@ PHASE1_OUTPUT_SCHEMA: Dict[str, SourceSpec] = {
                        description="Source of indication field."),
             ColumnSpec("mechanism_of_action", "string", nullable=True,
                        description="Mechanism of action text."),
+            # TM1 Task 1.1: declare ``drug_type`` so the drift detector
+            # doesn't false-positive. The pipeline emits this column
+            # (ChEMBL molecule_type, mapped to DrugType enum) but the
+            # contract previously omitted it.
+            ColumnSpec("drug_type", "string", nullable=True,
+                       description="small_molecule / antibody / protein / etc."),
         ),
         min_rows=1,
         description="ChEMBL FDA-approved drugs (Compound source).",
@@ -235,13 +241,30 @@ PHASE1_OUTPUT_SCHEMA: Dict[str, SourceSpec] = {
             ColumnSpec("target_name", "string", nullable=True,
                        description="Human-readable target name."),
             ColumnSpec("activity_type", "string", nullable=True,
-                       description="IC50, Ki, EC50, etc."),
+                       description="IC50, Ki, Kd, EC50, etc."),
             ColumnSpec("activity_value", "float64", nullable=True,
                        description="Activity value in nM."),
             ColumnSpec("activity_units", "string", nullable=True,
                        description="Units of activity_value (typically 'nM')."),
             ColumnSpec("chembl_id", "string", nullable=True,
                        description="Alias for molecule_chembl_id (legacy)."),
+            ColumnSpec("activity_censored", "bool", nullable=True,
+                       description="True if the value is a censor bound (e.g. '>10' or '<1')."),
+            ColumnSpec("activity_censor_direction", "string", nullable=True,
+                       description="Censor direction: '>', '<', or None."),
+            # TM1 Task 1.1: declare the remaining pipeline-emitted columns
+            # so the drift detector doesn't false-positive. These are
+            # emitted by _parse_activities and are needed by the bridge.
+            ColumnSpec("activity_id", "string", nullable=True,
+                       description="ChEMBL activity ID (primary key)."),
+            ColumnSpec("target_pref_name", "string", nullable=True,
+                       description="ChEMBL preferred target name."),
+            ColumnSpec("assay_id", "string", nullable=True,
+                       description="ChEMBL assay ID."),
+            ColumnSpec("assay_type", "string", nullable=True,
+                       description="ChEMBL assay type (A/B/F/...)."),
+            ColumnSpec("target_accession", "string", nullable=True,
+                       description="UniProt accession resolved from target_chembl_id."),
         ),
         min_rows=1,
         description="ChEMBL bioactivity measurements (Compound-Protein edges).",
@@ -298,6 +321,16 @@ PHASE1_OUTPUT_SCHEMA: Dict[str, SourceSpec] = {
                        description="True if approved by any regulator globally."),
             ColumnSpec("is_withdrawn", "bool", nullable=True,
                        description="True if withdrawn from market (patient-safety)."),
+            # TM1 Task 1.2: structured withdrawal metadata. These three
+            # columns are populated by drugbank_pipeline._parse_drug_element
+            # from the DrugBank <withdrawn-notice> XML element. They flow
+            # Phase 1 CSV → Phase 2 KG node → Phase 4 RL safety_score.
+            ColumnSpec("withdrawn_reason", "string", nullable=True,
+                       description="Semicolon-separated reason(s) for withdrawal (e.g. 'rhabdomyolysis')."),
+            ColumnSpec("withdrawn_country", "string", nullable=True,
+                       description="Semicolon-separated list of countries that withdrew the drug."),
+            ColumnSpec("withdrawn_year", "int64", nullable=True,
+                       description="Earliest withdrawal year across all <withdrawn-notice> elements."),
             ColumnSpec("clinical_status", "string", nullable=True,
                        description="Clinical trial status."),
             ColumnSpec("max_phase", "int64", nullable=True,
@@ -310,6 +343,24 @@ PHASE1_OUTPUT_SCHEMA: Dict[str, SourceSpec] = {
                        description="Computed logP."),
             ColumnSpec("tpsa", "float64", nullable=True,
                        description="Topological polar surface area."),
+            # TM1 Task 1.2: declare the remaining pipeline-emitted columns
+            # so the drift detector doesn't false-positive. These are
+            # emitted by drugbank_pipeline._parse_drug_element and are
+            # needed by the loader / RL ranker downstream.
+            ColumnSpec("description", "string", nullable=True,
+                       description="DrugBank free-text description."),
+            ColumnSpec("h_bond_donor_count", "int64", nullable=True,
+                       description="H-bond donor count (DrugBank calculated property)."),
+            ColumnSpec("h_bond_acceptor_count", "int64", nullable=True,
+                       description="H-bond acceptor count (DrugBank calculated property)."),
+            ColumnSpec("rotatable_bond_count", "int64", nullable=True,
+                       description="Rotatable bond count (DrugBank calculated property)."),
+            ColumnSpec("heavy_atom_count", "int64", nullable=True,
+                       description="Heavy atom count (DrugBank calculated property)."),
+            ColumnSpec("complexity", "float64", nullable=True,
+                       description="DrugBank complexity score."),
+            ColumnSpec("completeness_score", "float64", nullable=True,
+                       description="Per-row completeness score (fraction of non-null fields)."),
         ),
         min_rows=0,
         description="DrugBank drugs (preferred Compound source; empty when license paused).",
@@ -418,6 +469,29 @@ PHASE1_OUTPUT_SCHEMA: Dict[str, SourceSpec] = {
                        description="Functional description."),
             ColumnSpec("organism", "string", nullable=True,
                        description="Source organism (e.g. 'Homo sapiens')."),
+            # TM1 Task 1.3: subcellular_location is required by Phase 3
+            # for protein node feature extraction (per TASK-141). Without
+            # this column the graph transformer cannot distinguish two
+            # proteins with identical sequence but different cellular
+            # localization (e.g., a nuclear vs. cytoplasmic isoform).
+            ColumnSpec("subcellular_location", "string", nullable=True,
+                       description="Subcellular location (UniProt cc_subcellular_location)."),
+            # TM1 Task 1.3: declare the remaining pipeline-emitted columns
+            # so the drift detector doesn't false-positive. These are
+            # emitted by uniprot_pipeline._ensure_protein_columns and
+            # are needed by the loader downstream.
+            ColumnSpec("gene_name", "string", nullable=True,
+                       description="Gene name (deprecated alias for gene_symbol; always None post-cleaning)."),
+            ColumnSpec("protein_name_canonical", "string", nullable=True,
+                       description="Canonicalized protein name."),
+            ColumnSpec("length", "int64", nullable=True,
+                       description="Sequence length (amino acid count)."),
+            ColumnSpec("function_desc", "string", nullable=True,
+                       description="Function description (legacy alias for 'function')."),
+            ColumnSpec("string_id", "string", nullable=True,
+                       description="First STRING cross-reference ID."),
+            ColumnSpec("all_string_ids", "string", nullable=True,
+                       description="Semicolon-separated list of all STRING cross-reference IDs."),
         ),
         min_rows=1,
         description="UniProt proteins (Protein node source).",
@@ -774,4 +848,23 @@ def detect_contract_vs_pipeline_drift() -> List[str]:
             )
 
     return drift
+
+
+# =============================================================================
+# TM1 Task 1.2 ROOT FIX: re-export the Drug & Protein ORM models so the
+# verification commands in the task spec work as written:
+#   python -c "from phase1.contracts.phase1_schema import Drug; assert hasattr(Drug, 'is_withdrawn')"
+#   python -c "from phase1.contracts.phase1_schema import Protein; assert hasattr(Protein, 'sequence')"
+# Without these re-exports, the task verification raises ImportError.
+# The ORM models remain the SINGLE source of truth for column definitions;
+# this re-export makes them importable from the contract module without
+# duplicating the model code.
+# =============================================================================
+try:  # defensive: don't break schema import if ORM deps are missing
+    from database.models import Drug as Drug  # noqa: F401  (re-export)
+    from database.models import Protein as Protein  # noqa: F401  (re-export)
+except ImportError:  # pragma: no cover — only fires in envs without sqlalchemy
+    Drug = None  # type: ignore[assignment,misc]
+    Protein = None  # type: ignore[assignment,misc]
+
 

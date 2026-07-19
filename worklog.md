@@ -520,3 +520,58 @@ Stage Summary:
   PPO RL agent (trained, wrote ppo_model_50_steps.zip).
 - All 22 issues verified at runtime in REAL CODE (not comments, not tests, not grep).
 - main branch on GitHub (commit 17c63b9) has all the fixes; fresh clone verification PASSED.
+
+---
+Task ID: TM1-Tasks-1.1-1.2-1.3
+Agent: Teammate 1 (Manoj / Team Cosmic)
+Task: Forensic root-cause fix for Task 1.1 (ChEMBL contract), Task 1.2 (DrugBank withdrawn-drug safety flow), Task 1.3 (UniProt protein-sequence flow). Read every line of real code (not comments/tests); identify every gap; apply root-cause fixes; write contract tests; run real code to verify.
+
+Work Log:
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx) to understand the 6-phase architecture.
+- Cloned repo on `main`; created branch `fix/teammate-1-tasks-1.1-1.2-1.3-forensic-root`.
+- Hostile-auditor pass over 36,254 lines of real executable code across 11 files in scope:
+  - phase1/pipelines/chembl_pipeline.py (4997 lines)
+  - phase1/pipelines/_chembl_http_client.py (929 lines)
+  - phase1/pipelines/drugbank_pipeline.py (4489 lines)
+  - phase1/pipelines/uniprot_pipeline.py (4122 lines)
+  - phase1/pipelines/_dev_samples.py (1323 lines)
+  - phase1/pipelines/_http_client.py (33 lines)
+  - phase1/contracts/phase1_schema.py (777 lines)
+  - phase1/database/models.py (Drug class)
+  - phase2/drugos_graph/chembl_loader.py (2895 lines)
+  - phase2/drugos_graph/drugbank_parser.py (5627 lines)
+  - phase2/drugos_graph/uniprot_loader.py (2288 lines)
+  - phase2/drugos_graph/phase1_bridge.py (8774 lines)
+  - rl/rl_drug_ranker.py (reward + env step)
+- Identified 15 root-cause gaps across the 3 tasks:
+  - Task 1.1: _CHEMBL_ID_RE defined but NEVER CALLED; target_chembl_id had ZERO validation; env-var CHEMBL_STANDARD_UNITS escape hatch let '%' through; activity_type not uppercased before isin filter; embedded_sample_molecules in chembl_pipeline.py had NO production guard; _get_processed_columns did not exist (drift detector was a no-op).
+  - Task 1.2: withdrawn_reason/country/year absent at EVERY layer (XML, ORM, CSV, contract, loader, bridge, RL); no Drug class importable from phase1_schema (verification ImportError); RL ranker used HARDCODED WITHDRAWN_DRUGS frozenset with EXACT match — newly-withdrawn drugs ranked safe; tokenized helpers existed but were DEAD CODE in production reward path.
+  - Task 1.3: cc_subcellular_location never requested from API; _clean_function_desc ACTIVELY DESTROYED subcellular-location text via _SUBSECTION_MARKERS; pipeline emitted function_desc but every consumer read function (column-name drift); dev sample had 8 proteins (not 10) and NO sequence column; phase2 raw .dat path had NO CC line parser.
+- Applied ROOT-CAUSE fixes (no surface patches) to:
+  - phase1/pipelines/chembl_pipeline.py: added _is_valid_chembl_id helper; called it in _parse_molecules (chembl_id) and _parse_activities (mol_chembl_id + target_chembl_id); uppercased activity_type before isin filter; added post-normalization enforcement that activity_units is 'nM' or None with dead-letter; delegated embedded sample fallback to _dev_samples.embedded_chembl_molecules (which enforces the production guard); added module-level _get_processed_columns.
+  - phase1/pipelines/drugbank_pipeline.py: added <withdrawn-notice> XML parsing in _parse_drug_element (extracts reason/country/year from sub-elements, supports both hyphen and underscore spellings, handles multi-notice aggregation); added 3 new fields to drug_rec dict; added them to _drug_columns() and _ensure_drug_columns() defaults; added module-level _get_processed_columns.
+  - phase1/pipelines/uniprot_pipeline.py: added cc_subcellular_location to uniprot_fields list; added "Subcellular location [CC]" to _EXPECTED_TSV_COLUMNS and TSV_HEADER; updated _flatten_uniprot_rest_json to walk subcellularLocations entries (location + topologies); updated _flatten_uniprot_dat_record to parse CC SUBCELLULAR LOCATION blocks; added subcellular_location to column_map and EXPECTED_OUTPUT_COLUMNS; added _clean_subcellular_location helper; added function column alias (function = function_desc) so contract-canonical name carries the value; added subcellular_location to _ensure_protein_columns defaults; added module-level _get_processed_columns.
+  - phase1/pipelines/_dev_samples.py: added sequence + subcellular_location + function_desc columns to all 8 proteins; added 2 new proteins (P08172 ACHE, P00533 EGFR) to satisfy the 10-protein contract test.
+  - phase1/contracts/phase1_schema.py: added withdrawn_reason/country/year ColumnSpecs to drugs SourceSpec; added subcellular_location ColumnSpec to uniprot_proteins SourceSpec; added activity_censored + activity_censor_direction + activity_id/target_pref_name/assay_id/assay_type/target_accession to chembl_activities; added drug_type to chembl_drugs; added description/h_bond_*/heavy_atom_count/complexity/completeness_score to drugs; added gene_name/protein_name_canonical/length/function_desc/string_id/all_string_ids to uniprot_proteins; added Drug + Protein re-export so `from phase1.contracts.phase1_schema import Drug` works (verification command).
+  - phase1/database/models.py: added withdrawn_reason (Text), withdrawn_country (String(200)), withdrawn_year (Integer) columns to Drug SQLAlchemy model.
+  - phase1/tests/fixtures/drugbank_sample.xml: added 2 <withdrawn-notice> elements (US/DE, 2001, rhabdomyolysis) to the Cerivastatin (DB00463) entry so the new XML extraction has test coverage.
+  - phase2/drugos_graph/drugbank_parser.py: drugbank_to_node_records_from_phase1 now reads withdrawn_reason/country/year from the Phase 1 CSV and propagates them to the KG node; added lazy pandas import for pd.notna().
+  - phase2/drugos_graph/uniprot_loader.py: uniprot_to_node_records_from_phase1 now reads subcellular_location and propagates to KG node.
+  - phase2/drugos_graph/phase1_bridge.py: Compound node now carries withdrawn_reason/country/year; Protein node now carries subcellular_location.
+  - rl/rl_drug_ranker.py: RewardFunction.compute() Gate 0 now checks BOTH row.is_withdrawn (from Phase 1→Phase 2 KG) AND the hardcoded WITHDRAWN_DRUGS frozenset — if EITHER is True, hard-reject. Same fix in env step counter for n_withdrawn_rejected attribution.
+- Wrote 3 contract tests (37 test methods total):
+  - tests/contract_test_chembl_roundtrip.py — 11 tests covering all 5 ChEMBL invariants
+  - tests/contract_test_drugbank_withdrawn.py — 11 tests covering all 5 DrugBank invariants (incl. the critical patient-safety test: a row with is_withdrawn=True but drug_name NOT in WITHDRAWN_DRUGS frozenset is correctly rejected)
+  - tests/contract_test_uniprot_roundtrip.py — 15 tests covering all 4 UniProt invariants (incl. 10-protein sample round-trip with non-empty sequence)
+- Installed deps: sqlalchemy, pytest, gymnasium (required by rl_drug_ranker).
+- Ran real code: `python3 -m pytest tests/contract_test_*.py -v` → 37/37 PASS.
+- Verified no regressions: 12 pre-existing failures in phase1/tests/test_chembl_pipeline.py are IDENTICAL on main (without my changes) — confirmed via git stash + pytest. My changes added 37 new passing tests and zero regressions.
+- Verified Task 1.2 verification command: `python -c "from phase1.contracts.phase1_schema import Drug; assert hasattr(Drug, 'is_withdrawn')"` now passes (was ImportError before).
+
+Stage Summary:
+- All 3 TM1 tasks (1.1 ChEMBL, 1.2 DrugBank patient-safety, 1.3 UniProt) are now ROOT-CAUSE FIXED with end-to-end wiring Phase 1 → Phase 2 → Phase 3 → Phase 4 verified by 37 passing contract tests.
+- The most critical patient-safety fix: RL ranker now consumes `is_withdrawn` from the input row (not just the hardcoded frozenset), so newly-withdrawn drugs are correctly rejected — closing the loophole the user explicitly flagged ("withdrawn drugs like Vioxx could be ranked as safe repurposing candidates").
+- The Drug SQLAlchemy model now carries structured withdrawal metadata (reason/country/year) extracted from DrugBank <withdrawn-notice> XML, so the RL safety_score can use WHY/WHERE/WHEN context (not just the boolean).
+- The UniProt pipeline now extracts subcellular_location (Phase 3 requirement per TASK-141) and the function/function_desc column-name drift is fixed.
+- Files modified (10): phase1/contracts/phase1_schema.py, phase1/database/models.py, phase1/pipelines/chembl_pipeline.py, phase1/pipelines/drugbank_pipeline.py, phase1/pipelines/uniprot_pipeline.py, phase1/pipelines/_dev_samples.py, phase1/tests/fixtures/drugbank_sample.xml, phase2/drugos_graph/drugbank_parser.py, phase2/drugos_graph/uniprot_loader.py, phase2/drugos_graph/phase1_bridge.py, rl/rl_drug_ranker.py.
+- Files added (3): tests/contract_test_chembl_roundtrip.py, tests/contract_test_drugbank_withdrawn.py, tests/contract_test_uniprot_roundtrip.py.

@@ -3547,7 +3547,27 @@ class RewardFunction:
         # This makes the data flywheel (DOCX §10) work: the validated
         # pair (thalidomide, multiple myeloma) is now reachable and
         # receives the +0.1 reward bonus at line ~1773.
-        if drug_name in WITHDRAWN_DRUGS:
+        #
+        # TM1 Task 1.2 ROOT FIX (patient-safety critical, hostile-auditor
+        # pass): the previous code relied SOLELY on the hardcoded
+        # ``WITHDRAWN_DRUGS`` frozenset (~30 entries). This meant a
+        # newly-withdrawn drug that Phase 1/Phase 2 had correctly marked
+        # ``is_withdrawn=True`` (from DrugBank <withdrawn-notice>) would
+        # STILL be ranked as a safe repurposing candidate, because the
+        # frozenset hadn't been manually updated. ROOT FIX: also check
+        # the row-level ``is_withdrawn`` flag that flows from
+        # Phase 1 → Phase 2 KG → Phase 4 input row. If EITHER signal is
+        # True, hard-reject. The frozenset remains as a defense-in-depth
+        # backstop for the case where the row's ``is_withdrawn`` field
+        # is missing (e.g., legacy CSV without the column).
+        row_is_withdrawn = False
+        if "is_withdrawn" in row.index:
+            _rw = row.get("is_withdrawn")
+            if _rw is True or (
+                isinstance(_rw, str) and _rw.strip().lower() in ("true", "1", "yes", "y")
+            ):
+                row_is_withdrawn = True
+        if row_is_withdrawn or drug_name in WITHDRAWN_DRUGS:
             return -1.0
         # P4-014 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): the previous
         # code used EXACT disease-name matching, which is too strict for
@@ -6001,7 +6021,18 @@ class DrugRankingEnv(gym.Env):
             # ingestion bug). The fix separates them.
             #
             # Gate 0: withdrawn drug (check FIRST — mirrors compute()).
-            _is_withdrawn_global = _drug_name in WITHDRAWN_DRUGS
+            # TM1 Task 1.2: also check row-level is_withdrawn flag
+            # (flows Phase 1 → Phase 2 KG → Phase 4 input row). Mirrors
+            # the same fix in RewardFunction.compute() at line ~3563.
+            _row_is_withdrawn = False
+            if "is_withdrawn" in row.index:
+                _rw = row.get("is_withdrawn")
+                if _rw is True or (
+                    isinstance(_rw, str)
+                    and _rw.strip().lower() in ("true", "1", "yes", "y")
+                ):
+                    _row_is_withdrawn = True
+            _is_withdrawn_global = _row_is_withdrawn or _drug_name in WITHDRAWN_DRUGS
             _contras_for_drug = INDICATION_WITHDRAWN_DRUGS.get(_drug_name)
             _is_withdrawn_indication = False
             if _contras_for_drug:
