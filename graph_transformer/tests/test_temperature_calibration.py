@@ -100,7 +100,6 @@ def test_log_calibration_plot_with_mock_mlflow():
        2. Call mlflow.log_artifact with a PNG file.
        3. Call mlflow.log_metrics with calibration_ece_pre / _post / _improvement.
     """
-    from graph_transformer import utils
     from graph_transformer.utils import mlflow_integration
 
     # Build a fake mlflow module with MagicMock for the functions we use.
