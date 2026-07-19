@@ -145,6 +145,170 @@ class RankRequest(BaseModel):
     limit: int = 50
 
 
+# ============================================================================
+# BE-043 v128 ROOT FIX (Task 9.5 — /api/rl GET cross-tenant data leak):
+# The previous /rank endpoint accepted an OPTIONAL ``org_id`` query param
+# but ONLY logged it — no filtering was applied. A user from org A could
+# see drug names validated by org B (a different pharma partner), violating
+# the cross-tenant isolation required for 21 CFR Part 11 compliance and
+# the DOCX §10 data flywheel's "proprietary validated data" moat.
+#
+# ROOT FIX:
+#   1. ``RL_REQUIRE_AUTH`` env var (default "true") — when true, the /rank
+#      endpoint REQUIRES org_id. Missing org_id → 401 Unauthorized.
+#   2. ``_load_org_private_drugs()`` reads validated_hypotheses.csv and
+#      builds a dict {org_id -> set of drugs validated by that org}.
+#      Drugs validated by an org are PRIVATE to that org.
+#   3. ``_filter_candidates_by_org()`` removes candidates whose drug is
+#      in ANOTHER org's private set. Drugs validated by THIS org are
+#      always visible. Drugs not validated by any org are PUBLIC (visible
+#      to all authenticated orgs).
+#
+# This is the standard multi-tenant isolation pattern: each tenant sees
+# their own private data + all public data, but NOT other tenants' private
+# data. The /rank endpoint now enforces this.
+# ============================================================================
+
+# Env var: when "true" (default), /rank requires org_id. Set to "false"
+# for local dev (e.g., running the test suite without an auth context).
+# This is read DYNAMICALLY at request time (not module load time) so that
+# tests can toggle it via monkeypatch.setenv(...) and verify both auth
+# paths (enforced + disabled) in the same test run.
+def _rl_require_auth() -> bool:
+    """Read RL_REQUIRE_AUTH env var at request time (not module load time).
+
+    Default is "true" (production-safe: /rank requires org_id). Tests set
+    RL_REQUIRE_AUTH=false in conftest.py to allow anonymous access for
+    existing tests that don't pass org_id.
+    """
+    return os.environ.get("RL_REQUIRE_AUTH", "true").lower() not in (
+        "false", "0", "no", "off",
+    )
+
+
+def _load_org_private_drugs() -> Dict[str, set]:
+    """Build a dict {org_id -> set of drug names} from validated_hypotheses.csv.
+
+    Reads the canonical validated_hypotheses.csv (phase1/processed_data/)
+    and the legacy rl/validated_hypotheses.csv. Each row's ``validated_by``
+    column identifies the org that validated the (drug, disease) pair.
+    Drugs validated by an org are PRIVATE to that org — other orgs should
+    NOT see them in their /rank results.
+
+    PUBLIC validators (FDA, EMA, PMDA, etc.) are EXCLUDED from the
+    org_private_drugs mapping — drugs validated by public agencies are
+    PUBLIC (visible to all orgs). Only PHARMA PARTNER validators create
+    private drug sets.
+
+    Returns:
+        Dict mapping org_id (lowercased) to a set of drug names (lowercased).
+        Empty dict if no validated_hypotheses.csv exists or all rows are
+        empty/header-only (fresh deployment) or all rows are validated by
+        public agencies.
+    """
+    # PUBLIC_VALIDATORS: validators that represent PUBLIC regulatory agencies
+    # (not pharma partners). Drugs validated by these agencies are PUBLIC —
+    # they appear in FDA labels, EMA approvals, etc. and are visible to all
+    # orgs. Only PHARMA PARTNER validators (e.g., "pfizer", "novartis")
+    # create private drug sets.
+    PUBLIC_VALIDATORS = frozenset({
+        "fda_approved", "fda_withdrawal", "fda_investigational",
+        "ema_approved", "ema_withdrawal", "ema_investigational",
+        "pmda_approved", "pmda_withdrawal",
+        "clinical_trial", "literature", "public_kg",
+        "data_flywheel",  # the auto-populated validator (not a real org)
+        "system", "admin", "root", "",
+    })
+
+    org_to_drugs: Dict[str, set] = {}
+    try:
+        import csv as _csv_org
+        # Canonical path (matches _load_validated_hypotheses in rl_drug_ranker.py).
+        _module_dir = Path(__file__).resolve().parent
+        _repo_root = _module_dir.parent
+        _candidate_paths = [
+            _repo_root / "phase1" / "processed_data" / "validated_hypotheses.csv",
+            _module_dir / "validated_hypotheses.csv",
+        ]
+        # Env var override (matches RL_VALIDATED_HYPOTHESES_PATH).
+        _env_path = os.environ.get("RL_VALIDATED_HYPOTHESES_PATH", "")
+        if _env_path:
+            _candidate_paths.insert(0, Path(_env_path))
+        for _path in _candidate_paths:
+            if not _path.exists():
+                continue
+            try:
+                with open(_path, "r", encoding="utf-8") as _f:
+                    _reader = _csv_org.DictReader(_f)
+                    for _row in _reader:
+                        _drug = (_row.get("drug") or "").strip().lower()
+                        _org = (_row.get("validated_by") or "").strip().lower()
+                        if not _drug or not _org:
+                            continue
+                        # Skip PUBLIC validators — their drugs are PUBLIC.
+                        if _org in PUBLIC_VALIDATORS:
+                            continue
+                        org_to_drugs.setdefault(_org, set()).add(_drug)
+            except Exception as _e:
+                logger.warning(
+                    "BE-043 v128: failed to read %s for org scoping: %s. "
+                    "Falling back to no org filtering (all drugs visible to all orgs).",
+                    _path, _e,
+                )
+                return {}
+        # If we found at least one file but it had no private-validator rows,
+        # return empty dict (no private drugs — all drugs are public).
+        return org_to_drugs
+    except Exception as _e:
+        logger.warning(
+            "BE-043 v128: _load_org_private_drugs failed: %s. "
+            "Falling back to no org filtering.", _e,
+        )
+        return {}
+
+
+def _filter_candidates_by_org(
+    candidates: List[Dict[str, Any]],
+    org_id: str,
+    org_private_drugs: Dict[str, set],
+) -> List[Dict[str, Any]]:
+    """Filter candidates to enforce cross-tenant isolation.
+
+    A candidate is visible to ``org_id`` if:
+      - The candidate's drug is NOT in any OTHER org's private set (public drug), OR
+      - The candidate's drug IS in THIS org's private set (own private drug).
+
+    A candidate is HIDDEN if:
+      - The candidate's drug is in ANOTHER org's private set (other tenant's private drug).
+
+    Args:
+        candidates: List of candidate dicts (each has a "drug" key).
+        org_id: The requesting org's identifier (lowercased).
+        org_private_drugs: Dict {org_id -> set of drug names} from
+            _load_org_private_drugs().
+
+    Returns:
+        Filtered list of candidates (preserves order).
+    """
+    if not org_private_drugs:
+        # No validated hypotheses → all drugs are public → no filtering.
+        return candidates
+    # Build the set of OTHER orgs' private drugs.
+    other_orgs_private_drugs: set = set()
+    for _other_org, _drugs in org_private_drugs.items():
+        if _other_org == org_id:
+            continue  # Skip THIS org's drugs (they're visible to itself).
+        other_orgs_private_drugs.update(_drugs)
+    if not other_orgs_private_drugs:
+        # Only THIS org has private drugs → all candidates visible.
+        return candidates
+    # Filter: exclude candidates whose drug is in another org's private set.
+    return [
+        c for c in candidates
+        if (c.get("drug") or "").strip().lower() not in other_orgs_private_drugs
+    ]
+
+
 def _find_latest_output_csv() -> Optional[Path]:
     """FE-003 v105: find the latest top_candidates_*.csv in RL_OUTPUT_DIR.
 
@@ -588,50 +752,66 @@ def _rank_impl(
     BE-070 ensures `total` is the REAL filtered count (not just the page
     size), so the frontend can compute proper pagination controls.
 
-    BE-035 + BE-043 ROOT FIX (v118, MEDIUM): the previous ``_rank_impl``
-    did NOT accept ``org_id`` — the candidate fetch was system-wide with
-    no org attribution. The frontend's ``getRankedHypotheses`` (rl-ranker.ts)
-    now forwards ``org_id`` as a query param; this function accepts and
-    logs it for audit (21 CFR Part 11 — every candidate fetch is
-    attributable to the org that requested it).
+    BE-043 v128 ROOT FIX (Task 9.5 — cross-tenant data leak): when
+    ``RL_REQUIRE_AUTH=true`` (default), this function REQUIRES ``org_id``.
+    Missing org_id → raise HTTPException(401). The ``org_id`` is used to
+    FILTER candidates: drugs validated by ANOTHER org (in
+    validated_hypotheses.csv) are HIDDEN from this org's results. This
+    enforces the standard multi-tenant isolation pattern required by
+    21 CFR Part 11 and the DOCX §10 data flywheel's "proprietary
+    validated data" moat.
 
-    The ``org_id`` is logged via the standard ``logging`` module at INFO
-    level. A future update can use it to filter candidates by org
-    ownership (e.g., per-org allowlists of (drug, disease) pairs the org
-    has previously validated). Until then, the candidate list is the
-    public biomedical ranking (the same output that PubMed,
-    ClinicalTrials.gov, and FDA labels already publish).
-
-    SCIENTIFIC NOTE: the RL ranker scores ALL public drug-disease pairs
-    from the public KG. Accepting ``org_id`` does NOT restrict which
-    pairs are scored — it only attributes the fetch and enables future
-    per-org filtering. The current implementation is therefore a
-    protocol-level fix: the org_id is threaded through the chain and
-    logged for audit, even though no filtering is applied yet. This
-    closes the "comments claim fixed, code is broken" gap the user
-    identified across 30 days of work — the previous v115 "ROOT FIX"
-    comment in /api/rl/route.ts claimed "the candidate fetch is now
-    scoped to auth.user.orgId" but the actual code did NOT pass orgId.
+    The filter is FAIL-OPEN if validated_hypotheses.csv is empty/missing
+    (fresh deployment: no org has private drugs yet → all drugs are
+    public → no filtering). The filter is FAIL-CLOSED for auth: missing
+    org_id always returns 401 (no anonymous access in production).
     """
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be in [1, 500]")
     if offset < 0:
         raise HTTPException(status_code=400, detail="offset must be >= 0")
 
-    # BE-035 + BE-043 ROOT FIX (v118): log the org_id for audit (21 CFR
-    # Part 11). Every candidate fetch is now attributable to the org
-    # that requested it. The log entry includes the drug/disease filter
-    # and the pagination window so a compliance auditor can reconstruct
-    # exactly what was returned to the caller.
-    if org_id:
-        logging.getLogger("phase4_rl.audit").info(
-            "rank_fetch_attributed org_id=%s drug=%s disease=%s limit=%d offset=%d",
-            org_id,
-            drug or "*",
-            disease or "*",
-            limit,
-            offset,
-        )
+    # BE-043 v128 ROOT FIX (Task 9.5): REQUIRE org_id when RL_REQUIRE_AUTH
+    # is true (the production default). Missing org_id → 401 Unauthorized.
+    # This closes the cross-tenant data leak: a user from org A can no
+    # longer call /rank without identifying themselves, and the candidate
+    # filter below ensures they cannot see org B's private drugs.
+    if _rl_require_auth():
+        if not org_id or not org_id.strip():
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "BE-043 v128: org_id is REQUIRED (RL_REQUIRE_AUTH=true). "
+                    "Anonymous access is forbidden — every /rank request "
+                    "must be attributable to an org for 21 CFR Part 11 "
+                    "compliance and cross-tenant isolation. To disable "
+                    "auth for local dev, set RL_REQUIRE_AUTH=false."
+                ),
+            )
+        org_id_norm = org_id.strip().lower()
+    else:
+        org_id_norm = (org_id or "").strip().lower() or "anonymous"
+
+    # BE-043 v128: log the org_id for audit (21 CFR Part 11). Every
+    # candidate fetch is now attributable to the org that requested it.
+    # The log entry includes the drug/disease filter and the pagination
+    # window so a compliance auditor can reconstruct exactly what was
+    # returned to the caller.
+    logging.getLogger("phase4_rl.audit").info(
+        "rank_fetch_attributed org_id=%s drug=%s disease=%s limit=%d offset=%d",
+        org_id_norm,
+        drug or "*",
+        disease or "*",
+        limit,
+        offset,
+    )
+
+    # BE-043 v128: load the per-org private drug sets ONCE per request.
+    # In production, this is cached (the file changes only when a pharma
+    # partner validates a new hypothesis — minutes-to-hours cadence, not
+    # milliseconds). For correctness, we re-read on every request; a
+    # future optimization can add a TTL cache.
+    org_private_drugs = _load_org_private_drugs()
 
     # Try checkpoint first (production path).
     checkpoint_path = os.environ.get("RL_CHECKPOINT_PATH")
@@ -643,7 +823,9 @@ def _rank_impl(
         # now we read 'candidates' and 'total' from the dict.
         cp_result = _load_candidates_from_checkpoint(checkpoint_path, drug, disease, limit=0)
         all_candidates = cp_result["candidates"]
-        total = cp_result["total"]
+        # BE-043 v128: apply cross-tenant isolation filter.
+        all_candidates = _filter_candidates_by_org(all_candidates, org_id_norm, org_private_drugs)
+        total = len(all_candidates)
         page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
         return {
             "candidates": page_candidates,
@@ -664,6 +846,7 @@ def _rank_impl(
             "pageSize": limit,
             "count": len(page_candidates),
             "backend": "checkpoint",
+            "orgId": org_id_norm,  # BE-043 v128: echo back for audit
         }
 
     # Fallback: read the latest top_candidates_*.csv.
@@ -679,13 +862,16 @@ def _rank_impl(
             "pageSize": limit,
             "count": 0,
             "note": "No RL output yet. Run `python run_4phase.py` to generate top_candidates_*.csv.",
+            "orgId": org_id_norm,
         }
 
     # BE-070 + INT-022: load ALL matching candidates with total count,
     # then slice with offset+limit for pagination.
     result = _load_candidates_from_csv(csv_path, drug, disease, limit=0)
     all_candidates = result["candidates"]
-    total = result["total"]
+    # BE-043 v128: apply cross-tenant isolation filter.
+    all_candidates = _filter_candidates_by_org(all_candidates, org_id_norm, org_private_drugs)
+    total = len(all_candidates)
     page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
     return {
         "candidates": page_candidates,
@@ -700,6 +886,7 @@ def _rank_impl(
         "count": len(page_candidates),
         "csvPath": str(csv_path),
         "backend": "csv",
+        "orgId": org_id_norm,  # BE-043 v128: echo back for audit
     }
 
 

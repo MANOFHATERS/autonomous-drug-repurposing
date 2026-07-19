@@ -68,6 +68,13 @@ from .constants import (
     LITERATURE_SUPPORT_COL,
     IS_KNOWN_POSITIVE_COL,
     CONTROLLED_SUBSTANCE_COL,
+    # P4-006 v128 ROOT FIX (Task 9.6): optional bridge-provided feature columns.
+    GNN_SCORE_CALIBRATED_COL,
+    GNN_SCORE_AGE_HOURS_COL,
+    BRIDGE_DISEASE_PAIR_COUNT_COL,
+    BRIDGE_DISEASE_AVG_GNN_COL,
+    BRIDGE_DISEASE_AVG_SAFETY_COL,
+    OPTIONAL_BRIDGE_FEATURE_COLS,
 )
 
 # P4-021: DrugRankingEnv + RankedCandidate + PipelineMetrics still come from
@@ -425,4 +432,11 @@ __all__ = [
     "is_neo4j_available",
     "get_pathway_explanation",
     "enrich_candidates_with_pathways",
+    # P4-006 v128 (Task 9.6)
+    "GNN_SCORE_CALIBRATED_COL",
+    "GNN_SCORE_AGE_HOURS_COL",
+    "BRIDGE_DISEASE_PAIR_COUNT_COL",
+    "BRIDGE_DISEASE_AVG_GNN_COL",
+    "BRIDGE_DISEASE_AVG_SAFETY_COL",
+    "OPTIONAL_BRIDGE_FEATURE_COLS",
 ]

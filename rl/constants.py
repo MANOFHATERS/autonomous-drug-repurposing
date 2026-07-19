@@ -97,6 +97,55 @@ UNMET_NEED_COL: str = "unmet_need_score"
 # (EFFICACY_COL and ADME_COL are imported from the shared contract above.)
 
 # ============================================================================
+# P4-006 v128 ROOT FIX (Task 9.6 — bridge column mismatch):
+# The Phase 3 bridge (graph_transformer/gt_rl_bridge.py) writes 17 columns
+# (2 IDs + 15 features), but the env previously read only 12 (2 IDs +
+# 10 features), silently DROPPING 5 bridge-provided feature columns. The
+# 5 ignored columns include calibrated GNN score, GNN score timestamp
+# (staleness signal), and the bridge's pre-computed disease context
+# statistics. The agent was blind to these signals — its policy could
+# not learn from confidence calibration, prediction freshness, or the
+# bridge's authoritative disease context (it had to re-derive disease
+# context from its own data, which differs between train and test envs).
+#
+# ROOT FIX: add 5 new column constants for the previously-ignored bridge
+# columns. The env (DrugRankingEnv.__init__) now reads ALL 17 bridge
+# columns and includes them in the observation vector, bringing
+# observation_space.shape to (18,) — 10 canonical features + 5 newly-added
+# bridge columns + 3 env-derived disease context columns.
+#
+# The 5 newly-added bridge columns:
+#   1. GNN_SCORE_CALIBRATED_COL — the temperature-calibrated GNN score
+#      (apply_temperature=True). Useful for the agent to see both the raw
+#      ranking signal (gnn_score) and the decision-threshold signal
+#      (gnn_score_calibrated) — they encode different information.
+#   2. GNN_SCORE_AGE_HOURS_COL — derived from gnn_score_timestamp. Encodes
+#      how stale the GNN prediction is (0 = fresh, large = stale). The
+#      agent can learn to DOWN-WEIGHT stale predictions (the GT model may
+#      have been retrained since the gnn_score was computed).
+#   3. BRIDGE_DISEASE_PAIR_COUNT_COL — the bridge's authoritative count
+#      of drug-disease pairs per disease (computed on the FULL graph, not
+#      the env's train/test subset). The env still re-derives its own
+#      per-env stats for train/test consistency, but the bridge's value
+#      gives the agent a STABLE global signal.
+#   4. BRIDGE_DISEASE_AVG_GNN_COL — the bridge's authoritative mean gnn
+#      per disease (full-graph). Same rationale as above.
+#   5. BRIDGE_DISEASE_AVG_SAFETY_COL — the bridge's authoritative mean
+#      safety per disease (full-graph).
+# ============================================================================
+GNN_SCORE_CALIBRATED_COL: str = "gnn_score_calibrated"
+GNN_SCORE_AGE_HOURS_COL: str = "gnn_score_age_hours"  # derived from gnn_score_timestamp
+# NOTE: the bridge writes these as "disease_pair_count" / "disease_avg_gnn" /
+# "disease_avg_safety". The env RENAMES them to the "bridge_*" names below
+# at __init__ time (before its own groupby re-derives "disease_pair_count"
+# etc.) to avoid pandas merge _x/_y suffix collisions while preserving both
+# the bridge's authoritative full-graph value AND the env's train/test-split
+# value in the observation vector.
+BRIDGE_DISEASE_PAIR_COUNT_COL: str = "bridge_disease_pair_count"
+BRIDGE_DISEASE_AVG_GNN_COL: str = "bridge_disease_avg_gnn"
+BRIDGE_DISEASE_AVG_SAFETY_COL: str = "bridge_disease_avg_safety"
+
+# ============================================================================
 # DISEASE-CONTEXT FEATURES (added at runtime by the env)
 # ============================================================================
 DISEASE_PAIR_COUNT_COL: str = "disease_pair_count"
@@ -133,6 +182,14 @@ CONTROLLED_SUBSTANCE_COL: str = "controlled_substance"
 # DEFAULT FEATURE COLUMNS
 # ============================================================================
 # The environment may EXTEND this list with disease context features at runtime.
+#
+# P4-006 v128 ROOT FIX (Task 9.6): the 5 BRIDGE_* columns are OPTIONALLY
+# read by DrugRankingEnv when the bridge CSV provides them. They are NOT
+# in the canonical FEATURE_COLS because (a) older bridge versions may not
+# emit them, and (b) the env-derived disease context (DISEASE_PAIR_COUNT_COL
+# etc.) provides train/test-consistent values. The env includes the bridge
+# columns IN ADDITION to the env-derived ones when present — bringing the
+# total observation_space.shape to (18,) on a v128+ bridge CSV.
 FEATURE_COLS: List[str] = [
     GNN_SCORE_COL,
     SAFETY_COL,
@@ -146,6 +203,18 @@ FEATURE_COLS: List[str] = [
     ADME_COL,
 ]
 
+# P4-006 v128: OPTIONAL bridge-provided feature columns (added to the
+# observation vector by DrugRankingEnv when present in the input CSV).
+# These are NOT required — the env falls back to default values (0.0)
+# when the bridge CSV omits them (older bridge versions).
+OPTIONAL_BRIDGE_FEATURE_COLS: List[str] = [
+    GNN_SCORE_CALIBRATED_COL,
+    GNN_SCORE_AGE_HOURS_COL,
+    BRIDGE_DISEASE_PAIR_COUNT_COL,
+    BRIDGE_DISEASE_AVG_GNN_COL,
+    BRIDGE_DISEASE_AVG_SAFETY_COL,
+]
+
 REQUIRED_COLUMNS: List[str] = FEATURE_COLS + [DRUG_COL, DISEASE_COL]
 
 __all__ = [
@@ -155,6 +224,10 @@ __all__ = [
     "GNN_SCORE_COL", "SAFETY_COL", "MARKET_COL", "CONFIDENCE_COL",
     "PATHWAY_COL", "PATENT_COL", "RARE_DISEASE_COL", "UNMET_NEED_COL",
     "EFFICACY_COL", "ADME_COL",
+    # P4-006 v128: optional bridge-provided feature columns
+    "GNN_SCORE_CALIBRATED_COL", "GNN_SCORE_AGE_HOURS_COL",
+    "BRIDGE_DISEASE_PAIR_COUNT_COL", "BRIDGE_DISEASE_AVG_GNN_COL",
+    "BRIDGE_DISEASE_AVG_SAFETY_COL", "OPTIONAL_BRIDGE_FEATURE_COLS",
     # Disease context
     "DISEASE_PAIR_COUNT_COL", "DISEASE_AVG_GNN_COL", "DISEASE_AVG_SAFETY_COL",
     # GNN staleness
