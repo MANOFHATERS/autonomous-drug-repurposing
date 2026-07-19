@@ -407,6 +407,63 @@ def _is_valid_drugbank_id(drugbank_id: str | None) -> bool:
         or _SYNTHESIZED_DRUG_ID_RE.match(drugbank_id)
     )
 
+
+def _get_processed_columns(source_key: str) -> list[str]:
+    """Return the canonical CSV columns this pipeline emits for ``source_key``.
+
+    TM1 Task 1.2 ROOT FIX: enables
+    :func:`phase1.contracts.phase1_schema.detect_contract_vs_pipeline_drift`
+    to verify the pipeline's actual output schema matches the contract.
+    Without this function the drift detector silently skips DrugBank
+    sources — which is exactly how the withdrawn_reason/country/year
+    gap went undetected for months.
+
+    Parameters
+    ----------
+    source_key : str
+        One of ``"drugs"``, ``"interactions"``, or ``"indications"``.
+
+    Returns
+    -------
+    list[str]
+        The ordered list of column names the pipeline writes to the CSV
+        for the requested source.
+    """
+    if source_key == "drugs":
+        # Must match DrugBankPipeline._drug_columns() + the
+        # indication/indication_source/indication_type fields written
+        # by _parse_drug_element and groups/description that the
+        # pipeline persists through to the CSV but NOT through the
+        # Drug model. Order matches the actual CSV header order.
+        return [
+            "drugbank_id", "name", "inchikey", "smiles",
+            "molecular_weight", "molecular_formula",
+            "is_globally_approved", "is_fda_approved",
+            "is_withdrawn", "withdrawn_reason", "withdrawn_country",
+            "withdrawn_year", "clinical_status", "groups",
+            "mechanism_of_action", "indication", "description",
+            "cas_number", "chembl_id", "pubchem_cid", "max_phase",
+            "drug_type", "logp", "tpsa", "h_bond_donor_count",
+            "h_bond_acceptor_count", "rotatable_bond_count",
+            "heavy_atom_count", "complexity", "completeness_score",
+            "indication_source",
+        ]
+    if source_key == "interactions":
+        return [
+            "drugbank_id", "uniprot_id", "action_type",
+            "target_name", "target_chembl_id",
+        ]
+    if source_key == "indications":
+        return [
+            "drugbank_id", "disease_id", "drug_inchikey", "drug_name",
+            "disease_name", "doid_id", "omim_disease_id",
+            "indication", "indication_type", "source",
+        ]
+    raise ValueError(
+        f"_get_processed_columns: unknown source_key {source_key!r} "
+        f"(expected 'drugs', 'interactions', or 'indications')."
+    )
+
 # S19: standard InChIKey is 27 chars (14-10-1). Source: InChI Trust.
 # v84 FORENSIC ROOT FIX (BUG #52): removed the local ``_INCHIKEY_RE``
 # regex definition. The codebase had THREE divergent InChIKey regex
@@ -2223,6 +2280,79 @@ class DrugBankPipeline(BasePipeline):
         is_approved = "approved" in groups and not is_withdrawn
         is_fda_approved = None  # populated only by FDA Orange Book join
 
+        # ----------------------------------------------------------------
+        # TM1 Task 1.2 ROOT FIX (patient-safety critical):
+        # Extract structured withdrawn_notice metadata from the DrugBank
+        # XML. DrugBank 5.x emits one or more ``<withdrawn-notice>``
+        # elements per withdrawn drug, each with ``<country>``,
+        # ``<year>``, and ``<reason>`` sub-elements. The previous code
+        # only set the boolean ``is_withdrawn`` from the ``<groups>``
+        # list and dropped ALL structured withdrawal metadata. This
+        # meant a drug like Vioxx (rofecoxib) was marked withdrawn but
+        # the safety-critical context (rhabdomyolysis, US/UK, 2004) was
+        # silently lost — Phase 2 received only a boolean, and the RL
+        # ranker IGNORED that boolean (it used a hardcoded frozenset of
+        # drug names). With Task 1.2 we wire the full structured
+        # withdrawal context through Phase 1 → Phase 2 → Phase 4 so the
+        # RL safety_score can use BOTH the boolean flag AND the reason.
+        # ----------------------------------------------------------------
+        withdrawn_reason: str | None = None
+        withdrawn_country: str | None = None
+        withdrawn_year: int | None = None
+        # DrugBank 5.x uses <withdrawn-notice> under <drug>; older
+        # releases use <withdrawn_notice>. Try both spellings.
+        notice_elems: list[Any] = []
+        for tag in ("db:withdrawn-notice", "db:withdrawn_notice"):
+            notice_elems.extend(elem.findall(tag, NS))
+        if notice_elems:
+            reasons: list[str] = []
+            countries: list[str] = []
+            years: list[int] = []
+            for notice in notice_elems:
+                _reason = _sanitize_text(_all_text(notice.find("db:reason", NS)))
+                if _reason:
+                    reasons.append(_reason)
+                _country = _sanitize_text(_text_of(notice.find("db:country", NS)))
+                if _country:
+                    countries.append(_country)
+                _year_text = _text_of(notice.find("db:year", NS))
+                if _year_text:
+                    try:
+                        years.append(int(_year_text))
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "[drugbank] %s: <withdrawn-notice> year %r not "
+                            "an integer — skipping.",
+                            drugbank_id, _year_text,
+                        )
+            if reasons:
+                withdrawn_reason = "; ".join(sorted(set(reasons)))
+            if countries:
+                withdrawn_country = "; ".join(sorted(set(countries)))
+            if years:
+                withdrawn_year = min(years)  # earliest withdrawal year
+            # If <withdrawn-notice> exists but is_withdrawn is False
+            # (groups list missing 'withdrawn'), force is_withdrawn=True
+            # — the structured notice is authoritative.
+            if not is_withdrawn:
+                is_withdrawn = True
+                logger.warning(
+                    "[drugbank] %s: <withdrawn-notice> found but 'withdrawn' "
+                    "absent from <groups> — forcing is_withdrawn=True (notice "
+                    "is authoritative).",
+                    drugbank_id,
+                )
+        elif is_withdrawn:
+            # is_withdrawn=True from groups but no <withdrawn-notice>
+            # element. This happens for older DrugBank releases or for
+            # drugs where only the groups tag is present. Leave the
+            # structured fields as None — the boolean still flows.
+            logger.debug(
+                "[drugbank] %s: is_withdrawn=True from <groups> but no "
+                "<withdrawn-notice> element — structured fields are None.",
+                drugbank_id,
+            )
+
         # Derived clinical_status field (S3).
         if is_withdrawn:
             clinical_status = "withdrawn"
@@ -2301,6 +2431,14 @@ class DrugBankPipeline(BasePipeline):
             "is_globally_approved": is_approved,
             "is_fda_approved": is_fda_approved,  # None until FDA Orange Book join
             "is_withdrawn": is_withdrawn,  # S3: new explicit safety flag
+            # TM1 Task 1.2: structured withdrawal metadata — flows
+            # Phase 1 → Phase 2 KG node → Phase 4 RL safety_score.
+            # When is_withdrawn=True but these are None, the drug was
+            # withdrawn but the DrugBank XML did not include a
+            # <withdrawn-notice> element (older DrugBank release).
+            "withdrawn_reason": withdrawn_reason,
+            "withdrawn_country": withdrawn_country,
+            "withdrawn_year": withdrawn_year,
             "clinical_status": clinical_status,  # S3: new derived field
             "groups": groups_str,  # S3: persist full multi-state field
             "mechanism_of_action": mechanism,  # S4: full text
@@ -3088,6 +3226,15 @@ class DrugBankPipeline(BasePipeline):
             "is_globally_approved",
             "is_fda_approved",
             "is_withdrawn",
+            # TM1 Task 1.2: structured withdrawal metadata — these are
+            # Phase 1 output columns (drugbank_drugs.csv) consumed by
+            # phase2 drugbank_loader and propagated to the KG node so
+            # the RL ranker's safety_score has access to the withdrawal
+            # reason (not just the boolean). They are also added to the
+            # Drug SQLAlchemy model (see database/models.py).
+            "withdrawn_reason",
+            "withdrawn_country",
+            "withdrawn_year",
             "clinical_status",
             "mechanism_of_action",
             "chembl_id",
@@ -3143,6 +3290,14 @@ class DrugBankPipeline(BasePipeline):
             "is_globally_approved": False,
             "is_fda_approved": None,
             "is_withdrawn": False,
+            # TM1 Task 1.2: defaults for the structured withdrawal fields.
+            # When a drug is not withdrawn, all three are None. When a
+            # drug IS withdrawn but the DrugBank XML has no
+            # <withdrawn-notice> element, withdrawn_reason/country/year
+            # remain None (only is_withdrawn is True).
+            "withdrawn_reason": None,
+            "withdrawn_country": None,
+            "withdrawn_year": None,
             "clinical_status": None,
             "mechanism_of_action": None,
             "cas_number": None,

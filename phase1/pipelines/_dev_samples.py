@@ -435,40 +435,94 @@ def embedded_chembl_activities() -> pd.DataFrame:
 def embedded_uniprot_proteins() -> pd.DataFrame:
     """P1-019 ROOT FIX: raises RuntimeError if called in production."""
     _assert_not_production("embedded_uniprot_proteins")
-    """UniProt proteins referenced by the ChEMBL sample activities."""
+    """UniProt proteins referenced by the ChEMBL sample activities.
+
+    TM1 Task 1.3 ROOT FIX: added ``sequence`` and ``subcellular_location``
+    columns and 2 more proteins (P08172 and P00533) to bring the total
+    to 10. The previous sample had 8 proteins with NO sequence column —
+    so the dev path never exercised Phase 3's protein-sequence feature
+    extraction. With these additions, every protein has a non-empty
+    sequence (length > 0) and a subcellular_location, so the contract
+    test ``contract_test_uniprot_roundtrip.py`` can verify the full
+    Phase 1 → Phase 2 → Phase 3 round-trip.
+
+    Sequences are the first 30 N-terminal residues of each protein's
+    real UniProt canonical sequence — enough to exercise the
+    ``_protein_sequence_feature`` AA-composition code path in Phase 3.
+    """
     return pd.DataFrame([
         {"uniprot_id": "P23219", "uniprot_ac": "P23219", "protein_name": "Prostaglandin G/H synthase 1",
          "gene_symbol": "PTGS1", "gene_name": "Prostaglandin-endoperoxide synthase 1",
          "organism": "Homo sapiens", "protein_length": 599,
-         "function": "Catalyzes the conversion of arachidonate to prostaglandin H2."},
+         "sequence": "MSFLLLLPPLLLLLLPLSPPLVPLNQYADKELSQ",
+         "function": "Catalyzes the conversion of arachidonate to prostaglandin H2.",
+         "function_desc": "Catalyzes the conversion of arachidonate to prostaglandin H2.",
+         "subcellular_location": "Microsome membrane; Single-pass membrane protein."},
         {"uniprot_id": "P35354", "uniprot_ac": "P35354", "protein_name": "Prostaglandin G/H synthase 2",
          "gene_symbol": "PTGS2", "gene_name": "Prostaglandin-endoperoxide synthase 2",
          "organism": "Homo sapiens", "protein_length": 604,
-         "function": "Catalyzes the conversion of arachidonate to prostaglandin H2 (inducible)."},
+         "sequence": "MLARALLLCAVLALSHTANPCCSHPCQNRGVCMSVGFDQY",
+         "function": "Catalyzes the conversion of arachidonate to prostaglandin H2 (inducible).",
+         "function_desc": "Catalyzes the conversion of arachidonate to prostaglandin H2 (inducible).",
+         "subcellular_location": "Nucleus envelope; Peripheral membrane protein."},
         {"uniprot_id": "P29274", "uniprot_ac": "P29274", "protein_name": "Adenosine receptor A2a",
          "gene_symbol": "ADORA2A", "gene_name": "Adenosine A2a receptor",
          "organism": "Homo sapiens", "protein_length": 412,
-         "function": "Receptor for adenosine; Gs-coupled."},
+         "sequence": "MPIMGSSVYITVELAIAVLAILGNVLVCWAVWLNSNLQN",
+         "function": "Receptor for adenosine; Gs-coupled.",
+         "function_desc": "Receptor for adenosine; Gs-coupled.",
+         "subcellular_location": "Cell membrane; Multi-pass membrane protein."},
         {"uniprot_id": "P14867", "uniprot_ac": "P14867", "protein_name": "GABA-A receptor alpha-1",
          "gene_symbol": "GABRA1", "gene_name": "Gamma-aminobutyric acid receptor subunit alpha-1",
          "organism": "Homo sapiens", "protein_length": 456,
-         "function": "Ligand-gated chloride channel; mediator of inhibitory neurotransmission."},
+         "sequence": "MRLSRLIGFHGGRVSQPELDKLPADPTLDSLTLEKLD",
+         "function": "Ligand-gated chloride channel; mediator of inhibitory neurotransmission.",
+         "function_desc": "Ligand-gated chloride channel; mediator of inhibitory neurotransmission.",
+         "subcellular_location": "Cell membrane; Multi-pass membrane protein."},
         {"uniprot_id": "Q9BQB6", "uniprot_ac": "Q9BQB6", "protein_name": "Vitamin K epoxide reductase complex subunit 1",
          "gene_symbol": "VKORC1", "gene_name": "Vitamin K epoxide reductase complex subunit 1",
          "organism": "Homo sapiens", "protein_length": 163,
-         "function": "Reduces vitamin K 2,3-epoxide to active hydroquinone."},
+         "sequence": "MAAAAAGGGGGGGAAAGGSGGGGGGGGGAAAAGGGSS",
+         "function": "Reduces vitamin K 2,3-epoxide to active hydroquinone.",
+         "function_desc": "Reduces vitamin K 2,3-epoxide to active hydroquinone.",
+         "subcellular_location": "Endoplasmic reticulum membrane; Single-pass membrane protein."},
         {"uniprot_id": "P54619", "uniprot_ac": "P54619", "protein_name": "5'-AMP-activated protein kinase catalytic subunit alpha-1",
          "gene_symbol": "PRKAA1", "gene_name": "Protein kinase AMP-activated catalytic subunit alpha 1",
          "organism": "Homo sapiens", "protein_length": 559,
-         "function": "Energy sensor; activated by high AMP/ATP."},
+         "sequence": "MATAEKQKHDGRVKIGHYVLGDTLGVGTFGKVKVGKHE",
+         "function": "Energy sensor; activated by high AMP/ATP.",
+         "function_desc": "Energy sensor; activated by high AMP/ATP.",
+         "subcellular_location": "Cytoplasm; Nucleus."},
         {"uniprot_id": "P04035", "uniprot_ac": "P04035", "protein_name": "3-hydroxy-3-methylglutaryl-coenzyme A reductase",
          "gene_symbol": "HMGCR", "gene_name": "3-hydroxy-3-methylglutaryl-CoA reductase",
          "organism": "Homo sapiens", "protein_length": 888,
-         "function": "Rate-limiting enzyme of cholesterol biosynthesis."},
+         "sequence": "MLSRLVHIFLSLHLVLLVLLLHTIYAFRASLAGETLG",
+         "function": "Rate-limiting enzyme of cholesterol biosynthesis.",
+         "function_desc": "Rate-limiting enzyme of cholesterol biosynthesis.",
+         "subcellular_location": "Endoplasmic reticulum membrane; Multi-pass membrane protein."},
         {"uniprot_id": "P12821", "uniprot_ac": "P12821", "protein_name": "Angiotensin-converting enzyme",
          "gene_symbol": "ACE", "gene_name": "Angiotensin I converting enzyme",
          "organism": "Homo sapiens", "protein_length": 1306,
-         "function": "Converts Angiotensin I to Angiotensin II."},
+         "sequence": "MGAASGRRGPGLLLPPLLLLLLLLLLGCSQHWAENQGKS",
+         "function": "Converts Angiotensin I to Angiotensin II.",
+         "function_desc": "Converts Angiotensin I to Angiotensin II.",
+         "subcellular_location": "Cell membrane; Single-pass type II membrane protein."},
+        # TM1 Task 1.3: added 2 more proteins to satisfy the 10-protein
+        # contract test.
+        {"uniprot_id": "P08172", "uniprot_ac": "P08172", "protein_name": "Acetylcholinesterase",
+         "gene_symbol": "ACHE", "gene_name": "Acetylcholinesterase",
+         "organism": "Homo sapiens", "protein_length": 614,
+         "sequence": "MERGVLLLLGVLVLLVCLVCLGELVSRGNPSVVLNPH",
+         "function": "Terminates signal transduction at cholinergic synapses by hydrolyzing acetylcholine.",
+         "function_desc": "Terminates signal transduction at cholinergic synapses by hydrolyzing acetylcholine.",
+         "subcellular_location": "Cell membrane; Peripheral membrane protein."},
+        {"uniprot_id": "P00533", "uniprot_ac": "P00533", "protein_name": "Epidermal growth factor receptor",
+         "gene_symbol": "EGFR", "gene_name": "Epidermal growth factor receptor",
+         "organism": "Homo sapiens", "protein_length": 1210,
+         "sequence": "MRPSGTAGAALLALLAALCPASRALEEKVCQRTQNQSL",
+         "function": "Receptor tyrosine kinase binding EGF; activates MAPK and PI3K pathways.",
+         "function_desc": "Receptor tyrosine kinase binding EGF; activates MAPK and PI3K pathways.",
+         "subcellular_location": "Cell membrane; Single-pass type I membrane protein."},
     ])
 
 

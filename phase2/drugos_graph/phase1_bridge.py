@@ -5937,6 +5937,22 @@ def stage_phase1_to_phase2(
             else:
                 withdrawn_val = _to_bool(is_withdrawn_raw)
                 safety_data_missing = False
+            # TM1 Task 1.2: extract structured withdrawal metadata.
+            # These fields are populated by drugbank_pipeline._parse_drug_element
+            # from the DrugBank <withdrawn-notice> XML element. They are
+            # None when is_withdrawn is False OR when the DrugBank XML
+            # had no <withdrawn-notice> element (older release).
+            withdrawn_reason_val = _safe_str(row.get("withdrawn_reason")) or None
+            withdrawn_country_val = _safe_str(row.get("withdrawn_country")) or None
+            withdrawn_year_raw = row.get("withdrawn_year")
+            withdrawn_year_val: Optional[int] = None
+            if withdrawn_year_raw is not None and not (
+                isinstance(withdrawn_year_raw, float) and pd.isna(withdrawn_year_raw)
+            ):
+                try:
+                    withdrawn_year_val = int(withdrawn_year_raw)
+                except (TypeError, ValueError):
+                    withdrawn_year_val = None
             node = {
                 "id": canonical_id,
                 "drugbank_id": drugbank_id,
@@ -5958,6 +5974,15 @@ def stage_phase1_to_phase2(
                 # contract. withdrawn=False (default safe state) when
                 # Phase 1 is silent; safety_data_missing=True flags it.
                 "withdrawn": withdrawn_val,
+                # TM1 Task 1.2: structured withdrawal metadata flows
+                # Phase 1 → Phase 2 KG → Phase 4 RL safety_score.
+                # Without these, two withdrawn drugs (hepatotoxic vs
+                # labelling issue) would be indistinguishable to the
+                # ranker — see Task 1.2 spec for the patient-safety
+                # rationale.
+                "withdrawn_reason": withdrawn_reason_val,
+                "withdrawn_country": withdrawn_country_val,
+                "withdrawn_year": withdrawn_year_val,
                 "safety_data_missing": safety_data_missing,
                 "clinical_status": _safe_str(row.get("clinical_status")),
                 "groups": _safe_str(row.get("groups")),
@@ -7494,6 +7519,13 @@ def stage_phase1_to_phase2(
                 "organism": _safe_str(row.get("organism") or "Homo sapiens"),
                 "sequence": _safe_str(row.get("sequence")),
                 "function": _safe_str(row.get("function")),
+                # TM1 Task 1.3: propagate subcellular_location to the
+                # staged Protein node so Phase 3 can use it for protein
+                # node feature extraction (per TASK-141). Without this
+                # column, the graph transformer cannot distinguish two
+                # proteins with identical sequence but different cellular
+                # localization.
+                "subcellular_location": _safe_str(row.get("subcellular_location")),
                 "_source_phase": 1,
                 "_source_file": "uniprot_proteins.csv",
                 "_source_row": _safe_row_idx(idx),

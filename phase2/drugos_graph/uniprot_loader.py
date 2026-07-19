@@ -2165,6 +2165,10 @@ def uniprot_to_node_records_from_phase1(
             "ncbi_taxid": _coerce_ncbi_taxid(rec.get("ncbi_taxid", 0)),
             "sequence": str(rec.get("sequence") or ""),
             "function": str(rec.get("function") or ""),
+            # TM1 Task 1.3: propagate subcellular_location to the KG
+            # node so Phase 3 can use it for protein node feature
+            # extraction (per TASK-141).
+            "subcellular_location": str(rec.get("subcellular_location") or ""),
             "_source": "uniprot",
             "_source_phase": 1,
             "_source_file": "uniprot_proteins.csv",

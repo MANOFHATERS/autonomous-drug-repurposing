@@ -375,11 +375,23 @@ EXPECTED_OUTPUT_COLUMNS: frozenset[str] = frozenset({
     "length",
     "sequence",
     "function_desc",
+    # TM1 Task 1.3: also emit ``function`` as an alias for ``function_desc``
+    # so downstream consumers (phase2 uniprot_loader, phase1_bridge) that
+    # read the contract-canonical name ``function`` see a non-empty value.
+    # ``function_desc`` remains for backward compatibility with v50+
+    # consumers; both columns carry the same value.
+    "function",
+    # TM1 Task 1.3: subcellular_location is required by Phase 3 (per
+    # TASK-141) for protein node feature extraction.
+    "subcellular_location",
     "string_id",
     "all_string_ids",
 })
 
 # Expected raw TSV column names from UniProt REST API (used for schema-version guard).
+# TM1 Task 1.3 ROOT FIX: added "Subcellular location [CC]" so the schema-version
+# guard accepts the new column. Without this entry, the guard would log a
+# warning that the column is "unexpected" and might silently drop it.
 _EXPECTED_TSV_COLUMNS: frozenset[str] = frozenset({
     "Entry",
     "Gene Names",
@@ -390,6 +402,7 @@ _EXPECTED_TSV_COLUMNS: frozenset[str] = frozenset({
     "Sequence",
     "Cross-reference (STRING)",
     "Function [CC]",
+    "Subcellular location [CC]",
 })
 
 # Columns critical to load() -- if missing after rename, raise immediately.
@@ -546,6 +559,16 @@ class UniProtPipeline(BasePipeline):
 
     # Fields requested from UniProt (CFG4, S13, S18).  ``ft_domain`` is
     # intentionally excluded until domain extraction is implemented.
+    # TM1 Task 1.3 ROOT FIX: added ``cc_subcellular_location`` so the
+    # pipeline extracts the subcellular_location field that Phase 3
+    # needs for protein node feature extraction (per TASK-141). The
+    # previous field list omitted it entirely, so the data was NEVER
+    # requested from the API — and the cleaner actively destroyed any
+    # subcellular location text that appeared inside the Function [CC]
+    # field (see ``_clean_function_desc``). Without subcellular_location,
+    # two proteins with identical sequence but different cellular
+    # localization (e.g., a nuclear vs. cytoplasmic isoform) are
+    # indistinguishable to the graph transformer.
     uniprot_fields: list[str] = [
         "accession",
         "gene_primary",
@@ -556,6 +579,7 @@ class UniProtPipeline(BasePipeline):
         "sequence",
         "xref_string",   # S18: specific STRING xref field (not generic 'xref')
         "cc_function",
+        "cc_subcellular_location",  # TM1 Task 1.3: required by Phase 3
     ]
 
     # Pagination & retry tuning (CFG1, CFG7, C35).
@@ -939,6 +963,9 @@ class UniProtPipeline(BasePipeline):
 
         # TSV header -- must match _EXPECTED_TSV_COLUMNS exactly so the
         # schema-version guard in clean() passes.
+        # TM1 Task 1.3: added "Subcellular location [CC]" so the TSV
+        # written by this normalizer carries the subcellular_location
+        # field through to the clean() step.
         TSV_HEADER = [
             "Entry",
             "Gene Names",
@@ -949,6 +976,7 @@ class UniProtPipeline(BasePipeline):
             "Sequence",
             "Cross-reference (STRING)",
             "Function [CC]",
+            "Subcellular location [CC]",
         ]
 
         suffix = prot_path.suffix.lower()
@@ -1122,21 +1150,54 @@ class UniProtPipeline(BasePipeline):
 
         # Function [CC].
         function_desc = ""
+        # TM1 Task 1.3: Subcellular location [CC].
+        # UniProt emits a separate comment block with commentType
+        # "SUBCELLULAR LOCATION" containing one or more "subcellularLocations"
+        # entries, each with a "location" dict that has a "value" key.
+        subcellular_location = ""
         for comment in (rec.get("comments") or []):
             if not isinstance(comment, dict):
                 continue
-            if comment.get("commentType") == "FUNCTION":
+            ctype = comment.get("commentType")
+            if ctype == "FUNCTION" and not function_desc:
                 texts = comment.get("texts") or []
                 parts = []
                 for t in texts:
                     if isinstance(t, dict):
                         parts.append(_safe_str(t.get("value")))
                 function_desc = " ".join(p for p in parts if p)
-                break
+            elif ctype == "SUBCELLULAR LOCATION" and not subcellular_location:
+                # Collect all location values from the comment block.
+                # The structure is:
+                #   {"commentType": "SUBCELLULAR LOCATION",
+                #    "subcellularLocations": [
+                #        {"location": {"value": "Nucleus",
+                #                       "evidences": [...]},
+                #         "topologies": [...],
+                #         "orientation": ...},
+                #        ...
+                #    ]}
+                parts_loc: list[str] = []
+                for sloc in (comment.get("subcellularLocations") or []):
+                    if not isinstance(sloc, dict):
+                        continue
+                    loc = sloc.get("location") or {}
+                    if isinstance(loc, dict):
+                        val = loc.get("value")
+                        if val:
+                            parts_loc.append(str(val))
+                    # Also collect topology values (e.g. "Single-pass membrane protein")
+                    for topo in (sloc.get("topologies") or []):
+                        if isinstance(topo, dict):
+                            tval = topo.get("value")
+                            if tval:
+                                parts_loc.append(str(tval))
+                subcellular_location = "; ".join(parts_loc)
 
         return [
             entry, gene_names, gene_primary, protein_name,
             organism, length, sequence, string_xref, function_desc,
+            subcellular_location,
         ]
 
     @staticmethod
@@ -1292,24 +1353,39 @@ class UniProtPipeline(BasePipeline):
 
         # CC: FUNCTION comment.
         function_desc = ""
+        # TM1 Task 1.3: CC: SUBCELLULAR LOCATION comment.
+        subcellular_location = ""
         cc_lines = rec.get("CC") or []
         in_function = False
+        in_subloc = False
         func_parts: list[str] = []
+        subloc_parts: list[str] = []
         for line in cc_lines:
             line = str(line)
             if line.startswith("-!- FUNCTION:"):
                 in_function = True
+                in_subloc = False
                 func_parts.append(line.split("FUNCTION:", 1)[-1].strip())
-            elif line.startswith("-!-"):
-                # New comment block -- stop FUNCTION collection.
+            elif line.startswith("-!- SUBCELLULAR LOCATION:"):
+                # New SUBCELLULAR LOCATION block.
                 in_function = False
+                in_subloc = True
+                subloc_parts.append(line.split("SUBCELLULAR LOCATION:", 1)[-1].strip())
+            elif line.startswith("-!-"):
+                # New comment block -- stop FUNCTION + SUBCELLULAR LOCATION collection.
+                in_function = False
+                in_subloc = False
             elif in_function:
                 func_parts.append(line.strip())
+            elif in_subloc:
+                subloc_parts.append(line.strip())
         function_desc = " ".join(p for p in func_parts if p)
+        subcellular_location = " ".join(p for p in subloc_parts if p)
 
         return [
             entry, gene_names, gene_primary, protein_name,
             organism, length, sequence, string_xref, function_desc,
+            subcellular_location,
         ]
 
     def download(self) -> Path:
@@ -2455,6 +2531,8 @@ class UniProtPipeline(BasePipeline):
                 # S18 -- UniProt REST uses "Cross-reference (STRING)" for xref_string.
                 "Cross-reference (STRING)": "string_xref",
                 "Function [CC]": "function_desc",
+                # TM1 Task 1.3: subcellular_location field.
+                "Subcellular location [CC]": "subcellular_location",
             }
             df = df.rename(columns={k: v for k, v in column_map.items() if k in df.columns})
 
@@ -2518,6 +2596,38 @@ class UniProtPipeline(BasePipeline):
                 )
             else:
                 df["function_desc"] = None
+
+            # TM1 Task 1.3 ROOT FIX (function column alias):
+            # The contract (phase1_schema.py "uniprot_proteins" SourceSpec)
+            # declares the column name as ``function``, but the pipeline
+            # historically emits ``function_desc``. Every Phase 2 consumer
+            # (uniprot_loader, phase1_bridge) reads ``function`` — so every
+            # real-pipeline Protein node ended up with an empty function
+            # field. ROOT FIX: alias ``function`` to ``function_desc`` so
+            # both names carry the same value. Downstream consumers can
+            # read either name; the contract-canonical name is ``function``.
+            df["function"] = df["function_desc"]
+
+            # TM1 Task 1.3 ROOT FIX (subcellular_location cleaning):
+            # Apply the same _clean_function_desc helper to subcellular_location
+            # — UniProt emits SUBCELLULAR LOCATION with the same ECO tag and
+            # subsection marker format as FUNCTION, so the same cleaner works.
+            # This replaces the previous behaviour where _clean_function_desc
+            # would silently TRUNCATE the function_desc at the SUBCELLULAR
+            # LOCATION marker (losing the data) AND subcellular_location was
+            # never extracted as a separate column.
+            if "subcellular_location" in df.columns:
+                before_subloc = df["subcellular_location"].notna().sum()
+                df["subcellular_location"] = df["subcellular_location"].apply(
+                    self._clean_subcellular_location
+                )
+                after_subloc = df["subcellular_location"].notna().sum()
+                self._log_transformation(
+                    "clean_subcellular_location", before_subloc, after_subloc,
+                    {"reason": "Stripped SUBCELLULAR LOCATION: prefix, ECO tags."},
+                )
+            else:
+                df["subcellular_location"] = None
 
             # ---------- Step 9: extract string_id + all_string_ids (S8, S9) ----------
             if "string_xref" in df.columns:
@@ -2968,6 +3078,61 @@ class UniProtPipeline(BasePipeline):
         return cleaned if cleaned else None
 
     # ---------------------------------------------------------------------
+    # _clean_subcellular_location() -- TM1 Task 1.3
+    # ---------------------------------------------------------------------
+    def _clean_subcellular_location(self, desc: Optional[str]) -> Optional[str]:
+        """Clean a UniProt SUBCELLULAR LOCATION comment block.
+
+        UniProt's ``Subcellular location [CC]`` field looks like::
+
+            "SUBCELLULAR LOCATION: Membrane {ECO:0000256|HAMAP-Rule:MF_00234}.
+             Single-pass membrane protein."
+
+        We want only the location prose. Steps:
+        1. Strip the leading ``SUBCELLULAR LOCATION:`` prefix
+           (case-insensitive).
+        2. Remove ALL ``{ECO:...}`` evidence tags.
+
+        Unlike ``_clean_function_desc``, we do NOT truncate at
+        sub-section markers — subcellular location blocks legitimately
+        contain multiple lines (location, topology, orientation) that
+        should all be preserved as a single semicolon-joined string
+        for the Phase 3 node feature extractor.
+
+        Parameters
+        ----------
+        desc : str | None
+            Raw subcellular location text.
+
+        Returns
+        -------
+        str | None
+            Cleaned text, or None if input is empty / all stripped.
+        """
+        if not desc or not isinstance(desc, str):
+            return None
+        if not desc.strip():
+            return None
+
+        cleaned = desc.strip()
+
+        # Strip the leading SUBCELLULAR LOCATION: prefix (case-insensitive).
+        for prefix in (
+            "SUBCELLULAR LOCATION: ",
+            "Subcellular location: ",
+            "SUBCELLULAR LOCATION:",
+            "Subcellular location:",
+        ):
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+                break
+
+        # Remove ALL {ECO:...} evidence tags (inline + trailing).
+        cleaned = _ECO_TAG_RE.sub("", cleaned).strip()
+
+        return cleaned if cleaned else None
+
+    # ---------------------------------------------------------------------
     # _extract_string_id() -- first valid STRING ID (S8, S9, C19)
     # ---------------------------------------------------------------------
     def _extract_string_id(self, xref: Optional[str]) -> Optional[str]:
@@ -3142,6 +3307,16 @@ class UniProtPipeline(BasePipeline):
             "length": None,               # C48 / DQ18
             "sequence": None,
             "function_desc": None,
+            # TM1 Task 1.3: ``function`` is the contract-canonical column
+            # name (phase1_schema.py SourceSpec "uniprot_proteins").
+            # The pipeline emits ``function_desc`` for backward compat
+            # with v50+ consumers; ``function`` is populated post-rename
+            # as an alias. Default to None here; the aliasing happens in
+            # the clean() method.
+            "function": None,
+            # TM1 Task 1.3: subcellular_location is required by Phase 3
+            # for protein node feature extraction (per TASK-141).
+            "subcellular_location": None,
             "string_id": None,
             "all_string_ids": None,
         }
@@ -4085,6 +4260,30 @@ class UniProtPipeline(BasePipeline):
 # ---------------------------------------------------------------------------
 UNIPROT_SEARCH_URL: str = UniProtPipeline.uniprot_search_url
 UNIPROT_FIELDS: list[str] = list(UniProtPipeline.uniprot_fields)
+
+
+def _get_processed_columns(source_key: str) -> list[str]:
+    """Return the canonical CSV columns this pipeline emits for ``source_key``.
+
+    TM1 Task 1.3 ROOT FIX: enables
+    :func:`phase1.contracts.phase1_schema.detect_contract_vs_pipeline_drift`
+    to verify the pipeline's actual output schema matches the contract.
+    """
+    if source_key == "uniprot_proteins":
+        # Matches EXPECTED_OUTPUT_COLUMNS + the function alias added in
+        # Task 1.3 (``function`` is the contract-canonical name; the
+        # pipeline emits both ``function_desc`` and ``function``).
+        return [
+            "uniprot_id", "gene_symbol", "gene_name",
+            "protein_name", "protein_name_canonical",
+            "organism", "length", "sequence",
+            "function_desc", "function", "subcellular_location",
+            "string_id", "all_string_ids",
+        ]
+    raise ValueError(
+        f"_get_processed_columns: unknown source_key {source_key!r} "
+        f"(expected 'uniprot_proteins')."
+    )
 
 
 def _resolve_uniprot_query_at_import_time() -> str:

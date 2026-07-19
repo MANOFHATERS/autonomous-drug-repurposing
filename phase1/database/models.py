@@ -729,6 +729,38 @@ class Drug(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
         #   boolean column-type metadata is identical on every dialect.
         Boolean, server_default=text("FALSE"), nullable=False,
     )
+    # ----------------------------------------------------------------
+    # TM1 Task 1.2 ROOT FIX (patient-safety critical):
+    # Structured withdrawal metadata extracted from DrugBank
+    # <withdrawn-notice> elements. The boolean is_withdrawn above only
+    # records WHETHER a drug was withdrawn; these three columns capture
+    # WHY, WHERE, and WHEN — context the RL ranker needs to make
+    # patient-safety decisions. Without these fields, two withdrawn
+    # drugs (one withdrawn for severe hepatotoxicity in 12 countries,
+    # another withdrawn for a mild labelling issue in 1 country) would
+    # be indistinguishable to the safety_score, and the ranker could
+    # surface the hepatotoxic one as a "safe repurposing candidate".
+    # These fields are populated by drugbank_pipeline._parse_drug_element
+    # and flow Phase 1 CSV → Phase 2 KG node → Phase 4 RL safety_score.
+    # ----------------------------------------------------------------
+    withdrawn_reason: Mapped[Optional[str]] = mapped_column(
+        # Free-text reason(s) for withdrawal, semicolon-separated when
+        # multiple <withdrawn-notice> elements exist. e.g.
+        # "rhabdomyolysis" for cerivastatin, "cardiovascular events"
+        # for rofecoxib.
+        Text, nullable=True,
+    )
+    withdrawn_country: Mapped[Optional[str]] = mapped_column(
+        # Semicolon-separated list of ISO country codes / names that
+        # withdrew the drug. e.g. "US;UK;CA". NULL when DrugBank
+        # provides no <country> sub-element (older releases).
+        String(200), nullable=True,
+    )
+    withdrawn_year: Mapped[Optional[int]] = mapped_column(
+        # Earliest withdrawal year across all <withdrawn-notice>
+        # elements. NULL when no year is provided.
+        Integer, nullable=True,
+    )
     # Derived clinical status: approved/withdrawn/illicit/investigational/
     # vet_approved/experimental/nutraceutical/unknown.
     clinical_status: Mapped[Optional[str]] = mapped_column(
