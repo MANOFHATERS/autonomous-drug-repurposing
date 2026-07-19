@@ -215,13 +215,39 @@ async function checkNeo4j(): Promise<ServiceHealth> {
   //      execute queries — not just that the HTTP server is up.
   //   3. Send basic auth (NEO4J_USERNAME / NEO4J_PASSWORD) since
   //      /db/neo4j/tx/commit requires authentication.
-  const url = process.env.NEO4J_URL;
+  // TM10 v128 ROOT FIX (Task 10.2): align Neo4j env var names with the
+  // Phase 2 backend (phase2/service.py::_get_neo4j_env_var). The backend
+  // reads `DRUGOS_NEO4J_URI` (canonical) with `NEO4J_URI` (legacy) fallback.
+  // The previous frontend code read `NEO4J_URL` (URL, not URI) and
+  // `NEO4J_USERNAME` (USERNAME, not USER) — neither matched the backend's
+  // legacy names. This meant an operator who set ONLY the canonical
+  // `DRUGOS_NEO4J_PASSWORD` (as the backend docs instruct) would see
+  // /api/system/status report "Neo4j unavailable: NEO4J_PASSWORD not
+  // configured" even though Neo4j was actually working fine for the KG
+  // service. The system-health check was reporting a phantom outage.
+  //
+  // ROOT FIX: read the canonical name first, then fall back to the legacy
+  // backend name, then to the legacy frontend name. This is forward-compatible
+  // (canonical name wins) AND backward-compatible (all three legacy names
+  // still work). After all operators migrate to the canonical names, the
+  // fallbacks can be removed.
+  const url =
+    process.env.DRUGOS_NEO4J_URI ||
+    process.env.NEO4J_URI ||
+    process.env.NEO4J_URL;
   if (!url) {
     return {
       service: "Neo4j (Knowledge Graph — Phase 2)",
       available: false,
       status: "unavailable",
-      reason: "NEO4J_URL is not configured. The Neo4j HTTP endpoint (default http://neo4j:7474) MUST be set explicitly — this check no longer falls back to KG_SERVICE_URL because that would ping the Python KG service, not Neo4j itself (BE-023 root fix).",
+      reason:
+        "DRUGOS_NEO4J_URI is not configured (canonical name). " +
+        "The Neo4j HTTP endpoint (default http://neo4j:7474) MUST be set " +
+        "explicitly — this check no longer falls back to KG_SERVICE_URL " +
+        "because that would ping the Python KG service, not Neo4j itself " +
+        "(BE-023 root fix). Legacy names NEO4J_URI and NEO4J_URL are also " +
+        "accepted for backward compatibility. (TM10 v128 Task 10.2: aligned " +
+        "with phase2/service.py::_get_neo4j_env_var.)",
       critical: true,
     };
   }
@@ -231,18 +257,31 @@ async function checkNeo4j(): Promise<ServiceHealth> {
   // (RETURN 1) and check the response status.
   const txUrl = url.replace(/\/$/, "") + "/db/neo4j/tx/commit";
 
-  // Basic auth header (Neo4j requires auth on /db/*/tx/commit).
-  const username = process.env.NEO4J_USERNAME || "neo4j";
-  const password = process.env.NEO4J_PASSWORD || "";
+  // TM10 v128: same canonical-first env var lookup for credentials.
+  const username =
+    process.env.DRUGOS_NEO4J_USER ||
+    process.env.NEO4J_USER ||
+    process.env.NEO4J_USERNAME ||
+    "neo4j";
+  const password =
+    process.env.DRUGOS_NEO4J_PASSWORD ||
+    process.env.NEO4J_PASSWORD ||
+    "";
   if (!password) {
     // Without a password, the auth check will fail with 401. Report
     // this as a configuration error — the operator needs to set
-    // NEO4J_PASSWORD in the env.
+    // DRUGOS_NEO4J_PASSWORD (canonical) in the env.
     return {
       service: "Neo4j (Knowledge Graph — Phase 2)",
       available: false,
       status: "unavailable",
-      reason: "NEO4J_PASSWORD is not configured. Neo4j's /db/neo4j/tx/commit endpoint requires authentication — set NEO4J_USERNAME and NEO4J_PASSWORD.",
+      reason:
+        "DRUGOS_NEO4J_PASSWORD is not configured (canonical name). " +
+        "Neo4j's /db/neo4j/tx/commit endpoint requires authentication — " +
+        "set DRUGOS_NEO4J_USER and DRUGOS_NEO4J_PASSWORD (canonical) or " +
+        "NEO4J_USER / NEO4J_PASSWORD (legacy backend) or " +
+        "NEO4J_USERNAME / NEO4J_PASSWORD (legacy frontend). " +
+        "(TM10 v128 Task 10.2.)",
       critical: true,
     };
   }
@@ -289,7 +328,7 @@ async function checkNeo4j(): Promise<ServiceHealth> {
     reason: ok
       ? undefined
       : result.status === 401 || result.status === 403
-        ? `Neo4j auth failed (HTTP ${result.status}) — check NEO4J_USERNAME / NEO4J_PASSWORD.`
+        ? `Neo4j auth failed (HTTP ${result.status}) — check DRUGOS_NEO4J_USER / DRUGOS_NEO4J_PASSWORD (canonical) or legacy NEO4J_USER / NEO4J_PASSWORD / NEO4J_USERNAME. (TM10 v128)`
         : result.status === 404
           ? "Neo4j database 'neo4j' not found — the database may not be initialized."
           : result.reason,

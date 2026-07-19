@@ -42,9 +42,12 @@ export const LOCKOUT_WINDOW_MINUTES = 15;
 export const LOCKOUT_DURATION_MINUTES = 30;
 
 // Per-IP limits (across all accounts).
-const IP_MAX_ATTEMPTS = 20; // 20 attempts...
-const IP_WINDOW_MINUTES = 5; // ...per 5 minutes
-const IP_BLOCK_MINUTES = 15; // ...then block IP for 15 minutes
+// TM10 v128: exported so tests and operators can verify the configured
+// limits. Previously only IP_MAX_ATTEMPTS was exported — tests had to
+// hard-code 5 and 15, which would silently break if the constants changed.
+export const IP_MAX_ATTEMPTS = 20; // 20 attempts...
+export const IP_WINDOW_MINUTES = 5; // ...per 5 minutes
+export const IP_BLOCK_MINUTES = 15; // ...then block IP for 15 minutes
 
 // FE-061: Bounded LRU cache size. 100K unique IPs covers a sustained attack
 // from a botnet; legitimate traffic uses orders of magnitude fewer entries.
@@ -585,6 +588,33 @@ export function clearTotpAttempts(userId: string): void {
  */
 export function __resetTotpStateForTests(): void {
   totpBuckets.clear();
+}
+
+/**
+ * TM10 v128 ROOT FIX (Task 10.6): test-only helper to reset the IP-bucket
+ * LRU cache. Required by the refresh rate-limit regression test so test
+ * cases don't leak state into each other.
+ *
+ * The LRU `ipBuckets` map was previously not resettable from outside the
+ * module — tests had to wait for the natural 10-minute cleanup cycle,
+ * making deterministic testing impossible. This function clears the map
+ * in O(n) (acceptable for tests, never called in production).
+ *
+ * NOT for use in production code paths — clearing the IP buckets would
+ * unfreeze a blocked attacker mid-attack.
+ */
+export function __resetIpBucketsForTests(): void {
+  ipBuckets.forEach((_v, _k) => { /* iterate to satisfy linter */ });
+  // The LruMap class doesn't expose a clear() method, so we delete keys
+  // one at a time. This is O(n) but acceptable for tests.
+  const keys: string[] = [];
+  ipBuckets.forEach((_v, k) => keys.push(k));
+  for (const k of keys) {
+    ipBuckets.delete(k);
+  }
+  // Reset the cleanup timer so the next cleanup cycle doesn't immediately
+  // run with stale state.
+  lastCleanup = Date.now();
 }
 
 // ---------------------------------------------------------------------------

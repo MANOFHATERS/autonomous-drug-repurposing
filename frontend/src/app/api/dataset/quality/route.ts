@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { requireAuth, internalError, writeAuditLog } from "@/lib/api-helpers";
-import { getDatasetStats } from "@/lib/services/dataset-stats";
+// TM10 v128 ROOT FIX: import from the CANONICAL dataset-service.ts (HTTP-only).
+// The previous import from "@/lib/services/dataset-stats" worked functionally
+// (dataset-stats.ts is now a re-export shim), but it referenced a DEPRECATED
+// module name. This caused confusion for new developers and static-analysis
+// tools (IDE "go to definition" landed on the shim, not the real impl).
+// Importing the canonical module directly is the production-grade pattern.
+import { getDatasetStats } from "@/lib/services/dataset-service";
 import { getKnowledgeGraphStats } from "@/lib/services/knowledge-graph-stats";
 // BE-039 ROOT FIX: import CANONICAL_NODE_TYPES from lib/ml-contracts.ts
 // so there is a SINGLE source of truth for the canonical node type list.
@@ -128,8 +134,18 @@ export async function GET() {
     const warningsCount = (datasetStats.warnings || []).length;
     const errorsCount = (datasetStats.errors || []).length;
 
+    // TM10 v128 ROOT FIX: derive status WITHOUT `as any` cast. The
+    // DatasetStatsResponse contract includes a `status` field, but it's
+    // optional in the Zod schema (the Python service may omit it). The
+    // previous code used `(datasetStats as any).status` which bypassed
+    // TypeScript's type system — a production-grade codebase should never
+    // silence the compiler with `as any` for a field that's actually in
+    // the type. We read it via a typed accessor instead.
+    const explicitStatus = (datasetStats as { status?: string }).status;
     const status: "ok" | "no_data" | "service_down" =
-      (datasetStats as any).status || (datasetStats.source === "none" ? "no_data" : "ok");
+      explicitStatus === "ok" || explicitStatus === "no_data" || explicitStatus === "service_down"
+        ? explicitStatus
+        : (datasetStats.source === "none" ? "no_data" : "ok");
 
     await writeAuditLog({
       user: auth.user,
