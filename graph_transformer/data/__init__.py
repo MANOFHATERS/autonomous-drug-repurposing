@@ -95,11 +95,20 @@ EDGE_TYPES: List[Tuple[str, str, str]] = [
     ("disease", "treated_by", "drug"),
     ("disease", "tested_on", "drug"),
     ("clinical_outcome", "caused_by", "drug"),
+    # Teammate-2 Task 2.1 ROOT FIX (P2-008): PPI forward + reverse.
+    # STRING PPI was previously dropped at Phase 2->3 boundary
+    # (PHASE2_TO_PHASE3_EDGE_DROPPED). Adding it here lets the GT model
+    # learn protein-protein co-functionality, which is the largest single
+    # biomedical signal in STRING v12.0 (~10M edges). PPI is symmetric
+    # so the "reverse" edge type is identical to the forward (the graph
+    # builder's _add_reverse_edges adds (dst, src) pairs to the same
+    # edge-type bucket, deduplicating via the _edge_sets set).
+    ("protein", "interacts_with", "protein"),
 ]
 
 # Forward edge types only (used by graph builder for reverse-edge synthesis).
-FORWARD_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES[:9]
-REVERSE_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES[9:]
+FORWARD_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES[:10]
+REVERSE_EDGE_TYPES: List[Tuple[str, str, str]] = EDGE_TYPES[10:]
 
 # Canonical default edge types -- re-exported for use by other sub-modules
 # (B7 fix: single source of truth).
@@ -117,6 +126,14 @@ REVERSE_RELATION_MAP: Dict[str, str] = {
     "treats": "treated_by",
     "tested_for": "tested_on",
     "causes": "caused_by",
+    # Teammate-2 Task 2.1 ROOT FIX (P2-008): PPI is symmetric.
+    # The graph builder's _add_reverse_edges uses REVERSE_RELATION_MAP
+    # to add (dst, src) pairs to the reverse edge-type bucket. For PPI,
+    # the reverse of ("protein", "interacts_with", "protein") is itself
+    # (same src_type, same rel_type, same dst_type), so the (dst, src)
+    # pair gets added to the SAME edge set, deduplicating via the
+    # _edge_sets set. This correctly models PPI as undirected.
+    "interacts_with": "interacts_with",
 }
 
 # Edge types whose presence during training would leak the prediction label

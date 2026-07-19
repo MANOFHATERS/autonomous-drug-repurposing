@@ -1933,11 +1933,24 @@ Default 180 (6 months)."""
 
 # CONF-10 / CONF-11: Output / raw filenames.
 DISGENET_OUTPUT_FILENAME: str = _getenv(
-    "DISGENET_OUTPUT_FILENAME", default="gene_disease_associations.csv"
+    # Teammate-2 Task 2.2 ROOT FIX: default changed from
+    # "gene_disease_associations.csv" (alias) to
+    # "disgenet_gene_disease_associations.csv" (canonical per
+    # phase1_schema.PHASE1_OUTPUT_SCHEMA["disgenet_gda"].filename).
+    # The previous default produced the ALIAS filename, but the schema
+    # and phase2 disgenet_loader.DEFAULT_DISGENET_CSV both expect the
+    # CANONICAL prefixed form. The bridge accepted both via aliases,
+    # but the embedded-sample path in disgenet_pipeline.py:2492 ALSO
+    # wrote the prefixed form — so the two paths DISAGREED. Aligning
+    # the default to the canonical form ensures all 3 write paths
+    # (main, embedded-sample, future code) produce the same filename.
+    "DISGENET_OUTPUT_FILENAME",
+    default="disgenet_gene_disease_associations.csv"
 )
 """Output CSV filename in PROCESSED_DATA_DIR.  Default
-'gene_disease_associations.csv'.  Changing this breaks downstream
-consumers (Neo4j exporter, Graph Transformer) -- change only for testing."""
+'disgenet_gene_disease_associations.csv' (Teammate-2 Task 2.2 ROOT FIX).
+Changing this breaks downstream consumers (Neo4j exporter, Graph
+Transformer) -- change only for testing."""
 
 DISGENET_RAW_FILENAME: str = _getenv(
     "DISGENET_RAW_FILENAME", default=""

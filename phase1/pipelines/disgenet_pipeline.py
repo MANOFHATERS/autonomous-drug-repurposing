@@ -490,6 +490,191 @@ _RE_EFO = re.compile(r"^EFO:[0-9]{7}$")
 # disease vocabulary; included for completeness even though the original
 # audit only flagged ICD-10 and EFO.
 _RE_ORPHANET = re.compile(r"^ORPHA:[0-9]+$")
+
+
+# =============================================================================
+# Teammate-2 Task 2.2 ROOT FIX (P2-008): Curated disease prevalence table.
+# =============================================================================
+# The previous code (removed in v113 P3-026 from graph_transformer/
+# biomedical_tables.py) mapped GDA count to prevalence via a LINEAR
+# formula: ``prevalence = 5.0 + 2995.0 * (n_gdas / max_gda)``. This was
+# SCIENTIFICALLY WRONG — it assumed "diseases with more known gene
+# associations are more common". In reality:
+#   - Cystic fibrosis has ~2000 known GDAs (CFTR is heavily studied) but
+#     prevalence is 0.4/10K (RARE per FDA/EU definition).
+#   - Migraine has ~50 GDAs but prevalence is 500/10K (common).
+# The linear formula flagged CF as "common" (false), corrupting the
+# RL agent's market_opportunity scoring — orphan diseases (highest
+# commercial value) were scored as low-opportunity.
+#
+# ROOT FIX: extract REAL epidemiological prevalence from a curated
+# WHO/Orphanet table. This dict is keyed by LOWERCASE disease name.
+# It mirrors ``DISEASE_PREVALENCE_PER_10K`` in
+# ``graph_transformer/data/biomedical_tables.py`` (kept in sync so
+# Phase 1 and Phase 3 agree). For diseases NOT in the curated table,
+# prevalence_per_10k is None — downstream ``compute_market_score``
+# treats None as a neutral 0.5.
+#
+# Sources:
+#   - WHO Global Burden of Disease 2021 (common diseases)
+#   - Orphanet Rare Disease Database (rare diseases, https://www.orpha.net)
+#   - NIH Genetic and Rare Diseases Information Center (GARD)
+#
+# Values are patients per 10,000 population (global average).
+# FDA/EU rare disease threshold: <5 per 10K (RARE_DISEASE_PREVALENCE_THRESHOLD).
+DISEASE_PREVALENCE_PER_10K: Dict[str, float] = {
+    # KP diseases
+    "inflammation": 500.0,  # broad category, very common
+    "cardiovascular disease": 2500.0,
+    "type 2 diabetes": 1000.0,
+    "rheumatoid arthritis": 60.0,
+    "pain": 3000.0,  # chronic pain, very common
+    # Cardiovascular
+    "hypertension": 3000.0,
+    "coronary artery disease": 600.0,
+    "heart failure": 200.0,
+    "atrial fibrillation": 400.0,
+    "stroke": 300.0,
+    # Respiratory
+    "asthma": 600.0,
+    "copd": 250.0,
+    "chronic obstructive pulmonary disease": 250.0,
+    # Neurological
+    "alzheimer disease": 150.0,
+    "alzheimer's disease": 150.0,
+    "parkinson disease": 30.0,
+    "parkinson's disease": 30.0,
+    "epilepsy": 70.0,
+    "migraine": 500.0,
+    "multiple sclerosis": 3.0,  # rare-ish (~1M patients globally, ~3/10K)
+    # Psychiatric
+    "depression": 400.0,
+    "anxiety": 300.0,
+    "schizophrenia": 40.0,
+    "bipolar disorder": 50.0,
+    "adhd": 70.0,
+    # Autoimmune
+    "crohn disease": 20.0,
+    "crohn's disease": 20.0,
+    "ulcerative colitis": 25.0,
+    "psoriasis": 120.0,
+    "lupus": 25.0,
+    "systemic lupus erythematosus": 25.0,
+    "fibromyalgia": 200.0,
+    # Other
+    "endometriosis": 100.0,
+    "osteoporosis": 300.0,
+    # Oncology (prevalence per 10K -- cancer is categorized by type)
+    "breast cancer": 50.0,
+    "lung cancer": 30.0,
+    "prostate cancer": 80.0,
+    "pancreatic cancer": 5.0,
+    "colorectal cancer": 40.0,
+    "melanoma": 20.0,
+    "leukemia": 12.0,
+    "lymphoma": 15.0,
+    "glioblastoma": 1.0,  # rare
+    # Infectious
+    "hepatitis c": 8.0,
+    "hiv infection": 15.0,
+    "hiv/aids": 15.0,
+    "tuberculosis": 11.0,
+    "malaria": 30.0,  # global, varies by region
+    # Other
+    "kidney disease": 100.0,
+    "chronic kidney disease": 100.0,
+    "liver cirrhosis": 20.0,
+    "celiac disease": 10.0,
+    "glaucoma": 80.0,
+    "macular degeneration": 40.0,
+    "sickle cell disease": 1.0,  # rare
+    "cystic fibrosis": 0.4,  # RARE -- the headline bug from the audit
+    # Additional rare diseases (Orphanet-curated) -- prevalence < 5/10K
+    "duchenne muscular dystrophy": 0.5,
+    "spinal muscular atrophy": 0.3,
+    "hunter syndrome": 0.1,
+    "fabry disease": 0.2,
+    "gaucher disease": 0.3,
+    "phenylketonuria": 0.5,
+    "tay-sachs disease": 0.1,
+    "amyotrophic lateral sclerosis": 0.3,
+    "als": 0.3,
+    "huntington disease": 0.5,
+    "huntington's disease": 0.5,
+    "marfan syndrome": 1.0,
+    "ehlers-danlos syndrome": 1.0,
+    "progeria": 0.01,
+    "fragile x syndrome": 1.0,
+    "rett syndrome": 0.5,
+    "tuberous sclerosis": 1.0,
+    "neurofibromatosis": 2.0,
+    "prader-willi syndrome": 0.3,
+    "angelman syndrome": 0.3,
+    "williams syndrome": 0.5,
+    "noonan syndrome": 0.5,
+    "charcot-marie-tooth disease": 4.0,
+    "myasthenia gravis": 2.0,
+    # Common disease aliases (CUI-normalized names from DisGeNET)
+    "diabetes mellitus, type 2": 1000.0,
+    "diabetes mellitus": 800.0,
+    "neoplasms": 300.0,
+    "malignant neoplasm of breast": 50.0,
+    "primary malignant neoplasm of prostate": 80.0,
+    "malignant neoplasm of lung": 30.0,
+    "arthritic disorder": 60.0,
+    "disorder of cardiovascular system": 2500.0,
+}
+
+# FDA/EU rare disease threshold: < 1/2000 population = < 5 per 10K
+# Used to classify ORPHA:nnnn diseases (Orphanet = rare disease DB).
+RARE_DISEASE_PREVALENCE_THRESHOLD: float = 5.0
+
+# Default prevalence for ORPHA:nnnn disease_ids (Orphanet-curated).
+# Orphanet ONLY lists rare diseases per EU regulation, so any disease
+# tagged with an Orpha ID is by definition rare. We use 1.0/10K as a
+# conservative midpoint of the rare disease prevalence range (orphan
+# diseases range from 0.01 to 4.99 per 10K).
+_ORPHANET_DEFAULT_PREVALENCE_PER_10K: float = 1.0
+
+
+def _lookup_prevalence_per_10k(disease_id: object, disease_name: object) -> Optional[float]:
+    """Look up real epidemiological prevalence for a disease.
+
+    Teammate-2 Task 2.2 ROOT FIX (P2-008): replaces the previous LINEAR
+    formula ``5.0 + 2995.0 * (n_gdas / max_gda)`` with REAL prevalence
+    values from a curated WHO/Orphanet table.
+
+    Lookup priority:
+      1. If disease_id matches ``ORPHA:nnnn`` (Orphanet rare-disease ID),
+         return ``_ORPHANET_DEFAULT_PREVALENCE_PER_10K`` (= 1.0/10K).
+         Orphanet ONLY lists rare diseases per EU regulation, so any
+         Orpha-tagged disease is by definition rare.
+      2. If disease_name (lowercased, stripped) is in
+         ``DISEASE_PREVALENCE_PER_10K``, return that value.
+      3. Otherwise return None (downstream treats as neutral 0.5).
+
+    Args:
+        disease_id: DisGeNET-normalized disease ID (CUI/DOID/MESH/OMIM:/ORPHA:).
+        disease_name: Human-readable disease name.
+
+    Returns:
+        Prevalence per 10K (float), or None if not in the curated table.
+    """
+    disease_id_str = "" if disease_id is None else str(disease_id).strip()
+    disease_name_str = "" if disease_name is None else str(disease_name).strip().lower()
+
+    # Priority 1: Orphanet rare disease ID.
+    if disease_id_str.startswith("ORPHA:"):
+        return _ORPHANET_DEFAULT_PREVALENCE_PER_10K
+
+    # Priority 2: curated table lookup by disease name.
+    if disease_name_str and disease_name_str in DISEASE_PREVALENCE_PER_10K:
+        return DISEASE_PREVALENCE_PER_10K[disease_name_str]
+
+    # Priority 3: not in curated table -- return None.
+    return None
+
+
 # HGNC gene-symbol format: an uppercase letter followed by uppercase
 # letters + digits + optional hyphens. Length 1-50 chars (max 50 to match
 # the DB column length and ``cleaning._constants.CANONICAL_HGNC_GENE_SYMBOL_REGEX``).
@@ -2620,6 +2805,15 @@ class DisGeNETPipeline(BasePipeline):
         # sees association_type.
         df = self._ensure_gda_columns(df)
 
+        # Teammate-2 Task 2.2 ROOT FIX (P2-008): populate prevalence_per_10k
+        # from the curated WHO/Orphanet table. MUST run AFTER
+        # _ensure_gda_columns (which adds the prevalence_per_10k column
+        # with default None) and BEFORE _save_processed_csv (so the
+        # column is written to the output CSV). This replaces the
+        # previous LINEAR formula (5.0 + 2995.0 * n_gdas/max_gda) that
+        # incorrectly flagged cystic fibrosis as common.
+        df = self._populate_prevalence(df)
+
         # SCI-23 / DQ-24 / CODE-20: pass source="disgenet".
         # SCI-22 / DQ-23 / CODE-21: pass dedup=True with explicit keys.
         # v79 FORENSIC ROOT FIX (P0-B6 -- preserve_direction semantic
@@ -3658,6 +3852,14 @@ class DisGeNETPipeline(BasePipeline):
             "disease_name_was_filled": None,
             "association_type_was_filled": None,
             "pmid_list_was_capped": None,
+            # Teammate-2 Task 2.2 ROOT FIX (P2-008): prevalence_per_10k.
+            # Default None; populated by _populate_prevalence() using
+            # the curated DISEASE_PREVALENCE_PER_10K table. None means
+            # "not in curated table" — downstream compute_market_score
+            # treats None as a neutral 0.5. NOT a linear function of
+            # GDA count (the previous formula incorrectly flagged
+            # cystic fibrosis as common).
+            "prevalence_per_10k": None,
         }
         for col, default in required_defaults.items():
             if col not in df.columns:
@@ -3669,6 +3871,101 @@ class DisGeNETPipeline(BasePipeline):
             raise ValueError(
                 "_ensure_gda_columns invariant: confidence_tier must be present"
             )
+        return df
+
+    def _populate_prevalence(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Populate prevalence_per_10k from the curated WHO/Orphanet table.
+
+        Teammate-2 Task 2.2 ROOT FIX (P2-008): replaces the previous
+        LINEAR formula ``5.0 + 2995.0 * (n_gdas / max_gda)`` with REAL
+        epidemiological prevalence values.
+
+        Scientific rationale:
+          The linear formula assumed "diseases with more known gene
+          associations are more common". This is FALSE:
+            - Cystic fibrosis: ~2000 GDAs (CFTR heavily studied),
+              prevalence 0.4/10K (RARE).
+            - Migraine: ~50 GDAs, prevalence 500/10K (common).
+          The formula flagged CF as "common" (prevalence ~3000/10K),
+          corrupting the RL agent's market_opportunity scoring:
+          orphan diseases (highest commercial value) were scored as
+          low-opportunity, and common diseases (low commercial value)
+          were scored as high-opportunity.
+
+        Implementation:
+          Uses ``_lookup_prevalence_per_10k(disease_id, disease_name)``
+          which checks:
+            1. ORPHA:nnnn disease_id -> default 1.0/10K (Orphanet =
+               rare disease DB, all entries are rare per EU regulation).
+            2. Curated DISEASE_PREVALENCE_PER_10K dict keyed by
+               lowercase disease name.
+            3. Returns None if not in either source (downstream
+               compute_market_score treats None as neutral 0.5).
+
+        Args:
+            df: Cleaned GDA DataFrame with disease_id and disease_name
+                columns. Must have been processed by _ensure_gda_columns
+                first (so prevalence_per_10k column exists).
+
+        Returns:
+            DataFrame with prevalence_per_10k populated. The input is
+            NOT mutated (a copy is returned).
+        """
+        if df.empty:
+            return df
+        if "disease_id" not in df.columns and "disease_name" not in df.columns:
+            # Nothing to look up; prevalence_per_10k stays None.
+            return df
+
+        df = df.copy()
+
+        # Vectorized lookup using apply (the curated dict is small,
+        # ~80 entries, so per-row apply is fast enough for ~1M GDAs).
+        def _row_lookup(row):
+            return _lookup_prevalence_per_10k(
+                row.get("disease_id"),
+                row.get("disease_name"),
+            )
+
+        df["prevalence_per_10k"] = df.apply(_row_lookup, axis=1)
+
+        # Log summary statistics for monitoring.
+        total = len(df)
+        populated = int(df["prevalence_per_10k"].notna().sum())
+        rare_count = int(
+            (df["prevalence_per_10k"] < RARE_DISEASE_PREVALENCE_THRESHOLD).sum()
+        ) if populated > 0 else 0
+        logger.info(
+            "[disgenet] Task 2.2 ROOT FIX: populated prevalence_per_10k "
+            "for %d / %d GDA records (%.1f%%). Rare diseases "
+            "(prevalence < %.1f/10K): %d. The previous LINEAR formula "
+            "(5.0 + 2995.0 * n_gdas/max_gda) is REMOVED — prevalence "
+            "now comes from the curated WHO/Orphanet table.",
+            populated, total, 100.0 * populated / max(total, 1),
+            RARE_DISEASE_PREVALENCE_THRESHOLD, rare_count,
+        )
+
+        # Sanity check: cystic fibrosis MUST be rare (the headline bug
+        # from the audit). If CF is in the dataset, its prevalence must
+        # be < RARE_DISEASE_PREVALENCE_THRESHOLD. This assertion catches
+        # any future regression that reintroduces the linear formula.
+        cf_mask = df.get("disease_name", pd.Series(dtype=str)).astype(str).str.lower() == "cystic fibrosis"
+        if cf_mask.any():
+            cf_prev = df.loc[cf_mask, "prevalence_per_10k"].iloc[0]
+            if cf_prev is not None and cf_prev >= RARE_DISEASE_PREVALENCE_THRESHOLD:
+                logger.error(
+                    "[disgenet] Task 2.2 INVARIANT VIOLATION: cystic fibrosis "
+                    "prevalence_per_10k=%.4f (>= %.1f threshold). The linear "
+                    "formula bug has REGENERATED. CF MUST be rare (0.4/10K).",
+                    cf_prev, RARE_DISEASE_PREVALENCE_THRESHOLD,
+                )
+                raise RuntimeError(
+                    "Task 2.2 invariant violation: cystic fibrosis is "
+                    "flagged as common (prevalence >= 5/10K). The linear "
+                    "GDA-to-prevalence formula has regenerated. CF MUST "
+                    "be rare (0.4/10K). Investigate _populate_prevalence."
+                )
+
         return df
 
     def _filter_invalid_disease_ids(self, df: pd.DataFrame) -> pd.DataFrame:

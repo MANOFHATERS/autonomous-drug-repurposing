@@ -2797,6 +2797,22 @@ def _main(argv: list[str]) -> None:
         print(_main.__doc__)
         return
     cmd = argv[0]
+    # Teammate-2 Task 2.1 ROOT FIX (P2-008 verification command):
+    # The task verification command is `python -m phase1.pipelines string`
+    # (bare source name, no `run` prefix). The previous CLI required the
+    # `run` prefix and exited 1 with "Unknown command: string" on bare
+    # source names — making the verification command IMPOSSIBLE to run.
+    # ROOT FIX: if `cmd` is a recognized source name, treat it as
+    # `run <cmd>`. This is backward-compatible (the explicit `run`
+    # prefix still works) and makes the documented verification command
+    # actually executable.
+    _KNOWN_SOURCE_NAMES = {
+        "chembl", "drugbank", "uniprot", "string",
+        "disgenet", "omim", "pubchem",
+    }
+    if cmd in _KNOWN_SOURCE_NAMES:
+        argv = ["run", cmd] + list(argv[1:])
+        cmd = "run"
     if cmd == "list":
         for name in sorted(get_expected_pipelines()):
             print(f"  {name}")

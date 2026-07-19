@@ -787,17 +787,56 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
         # v83 P1-8: added ``drug_source`` column so downstream consumers
         # know which drug source (DrugBank / ChEMBL / sample) each
         # PubChem-enriched row came from.
+        #
+        # Teammate-2 Task 2.4 ROOT FIX (P2-036): the previous v50
+        # downloader wrote only 9 columns and requested only 6
+        # properties from PubChem. This caused:
+        #   1. molecular_formula and molecular_weight to be NULL in
+        #      every row (Phase 3 biomedical_tables.py needs these
+        #      for RDKit ADME proxy computation).
+        #   2. isomeric_smiles to be NULL (life-safety: (R)- vs (S)-
+        #      thalidomide must remain distinguishable for chiral
+        #      drug fingerprinting).
+        #   3. iupac_name, complexity, heavy_atom_count, exact_mass,
+        #      inchi all missing.
+        # ROOT FIX: request the full 15-property list (matching the
+        # v49 institutional-grade path in pubchem_pipeline.py:2378)
+        # and write all 16 columns. The schema in
+        # phase1_schema.pubchem_enrichment has been updated to declare
+        # all these columns as optional.
         writer.writerow([
-            "inchikey", "pubchem_cid", "canonical_smiles",
+            "inchikey", "pubchem_cid",
+            "molecular_formula", "molecular_weight",
+            "canonical_smiles", "isomeric_smiles",
+            "inchi", "iupac_name",
             "xlogp", "tpsa",
+            "complexity",
             "h_bond_donor_count", "h_bond_acceptor_count",
-            "rotatable_bond_count", "drug_source",
+            "rotatable_bond_count", "heavy_atom_count",
+            "exact_mass",
+            "drug_source",
         ])
+        # Teammate-2 Task 2.4 ROOT FIX: full 15-property list (matches
+        # the v49 institutional-grade path). The previous 6-property
+        # list (CanonicalSMILES,XLogP,TPSA,HBondDonorCount,
+        # HBondAcceptorCount,RotatableBondCount) was missing
+        # MolecularFormula, MolecularWeight, InChIKey, InChI,
+        # IsomericSMILES, IUPACName, ExactMass, Complexity,
+        # HeavyAtomCount. The missing properties broke Phase 3's
+        # RDKit ADME proxy (which needs molecular_weight) and the
+        # chiral drug fingerprinting (which needs isomeric_smiles).
+        PUBCHEM_FULL_PROPERTY_LIST = (
+            "MolecularFormula,MolecularWeight,InChIKey,InChI,"
+            "CanonicalSMILES,IsomericSMILES,IUPACName,"
+            "XLogP,ExactMass,TPSA,Complexity,"
+            "HBondDonorCount,HBondAcceptorCount,"
+            "RotatableBondCount,HeavyAtomCount"
+        )
         for i, inchikey in enumerate(inchikeys):
             try:
-                # Resolve InChIKey -> CID
+                # Resolve InChIKey -> CID + properties in a single call.
                 url = f"{PUBCHEM_PUG_REST}/compound/inchikey/{inchikey}/property/"
-                properties = "CanonicalSMILES,XLogP,TPSA,HBondDonorCount,HBondAcceptorCount,RotatableBondCount"
+                properties = PUBCHEM_FULL_PROPERTY_LIST
                 # v64 ROOT FIX (P1-015): percent-encode the comma-separated
                 # property list. PubChem PUG-REST accepts bare commas in
                 # practice, but strict proxies/CDNs may reject them with 400
@@ -814,15 +853,26 @@ def download_pubchem_full(raw_dir: Path, inchikeys: list[str] | None = None) -> 
                     props_list = data.get("PropertyTable", {}).get("Properties", [])
                     if props_list:
                         p = props_list[0]
+                        # Teammate-2 Task 2.4 ROOT FIX: write all 16
+                        # columns. Missing properties default to empty
+                        # string (the CSV writer handles None → '').
                         writer.writerow([
                             inchikey,
                             p.get("CID", ""),
+                            p.get("MolecularFormula", ""),
+                            p.get("MolecularWeight", ""),
                             p.get("CanonicalSMILES", ""),
+                            p.get("IsomericSMILES", ""),
+                            p.get("InChI", ""),
+                            p.get("IUPACName", ""),
                             p.get("XLogP", ""),
                             p.get("TPSA", ""),
+                            p.get("Complexity", ""),
                             p.get("HBondDonorCount", ""),
                             p.get("HBondAcceptorCount", ""),
                             p.get("RotatableBondCount", ""),
+                            p.get("HeavyAtomCount", ""),
+                            p.get("ExactMass", ""),
                             drug_source,
                         ])
                 elif resp.status_code == 404:

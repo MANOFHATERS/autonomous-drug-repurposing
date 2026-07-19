@@ -166,14 +166,17 @@ except NameError:
 # ("dropped", reason) for these edges — the adapter LOGS the drop with
 # the reason, replacing the previous silent-drop pattern (P3-002 bug).
 EDGE_DROP_REASONS: Dict[Tuple[str, str, str], str] = {
-    ("Protein", "interacts_with", "Protein"): (
-        "PPI (Protein-Protein Interaction). Phase 3's GT model is a "
-        "drug-disease link predictor — PPI edges would let the model "
-        "learn a shortcut (drug -> protein -> protein -> disease) that "
-        "bypasses the multi-hop pathway reasoning the architecture is "
-        "designed for. PPI signal is preserved indirectly via shared "
-        "pathway membership (both proteins -> same pathway)."
-    ),
+    # Teammate-2 Task 2.1 ROOT FIX (P2-008): REMOVED the
+    # ("Protein", "interacts_with", "Protein") entry. PPI now flows
+    # through PHASE2_TO_PHASE3_EDGE (mapped to
+    # ("protein", "interacts_with", "protein")). The previous drop
+    # reason ("shortcut concern") was speculative — the GT model's
+    # attention mechanism can downweight shortcut paths if they hurt
+    # generalization. Disconnecting the largest biomedical dataset
+    # the platform ingests is the worse trade-off. The (dst, src)
+    # reverse edge is added to the SAME edge set by the graph builder's
+    # _add_reverse_edges (since REVERSE_RELATION_MAP["interacts_with"]
+    # = "interacts_with"), correctly modeling PPI as undirected.
     ("Gene", "interacts_with", "Gene"): (
         "Gene-gene interaction (PPI at the gene level). Same rationale "
         "as Protein-Protein: would create a shortcut. Genes are a Phase "
