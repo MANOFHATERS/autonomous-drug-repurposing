@@ -26,10 +26,22 @@ import { NextResponse } from "next/server";
  * matches the Kubernetes / Docker convention of /healthz or /api/health
  * returning 200 with `{ "status": "ok" }`.
  *
+ * TM10 v128 ROOT FIX (Task 10.4): this route is intentionally LIVENESS
+ * ONLY. A separate /api/health/ready endpoint handles READINESS checks
+ * (PostgreSQL, Neo4j, Phase 1/2/3 service connectivity). The split is
+ * the institutional-grade pattern:
+ *   - LIVENESS (/api/health) = "is the process alive?" → 200 always.
+ *     Docker HEALTHCHECK uses this. If it returned 503 when the DB was
+ *     down, Docker would restart the container in a loop — but restarting
+ *     doesn't fix a DB outage, and the restart loop prevents fast recovery
+ *     when the DB comes back.
+ *   - READINESS (/api/health/ready) = "are all deps reachable?" → 200 or 503.
+ *     Orchestrators (K8s readinessProbe) and monitoring (Prometheus,
+ *     Datadog) use this. A 503 takes the pod out of the load balancer
+ *     without restarting it.
+ *
  * WHAT THIS ROUTE IS NOT:
- *   - It is NOT a readiness probe. A readiness probe would also check
- *     DB connectivity, ML service reachability, etc. That is
- *     /api/system/status (gated on requirePlatformAdmin) — NOT this.
+ *   - It is NOT a readiness probe. That is /api/health/ready (NEW, TM10 v128).
  *   - It is NOT a metrics endpoint. Metrics are exposed by the
  *     monitoring layer (Prometheus / OpenTelemetry) on a different path.
  *   - It is NOT authenticated. Auth would defeat the purpose — the

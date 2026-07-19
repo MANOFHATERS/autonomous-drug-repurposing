@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import {
   verifyPassword,
+  // TM10 v128 ROOT FIX (Task 10.5): import hashPassword + hashNeedsMigration
+  // for transparent bcrypt→argon2id migration on successful login.
+  hashPassword,
+  hashNeedsMigration,
   signAccessToken,
   rotateRefreshToken,
   setAuthCookies,
@@ -384,6 +388,54 @@ export async function POST(req: NextRequest) {
   // FE-009: Reset failed counter on successful login.
   // FE-056: recordIpAttempt was already called up-front at line 49.
   await recordSuccessfulLogin(user.id);
+
+  // TM10 v128 ROOT FIX (Task 10.5): transparent bcrypt→argon2id migration.
+  // If the user's stored hash is bcrypt (any variant), re-hash the plaintext
+  // password (which the user just supplied) with argon2id and update the DB.
+  // This is the OWASP-recommended password-hash migration pattern — it
+  // upgrades existing users to the modern algorithm on their next login
+  // without requiring a password reset or any user-visible action.
+  //
+  // The migration is BEST-EFFORT: if it fails (DB write error, argon2
+  // package missing, etc.), the login STILL SUCCEEDS — the user is already
+  // authenticated and we don't want to lock them out due to a migration
+  // glitch. The next login attempt will retry the migration.
+  //
+  // We do the migration AFTER recordSuccessfulLogin (so the failed-login
+  // counter is already cleared) but BEFORE rotateRefreshToken (so the
+  // fresh access token doesn't need to be re-issued if the migration
+  // takes a few hundred ms).
+  if (hashNeedsMigration(user.passwordHash)) {
+    try {
+      const newHash = await hashPassword(password);
+      await db.user.update({
+        where: { id: user.id },
+        data: { passwordHash: newHash },
+      });
+      // Best-effort audit log — non-critical, don't fail login if it errors.
+      await writeAuditLog({
+        user: { userId: user.id, email: user.email, role: user.role },
+        action: "password_hash_migrated",
+        resource: `user:${user.id}`,
+        metadata: {
+          from: "bcrypt",
+          to: "argon2id",
+        },
+      }).catch(() => {
+        // Audit-log failure is non-critical for the migration.
+      });
+    } catch (migrationErr) {
+      // Migration failed — log and continue. The user is already
+      // authenticated (verifyPassword returned true). The next login
+      // will retry the migration. We do NOT fail the login here.
+      console.error(
+        "[login] TM10 v128: bcrypt→argon2id migration failed for user " +
+        user.id + ". Login will proceed; migration will be retried next " +
+        "login. Error:",
+        migrationErr,
+      );
+    }
+  }
 
   const tokens = await rotateRefreshToken(user.id);
   const access = signAccessToken({
