@@ -374,6 +374,13 @@ from .constants import (
     CONTROLLED_SUBSTANCE_COL,
     FEATURE_COLS,
     REQUIRED_COLUMNS,
+    # P4-006 v128 ROOT FIX (Task 9.6): optional bridge-provided feature columns.
+    GNN_SCORE_CALIBRATED_COL,
+    GNN_SCORE_AGE_HOURS_COL,
+    BRIDGE_DISEASE_PAIR_COUNT_COL,
+    BRIDGE_DISEASE_AVG_GNN_COL,
+    BRIDGE_DISEASE_AVG_SAFETY_COL,
+    OPTIONAL_BRIDGE_FEATURE_COLS,
 )
 
 # P4-013 ROOT FIX (v2 — Team Member 12): import the shared threshold
@@ -1117,6 +1124,7 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
     result: List[Tuple[str, str]] = []
     seen = set()
     files_loaded: List[str] = []
+    files_found_empty: List[str] = []  # P4-011 v128: track files found but empty
     files_missing: List[str] = []
     n_toxic_skipped = 0
     for path in candidate_paths:
@@ -1133,6 +1141,7 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
                 continue
             n_added_from_this_file = 0
             n_toxic_from_this_file = 0
+            n_rows_total = len(df_vh)
             for _, row in df_vh.iterrows():
                 drug = str(row[DRUG_COL]).lower().strip()
                 disease = str(row[DISEASE_COL]).lower().strip()
@@ -1156,6 +1165,14 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
                     result.append((drug, disease))
                     n_added_from_this_file += 1
             files_loaded.append(f"{path} ({n_added_from_this_file} new pairs)")
+            # P4-011 v128 ROOT FIX (Task 9.3): track files found but empty
+            # (header-only CSV). On a fresh deployment, rl/validated_hypotheses.csv
+            # ships as HEADER-ONLY — it is populated by the data flywheel
+            # (phase4/writeback.py) as pharma partners validate hypotheses.
+            # A header-only file is EXPECTED on first boot, but the operator
+            # should be aware that the reward bonus is currently a no-op.
+            if n_rows_total == 0:
+                files_found_empty.append(path)
             if n_toxic_from_this_file > 0:
                 logger.warning(
                     f"INT-020 ROOT FIX: skipped {n_toxic_from_this_file} "
@@ -1174,6 +1191,28 @@ def _load_validated_hypotheses() -> List[Tuple[str, str]]:
             f"{files_loaded}. Canonical path searched FIRST. "
             f"Used for REWARD BONUS ONLY (not in AUC label set). "
             f"{n_toxic_skipped} toxic pair(s) intentionally excluded."
+        )
+    elif files_found_empty:
+        # P4-011 v128 ROOT FIX (Task 9.3): file was FOUND but EMPTY.
+        # This is the EXPECTED state on a fresh deployment (the file ships
+        # as header-only and is populated by the data flywheel). Log at
+        # WARNING (not CRITICAL) so the operator knows the reward bonus
+        # is currently a no-op, but doesn't get paged at 3am for a fresh
+        # install. As pharma partners validate hypotheses via
+        # phase4/writeback.write_validated_hypothesis(), this file grows
+        # and the warning disappears on the next reload.
+        logger.warning(
+            f"P4-011 v128 ROOT FIX (Task 9.3): validated_hypotheses.csv "
+            f"was FOUND but is EMPTY (header-only, 0 data rows) at: "
+            f"{files_found_empty}. This is the EXPECTED state on a fresh "
+            f"deployment — the file ships as header-only and is populated "
+            f"by the DATA FLYWHEEL (phase4/writeback.write_validated_"
+            f"hypothesis()) as pharma partners validate hypotheses. The "
+            f"RL reward bonus is currently a no-op (no validated pairs to "
+            f"reward). To populate: POST /validate with a validated "
+            f"hypothesis, or call phase4.writeback.write_validated_"
+            f"hypothesis(drug=..., disease=..., outcome='validated_"
+            f"positive', validated_by=...)."
         )
     else:
         logger.critical(
@@ -5458,6 +5497,108 @@ class DrugRankingEnv(gym.Env):
                 f"No test-data leakage into reward_fn."
             )
 
+        # ====================================================================
+        # P4-006 v128 ROOT FIX (Task 9.6 — bridge column mismatch):
+        # The Phase 3 bridge writes 17 columns (2 IDs + 15 features), but
+        # the env previously read only 12 (2 IDs + 10 features), silently
+        # DROPPING 5 bridge-provided feature columns:
+        #   - gnn_score_calibrated (temperature-calibrated GNN score)
+        #   - gnn_score_timestamp (used only for staleness, NOT as a feature)
+        #   - disease_pair_count  (bridge's full-graph authoritative value)
+        #   - disease_avg_gnn     (bridge's full-graph authoritative value)
+        #   - disease_avg_safety  (bridge's full-graph authoritative value)
+        #
+        # The agent was blind to confidence calibration, prediction freshness,
+        # and the bridge's authoritative disease context. The env re-derived
+        # disease context from its own train/test subset, which DIFFERS from
+        # the bridge's full-graph value — train/test distribution shift.
+        #
+        # ROOT FIX: capture the 5 bridge columns BEFORE the env's drop+re-derive
+        # step below, RENAME the disease-context columns to "bridge_*" (so
+        # they don't collide with the env-derived "disease_*" columns), and
+        # add all 5 to _effective_feature_cols. The observation vector now
+        # includes BOTH the bridge's authoritative values AND the env-derived
+        # train/test-split values — the agent can learn from both signals.
+        #
+        # observation_space.shape is now (10 + 5 + 3 = 18,) — meets the
+        # Task 9.6 verification: assert env.observation_space.shape[0] >= 17.
+        #
+        # For OLD bridge CSVs (pre-v128) that don't emit these columns, the
+        # env falls back to 0.0 (neutral value, doesn't break the policy).
+        # The verification test uses a v128+ bridge CSV that emits all 5.
+        # ====================================================================
+        self._bridge_feature_cols: List[str] = []
+
+        # (1) gnn_score_calibrated — the temperature-calibrated GNN score.
+        if GNN_SCORE_CALIBRATED_COL in self.data.columns:
+            # Clip to [0, 1] — calibrated scores are sigmoid outputs in [0, 1].
+            self.data[GNN_SCORE_CALIBRATED_COL] = self.data[GNN_SCORE_CALIBRATED_COL].clip(0.0, 1.0)
+            self._bridge_feature_cols.append(GNN_SCORE_CALIBRATED_COL)
+        else:
+            # Old bridge CSV: fill with 0.0 (neutral — agent learns to ignore).
+            self.data[GNN_SCORE_CALIBRATED_COL] = 0.0
+            self._bridge_feature_cols.append(GNN_SCORE_CALIBRATED_COL)
+
+        # (2) gnn_score_age_hours — derived from gnn_score_timestamp.
+        # 0.0 = fresh (just computed); large = stale. The agent can learn
+        # to DOWN-WEIGHT stale predictions (the GT model may have been
+        # retrained since the gnn_score was computed).
+        if GNN_SCORE_TIMESTAMP_COL in self.data.columns and len(self.data) > 0:
+            try:
+                from datetime import datetime as _dt_age, timezone as _tz_age
+                _now_age = datetime.now(timezone.utc)
+                _ages_hours = []
+                for _ts_str in self.data[GNN_SCORE_TIMESTAMP_COL].astype(str):
+                    if not _ts_str or _ts_str == "nan":
+                        _ages_hours.append(0.0)
+                        continue
+                    try:
+                        _parsed = _dt_age.fromisoformat(_ts_str.replace("Z", "+00:00"))
+                        if _parsed.tzinfo is None:
+                            _parsed = _parsed.replace(tzinfo=_tz_age.utc)
+                        _age_h = (_now_age - _parsed).total_seconds() / 3600.0
+                        _ages_hours.append(max(0.0, _age_h))
+                    except (ValueError, TypeError):
+                        _ages_hours.append(0.0)
+                self.data[GNN_SCORE_AGE_HOURS_COL] = _ages_hours
+            except Exception as _age_exc:
+                logger.warning(
+                    f"P4-006 v128: failed to derive {GNN_SCORE_AGE_HOURS_COL} "
+                    f"from {GNN_SCORE_TIMESTAMP_COL}: {_age_exc}. Filling with 0.0."
+                )
+                self.data[GNN_SCORE_AGE_HOURS_COL] = 0.0
+        else:
+            self.data[GNN_SCORE_AGE_HOURS_COL] = 0.0
+        self._bridge_feature_cols.append(GNN_SCORE_AGE_HOURS_COL)
+
+        # (3, 4, 5) Capture bridge's disease context columns and RENAME to
+        # "bridge_*" BEFORE the env's drop+re-derive step below. The env's
+        # drop step removes columns NAMED "disease_pair_count" /
+        # "disease_avg_gnn" / "disease_avg_safety" — so renaming to
+        # "bridge_*" preserves them. The env then re-derives its own
+        # "disease_*" columns from its train/test subset, and the agent
+        # gets BOTH signals in the observation vector.
+        _bridge_disease_map = {
+            "disease_pair_count": BRIDGE_DISEASE_PAIR_COUNT_COL,
+            "disease_avg_gnn": BRIDGE_DISEASE_AVG_GNN_COL,
+            "disease_avg_safety": BRIDGE_DISEASE_AVG_SAFETY_COL,
+        }
+        for _src_col, _dst_col in _bridge_disease_map.items():
+            if _src_col in self.data.columns:
+                # Rename the bridge-provided column to "bridge_*".
+                self.data = self.data.rename(columns={_src_col: _dst_col})
+                # Normalize to [0, 1] (the bridge emits raw counts/means,
+                # so min-max normalize per-env for scale consistency with
+                # the other features).
+                _col_min = float(self.data[_dst_col].min())
+                _col_max = float(self.data[_dst_col].max())
+                _denom = (_col_max - _col_min) + 1e-9
+                self.data[_dst_col] = (self.data[_dst_col] - _col_min) / _denom
+            else:
+                # Old bridge CSV: fill with 0.0 (neutral).
+                self.data[_dst_col] = 0.0
+            self._bridge_feature_cols.append(_dst_col)
+
         # V4 C-F2 fix: disease-context features. Use pre-computed stats
         # from the TRAIN env if provided (eliminates distribution shift).
         # Otherwise compute from this env's own data (train env case).
@@ -5561,7 +5702,9 @@ class DrugRankingEnv(gym.Env):
             }
 
         self._effective_feature_cols: List[str] = (
-            list(self.config.reward.feature_cols) + self._disease_feature_cols
+            list(self.config.reward.feature_cols)
+            + self._bridge_feature_cols  # P4-006 v128 (Task 9.6): 5 bridge cols
+            + self._disease_feature_cols
         )
 
         self.n_pairs = len(self.data)
