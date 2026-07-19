@@ -520,3 +520,24 @@ Stage Summary:
   PPO RL agent (trained, wrote ppo_model_50_steps.zip).
 - All 22 issues verified at runtime in REAL CODE (not comments, not tests, not grep).
 - main branch on GitHub (commit 17c63b9) has all the fixes; fresh clone verification PASSED.
+
+---
+Task ID: TM7-v127-phase3-forensic-root-fixes
+Agent: Teammate 7 (Phase 3 — Models, Layers, Embeddings, Training, Eval, Inference)
+Task: Fix Tasks 7.1-7.5 (per-epoch AUC, gradient clipping+AMP, graph-aware split, MLflow tracking, Neo4j writeback) by reading actual code line-by-line and applying root-cause fixes. Hostile-auditor mode: assume every comment is a lie until the code proves otherwise.
+
+Work Log (forensic audit findings — actual code, not comments):
+- Read full project docx (Team_Cosmic_Build_Process_Updated.docx). Phase 3 = Graph Transformer (PyTorch+PyG) that reads Neo4j KG from Phase 2 and predicts drug-disease interaction scores. V1 launch criterion: >0.85 AUC on held-out pairs.
+- Cloned repo (main @ bc5f064). Audited graph_transformer/training/trainer.py (3344 lines), graph_transformer/data/graph_builder.py (2953 lines), graph_transformer/service.py (884 lines), graph_transformer/utils/__init__.py (585 lines), graph_transformer/utils/mlflow_integration.py (250 lines), graph_transformer/evaluation/__init__.py (469 lines).
+
+Forensic findings (REAL bugs, not the comments' claims):
+- Task 7.1 (per-epoch AUC + early stopping): ALREADY implemented in fit() at lines ~1500-1660. verified_val_auc is computed every epoch via evaluate_link_prediction, used for checkpoint selection with val_auc_min_improvement=0.005, patience from scale_patience_with_graph_size. REAL.
+- Task 7.2 (gradient clipping + AMP): PARTIALLY implemented. Inline batching path (lines 939-963) has BOTH clip_grad_norm_ AND autocast+GradScaler. BUT the DataLoader production path (lines 877-894, triggered when n_samples >= 8192) has clip_grad_norm_ but NO AMP — exactly when AMP is most needed for 6M-node KG. This is the "comments claim fixed but production code broken" pattern.
+- Task 7.3 (graph-aware split): PARTIALLY implemented. drug_aware_split in utils/__init__.py splits by DRUG only. Diseases CAN leak across train/val/test — a disease in train can appear in val/test. Task explicitly requires BOTH drug AND disease disjointness. No leakage-detection utility exists.
+- Task 7.4 (MLflow): NOT WIRED IN. MLflowRunTracker class exists in utils/mlflow_integration.py (250 lines, fully implemented) but is NEVER IMPORTED OR CALLED in trainer.py. grep "mlflow" trainer.py = 0 matches. Dead code. The trainer does NOT log any params, metrics, artifacts, or models to MLflow.
+- Task 7.5 (Neo4j writeback): COMPLETELY MISSING. service.py only returns predictions in HTTP response. No MERGE to Neo4j. No PREDICTED_TREATS edge type anywhere in repo. No retrieval query. Predictions only go to gt_predictions.csv via gt_rl_bridge.py.
+
+Stage Summary:
+- 1 task fully done (7.1), 1 task partially done with critical production-path bug (7.2), 1 task partially done with disease-leakage bug (7.3), 2 tasks not done at all (7.4, 7.5).
+- Branch: teammate-7-phase3-root-fixes-v127.
+- Will apply root-cause fixes (not surface patches) to all 5 tasks, write real tests, run real code, push, verify, merge.
