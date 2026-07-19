@@ -83,6 +83,8 @@ class GraphTransformerTrainer:
         drug_names: Optional[List[str]] = None,
         disease_names: Optional[List[str]] = None,
         known_pairs: Optional[List[Tuple[str, str]]] = None,
+        # Teammate 6 (Task 6.4) ROOT FIX: optional MLflow tracker.
+        mlflow_tracker: Optional[Any] = None,
     ) -> None:
         """Initialize the trainer.
 
@@ -249,49 +251,52 @@ class GraphTransformerTrainer:
         self.best_val_auc = 0.0
         self.best_val_loss: float = float("inf")
         self.best_state_dict: Optional[Dict[str, Any]] = None
-        # TM7-v127 ROOT FIX (Task 7.4, hostile-auditor pass):
-        # The codebase has a fully-implemented ``MLflowRunTracker`` wrapper
-        # at ``graph_transformer/utils/mlflow_integration.py`` (250 lines,
-        # probe-for-mlflow, env-gated, non-blocking) but it was NEVER
-        # IMPORTED OR CALLED by the trainer. grep "mlflow" trainer.py = 0
-        # matches. The wrapper was dead code -- comments in the module
-        # docstring claimed "the trainer and bridge can call" it, but no
-        # code actually did. Hostile-auditor confirmed.
+        # ─── MLflow tracker wiring (merged TM6 + TM7 ROOT FIX) ───────────
+        # TM7-v127 ROOT FIX (Task 7.4): auto-instantiate an MLflowRunTracker
+        # so the trainer can log params/metrics/artifacts without the caller
+        # having to pass one in. The tracker is OPT-IN (no-op when mlflow is
+        # not installed OR MLFLOW_TRACKING_URI is not set), so dev/CI runs
+        # without MLflow still work.
         #
-        # ROOT FIX: instantiate the tracker here so ``fit()`` and
-        # ``save_checkpoint()`` can call log_params / log_metrics /
-        # log_artifact / register_model. The tracker is OPT-IN (no-op
-        # when ``mlflow`` is not installed OR ``MLFLOW_TRACKING_URI`` is
-        # not set), so dev/CI environments without MLflow still work.
-        # Production sets ``MLFLOW_TRACKING_URI=http://mlflow:5001`` (see
-        # docker-compose.yml) and gets full tracking.
+        # TM6-v127 ROOT FIX (Task 6.4): accept an OPTIONAL ``mlflow_tracker``
+        # parameter so callers (e.g. tests, or production code that wants a
+        # custom tracker) can override the auto-instantiated one. When the
+        # caller provides a tracker, it WINS over the auto-instantiated one
+        # — this is the standard "dependency injection" pattern.
         #
-        # The tracker instance is REUSED across multiple fit() calls on
-        # the same trainer (each fit() calls start_run + end_run, which
-        # creates a NEW MLflow run inside the same experiment). This
-        # matches the standard MLflow usage pattern.
-        try:
-            from ..utils.mlflow_integration import MLflowRunTracker
-            self.mlflow_tracker = MLflowRunTracker(
-                experiment_name=os.environ.get(
-                    "GT_MLFLOW_EXPERIMENT", "drugos_phase3_gt"
-                )
-            )
+        # The tracker is exposed as BOTH ``self.mlflow_tracker`` (TM7 name,
+        # used by fit() / save_checkpoint()) AND ``self._mlflow_tracker``
+        # (TM6 name, used by _calibrate_temperature() to log the
+        # calibration reliability diagram). Both names point to the SAME
+        # object so there is no drift.
+        if mlflow_tracker is not None:
+            # TM6: caller provided a tracker (e.g. a mock for testing, or a
+            # custom-configured tracker for production). Use it.
+            self.mlflow_tracker = mlflow_tracker
+            self._mlflow_tracker = mlflow_tracker
             self._mlflow_available = True
-        except ImportError:
-            # If the import itself fails (e.g. utils module moved), make
-            # the tracker a no-op object with the same methods. This is
-            # a defense-in-depth fallback -- the wrapper already degrades
-            # to no-op when mlflow is not installed, but this catches the
-            # case where the wrapper module itself is unavailable.
-            logger.warning(
-                "TM7-v127 (Task 7.4): could not import MLflowRunTracker "
-                "from graph_transformer.utils.mlflow_integration. MLflow "
-                "tracking is DISABLED for this trainer. Install mlflow "
-                "and set MLFLOW_TRACKING_URI to enable."
-            )
-            self.mlflow_tracker = None
-            self._mlflow_available = False
+        else:
+            # TM7: auto-instantiate the default tracker.
+            try:
+                from ..utils.mlflow_integration import MLflowRunTracker
+                self.mlflow_tracker = MLflowRunTracker(
+                    experiment_name=os.environ.get(
+                        "GT_MLFLOW_EXPERIMENT", "drugos_phase3_gt"
+                    )
+                )
+                self._mlflow_available = True
+            except ImportError:
+                logger.warning(
+                    "TM7-v127 (Task 7.4): could not import MLflowRunTracker "
+                    "from graph_transformer.utils.mlflow_integration. MLflow "
+                    "tracking is DISABLED for this trainer. Install mlflow "
+                    "and set MLFLOW_TRACKING_URI to enable."
+                )
+                self.mlflow_tracker = None
+                self._mlflow_available = False
+            # TM6: expose the same tracker under the _mlflow_tracker name
+            # so _calibrate_temperature can call log_calibration_plot on it.
+            self._mlflow_tracker = self.mlflow_tracker
         # FORENSIC ROOT FIX (audit Issue 138): checkpoint selection is now
         # driven by ``val_auc`` (the scientific success metric), NOT
         # ``val_loss``. The previous implementation argued that val_loss is
@@ -2197,6 +2202,21 @@ class GraphTransformerTrainer:
             disease_emb = embeddings["disease"][val_disease_idx.to(self.device)].detach()
             labels = val_labels.to(self.device)
 
+            # Teammate 6 (Task 6.4) ROOT FIX: compute the RAW logits BEFORE
+            # fit_temperature mutates the temperature parameter.
+            try:
+                pre_logits = self.model.link_predictor.forward_logits(
+                    drug_emb, disease_emb
+                ).detach()
+            except Exception as exc:
+                logger.debug(
+                    "Task 6.4: could not compute pre-calibration logits "
+                    "for reliability diagram (%s). Calibration plot will "
+                    "be skipped (temperature calibration itself succeeds).",
+                    exc,
+                )
+                pre_logits = None
+
         # *** MUST be OUTSIDE the no_grad block above -- Adam needs gradients ***
         # ROOT FIX (D-04): the V27 code correctly placed fit_temperature
         # outside the no_grad block, but the structure was FRAGILE: a
@@ -2227,6 +2247,45 @@ class GraphTransformerTrainer:
             drug_emb, disease_emb, labels
         )
         logger.info(f"Post-hoc temperature calibrated to {temp:.4f}")
+
+        # Teammate 6 (Task 6.4) ROOT FIX: log the calibration reliability
+        # diagram to MLflow (when a tracker is configured). The diagram
+        # shows the pre-calibration curve (T=1.0) vs the post-calibration
+        # curve (T=temp) so operators can visually verify the calibration
+        # improved. We compute both probability vectors from the SAME
+        # logits so the comparison is apples-to-apples.
+        if self._mlflow_tracker is not None and pre_logits is not None:
+            try:
+                with torch.no_grad():
+                    # Pre-calibration probabilities: sigmoid(logits) with T=1.0.
+                    pre_probs = torch.sigmoid(pre_logits).cpu().numpy()
+                    # Post-calibration probabilities: sigmoid(logits / T_fit).
+                    _safe_temp = max(float(temp), 1e-6)
+                    post_probs = torch.sigmoid(pre_logits / _safe_temp).cpu().numpy()
+                    _labels_np = labels.cpu().numpy()
+                # The tracker's method is non-blocking (try/except internally).
+                self._mlflow_tracker.log_calibration_plot(
+                    pre_probs=pre_probs,
+                    post_probs=post_probs,
+                    labels=_labels_np,
+                    step=None,  # end-of-training plot, not per-epoch
+                    n_bins=10,
+                )
+                logger.info(
+                    "Task 6.4: logged temperature calibration reliability "
+                    "diagram to MLflow (pre ECE vs post ECE — see the "
+                    "calibration_ece_pre / calibration_ece_post metrics "
+                    "in the MLflow UI)."
+                )
+            except Exception as exc:
+                # Non-blocking: a tracker outage must NOT fail training.
+                logger.warning(
+                    "Task 6.4: MLflow calibration plot logging failed (%s). "
+                    "Temperature calibration itself succeeded (T=%.4f). The "
+                    "plot will not be available in the MLflow UI.",
+                    exc, temp,
+                )
+
         return temp
 
     # ------------------------------------------------------------------

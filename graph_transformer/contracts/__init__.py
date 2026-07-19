@@ -33,6 +33,11 @@ from graph_transformer.contracts.phase3_schema import (
     HYPERPARAMS_REQUIRED_KEYS,
     validate_checkpoint_dict,
     is_valid_checkpoint,
+    # Teammate 6 (Task 6.2) — Phase 2 → Phase 3 edge mapping re-exports.
+    PHASE2_TO_PHASE3_EDGE,
+    PHASE2_TO_PHASE3_EDGE_DROPPED,
+    CORE_EDGE_TYPES,
+    assert_all_phase2_edges_mapped_or_dropped,
 )
 
 __all__ = [
@@ -48,4 +53,9 @@ __all__ = [
     "HYPERPARAMS_REQUIRED_KEYS",
     "validate_checkpoint_dict",
     "is_valid_checkpoint",
+    # Teammate 6 (Task 6.2)
+    "PHASE2_TO_PHASE3_EDGE",
+    "PHASE2_TO_PHASE3_EDGE_DROPPED",
+    "CORE_EDGE_TYPES",
+    "assert_all_phase2_edges_mapped_or_dropped",
 ]
