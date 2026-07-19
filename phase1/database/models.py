@@ -547,6 +547,9 @@ __all__: list[str] = [
     "EntityMapping",
     "PipelineRun",
     "SchemaVersion",
+    # TM3 Task 3.3 v127: ValidatedHypothesis for data flywheel writeback
+    "ValidatedHypothesis",
+    "VALIDATED_HYPOTHESIS_OUTCOMES",
     # Enums
     "ClinicalPhase",
     "DrugType",
@@ -3202,6 +3205,188 @@ class RejectedRecord(Base, IDMixin):
             f"source_table='{self.source_table}', "
             f"source_pipeline='{self.source_pipeline}', "
             f"rejection_type='{self.rejection_type}')>"
+        )
+
+
+# ===========================================================================
+# 11. VALIDATED HYPOTHESES (TM3 Task 3.3 v127 — Data Flywheel Writeback)
+# ===========================================================================
+
+#: Validated hypothesis outcome values. Mirrors the TM14
+#: ``shared/contracts/writeback.py`` VALID_OUTCOMES list (single source of
+#: truth for the writeback contract). Defined here as a tuple so it can be
+#: used in the ORM CHECK constraint below WITHOUT importing from
+#: ``shared.contracts.writeback`` (which would create a circular import
+#: hazard if shared/ ever imports from phase1.database).
+VALIDATED_HYPOTHESIS_OUTCOMES: tuple[str, ...] = (
+    "validated_positive",
+    "validated_toxic",
+    "validated_negative",
+    "invalidated",
+)
+
+
+class ValidatedHypothesis(Base, IDMixin, TimestampMixin):
+    """Durable PostgreSQL store for validated drug-disease hypotheses.
+
+    TM3 Task 3.3 ROOT FIX (v127) — PostgreSQL-backed data flywheel writeback.
+
+    Domain meaning
+    --------------
+    Each row represents a single drug-disease hypothesis that was validated
+    by a pharma partner (wet lab / clinical study / literature cross-check).
+    This is the proprietary data flywheel described in DOCX §10: validated
+    hypotheses are fed back to the Graph Transformer as new labeled data
+    points, the model retrains, predictions improve, repeat. This table is
+    the AUTHORITATIVE durable store; the CSV at
+    ``phase1/processed_data/validated_hypotheses.csv`` (per the TM14
+    ``shared/contracts/writeback.py`` contract) is the TRANSPORT format.
+
+    Schema — 10-column canonical (TM3 Task 3.3 spec)
+    ------------------------------------------------
+    1. ``drug_id``        VARCHAR(64)  — canonical drug ID (InChIKey /
+                                          DrugBank ID / ChEMBL ID). Nullable
+                                          because the writeback CSV (TM14
+                                          contract) uses bare drug NAMES —
+                                          the endpoint looks up the ID from
+                                          the drugs table and may not find
+                                          it (e.g. newly-validated drug not
+                                          yet loaded).
+    2. ``drug_name``      VARCHAR(500) — human-readable drug name. NOT NULL.
+    3. ``disease_id``     VARCHAR(64)  — canonical disease ID (MeSH / DO /
+                                          OMIM ID). Nullable for the same
+                                          reason as drug_id.
+    4. ``disease_name``   VARCHAR(500) — human-readable disease name. NOT NULL.
+    5. ``score``          NUMERIC(6,4) — Graph Transformer prediction score
+                                          (0.0-1.0). Nullable — a hypothesis
+                                          can be validated before the GT
+                                          score was recorded (rare but
+                                          possible during cold-start).
+    6. ``outcome``        VARCHAR(32)  — validation outcome. NOT NULL.
+                                          Constrained to VALID_OUTCOMES.
+    7. ``validated_at``   TIMESTAMPTZ  — when the validation occurred. NOT NULL.
+    8. ``validated_by``   VARCHAR(200) — who validated (pharma partner name /
+                                          study PI / "automated_literature_check").
+    9. ``source``         VARCHAR(200) — validation source (study ID, registry
+                                          URL, NCT number, etc.).
+    10. ``notes``         TEXT         — free-form notes.
+
+    Plus system columns: ``id`` (PK), ``created_at``, ``updated_at``.
+
+    Key constraints
+    ---------------
+    - ``outcome`` must be one of VALIDATED_HYPOTHESIS_OUTCOMES (CHECK).
+    - ``score`` must be in [0.0, 1.0] if present (CHECK).
+    - ``drug_name`` and ``disease_name`` must be non-empty (CHECK).
+    - Unique partial index on ``(drug_id, disease_id, validated_at)`` where
+      both IDs are NOT NULL — prevents duplicate writebacks. Rows with NULL
+      IDs are exempt (NULL != NULL in SQL).
+
+    Design notes
+    ------------
+    - NO foreign keys to drugs / gene_disease_associations. The validated
+      hypotheses table is the PLATFORM'S PROPRIETARY MOAT (DOCX §10) — it
+      must survive a rebuild of the drugs table (TRUNCATE + re-load). FK
+      constraints would cascade-delete the moat. Denormalizing drug_id +
+      drug_name preserves the hypothesis permanently.
+    - ``score`` uses NUMERIC(6,4), not FLOAT, to avoid float rounding
+      errors that would compound across retraining iterations.
+    - The CSV writeback contract (TM14) uses different column names
+      (``drug``, ``disease``, ``original_gt_score``, ``validation_study_id``).
+      The POST /datasets/validated_hypotheses endpoint in phase1/service.py
+      maps the CSV column names to this table's column names at write time.
+    """
+    __tablename__ = "validated_hypotheses"
+    # v117 ROOT FIX pattern: extend_existing=True so dual-import
+    # (database.models vs phase1.database.models) doesn't raise
+    # InvalidRequestError.
+    __table_args__ = (
+        # outcome CHECK — mirror migration 019's chk_vh_outcome.
+        CheckConstraint(
+            "outcome IN ("
+            "'validated_positive', "
+            "'validated_toxic', "
+            "'validated_negative', "
+            "'invalidated'"
+            ")",
+            name="chk_vh_outcome",
+        ),
+        # score range CHECK — mirror migration 019's chk_vh_score_range.
+        CheckConstraint(
+            "score IS NULL OR (score >= 0.0 AND score <= 1.0)",
+            name="chk_vh_score_range",
+        ),
+        # drug_name non-empty CHECK — mirror migration 019's
+        # chk_vh_drug_name_nonempty. The migration SQL uses PostgreSQL's
+        # ``btrim()`` function (Postgres-only); the ORM CHECK uses the
+        # portable ``LENGTH(TRIM(...)) > 0`` form (works on BOTH SQLite
+        # and PostgreSQL — same pattern as chk_drugs_smiles_valid at
+        # line 1069). This ensures dev DBs created via create_all() (which
+        # skip the migration SQL) enforce the same non-empty contract.
+        CheckConstraint(
+            "drug_name IS NOT NULL AND LENGTH(TRIM(drug_name)) > 0",
+            name="chk_vh_drug_name_nonempty",
+        ),
+        CheckConstraint(
+            "disease_name IS NOT NULL AND LENGTH(TRIM(disease_name)) > 0",
+            name="chk_vh_disease_name_nonempty",
+        ),
+        # Indexes mirroring migration 019 (partial indexes for NULLable
+        # drug_id / disease_id columns).
+        Index(
+            "idx_vh_drug_id",
+            "drug_id",
+            postgresql_where=text("drug_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_vh_disease_id",
+            "disease_id",
+            postgresql_where=text("disease_id IS NOT NULL"),
+        ),
+        Index("idx_vh_outcome", "outcome"),
+        Index(
+            "idx_vh_validated_at",
+            "validated_at",
+            postgresql_using="btree",
+        ),
+        # Unique partial index — prevents duplicate writebacks for the
+        # same (drug_id, disease_id, validated_at) triple. Rows with NULL
+        # IDs are exempt.
+        Index(
+            "uq_vh_drug_disease_time",
+            "drug_id",
+            "disease_id",
+            "validated_at",
+            unique=True,
+            postgresql_where=text("drug_id IS NOT NULL AND disease_id IS NOT NULL"),
+        ),
+        {"extend_existing": True},
+    )
+
+    # ---- Canonical 10-column schema (TM3 Task 3.3 spec) ----
+    drug_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    drug_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    disease_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    disease_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    # NUMERIC(6,4): 6 total digits, 4 after decimal. Range: -9.9999 to 99.9999.
+    # The CHECK constraint clamps to [0.0, 1.0] for GT prediction scores.
+    score: Mapped[Optional[float]] = mapped_column(Numeric(6, 4), nullable=True)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    validated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    validated_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    source: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"<ValidatedHypothesis(id={self.id}, "
+            f"drug_name='{self.drug_name}', "
+            f"disease_name='{self.disease_name}', "
+            f"outcome='{self.outcome}', "
+            f"score={self.score}, "
+            f"validated_at='{self.validated_at}')>"
         )
 
 

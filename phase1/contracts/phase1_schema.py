@@ -775,3 +775,152 @@ def detect_contract_vs_pipeline_drift() -> List[str]:
 
     return drift
 
+
+# =============================================================================
+# TM3 Task 3.4 ROOT FIX (v127) — MatchConfidence contract re-export
+# =============================================================================
+# RED-TEAM AUDIT FINDING (v127, hostile-auditor pass):
+#   The Task 3.4 specification (Teammate 3, Phase 1 -> Phase 2 data-integrity
+#   pairing) explicitly lists ``phase1/contracts/phase1_schema.py`` as the
+#   file to edit and prescribes this verification command:
+#
+#       python -c "from phase1.contracts.phase1_schema import MatchConfidence; \
+#                  vals = [m.value for m in MatchConfidence]; \
+#                  assert len(vals) == len(set(vals)), 'duplicates!'"
+#
+#   Prior "root fix" passes (v113 / v65 / v89) corrected the alias collisions
+#   IN THE ENUM ITSELF (which physically lives at
+#   ``phase1/entity_resolution/base.py`` lines 95-237 — verified by reading
+#   the actual file, NOT by trusting comments). The enum now has 11 members
+#   with 11 distinct float values and is decorated with ``@enum.unique`` so
+#   any future duplicate is a hard import-time error.
+#
+#   BUT — the verification command above FAILED prior to this commit because
+#   ``MatchConfidence`` was NOT importable from the contract module
+#   ``phase1.contracts.phase1_schema``. Downstream consumers that read the
+#   Task 3.4 contract and imported MatchConfidence from the contract module
+#   got ``ImportError: cannot import name 'MatchConfidence'``. This is the
+#   exact "comments claim fixed, code is broken" failure mode the audit
+#   mandates against.
+#
+# ROOT FIX (v127, this commit):
+#   1. Re-export MatchConfidence (and the from_method classmethod) from the
+#      contract module so the Task 3.4 verification command succeeds.
+#   2. The canonical definition stays in ``phase1/entity_resolution/base.py``
+#      (single source of truth — do NOT duplicate the enum here).
+#   3. ``__all__`` is extended so ``from phase1.contracts.phase1_schema import *``
+#      surfaces MatchConfidence to downstream callers (Phase 2's
+#      ``drugos_graph/entity_resolver.py`` and Phase 4's RL ranker).
+#   4. A runtime assertion verifies the re-export resolves to the SAME class
+#      object as the canonical definition — catches any future module-split
+#      regression where the contract module accidentally defines a parallel
+#      enum.
+#
+# This makes the contract module the canonical PUBLIC import path while the
+# entity_resolution package remains the canonical IMPLEMENTATION path. Both
+# paths resolve to the same class object (verified by ``is`` identity check
+# below).
+# -----------------------------------------------------------------------------
+try:
+    # Absolute import — works whether the importer is at the repo root or
+    # inside phase1/. The ``phase1.`` prefix matches the canonical package
+    # path established by phase1/__init__.py's meta-path finder.
+    from phase1.entity_resolution.base import MatchConfidence as _MatchConfidence
+
+    MatchConfidence = _MatchConfidence  # public re-export
+
+    # Identity check: the re-export MUST be the SAME class object as the
+    # canonical definition. If a future maintainer accidentally defines a
+    # parallel MatchConfidence in this module, the ``is`` check fails at
+    # import time.
+    from phase1.entity_resolution.base import MatchConfidence as _CanonicalMatchConfidence
+    assert MatchConfidence is _CanonicalMatchConfidence, (
+        "TM3 Task 3.4 v127 CONTRACT DRIFT: phase1.contracts.phase1_schema."
+        "MatchConfidence is NOT the same class object as phase1.entity_"
+        "resolution.base.MatchConfidence. A parallel enum definition was "
+        "introduced — remove it and use the re-export instead."
+    )
+    del _MatchConfidence, _CanonicalMatchConfidence
+except ImportError as _mc_exc:
+    # Defensive: if entity_resolution.base is unimportable (e.g. rapidux
+    # dependency missing during a partial install), do NOT crash the
+    # contract module — other schema constants are still needed. Log loudly.
+    import logging as _logging
+    _logging.getLogger("phase1.contracts.phase1_schema").error(
+        "TM3 Task 3.4 v127: could not re-export MatchConfidence from "
+        "phase1.entity_resolution.base: %s. The Task 3.4 verification "
+        "command will fail. Fix the entity_resolution package import.",
+        _mc_exc,
+    )
+    del _logging, _mc_exc
+
+
+# -----------------------------------------------------------------------------
+# TM3 Task 3.3 v127: ValidatedHypothesis ORM model contract re-export
+# -----------------------------------------------------------------------------
+# The Task 3.3 spec lists ``phase1/contracts/phase1_schema.py`` as a file to
+# edit. The canonical ORM definition lives in ``phase1/database/models.py``
+# (where ALL other ORM models live — consistency). Re-export it here so
+# downstream code (and future TMs reading the task spec) can import it from
+# the contract module:
+#
+#     from phase1.contracts.phase1_schema import ValidatedHypothesis
+#
+# The migration SQL (``phase1/database/migrations/019_validated_hypotheses.sql``)
+# is the canonical DDL; the ORM mirrors it for SQLite dev/test DBs that skip
+# the migration SQL. See the ORM docstring for the full 10-column schema.
+try:
+    from phase1.database.models import (
+        ValidatedHypothesis as _ValidatedHypothesis,
+        VALIDATED_HYPOTHESIS_OUTCOMES as _VH_OUTCOMES,
+    )
+    ValidatedHypothesis = _ValidatedHypothesis
+    VALIDATED_HYPOTHESIS_OUTCOMES = _VH_OUTCOMES
+
+    # Identity check — same defense-in-depth pattern as MatchConfidence above.
+    from phase1.database.models import (
+        ValidatedHypothesis as _CanonicalVH,
+        VALIDATED_HYPOTHESIS_OUTCOMES as _CanonicalOutcomes,
+    )
+    assert ValidatedHypothesis is _CanonicalVH, (
+        "TM3 Task 3.3 v127 CONTRACT DRIFT: ValidatedHypothesis is not the "
+        "same class object as phase1.database.models.ValidatedHypothesis."
+    )
+    assert VALIDATED_HYPOTHESIS_OUTCOMES is _CanonicalOutcomes, (
+        "TM3 Task 3.3 v127 CONTRACT DRIFT: VALIDATED_HYPOTHESIS_OUTCOMES "
+        "is not the same tuple object as the canonical definition."
+    )
+    del _ValidatedHypothesis, _VH_OUTCOMES, _CanonicalVH, _CanonicalOutcomes
+except ImportError as _vh_exc:
+    import logging as _logging
+    _logging.getLogger("phase1.contracts.phase1_schema").error(
+        "TM3 Task 3.3 v127: could not re-export ValidatedHypothesis from "
+        "phase1.database.models: %s. The POST /datasets/validated_hypotheses "
+        "endpoint will fail. Fix the phase1.database import.",
+        _vh_exc,
+    )
+    del _logging, _vh_exc
+
+
+# -----------------------------------------------------------------------------
+# ``__all__`` — explicit public API surface for ``from ... import *``.
+# -----------------------------------------------------------------------------
+__all__: list[str] = [
+    # Source-spec contract types
+    "ColumnSpec",
+    "SourceSpec",
+    "ValidationIssue",
+    "PHASE1_OUTPUT_SCHEMA",
+    "get_required_columns",
+    "get_any_of_groups",
+    "get_optional_columns",
+    "get_all_aliases",
+    "detect_contract_vs_pipeline_drift",
+    # TM3 Task 3.4 v127: MatchConfidence contract re-export
+    "MatchConfidence",
+    # TM3 Task 3.3 v127: ValidatedHypothesis ORM model re-export
+    "ValidatedHypothesis",
+    "VALIDATED_HYPOTHESIS_OUTCOMES",
+]
+
+

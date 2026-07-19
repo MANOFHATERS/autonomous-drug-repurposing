@@ -458,3 +458,123 @@ services:
         reservations: { memory: 128m }
     logging: *default-logging
     restart: unless-stopped
+
+  # ===========================================================================
+  # phase1-service — TM3 Task 3.1 ROOT FIX (v127)
+  # ---------------------------------------------------------------------------
+  # RED-TEAM AUDIT FINDING (v127, hostile-auditor pass):
+  #   The Task 3.1 specification (Teammate 3, Phase 1 -> Backend pairing)
+  #   requires a ``phase1-service`` docker-compose service that runs
+  #   ``uvicorn phase1.service:app --host 0.0.0.0 --port 8001``, exposes port
+  #   8001, and has a healthcheck. The audit found that ``phase1/service.py``
+  #   (534 lines of correct FastAPI code with ``/health``, ``/datasets``,
+  #   ``/datasets/{drug}/mechanism``, ``/stats`` endpoints) existed but was
+  #   NEVER started by any docker-compose service. Every ``/api/dataset``
+  #   call from the Next.js frontend proxies to ``DATASET_SERVICE_URL`` which
+  #   had nothing listening — every call returned ECONNREFUSED. Prior "ROOT
+  #   FIX" commits claimed this was wired but a manual read of
+  #   ``phase1/docker-compose.yml`` (this file) showed NO ``phase1-service``
+  #   key in the ``services:`` map. This is the exact "comments claim fixed,
+  #   code is broken" failure mode the audit mandates against.
+  #
+  # ROOT FIX (v127, this commit):
+  #   1. Add a new ``phase1-service`` docker-compose service.
+  #   2. Build from the SAME ``docker/Dockerfile.airflow`` image used by
+  #      the Airflow services — that image already pip-installs
+  #      ``phase1/requirements.txt`` which (per Task 3.2 verification)
+  #      declares ``fastapi>=0.110,<1.0`` and ``uvicorn[standard]>=0.27,<1.0``.
+  #      The image also has ``curl`` (added by IN-081) so the healthcheck
+  #      works. No new Dockerfile is needed.
+  #   3. Mount the phase1 source as ``/opt/airflow/phase1/`` and set
+  #      ``PYTHONPATH=/opt/airflow`` so ``uvicorn phase1.service:app``
+  #      resolves the ``phase1`` package correctly. The package's
+  #      ``__init__.py`` is present (verified by reading the file).
+  #   4. Also mount ``../shared`` as ``/opt/airflow/shared`` so the
+  #      service's optional ``from shared.observability import configure_app``
+  #      import resolves when the repo is checked out. If shared/ is absent
+  #      the service still starts (the import is wrapped in try/except).
+  #   5. Set ``DATABASE_URL`` so the new POST /datasets/validated_hypotheses
+  #      endpoint (Task 3.3) can persist validated hypotheses to PostgreSQL.
+  #      ``PHASE1_DB_URL`` is set as an alias for forward compatibility with
+  #      the env-var name documented in service.py's module docstring.
+  #   6. Expose port 8001 via the ``*_BIND_HOST_PORT`` env-var pattern
+  #      (matches IN-003 v118) — default is no host binding (production-safe);
+  #      dev operators set ``PHASE1_SERVICE_BIND_HOST_PORT=127.0.0.1:8001``
+  #      in .env for local curl access.
+  #   7. Healthcheck: ``curl -f http://localhost:8001/health`` — the
+  #      ``/health`` endpoint is defined in service.py:408 and returns
+  #      ``{"status": "ok", ...}``.
+  #   8. ``depends_on: postgres (service_healthy)`` so the DB is ready
+  #      before the service starts. The service still starts if the DB
+  #      later fails (CSV fallback for /datasets); only the POST endpoint
+  #      requires the DB.
+  #   9. Resource limits + logging + ``init: true`` match every other
+  #      service in this file (IN-004, IN-041, IN-099).
+  #
+  # VERIFICATION (TM3 Task 3.1 spec):
+  #   docker-compose up -d phase1-service
+  #   curl -sf http://localhost:8001/health   # -> {"status": "ok", ...}
+  #   curl -sf http://localhost:8001/datasets # -> {"sources": [...], ...}
+  # ===========================================================================
+  phase1-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.airflow
+    init: true
+    command: >
+      uvicorn phase1.service:app
+      --host 0.0.0.0
+      --port 8001
+      --proxy-headers
+      --forwarded-allow-ips=*
+    environment:
+      # Database — used by the POST /datasets/validated_hypotheses endpoint
+      # (Task 3.3). Matches the airflow services' DATABASE_URL pattern.
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}}
+      # PHASE1_DB_URL is the env var documented in service.py's module
+      # docstring. Set as an alias so future code that reads PHASE1_DB_URL
+      # instead of DATABASE_URL still works.
+      PHASE1_DB_URL: ${DATABASE_URL:-postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}}
+      # CORS — production MUST set PHASE1_CORS_ORIGINS to the real frontend
+      # domain. Default localhost:3000 is dev-only (matches Next.js dev).
+      PHASE1_CORS_ORIGINS: ${PHASE1_CORS_ORIGINS:-http://localhost:3000}
+      # PYTHONPATH — make ``phase1`` importable as a top-level package.
+      PYTHONPATH: /opt/airflow
+      # Service port/host (read by service.py:531-532 when run via __main__).
+      # When launched via uvicorn CLI (as here), these are NOT used by
+      # uvicorn itself but are kept for parity with `python service.py`.
+      PHASE1_SERVICE_HOST: 0.0.0.0
+      PHASE1_SERVICE_PORT: "8001"
+      DRUGOS_ENVIRONMENT: ${DRUGOS_ENVIRONMENT:-development}
+    volumes:
+      # Mount the phase1 source dir as /opt/airflow/phase1/ so the
+      # ``phase1.service`` module path resolves. The package's __init__.py
+      # makes it importable.
+      - ./:/opt/airflow/phase1:ro
+      # Mount shared/ (repo root) so the optional shared.observability
+      # import in service.py resolves. Read-only for safety.
+      - ../shared:/opt/airflow/shared:ro
+      # processed_data must be read-write so future endpoints can write
+      # validated_hypotheses.csv if needed (current Task 3.3 writes to DB,
+      # not CSV, but the volume mount preserves forward compatibility).
+      - ./processed_data:/opt/airflow/phase1/processed_data
+    # IN-003 v118 pattern: NO host port by default. Dev operators set
+    # PHASE1_SERVICE_BIND_HOST_PORT=127.0.0.1:8001 in .env for local curl.
+    ports:
+      - "${PHASE1_SERVICE_BIND_HOST_PORT:-}:8001"
+    networks: [app, data, edge]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8001/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { memory: 1g, cpus: '1' }
+        reservations: { memory: 128m }
+    logging: *default-logging
+    restart: unless-stopped
