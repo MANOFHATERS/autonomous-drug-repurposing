@@ -569,6 +569,28 @@ PHASE1_OUTPUT_SCHEMA: Dict[str, SourceSpec] = {
                        description="DisGeNET source (CURATED/BEFREE/etc.)."),
             ColumnSpec("year", "int64", nullable=True,
                        description="Year of first association."),
+            # Teammate-2 Task 2.2 ROOT FIX (P2-008 prevalence):
+            # Add prevalence_per_10k column. Cystic fibrosis was previously
+            # flagged as "common" by a LINEAR formula that mapped GDA count
+            # to prevalence (scientifically wrong — CF is RARE at 0.4/10K
+            # but has ~2000 GDAs because the CFTR gene is heavily studied).
+            # The fix: extract REAL epidemiological prevalence from a
+            # curated WHO/Orphanet table keyed by disease_id (ORPHA:nnnn
+            # for rare diseases, CUI for common diseases). Diseases not
+            # in the curated table get None (downstream treats as neutral
+            # 0.5). This field flows Phase 1 -> Phase 2 (Disease node
+            # property) -> Phase 4 (RL env market_opportunity scoring).
+            ColumnSpec("prevalence_per_10k", "float64", nullable=True,
+                       description=(
+                           "Real epidemiological prevalence per 10,000 "
+                           "people. Sources: Orphanet (for ORPHA:nnnn "
+                           "rare diseases), WHO Global Burden of Disease "
+                           "(for common diseases). NULL for diseases "
+                           "not in the curated table. NOT a linear "
+                           "function of GDA count (the previous formula "
+                           "incorrectly flagged cystic fibrosis as "
+                           "common — CF is RARE at 0.4/10K)."
+                       )),
         ),
         min_rows=1,
         description="DisGeNET gene-disease associations (Gene-Disease edge source).",
@@ -597,6 +619,45 @@ PHASE1_OUTPUT_SCHEMA: Dict[str, SourceSpec] = {
         optional_columns=(
             ColumnSpec("is_susceptibility", "bool", nullable=True,
                        description="True if susceptibility (not causal)."),
+            # Teammate-2 Task 2.3 ROOT FIX: add genetic_basis field.
+            # OMIM phenotypes have a marker prefix that encodes the
+            # genetic basis: '*' = gene locus, '+' = gene/locus with
+            # phenotype, '%' = mendelian phenotype, '#' = phenotype
+            # (phenotype MIM), '{}' = susceptibility, '[]' = non-disease,
+            # '?' = provisional. The pipeline already extracts
+            # inheritance_pattern from the phenotype name (e.g.,
+            # "autosomal recessive") — this field captures the SAME
+            # data under the contract name expected by downstream
+            # Phase 2 omim_loader (which reads `genetic_basis` to
+            # create (Gene)-[:CAUSES]->(Disease) edges for mendelian
+            # phenotypes). Without this field, the loader cannot
+            # distinguish causal from susceptibility associations.
+            ColumnSpec("genetic_basis", "string", nullable=True,
+                       description=(
+                           "OMIM genetic basis classification: "
+                           "'mendelian_phenotype' (marker '%'), "
+                           "'gene_locus' (marker '*' or '+'), "
+                           "'phenotype' (marker '#'), "
+                           "'susceptibility' (marker '{}'), "
+                           "'non_disease' (marker '[]'), "
+                           "'provisional' (marker '?'), or 'causal' "
+                           "(default for OMIM records with no marker). "
+                           "Used by phase2 omim_loader to create "
+                           "(Gene)-[:CAUSES]->(Disease) edges for "
+                           "mendelian_phenotype and causal entries."
+                       )),
+            ColumnSpec("inheritance_pattern", "string", nullable=True,
+                       description=(
+                           "Inheritance pattern extracted from the "
+                           "phenotype name (e.g., 'autosomal recessive', "
+                           "'X-linked'). Alias for genetic_basis — "
+                           "kept for backward compat with consumers "
+                           "that read inheritance_pattern."
+                       )),
+            ColumnSpec("association_type", "string", nullable=True,
+                       description="OMIM association type label."),
+            ColumnSpec("mapping_key", "int64", nullable=True,
+                       description="OMIM mapping key (1-3)."),
         ),
         min_rows=1,
         description="OMIM gene-disease associations (Mendelian).",
@@ -625,6 +686,14 @@ PHASE1_OUTPUT_SCHEMA: Dict[str, SourceSpec] = {
         optional_columns=(
             ColumnSpec("is_susceptibility", "bool", nullable=True,
                        description="Always True for this file."),
+            # Teammate-2 Task 2.3 ROOT FIX: same genetic_basis field as
+            # omim_gda — always 'susceptibility' for rows in this file.
+            ColumnSpec("genetic_basis", "string", nullable=True,
+                       description="Always 'susceptibility' for this file."),
+            ColumnSpec("inheritance_pattern", "string", nullable=True,
+                       description="Inheritance pattern (alias for genetic_basis)."),
+            ColumnSpec("association_type", "string", nullable=True,
+                       description="OMIM association type label."),
         ),
         min_rows=0,
         description="OMIM susceptibility (complex disease) — may be empty if no suscept associations.",
@@ -655,8 +724,20 @@ PHASE1_OUTPUT_SCHEMA: Dict[str, SourceSpec] = {
                        description="Molecular weight (Daltons)."),
             ColumnSpec("molecular_formula", "string", nullable=True,
                        description="Molecular formula."),
+            # Teammate-2 Task 2.4 ROOT FIX (P2-036): the pipeline emits
+            # `xlogp` (PubChem's XLogP3 algorithm), NOT `logp` (which
+            # is a generic label). The previous schema declared `logp`
+            # but the pipeline wrote `xlogp` — a column-name mismatch
+            # that caused every row's logP value to be NULL when read
+            # by consumers expecting `logp`. ROOT FIX: declare BOTH
+            # columns. The pipeline writes `xlogp` (canonical PubChem
+            # name); `logp` is kept as an alias for consumers that
+            # expect the generic name. Phase 3 biomedical_tables.py
+            # reads `xlogp` from the SQL drugs table.
+            ColumnSpec("xlogp", "float64", nullable=True,
+                       description="PubChem XLogP3 (computed logP)."),
             ColumnSpec("logp", "float64", nullable=True,
-                       description="Computed XLogP."),
+                       description="Alias for xlogp (legacy consumers)."),
             ColumnSpec("tpsa", "float64", nullable=True,
                        description="Topological polar surface area."),
             ColumnSpec("h_bond_donor_count", "int64", nullable=True,
@@ -669,6 +750,20 @@ PHASE1_OUTPUT_SCHEMA: Dict[str, SourceSpec] = {
                        description="Heavy atom count."),
             ColumnSpec("complexity", "float64", nullable=True,
                        description="PubChem complexity score."),
+            # Teammate-2 Task 2.4 ROOT FIX: isomeric_smiles is REQUIRED
+            # for chiral drug fingerprinting (life-safety: (R)- vs (S)-
+            # thalidomide must remain distinguishable). The previous v50
+            # downloader omitted this from the PubChem REST API property
+            # list, silently producing NULL isomeric_smiles for every row.
+            ColumnSpec("isomeric_smiles", "string", nullable=True,
+                       description=(
+                           "PubChem isomeric SMILES (preserves stereochemistry). "
+                           "REQUIRED for chiral drug fingerprinting in Phase 3 "
+                           "biomedical_tables.py. The (R) and (S) enantiomers "
+                           "of thalidomide have different biological activity "
+                           "— collapsing them to canonical_smiles (which drops "
+                           "stereochemistry) is a life-safety bug."
+                       )),
         ),
         min_rows=0,
         description="PubChem enrichment data (additional Compound properties).",

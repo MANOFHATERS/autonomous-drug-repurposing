@@ -53,6 +53,35 @@ for _p in (str(_REPO_ROOT), str(_PHASE2_ROOT)):
 # endpoint code in two places (which is exactly the kind of drift that
 # caused the original bug — see FORENSIC_AUDIT_FIX_SUMMARY_V29 §3.4).
 from phase2.service import app, logger  # noqa: E402  (after sys.path setup)
+# v127 FORENSIC ROOT FIX (Teammate 5, Task 5.1): import the unified
+# Neo4j env-var reader from phase2.service. The previous code in this
+# file used ``os.environ.get("NEO4J_PASSWORD")`` directly, which
+# silently returned "" when only the canonical ``DRUGOS_NEO4J_PASSWORD``
+# env var was set. The /healthz endpoint would then report
+# "skipped (NEO4J_PASSWORD not set)" even though Neo4j WAS configured.
+# ROOT FIX: delegate to ``_get_neo4j_env_var`` which reads BOTH env
+# var names (canonical ``DRUGOS_NEO4J_*`` preferred, legacy ``NEO4J_*``
+# kept for backward compat with a one-time warning). This is the same
+# helper used by phase2.service's Neo4j connection path, so the
+# healthcheck and the actual connection logic use the SAME source of
+# truth for "is Neo4j configured?".
+try:
+    from phase2.service import _get_neo4j_env_var as _get_neo4j_env_var  # noqa: E402
+except ImportError:  # pragma: no cover — defensive fallback
+    # If phase2.service cannot be imported for some reason, fall back
+    # to reading both env vars directly. This preserves the unified
+    # behavior (canonical preferred, legacy accepted) without depending
+    # on phase2.service.
+    def _get_neo4j_env_var(short_name: str, default: str = "") -> str:  # type: ignore[no-redef]
+        canonical = f"DRUGOS_NEO4J_{short_name}"
+        legacy = f"NEO4J_{short_name}"
+        canonical_val = os.environ.get(canonical)
+        if canonical_val is not None:
+            return canonical_val
+        legacy_val = os.environ.get(legacy)
+        if legacy_val is not None:
+            return legacy_val
+        return default
 
 
 @app.get("/healthz", tags=["health"])
@@ -102,18 +131,35 @@ def healthz() -> dict:
     overall_ok = True
 
     # Check 1: Neo4j reachable (only if configured).
-    neo4j_configured = bool(os.environ.get("NEO4J_PASSWORD"))
+    # v127 FORENSIC ROOT FIX (Teammate 5, Task 5.1): the previous code
+    # used ``os.environ.get("NEO4J_PASSWORD")`` directly. This silently
+    # returned "" when only the canonical ``DRUGOS_NEO4J_PASSWORD`` env
+    # var was set, causing the healthcheck to report
+    # "skipped (NEO4J_PASSWORD not set)" even though Neo4j WAS
+    # configured. Operators running with the canonical env var names
+    # would see the container marked "degraded" with no Neo4j check,
+    # and the /cypher endpoint would actually work (because
+    # phase2.service._neo4j_driver uses the unified reader) — a confusing
+    # discrepancy where the healthcheck says Neo4j is down but /cypher
+    # works. ROOT FIX: use the same unified reader the connection path
+    # uses (``_get_neo4j_env_var``) so the healthcheck and the actual
+    # Neo4j connection logic agree on whether Neo4j is configured.
+    neo4j_password = _get_neo4j_env_var("PASSWORD", "")
+    neo4j_configured = bool(neo4j_password)
     if not neo4j_configured:
         # Neo4j not configured — not a failure (dev/CI mode uses
         # in-memory bridge). Mark as "skipped".
-        checks["neo4j_reachable"] = "skipped (NEO4J_PASSWORD not set)"
+        checks["neo4j_reachable"] = (
+            "skipped (neither DRUGOS_NEO4J_PASSWORD nor legacy "
+            "NEO4J_PASSWORD is set)"
+        )
     else:
         try:
             # Local import — keeps the module importable without neo4j.
             from neo4j import GraphDatabase
-            uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
-            user = os.environ.get("NEO4J_USER", "neo4j")
-            password = os.environ.get("NEO4J_PASSWORD", "")
+            uri = _get_neo4j_env_var("URI", "bolt://localhost:7687")
+            user = _get_neo4j_env_var("USER", "neo4j")
+            password = neo4j_password  # already read above
             driver = GraphDatabase.driver(uri, auth=(user, password))
             try:
                 with driver.session() as session:

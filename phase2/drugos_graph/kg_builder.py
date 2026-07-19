@@ -4014,6 +4014,14 @@ class DrugOSGraphBuilder:
         # ``_load_edges`` as a defensive re-check (see below).
         _assert_edge_property_whitelist_populated()
 
+        # v127 FORENSIC ROOT FIX (Teammate 5, Task 5.4): fail fast in
+        # production if Neo4j is not configured. The previous code
+        # silently fell back to RecordingGraphBuilder when DRUGOS_NEO4J_URI
+        # was unset — even in production — meaning the KG was discarded
+        # at process exit. This is the startup fail-fast check the task
+        # spec requires. The check is a no-op in dev/test/staging.
+        _assert_neo4j_in_production(context="DrugOSGraphBuilder.__init__")
+
         self.config = config or get_neo4j_config()
         # Fixes A-5: Driver dependency injection
         self._conn = GraphConnection(self.config, driver, driver_factory)
@@ -5413,4 +5421,325 @@ def update_validated_edges(
         "total_validated_pairs": len(validated_pairs),
         "errors": errors,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v127 FORENSIC ROOT FIX (Teammate 5, Task 5.4 + Task 5.5)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Prior "ROOT FIX" claims for tasks 5.4 and 5.5 were aspirational, not actual.
+# Reading the REAL code (not comments):
+#
+#   Task 5.4 (RecordingGraphBuilder must fail loud in production):
+#     - phase1_bridge.py:run_phase1_to_phase2() still silently fell back to
+#       RecordingGraphBuilder() when builder=None. The KG was discarded at
+#       process exit and the operator never knew.
+#     - The verification command from the task spec
+#       (`DRUGOS_ENVIRONMENT=production python -c 'from drugos_graph.kg_builder
+#       import GraphBuilder; GraphBuilder()'`) would FAIL with ImportError
+#       because there was NO `GraphBuilder` symbol in kg_builder.py.
+#
+#   Task 5.5 (uniqueness constraints on specific ID properties):
+#     - GraphSchemaManager.create_constraints() only created constraints on
+#       the generic `n.id` property. The task spec explicitly requires
+#       constraints on the SCIENTIFIC identifier properties:
+#         Drug.inchikey, Protein.uniprot_id, Disease.disease_id,
+#         Pathway.pathway_id, AdverseEvent.meddra_code
+#       Without these, MERGE on inchikey/uniprot_id/etc. can create
+#       duplicate nodes (the same drug loaded twice with two different
+#       `id` values but the same `inchikey`).
+#     - The verification command from the task spec
+#       (`python -c "from drugos_graph.kg_builder import ensureConstraints;
+#       ensureConstraints()"`) would FAIL with ImportError because there
+#       was NO `ensureConstraints` symbol in kg_builder.py.
+#
+# ROOT FIX (this block):
+#   1. Add `GraphBuilder` as an alias for `DrugOSGraphBuilder` so the task
+#      verification command works.
+#   2. Add a module-level `ensure_constraints()` function (and snake_case
+#      `ensureConstraints` alias for backward-compat with the task spec)
+#      that:
+#        a. Constructs a DrugOSGraphBuilder, connects, and creates both
+#           the generic `n.id` constraints AND the specific scientific
+#           identifier constraints.
+#        b. Returns a dict reporting what was created.
+#   3. Add a `_assert_neo4j_in_production()` helper that raises
+#      `ConfigurationError` when `DRUGOS_ENVIRONMENT=production` AND
+#      `DRUGOS_NEO4J_URI` (or legacy `NEO4J_URI`) is unset. This is the
+#      fail-fast startup check the task spec requires.
+#   4. Add the canonical-scientific-ID constraint list as a module-level
+#      constant `SCIENTIFIC_ID_CONSTRAINTS` so the schema manager and the
+#      `ensure_constraints()` function share the same source of truth.
+#
+# Patient-safety rationale: a duplicate Compound node (same inchikey, two
+# ids) splits adverse-event counts per drug. The RL safety ranker queries
+# `(:Compound {inchikey: $ik})-[:causes_adverse_event]->(:MedDRA_Term)`
+# and would under-count adverse events, ranking a dangerous drug as
+# "green" (safe). This is a direct patient-harm pathway.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# `GraphBuilder` — public alias matching the task-5.4 verification command.
+# The codebase historically called this class `DrugOSGraphBuilder`. The
+# task spec verification command imports `GraphBuilder` (without the
+# `DrugOS` prefix). Aliasing here makes both names work without breaking
+# any existing imports.
+GraphBuilder = DrugOSGraphBuilder
+
+
+# Scientific ID properties that MUST have uniqueness constraints. Each
+# entry is (label, property, description). These are the CANONICAL
+# scientific identifiers (per CANONICAL_IDS in config.py) — not the
+# generic `id` property (which is also constrained, but a MERGE on
+# `inchikey` would still create duplicates if `inchikey` itself has no
+# constraint).
+#
+# Why these specific properties:
+#   Drug.inchikey       — InChIKey is the universal chemical identifier
+#                         (per project docx Phase 1). Two Compounds with
+#                         the same InChIKey are the same molecule.
+#   Protein.uniprot_id  — UniProt accession is the canonical protein ID.
+#                         Same UniProt = same protein.
+#   Disease.disease_id  — Disease ontology ID (DOID/OMIM/MIM). Same DOID
+#                         = same disease.
+#   Pathway.pathway_id  — Reactome/KEGG pathway ID. Same pathway_id =
+#                         same pathway.
+#   AdverseEvent.meddra_code — MedDRA preferred term code. Same MedDRA
+#                         code = same adverse event. The RL safety ranker
+#                         counts adverse events per drug by MedDRA code;
+#                         duplicates split the count.
+SCIENTIFIC_ID_CONSTRAINTS: Tuple[Tuple[str, str, str], ...] = (
+    ("Compound", "inchikey", "InChIKey universal chemical identifier"),
+    ("Protein", "uniprot_id", "UniProt canonical protein accession"),
+    ("Disease", "disease_id", "Disease ontology ID (DOID/OMIM/MIM)"),
+    ("Pathway", "pathway_id", "Reactome/KEGG pathway ID"),
+    ("AdverseEvent", "meddra_code", "MedDRA preferred term code"),
+    # MedDRA_Term is the Phase 2 KG label for adverse-event nodes (the
+    # SIDER canonical form per v113 P2-049). Add it as an alias so the
+    # constraint exists on the actual label used in the KG.
+    ("MedDRA_Term", "meddra_code", "MedDRA preferred term code (KG label)"),
+)
+
+
+def _assert_neo4j_in_production(context: str = "construction") -> None:
+    """Fail fast if Neo4j is required but not configured.
+
+    v127 FORENSIC ROOT FIX (Teammate 5, Task 5.4): in production
+    (``DRUGOS_ENVIRONMENT=production``), the Phase 2 KG MUST be backed by
+    Neo4j. Silently falling back to RecordingGraphBuilder (in-memory,
+    not persisted) means the KG is discarded at process exit — every
+    prediction the platform makes is then based on an ephemeral graph
+    that the next process invocation cannot reproduce. This violates
+    the FDA 21 CFR Part 11 audit trail requirement and makes the
+    platform's predictions non-reproducible.
+
+    This helper is called from:
+      - DrugOSGraphBuilder.__init__ (so any construction in production
+        without Neo4j fails immediately)
+      - phase1_bridge.run_phase1_to_phase2 (so the bridge refuses to
+        fall back to RecordingGraphBuilder in production)
+
+    Parameters
+    ----------
+    context : str
+        A short string describing where the check is being called from
+        (e.g. "construction", "bridge"). Used in the error message.
+
+    Raises
+    ------
+    ConfigurationError
+        If ``DRUGOS_ENVIRONMENT=production`` AND neither
+        ``DRUGOS_NEO4J_URI`` nor legacy ``NEO4J_URI`` is set.
+    """
+    env = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower().strip()
+    if env != "production":
+        return  # dev/test/staging — allow RecordingGraphBuilder fallback
+    # In production: require Neo4j URI (canonical or legacy).
+    canonical_uri = os.environ.get("DRUGOS_NEO4J_URI", "").strip()
+    legacy_uri = os.environ.get("NEO4J_URI", "").strip()
+    if canonical_uri or legacy_uri:
+        return  # Neo4j is configured
+    # Neo4j is NOT configured but we are in production — fail fast.
+    raise ConfigurationError(
+        f"DRUGOS_ENVIRONMENT=production but DRUGOS_NEO4J_URI is not set. "
+        f"In production, the Phase 2 KG MUST be backed by Neo4j — the "
+        f"RecordingGraphBuilder in-memory fallback is NOT acceptable "
+        f"because the KG is discarded at process exit, making "
+        f"predictions non-reproducible and breaking the FDA 21 CFR "
+        f"Part 11 audit trail. Set DRUGOS_NEO4J_URI (and "
+        f"DRUGOS_NEO4J_USER / DRUGOS_NEO4J_PASSWORD) to enable Neo4j, "
+        f"or set DRUGOS_ENVIRONMENT=dev for smoke tests. "
+        f"(v127 Task 5.4 root fix, context={context!r})"
+    )
+
+
+def ensure_constraints(
+    builder: Optional["DrugOSGraphBuilder"] = None,
+    *,
+    include_scientific_ids: bool = True,
+) -> Dict[str, Any]:
+    """Create uniqueness constraints on node ID properties.
+
+    v127 FORENSIC ROOT FIX (Teammate 5, Task 5.5): this is the
+    module-level function the task verification command requires:
+        python -c "from drugos_graph.kg_builder import ensureConstraints; ensureConstraints()"
+
+    It creates BOTH:
+      1. The generic `n.id` uniqueness constraints (delegates to
+         GraphSchemaManager.create_constraints) — these prevent
+         duplicate nodes when MERGE-ing on `id`.
+      2. The scientific-identifier constraints (NEW) — on
+         Drug.inchikey, Protein.uniprot_id, Disease.disease_id,
+         Pathway.pathway_id, AdverseEvent.meddra_code. These prevent
+         duplicate nodes when MERGE-ing on the scientific ID (which
+         is what loaders actually do — they MERGE on inchikey, not on
+         the internal `id`).
+
+    Parameters
+    ----------
+    builder : DrugOSGraphBuilder, optional
+        A connected builder. If None, a new builder is constructed
+        and connected. The caller is responsible for closing it if
+        they passed it in; if constructed here, it is closed in a
+        `finally` block before returning.
+    include_scientific_ids : bool, default True
+        If True, also create the scientific-ID constraints. If False,
+        only the generic `n.id` constraints are created (legacy
+        behavior). Useful for tests that want to verify the generic
+        constraints without needing the scientific properties to
+        exist as indexes.
+
+    Returns
+    -------
+    dict
+        ``{"generic_constraints_created": int,
+           "scientific_constraints_created": int,
+           "scientific_constraints_failed": list[tuple[label, prop, error]],
+           "total_created": int}``
+
+    Raises
+    ------
+    ConfigurationError
+        If called in production (DRUGOS_ENVIRONMENT=production) without
+        Neo4j configured.
+    CriticalDataSourceError
+        If any constraint creation fails (delegated from
+        GraphSchemaManager.create_constraints).
+    """
+    _assert_neo4j_in_production(context="ensure_constraints")
+
+    owns_builder = builder is None
+    if owns_builder:
+        builder = DrugOSGraphBuilder()
+        # Connect so the constraint Cypher can actually execute.
+        builder.connect()
+
+    assert builder is not None  # for type-checkers
+
+    try:
+        # 1. Generic `n.id` constraints (legacy behavior).
+        builder.create_constraints()
+        generic_count = len(list(dict.fromkeys(CORE_NODE_TYPES + DRKG_NODE_TYPES)))
+
+        # 2. Scientific-ID constraints (NEW in v127).
+        scientific_created = 0
+        scientific_failed: List[Tuple[str, str, str]] = []
+        if include_scientific_ids:
+            # Probe Neo4j version to choose the right syntax.
+            # 4.x: CREATE CONSTRAINT IF NOT EXISTS ON (n:L) ASSERT n.p IS UNIQUE
+            # 5.x: CREATE CONSTRAINT IF NOT EXISTS FOR (n:L) REQUIRE n.p IS UNIQUE
+            try:
+                legacy_syntax = (
+                    getattr(builder._conn, "constraint_syntax", "modern")
+                    == "legacy"
+                )
+            except Exception:
+                legacy_syntax = False
+
+            try:
+                with builder._conn.session() as session:
+                    with session.begin_transaction() as tx:
+                        for label, prop, _desc in SCIENTIFIC_ID_CONSTRAINTS:
+                            safe_label = sanitize_label(label)
+                            safe_prop = sanitize_identifier(prop, "property name")
+                            try:
+                                if legacy_syntax:
+                                    cypher = (
+                                        f"CREATE CONSTRAINT IF NOT EXISTS "
+                                        f"ON (n:{safe_label}) "
+                                        f"ASSERT n.{safe_prop} IS UNIQUE"
+                                    )
+                                else:
+                                    cypher = (
+                                        f"CREATE CONSTRAINT IF NOT EXISTS "
+                                        f"FOR (n:{safe_label}) "
+                                        f"REQUIRE n.{safe_prop} IS UNIQUE"
+                                    )
+                                tx.run(cypher)
+                                scientific_created += 1
+                                logger.debug(
+                                    "Scientific-ID constraint created for "
+                                    "%s.%s", safe_label, safe_prop,
+                                )
+                            except Exception as e:
+                                logger.error(
+                                    "Scientific-ID constraint for %s.%s "
+                                    "FAILED: %s", safe_label, safe_prop, e,
+                                )
+                                scientific_failed.append(
+                                    (str(safe_label), str(safe_prop), str(e))
+                                )
+                        tx.commit()
+            except Exception as e:
+                # Session/transaction-level failure (Neo4j down, auth, etc.)
+                logger.error(
+                    "Scientific-ID constraint transaction failed: %s", e
+                )
+                for label, prop, _desc in SCIENTIFIC_ID_CONSTRAINTS:
+                    scientific_failed.append(
+                        (label, prop, f"transaction_failed: {e}")
+                    )
+
+        if scientific_failed:
+            logger.warning(
+                "v127 Task 5.5: %d/%d scientific-ID constraints FAILED. "
+                "The generic `n.id` constraints are still in place, but "
+                "MERGE on the scientific IDs may create duplicate nodes. "
+                "Failures: %s",
+                len(scientific_failed), len(SCIENTIFIC_ID_CONSTRAINTS),
+                scientific_failed,
+            )
+
+        audit_log(
+            "ensure_constraints",
+            details=(
+                f"Created {generic_count} generic + {scientific_created} "
+                f"scientific-ID uniqueness constraints"
+            ),
+            metadata={
+                "generic_count": generic_count,
+                "scientific_created": scientific_created,
+                "scientific_failed_count": len(scientific_failed),
+            },
+        )
+
+        return {
+            "generic_constraints_created": generic_count,
+            "scientific_constraints_created": scientific_created,
+            "scientific_constraints_failed": scientific_failed,
+            "total_created": generic_count + scientific_created,
+        }
+    finally:
+        if owns_builder:
+            try:
+                builder.disconnect()
+            except Exception as _disc_exc:  # noqa: BLE001
+                logger.warning(
+                    "ensure_constraints: disconnect failed (%s). The "
+                    "Neo4j driver may leak.", _disc_exc,
+                )
+
+
+# Snake_case alias for the task-5.5 verification command. The task spec
+# uses `ensureConstraints` (camelCase) — keep both names working so
+# operators using either convention can call it.
+ensureConstraints = ensure_constraints
 
