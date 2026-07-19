@@ -59,7 +59,7 @@ Phase 3 (lowercase canonical):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 
 # =============================================================================
@@ -699,3 +699,41 @@ def map_phase2_edge_to_phase3(
             f"phase2/contracts/phase2_schema.py:PHASE2_TO_PHASE3_EDGE."
         )
     return PHASE2_TO_PHASE3_EDGE[key]
+
+
+def validate_phase2_to_phase3_coverage(
+    core_edge_types: Any,
+) -> list:
+    """Return the list of CORE_EDGE_TYPES that are SILENTLY DROPPED.
+
+    v127 FORENSIC ROOT FIX (Teammate 5, Task 5.3): this function was
+    referenced by ``test_v109_teammate5_fixes.py`` but NEVER IMPLEMENTED.
+    The pre-existing test failed with ImportError. ROOT FIX: implement
+    the function — it returns the list of edge types in
+    ``core_edge_types`` that are NEITHER in ``PHASE2_TO_PHASE3_EDGE``
+    (preserved into Phase 3) NOR in ``PHASE2_TO_PHASE3_EDGE_DROPPED``
+    (explicitly dropped with visible logging). A non-empty return value
+    means there are SILENT DROPS — edges that disappear between Phase 2
+    and Phase 3 without any record. This is the contract violation the
+    audit (P2-005) specifically called out.
+
+    Parameters
+    ----------
+    core_edge_types : iterable of (src, rel, dst) tuples
+        The canonical list of Phase 2 edge types (typically
+        ``CORE_EDGE_TYPES`` from ``config_schema.py``).
+
+    Returns
+    -------
+    list of (src, rel, dst) tuples
+        The subset of ``core_edge_types`` that are NEITHER mapped NOR
+        explicitly dropped. Empty list = full coverage (no silent drops).
+    """
+    mapped = set(PHASE2_TO_PHASE3_EDGE.keys())
+    dropped = set(PHASE2_TO_PHASE3_EDGE_DROPPED)
+    uncovered = []
+    for edge in core_edge_types:
+        edge_tuple = tuple(edge) if not isinstance(edge, tuple) else edge
+        if edge_tuple not in mapped and edge_tuple not in dropped:
+            uncovered.append(edge_tuple)
+    return uncovered

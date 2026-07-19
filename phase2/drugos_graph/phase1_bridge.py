@@ -250,6 +250,15 @@ except ImportError:  # pragma: no cover — fallback for direct-script execution
     class DrugOSDataError(Exception):
         """Local fallback when the package cannot be imported."""
 
+# v127 FORENSIC ROOT FIX (Teammate 5, Task 5.4): import ConfigurationError
+# so run_phase1_to_phase2 can raise it when DRUGOS_ENVIRONMENT=production
+# AND builder=None (the silent RecordingGraphBuilder fallback case).
+try:
+    from .exceptions import ConfigurationError
+except ImportError:  # pragma: no cover — fallback for direct-script execution
+    class ConfigurationError(Exception):
+        """Local fallback when the package cannot be imported."""
+
 # v102 ROOT FIX (P2-036): centralize InChIKey normalization so every
 # loader produces the SAME canonical form. Falls back to a local
 # implementation if utils cannot be imported (direct-script execution).
@@ -8473,12 +8482,62 @@ def run_phase1_to_phase2(
     ``drugbank_drugs.csv`` from disk. This eliminates the duplicate
     CSV read that step 4 was performing.
 
+    v127 FORENSIC ROOT FIX (Teammate 5, Task 5.4): the previous code
+    UNCONDITIONALLY fell back to ``RecordingGraphBuilder()`` when
+    ``builder is None`` — even in production. The KG was discarded at
+    process exit, making predictions non-reproducible and breaking the
+    FDA 21 CFR Part 11 audit trail. ROOT FIX: in production
+    (``DRUGOS_ENVIRONMENT=production``), REQUIRE the caller to pass a
+    real ``DrugOSGraphBuilder`` connected to Neo4j. Fail fast with
+    ``ConfigurationError`` if the caller did not pass one. In dev/test,
+    the ``RecordingGraphBuilder`` fallback is still allowed (with a
+    CRITICAL log warning so operators running Phase 1 → Phase 2 in dev
+    know the KG is ephemeral).
+
     Returns
     -------
     dict
         ``{"staged": Phase1StagedData, "builder": builder, "load_report": dict, "summary": dict, "backend": str}``
     """
+    # v127 Task 5.4: production fail-fast. If DRUGOS_ENVIRONMENT=production
+    # AND builder is None, raise. The operator MUST pass a real
+    # DrugOSGraphBuilder connected to Neo4j in production.
     if builder is None:
+        _env = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower().strip()
+        if _env == "production":
+            # Import the helper lazily to avoid a circular import
+            # (kg_builder imports phase1_bridge symbols at module load).
+            from .kg_builder import _assert_neo4j_in_production
+            _assert_neo4j_in_production(context="phase1_bridge.run_phase1_to_phase2")
+            # If we reach here, Neo4j IS configured (the helper would have
+            # raised otherwise). But the caller still did not pass a
+            # builder. That's a programming error in production — the
+            # caller should construct DrugOSGraphBuilder explicitly so
+            # connection failures surface at the call site, not deep
+            # inside the bridge. Raise so the caller fixes their code.
+            raise ConfigurationError(
+                "DRUGOS_ENVIRONMENT=production but builder=None was passed "
+                "to run_phase1_to_phase2(). In production, the caller MUST "
+                "construct a DrugOSGraphBuilder connected to Neo4j and pass "
+                "it via the `builder=` argument. The RecordingGraphBuilder "
+                "in-memory fallback is NOT acceptable in production — the "
+                "KG is discarded at process exit, making predictions "
+                "non-reproducible and breaking the FDA 21 CFR Part 11 "
+                "audit trail. (v127 Task 5.4 root fix)"
+            )
+        # Dev/test/staging: allow the RecordingGraphBuilder fallback but
+        # log a CRITICAL warning so operators running in dev know the KG
+        # is ephemeral. The CRITICAL level ensures it shows up in dev
+        # dashboards even when log level is set to WARNING.
+        logger.critical(
+            "v127 Task 5.4: run_phase1_to_phase2() is using the "
+            "RecordingGraphBuilder in-memory fallback (builder=None). "
+            "The KG is NOT persisted — it is discarded at process exit. "
+            "This is acceptable in dev/test/staging ONLY. In production, "
+            "set DRUGOS_ENVIRONMENT=production and pass a real "
+            "DrugOSGraphBuilder via builder=. The platform's predictions "
+            "are non-reproducible when the KG is ephemeral."
+        )
         builder = RecordingGraphBuilder()
 
     frames = read_phase1_outputs(

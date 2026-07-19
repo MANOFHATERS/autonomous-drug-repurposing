@@ -139,6 +139,70 @@ if _configure_observability is not None:
     _configure_observability(app, service_name="phase2-kg-api")
 
 
+# v127 FORENSIC ROOT FIX (Teammate 5, Task 5.1): startup fail-fast check.
+# In production (``DRUGOS_ENVIRONMENT=production``), the Phase 2 service
+# MUST have Neo4j configured — the /cypher endpoint cannot answer from
+# the in-memory bridge (it requires real Cypher execution). The previous
+# code allowed the service to start in production without Neo4j, then
+# every /cypher request would return HTTP 503 at request time (after
+# the user already waited for the request to be routed). Worse, the
+# /kg/stats endpoint would fall back to the in-memory bridge and serve
+# STALE CSV data labeled as "real" — a silent data-integrity bug.
+#
+# ROOT FIX: at app startup, if DRUGOS_ENVIRONMENT=production, REQUIRE
+# ``DRUGOS_NEO4J_PASSWORD`` (or legacy ``NEO4J_PASSWORD``) to be set.
+# If missing, log CRITICAL and refuse to start. This surfaces the
+# misconfiguration at boot time (when the operator is watching the
+# logs) rather than at request time (when a user is waiting).
+#
+# In dev/test/staging, the check is a no-op — the in-memory bridge is
+# the intended backend.
+@app.on_event("startup")
+def _startup_neo4j_check() -> None:
+    """Fail fast at service startup if Neo4j is missing in production."""
+    env = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower().strip()
+    if env != "production":
+        # Dev/test/staging — in-memory bridge is the intended backend.
+        # Log an INFO line so operators running in dev know the service
+        # is NOT using Neo4j (the bridge fallback is intentional here).
+        logger.info(
+            "Phase 2 service startup: DRUGOS_ENVIRONMENT=%s — Neo4j "
+            "fail-fast check SKIPPED (dev/test/staging). The in-memory "
+            "bridge will be used if Neo4j is unavailable.",
+            env or "dev (default)",
+        )
+        return
+    # Production — require Neo4j credentials.
+    pwd = _get_neo4j_env_var("PASSWORD", "")
+    if not pwd:
+        # CRITICAL so it surfaces in production log aggregators even
+        # when log level is WARNING. Then raise RuntimeError to abort
+        # the uvicorn worker — docker-compose will restart the container,
+        # and the operator sees the error in the logs.
+        logger.critical(
+            "Phase 2 service startup FAILED: DRUGOS_ENVIRONMENT=production "
+            "but neither DRUGOS_NEO4J_PASSWORD nor legacy NEO4J_PASSWORD "
+            "is set. The service cannot serve /cypher or /kg/stats with "
+            "real data in production without Neo4j. Set "
+            "DRUGOS_NEO4J_PASSWORD (canonical) or NEO4J_PASSWORD (legacy) "
+            "in the environment. Aborting startup. (v127 Task 5.1 root fix)"
+        )
+        raise RuntimeError(
+            "DRUGOS_ENVIRONMENT=production but Neo4j password is not set. "
+            "Set DRUGOS_NEO4J_PASSWORD (or legacy NEO4J_PASSWORD) to "
+            "enable the Neo4j backend. The Phase 2 service refuses to "
+            "start in production without Neo4j — the in-memory bridge "
+            "fallback serves stale CSV data labeled as 'real', which is "
+            "a silent data-integrity bug. (v127 Task 5.1 root fix)"
+        )
+    logger.info(
+        "Phase 2 service startup: DRUGOS_ENVIRONMENT=production — Neo4j "
+        "credentials detected (password length=%d). The /cypher, /kg/stats, "
+        "and /kg/explore endpoints will use Neo4j as the primary backend.",
+        len(pwd),
+    )
+
+
 # ─── P2-001 ROOT FIX (v109 forensic): unified Neo4j credential env vars
 # v107 had TWO different env var names for the same Neo4j password:
 #   * ``service.py`` read ``NEO4J_PASSWORD``.

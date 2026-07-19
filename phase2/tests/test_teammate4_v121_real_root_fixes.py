@@ -258,7 +258,12 @@ class TestP2054RealRootFixNonFatal:
 
     def test_healthz_returns_200_when_phase1_data_missing_default(self, monkeypatch):
         """Default (no STRICT env var): missing Phase 1 data must NOT cause 503."""
+        # v127: also delete DRUGOS_NEO4J_PASSWORD (canonical form, added by
+        # Teammate 5 Task 5.1). Without this, a leftover DRUGOS_NEO4J_PASSWORD
+        # from a prior test would make /healthz think Neo4j is configured and
+        # try to connect (failing -> 503 instead of 200).
         monkeypatch.delenv("NEO4J_PASSWORD", raising=False)
+        monkeypatch.delenv("DRUGOS_NEO4J_PASSWORD", raising=False)
         monkeypatch.delenv("DRUGOS_HEALTHCHECK_STRICT", raising=False)
         self._patch_repo_root_to_empty_dir(monkeypatch)
         client = self._get_client()
@@ -279,7 +284,9 @@ class TestP2054RealRootFixNonFatal:
 
     def test_healthz_returns_503_when_strict_and_phase1_data_missing(self, monkeypatch):
         """STRICT=1 + missing Phase 1 data must cause 503 (production mode)."""
+        # v127: also delete DRUGOS_NEO4J_PASSWORD (canonical form).
         monkeypatch.delenv("NEO4J_PASSWORD", raising=False)
+        monkeypatch.delenv("DRUGOS_NEO4J_PASSWORD", raising=False)
         monkeypatch.setenv("DRUGOS_HEALTHCHECK_STRICT", "1")
         self._patch_repo_root_to_empty_dir(monkeypatch)
         client = self._get_client()
@@ -295,7 +302,9 @@ class TestP2054RealRootFixNonFatal:
 
     def test_healthz_returns_200_when_strict_0_explicit(self, monkeypatch):
         """STRICT=0 explicit must behave same as default (non-fatal)."""
+        # v127: also delete DRUGOS_NEO4J_PASSWORD (canonical form).
         monkeypatch.delenv("NEO4J_PASSWORD", raising=False)
+        monkeypatch.delenv("DRUGOS_NEO4J_PASSWORD", raising=False)
         monkeypatch.setenv("DRUGOS_HEALTHCHECK_STRICT", "0")
         self._patch_repo_root_to_empty_dir(monkeypatch)
         client = self._get_client()
@@ -307,7 +316,9 @@ class TestP2054RealRootFixNonFatal:
     def test_healthz_strict_env_var_is_read_at_request_time(self, monkeypatch):
         """The STRICT env var must be read at REQUEST time (not module load time),
         so operators can toggle it without restarting the service."""
+        # v127: also delete DRUGOS_NEO4J_PASSWORD (canonical form).
         monkeypatch.delenv("NEO4J_PASSWORD", raising=False)
+        monkeypatch.delenv("DRUGOS_NEO4J_PASSWORD", raising=False)
         self._patch_repo_root_to_empty_dir(monkeypatch)
         client = self._get_client()
         # First request: no STRICT env var (non-fatal).
