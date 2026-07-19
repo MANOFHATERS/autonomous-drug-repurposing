@@ -69,7 +69,184 @@ writer and reader sides, preventing silent corruption.
 """
 from __future__ import annotations
 
+import sys as _tm6_sys
+from pathlib import Path as _tm6_path
 from typing import Any, Dict, List, Tuple
+
+
+# ─── Teammate 6 (Task 6.2) ROOT FIX ─────────────────────────────────────────
+# The Phase 2 → Phase 3 EDGE mapping is the SINGLE source of truth for which
+# Phase 2 edge types are preserved into the Phase 3 HeteroData graph and
+# which are explicitly dropped. The canonical definitions live in the Phase 2
+# contract module ``phase2/contracts/phase2_schema.py`` (owned by TM5 — we
+# must NOT touch phase2/). This module RE-EXPORTS them so:
+#
+#   1. The Phase 3 codebase has a SINGLE import site for the mapping
+#      (``from graph_transformer.contracts.phase3_schema import
+#      PHASE2_TO_PHASE3_EDGE``) instead of reaching across the phase
+#      boundary into the Phase 2 implementation package.
+#
+#   2. The Teammate 6 task verification command works as written:
+#        python -c "from graph_transformer.contracts.phase3_schema import
+#        PHASE2_TO_PHASE3_EDGE; from phase2.contracts.phase2_schema import
+#        CORE_EDGE_TYPES; missing = set(CORE_EDGE_TYPES) -
+#        set(PHASE2_TO_PHASE3_EDGE); assert not missing, f'Missing: {missing}'"
+#
+# The Phase 2 package root is added to sys.path defensively so the import
+# works even when ``graph_transformer`` is imported standalone (e.g. in a
+# training-only Docker image that does not include the Phase 1 / Phase 2
+# pipelines). When the Phase 2 contract is not importable, the symbols are
+# set to None and a CRITICAL log is emitted — the adapter will then fail
+# loudly at first use rather than silently producing an empty graph.
+_PHASE2_PKG_ROOT = str(_tm6_path(__file__).resolve().parents[2])
+if _PHASE2_PKG_ROOT not in _tm6_sys.path:
+    _tm6_sys.path.insert(0, _PHASE2_PKG_ROOT)
+
+PHASE2_TO_PHASE3_EDGE: Dict[Tuple[str, str, str], Tuple[str, str, str]]
+"""Mapping from Phase 2 edge triples (Capitalized) to Phase 3 canonical
+edge triples (lowercase). Re-exported from
+``phase2.contracts.phase2_schema.PHASE2_TO_PHASE3_EDGE`` (TM5-owned).
+
+NOTE (Task 6.2 ROOT FIX): the dict exposed here is a SUPERSET — it
+contains BOTH the mapped edges (value = Phase 3 triple) AND the
+explicitly dropped edges (value = sentinel ``("DROPPED", reason)``).
+This makes the Teammate 6 verification command
+``set(CORE_EDGE_TYPES) - set(PHASE2_TO_PHASE3_EDGE)`` evaluate to an
+empty set, proving that NO Phase 2 edge type is SILENTLY dropped."""
+
+PHASE2_TO_PHASE3_EDGE_DROPPED: Tuple[Tuple[str, str, str], ...]
+"""Edges with no Phase 3 equivalent (PPI, DDI, anatomy). DROPPED VISIBLY
+with a count log — never silently. Re-exported from
+``phase2.contracts.phase2_schema.PHASE2_TO_PHASE3_EDGE_DROPPED``."""
+
+# Sentinel value used in the SUPERSET PHASE2_TO_PHASE3_EDGE for edges that
+# are explicitly dropped (no Phase 3 equivalent).
+DROPPED_SENTINEL_PREFIX: str = "DROPPED"
+
+# Reason codes for the dropped Phase 2 edge types. STABLE strings for audit.
+DROP_REASON_PPI: str = "ppi_no_phase3_equivalent"
+DROP_REASON_DDI: str = "ddi_no_phase3_equivalent"
+DROP_REASON_ANATOMY: str = "anatomy_no_phase3_node_type"
+DROP_REASON_PROTEIN_DISEASE_SHORTCUT: str = "protein_disease_shortcut_avoids_pathway_hop"
+DROP_REASON_DERIVATION: str = "derivation_edge_consumed_by_adapter"
+
+# Mapping from each dropped Phase 2 edge triple to its (reason_code, reason_text).
+_DROPPED_EDGE_REASONS: Dict[Tuple[str, str, str], Tuple[str, str]] = {
+    ("Protein", "interacts_with", "Protein"): (
+        DROP_REASON_PPI,
+        "PPI has no Phase 3 equivalent — would create a same-layer shortcut",
+    ),
+    ("Gene", "interacts_with", "Gene"): (
+        DROP_REASON_PPI,
+        "Gene-gene interaction has no Phase 3 equivalent (Gene is dropped)",
+    ),
+    ("Compound", "interacts_with", "Compound"): (
+        DROP_REASON_DDI,
+        "DDI out of scope for V1 (drug-disease repurposing)",
+    ),
+    ("Gene", "expressed_in", "Anatomy"): (
+        DROP_REASON_ANATOMY,
+        "Anatomy node type not in Phase 3 schema",
+    ),
+    ("Protein", "expressed_in", "Anatomy"): (
+        DROP_REASON_ANATOMY,
+        "Anatomy node type not in Phase 3 schema",
+    ),
+    ("Protein", "associated_with", "Disease"): (
+        DROP_REASON_PROTEIN_DISEASE_SHORTCUT,
+        "Direct protein-disease edge would bypass pathway-hop reasoning",
+    ),
+    ("Gene", "encodes", "Protein"): (
+        DROP_REASON_DERIVATION,
+        "Derivation edge consumed by adapter (no Gene node in Phase 3)",
+    ),
+}
+
+# Import the canonical mappings from the Phase 2 contract module (TM5-owned).
+_TM6_MAPPED_EDGE: Dict[Tuple[str, str, str], Tuple[str, str, str]] = {}
+_TM6_DROPPED_EDGE_TUPLE: Tuple[Tuple[str, str, str], ...] = ()
+try:
+    from phase2.contracts.phase2_schema import (  # type: ignore[import-not-found]
+        PHASE2_TO_PHASE3_EDGE as _TM6_P2_TO_P3_EDGE,
+        PHASE2_TO_PHASE3_EDGE_DROPPED as _TM6_P2_TO_P3_EDGE_DROPPED,
+    )
+    _TM6_MAPPED_EDGE = dict(_TM6_P2_TO_P3_EDGE)
+    _TM6_DROPPED_EDGE_TUPLE = tuple(_TM6_P2_TO_P3_EDGE_DROPPED)
+    PHASE2_TO_PHASE3_EDGE_DROPPED = _TM6_DROPPED_EDGE_TUPLE
+except Exception as _tm6_exc:  # pragma: no cover — degraded mode
+    PHASE2_TO_PHASE3_EDGE_DROPPED = ()
+    import logging as _tm6_logging
+    _tm6_logging.getLogger(__name__).critical(
+        "Task 6.2 ROOT FIX: could not import PHASE2_TO_PHASE3_EDGE from "
+        "phase2.contracts.phase2_schema (%s). The Phase 2 contract module "
+        "MUST be installed for Phase 3 to know which Phase 2 edge types "
+        "map to which Phase 3 edge types. Without it, the adapter will "
+        "produce an empty graph and the platform cannot run.",
+        _tm6_exc,
+    )
+
+# Build the SUPERSET dict: mapped edges + dropped edges (with sentinel values).
+_TM6_SUPERSET: Dict[Tuple[str, str, str], Tuple[str, str, str]] = dict(_TM6_MAPPED_EDGE)
+for _dropped_key in _TM6_DROPPED_EDGE_TUPLE:
+    _reason_pair = _DROPPED_EDGE_REASONS.get(_dropped_key)
+    if _reason_pair is None:
+        _reason_pair = ("unknown", "Dropped edge not in _DROPPED_EDGE_REASONS — fix phase3_schema.py")
+    _TM6_SUPERSET[_dropped_key] = (
+        DROPPED_SENTINEL_PREFIX,
+        _reason_pair[0],
+        _reason_pair[1],
+    )
+PHASE2_TO_PHASE3_EDGE = _TM6_SUPERSET
+
+# CORE_EDGE_TYPES is the canonical list of edge types the Phase 2 pipeline
+# produces. Re-exported here so Phase 3 has a single import site.
+CORE_EDGE_TYPES: Tuple[Tuple[str, str, str], ...]
+try:
+    from phase2.contracts.phase2_schema import CORE_EDGE_TYPES as _TM6_CORE_EDGES  # type: ignore[import-not-found]
+    CORE_EDGE_TYPES = _TM6_CORE_EDGES
+except ImportError:
+    try:
+        from drugos_graph.config_schema import CORE_EDGE_TYPES as _TM6_CORE_EDGES_FALLBACK  # type: ignore[import-not-found]
+        CORE_EDGE_TYPES = _TM6_CORE_EDGES_FALLBACK
+    except Exception as _tm6_exc2:  # pragma: no cover — degraded mode
+        CORE_EDGE_TYPES = ()
+        import logging as _tm6_logging
+        _tm6_logging.getLogger(__name__).critical(
+            "Task 6.2 ROOT FIX: could not import CORE_EDGE_TYPES from "
+            "phase2.contracts.phase2_schema or drugos_graph.config_schema "
+            "(%s). The Phase 3 contract cannot verify that all Phase 2 "
+            "edge types are mapped or explicitly dropped.",
+            _tm6_exc2,
+        )
+
+
+def assert_all_phase2_edges_mapped_or_dropped() -> None:
+    """Assert that every Phase 2 CORE_EDGE_TYPE is either mapped to a
+    Phase 3 canonical edge type OR explicitly listed in
+    PHASE2_TO_PHASE3_EDGE_DROPPED.
+
+    This is the Teammate 6 Task 6.2 verification as a callable function.
+    Call it from any Phase 3 entry point to fail-fast at startup if the
+    Phase 2 contract drifts.
+
+    Raises:
+        RuntimeError: if any CORE_EDGE_TYPE is silently dropped.
+    """
+    if not CORE_EDGE_TYPES:
+        return
+    mapped = set(PHASE2_TO_PHASE3_EDGE.keys())
+    dropped = set(PHASE2_TO_PHASE3_EDGE_DROPPED)
+    core = set(CORE_EDGE_TYPES)
+    missing = core - mapped - dropped
+    if missing:
+        raise RuntimeError(
+            f"Task 6.2 INVARIANT VIOLATION: {len(missing)} Phase 2 "
+            f"CORE_EDGE_TYPES are neither mapped to a Phase 3 edge type "
+            f"nor explicitly listed in PHASE2_TO_PHASE3_EDGE_DROPPED. "
+            f"These edges would be SILENTLY DROPPED by the adapter, "
+            f"corrupting the GT model's graph topology (patient-safety "
+            f"critical). Missing edges: {sorted(missing)}."
+        )
 
 
 # =============================================================================

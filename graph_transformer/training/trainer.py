@@ -82,6 +82,8 @@ class GraphTransformerTrainer:
         drug_names: Optional[List[str]] = None,
         disease_names: Optional[List[str]] = None,
         known_pairs: Optional[List[Tuple[str, str]]] = None,
+        # Teammate 6 (Task 6.4) ROOT FIX: optional MLflow tracker.
+        mlflow_tracker: Optional[Any] = None,
     ) -> None:
         """Initialize the trainer.
 
@@ -248,6 +250,8 @@ class GraphTransformerTrainer:
         self.best_val_auc = 0.0
         self.best_val_loss: float = float("inf")
         self.best_state_dict: Optional[Dict[str, Any]] = None
+        # Teammate 6 (Task 6.4) ROOT FIX: store the optional MLflow tracker.
+        self._mlflow_tracker = mlflow_tracker
         # FORENSIC ROOT FIX (audit Issue 138): checkpoint selection is now
         # driven by ``val_auc`` (the scientific success metric), NOT
         # ``val_loss``. The previous implementation argued that val_loss is
@@ -1933,6 +1937,21 @@ class GraphTransformerTrainer:
             disease_emb = embeddings["disease"][val_disease_idx.to(self.device)].detach()
             labels = val_labels.to(self.device)
 
+            # Teammate 6 (Task 6.4) ROOT FIX: compute the RAW logits BEFORE
+            # fit_temperature mutates the temperature parameter.
+            try:
+                pre_logits = self.model.link_predictor.forward_logits(
+                    drug_emb, disease_emb
+                ).detach()
+            except Exception as exc:
+                logger.debug(
+                    "Task 6.4: could not compute pre-calibration logits "
+                    "for reliability diagram (%s). Calibration plot will "
+                    "be skipped (temperature calibration itself succeeds).",
+                    exc,
+                )
+                pre_logits = None
+
         # *** MUST be OUTSIDE the no_grad block above -- Adam needs gradients ***
         # ROOT FIX (D-04): the V27 code correctly placed fit_temperature
         # outside the no_grad block, but the structure was FRAGILE: a
@@ -1963,6 +1982,45 @@ class GraphTransformerTrainer:
             drug_emb, disease_emb, labels
         )
         logger.info(f"Post-hoc temperature calibrated to {temp:.4f}")
+
+        # Teammate 6 (Task 6.4) ROOT FIX: log the calibration reliability
+        # diagram to MLflow (when a tracker is configured). The diagram
+        # shows the pre-calibration curve (T=1.0) vs the post-calibration
+        # curve (T=temp) so operators can visually verify the calibration
+        # improved. We compute both probability vectors from the SAME
+        # logits so the comparison is apples-to-apples.
+        if self._mlflow_tracker is not None and pre_logits is not None:
+            try:
+                with torch.no_grad():
+                    # Pre-calibration probabilities: sigmoid(logits) with T=1.0.
+                    pre_probs = torch.sigmoid(pre_logits).cpu().numpy()
+                    # Post-calibration probabilities: sigmoid(logits / T_fit).
+                    _safe_temp = max(float(temp), 1e-6)
+                    post_probs = torch.sigmoid(pre_logits / _safe_temp).cpu().numpy()
+                    _labels_np = labels.cpu().numpy()
+                # The tracker's method is non-blocking (try/except internally).
+                self._mlflow_tracker.log_calibration_plot(
+                    pre_probs=pre_probs,
+                    post_probs=post_probs,
+                    labels=_labels_np,
+                    step=None,  # end-of-training plot, not per-epoch
+                    n_bins=10,
+                )
+                logger.info(
+                    "Task 6.4: logged temperature calibration reliability "
+                    "diagram to MLflow (pre ECE vs post ECE — see the "
+                    "calibration_ece_pre / calibration_ece_post metrics "
+                    "in the MLflow UI)."
+                )
+            except Exception as exc:
+                # Non-blocking: a tracker outage must NOT fail training.
+                logger.warning(
+                    "Task 6.4: MLflow calibration plot logging failed (%s). "
+                    "Temperature calibration itself succeeded (T=%.4f). The "
+                    "plot will not be available in the MLflow UI.",
+                    exc, temp,
+                )
+
         return temp
 
     # ------------------------------------------------------------------
