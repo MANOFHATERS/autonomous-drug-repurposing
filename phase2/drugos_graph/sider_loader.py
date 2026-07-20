@@ -4611,3 +4611,214 @@ logger.info(
 # ===== SECTION 17: BACKWARD-COMPAT ALIAS (Rule R3) =====
 # Now that parse_sider_side_effects is defined, populate the parse_sider alias.
 parse_sider = parse_sider_side_effects
+
+
+# ===== SECTION 18: TASK 4.4 ROOT FIX -- severity + SIDER-derived safety_score =====
+#
+# TASK 4.4 ROOT FIX (Teammate 4, hostile-auditor pass):
+#   The audit (P2-007) found that SIDER adverse-event edges existed in
+#   the KG but the RL ranker's ``safety_score`` column was generated
+#   via ``rng.beta(5, 2)`` -- RANDOM NUMBERS. The patient-safety signal
+#   from SIDER was NEVER propagated to the RL ranker. A withdrawn drug
+#   like Valdecoxib (severe skin reactions) got the same random
+#   safety_score distribution as Aspirin.
+#
+# ROOT FIX: this section adds:
+#   1. ``compute_ae_severity(frequency_lower, frequency_upper)`` -- converts
+#      a SIDER frequency band to a severity score in [0, 1].
+#   2. ``annotate_edges_with_severity(edges)`` + ``annotate_nodes_with_severity``
+#      -- adds ``severity`` to every SIDER edge + MedDRA_Term node.
+#   3. ``compute_sider_safety_score(drug_id, sider_edges_by_drug)`` -- the
+#      function the RL ranker calls to compute a REAL safety_score in
+#      [0, 1] for a drug, based on the AEs it causes and their severities.
+#
+# Verification: ``python -m pytest phase2/tests/test_sider_adverse_events.py -v``
+
+
+def compute_ae_severity(
+    frequency_lower: Optional[float],
+    frequency_upper: Optional[float],
+) -> float:
+    """Convert a SIDER frequency band to a severity score in [0, 1].
+
+    Uses the UPPER bound (worst-case frequency) so a drug that causes
+    an AE in up to 10% of patients gets severity ~0.316 (sqrt(0.10)),
+    while a drug that causes the same AE in up to 1% gets ~0.10.
+    sqrt curve makes severity more discriminative at low frequencies
+    (where most real AEs live) without saturating at high frequencies.
+    When no frequency data is present, returns 0.5 (unknown -- neutral).
+    """
+    if frequency_lower is None and frequency_upper is None:
+        return 0.5
+    if frequency_upper is not None:
+        try:
+            u = float(frequency_upper)
+        except (TypeError, ValueError):
+            u = 0.5
+    else:
+        try:
+            u = float(frequency_lower)
+        except (TypeError, ValueError):
+            u = 0.5
+    u = max(0.0, min(1.0, u))
+    import math as _math
+    return _math.sqrt(u)
+
+
+def annotate_edges_with_severity(
+    edges: List[Dict[str, Any]],
+) -> int:
+    """Add a ``severity`` property to every SIDER edge.
+
+    Modifies the edges in place. Returns the number of edges annotated.
+    """
+    n = 0
+    for edge in edges:
+        rel = edge.get("rel_type") or edge.get("relation") or ""
+        if rel not in ("causes_adverse_event", "causes_side_effect"):
+            continue
+        props = edge.get("props") or {}
+        lower = props.get("frequency_lower_bound")
+        upper = props.get("frequency_upper_bound")
+        try:
+            lower_f = float(lower) if lower is not None else None
+        except (TypeError, ValueError):
+            lower_f = None
+        try:
+            upper_f = float(upper) if upper is not None else None
+        except (TypeError, ValueError):
+            upper_f = None
+        severity = compute_ae_severity(lower_f, upper_f)
+        props["severity"] = severity
+        edge["props"] = props
+        n += 1
+    return n
+
+
+def annotate_nodes_with_severity(
+    nodes: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]],
+) -> int:
+    """Add a ``severity`` property to every MedDRA_Term node.
+
+    The node's severity is the MAX severity among all edges that point
+    to it (the worst-case observed frequency for that AE across all drugs).
+    """
+    max_severity_by_dst: Dict[str, float] = {}
+    for edge in edges:
+        rel = edge.get("rel_type") or edge.get("relation") or ""
+        if rel not in ("causes_adverse_event", "causes_side_effect"):
+            continue
+        props = edge.get("props") or {}
+        sev = props.get("severity")
+        if sev is None:
+            continue
+        try:
+            sev_f = float(sev)
+        except (TypeError, ValueError):
+            continue
+        dst_id = edge.get("dst_id")
+        if not dst_id:
+            continue
+        if dst_id not in max_severity_by_dst or sev_f > max_severity_by_dst[dst_id]:
+            max_severity_by_dst[dst_id] = sev_f
+
+    n = 0
+    for node in nodes:
+        et = node.get("entity_type") or node.get("label") or ""
+        if et not in ("MedDRA_Term", "Side Effect"):
+            continue
+        node_id = node.get("id")
+        if not node_id:
+            continue
+        severity = max_severity_by_dst.get(node_id, 0.0)
+        props = node.get("props") or {}
+        props["severity"] = severity
+        node["props"] = props
+        node["severity"] = severity
+        n += 1
+    return n
+
+
+def compute_sider_safety_score(
+    drug_id: str,
+    sider_edges_by_drug: Dict[str, List[Dict[str, Any]]],
+) -> float:
+    """Compute a real ``safety_score`` in [0, 1] for a drug from SIDER data.
+
+    TASK 4.4 ROOT FIX (patient-safety critical): the RL ranker's
+    safety_score column was generated via ``rng.beta(5, 2)`` -- RANDOM
+    NUMBERS. This function replaces that with a real signal derived
+    from the SIDER adverse-event edges in the KG.
+
+    Algorithm:
+      - safety = 1.0 - max(severities) -- the drug's safety is determined
+        by its WORST AE. A drug with a high-frequency severe AE
+        (severity=0.9) gets safety_score 0.10. A drug with only rare
+        mild AEs (max severity=0.10) gets safety_score 0.90.
+      - A small penalty per additional AE (5% * log10(n_ae), capped at
+        0.20) so a drug with 100 rare AEs doesn't get the same
+        safety_score as a drug with 1 rare AE.
+      - If the drug has NO SIDER edges, return 0.85 (clean record,
+        same default as ``drugbank_loader.compute_safety_score`` for
+        non-withdrawn drugs -- leaves headroom for SIDER penalties).
+    """
+    if not drug_id or not sider_edges_by_drug:
+        return 0.85
+    edges = sider_edges_by_drug.get(drug_id)
+    if not edges:
+        return 0.85
+    max_severity = 0.0
+    n_ae = 0
+    for edge in edges:
+        rel = edge.get("rel_type") or edge.get("relation") or ""
+        if rel not in ("causes_adverse_event", "causes_side_effect"):
+            continue
+        props = edge.get("props") or {}
+        sev = props.get("severity")
+        if sev is None:
+            sev = 0.5  # unknown -- neutral
+        try:
+            sev_f = float(sev)
+        except (TypeError, ValueError):
+            sev_f = 0.5
+        if sev_f > max_severity:
+            max_severity = sev_f
+        n_ae += 1
+    if n_ae == 0:
+        return 0.85
+    import math as _math
+    count_penalty = min(0.20, 0.05 * _math.log10(max(1, n_ae)))
+    safety = max(0.0, min(1.0, 1.0 - max_severity - count_penalty))
+    return safety
+
+
+def build_sider_edges_by_drug(
+    edges: List[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Index SIDER edges by drug ``src_id`` for fast safety_score lookup."""
+    by_drug: Dict[str, List[Dict[str, Any]]] = {}
+    for edge in edges:
+        rel = edge.get("rel_type") or edge.get("relation") or ""
+        if rel not in ("causes_adverse_event", "causes_side_effect"):
+            continue
+        src_id = edge.get("src_id")
+        if not src_id:
+            continue
+        by_drug.setdefault(src_id, []).append(edge)
+    return by_drug
+
+
+__all__ = list(__all__) + [
+    "compute_ae_severity",
+    "annotate_edges_with_severity",
+    "annotate_nodes_with_severity",
+    "compute_sider_safety_score",
+    "build_sider_edges_by_drug",
+] if "__all__" in dir() else [
+    "compute_ae_severity",
+    "annotate_edges_with_severity",
+    "annotate_nodes_with_severity",
+    "compute_sider_safety_score",
+    "build_sider_edges_by_drug",
+]

@@ -2676,12 +2676,43 @@ def chembl_to_edge_records_from_phase1(
         if src_id is None:
             # Fall back to the raw ChEMBL ID (last resort).
             src_id = compound_id
-        # Protein side: prefer uniprot_accession (already resolved by Phase 1).
-        uniprot_ac = row.get("uniprot_accession")
+        # Protein side: prefer the UniProt accession resolved by Phase 1.
+        #
+        # TASK 4.1 ROOT FIX (Teammate 4, hostile-auditor pass): the previous
+        # implementation read ONLY the column name ``uniprot_accession``.
+        # Phase 1's chembl_pipeline.py ACTUALLY emits the resolved UniProt
+        # accession under the column name ``target_accession`` (see
+        # phase1/pipelines/chembl_pipeline.py:_resolve_target_accessions).
+        # The Phase 1 schema calls this column ``uniprot_id``, and the task
+        # 4.1 spec calls it ``target_uniprot_id``. Four different names for
+        # the same column = silent data loss: every row with a real UniProt
+        # AC was dropped and replaced with a synthetic ``CHEMBL_TGT_<digits>``
+        # placeholder, so the KG had ZERO real UniProt accessions on ChEMBL
+        # edges.
+        #
+        # ROOT FIX: probe every known alias in priority order. The FIRST
+        # non-empty, non-NaN, non-"nan" value wins. Alias priority:
+        #   1. ``target_accession``     -- what phase1_pipeline ACTUALLY emits
+        #   2. ``uniprot_accession``    -- legacy chembl_loader name
+        #   3. ``target_uniprot_id``    -- task 4.1 spec name
+        #   4. ``uniprot_id``           -- phase1_schema name
+        #   5. ``accession``            -- bare-alias variant
         target_chembl_id = row.get("target_chembl_id")
-        if uniprot_ac is None or str(uniprot_ac).strip() in ("", "nan"):
-            # If we have target_chembl_id but no uniprot_ac, emit a
-            # CHEMBL_TGT_<digits> ID (mirrors phase1_bridge.py:1702).
+        uniprot_ac: Optional[str] = None
+        for _alias in (
+            "target_accession", "uniprot_accession", "target_uniprot_id",
+            "uniprot_id", "accession",
+        ):
+            _v = row.get(_alias)
+            if _v is None:
+                continue
+            if isinstance(_v, float) and pd.isna(_v):
+                continue
+            _s = str(_v).strip()
+            if _s and _s.lower() not in ("nan", "none", "null", "na"):
+                uniprot_ac = _s
+                break
+        if not uniprot_ac:
             tc = str(target_chembl_id or "").strip()
             if tc and tc.startswith("CHEMBL"):
                 digits = tc.replace("CHEMBL", "")
@@ -2693,10 +2724,43 @@ def chembl_to_edge_records_from_phase1(
                 continue
         uniprot_ac = str(uniprot_ac).strip()
         # Relation type: prefer standard_type, fall back to activity_type.
-        std_type = row.get("standard_type") or row.get("activity_type") or ""
-        if std_type is None or str(std_type) == "nan":
-            std_type = ""
+        # TASK 4.1: keep BOTH the raw ``activity_type`` (Phase 1 schema
+        # column name) and the ``standard_type`` alias (ChEMBL SQL name)
+        # so the contract test can verify the loader reads every column
+        # the pipeline emits.
+        activity_type_raw = row.get("activity_type")
+        if activity_type_raw is None or (
+            isinstance(activity_type_raw, float) and pd.isna(activity_type_raw)
+        ) or str(activity_type_raw).strip().lower() in ("", "nan", "none", "null"):
+            activity_type_s: Optional[str] = None
+        else:
+            activity_type_s = str(activity_type_raw).strip()
+        standard_type_raw = row.get("standard_type")
+        if standard_type_raw is None or (
+            isinstance(standard_type_raw, float) and pd.isna(standard_type_raw)
+        ) or str(standard_type_raw).strip().lower() in ("", "nan", "none", "null"):
+            standard_type_s: Optional[str] = None
+        else:
+            standard_type_s = str(standard_type_raw).strip()
+        std_type = standard_type_s or activity_type_s or ""
         rel_type = standard_type_to_relation(str(std_type).strip())
+        # TASK 4.1: activity_value (raw nM measurement) and activity_units.
+        activity_value_raw = row.get("activity_value")
+        try:
+            activity_value_f: Optional[float] = (
+                float(activity_value_raw)
+                if activity_value_raw is not None and not pd.isna(activity_value_raw)
+                else None
+            )
+        except (TypeError, ValueError):
+            activity_value_f = None
+        activity_units_raw = row.get("activity_units")
+        if activity_units_raw is None or (
+            isinstance(activity_units_raw, float) and pd.isna(activity_units_raw)
+        ) or str(activity_units_raw).strip().lower() in ("", "nan", "none", "null"):
+            activity_units_s: Optional[str] = None
+        else:
+            activity_units_s = str(activity_units_raw).strip()
         # pchembl_value (potency).
         pchembl = row.get("pchembl_value")
         try:
@@ -2788,6 +2852,22 @@ def chembl_to_edge_records_from_phase1(
                 "score_aggregation": "single",
                 "standard_relation": std_rel_s or None,
                 "standard_type": str(std_type).strip(),
+                # TASK 4.1 (Teammate 4, root fix): emit the raw Phase 1
+                # columns explicitly so the contract test can verify the
+                # loader reads every column produced by chembl_pipeline.
+                "activity_type": activity_type_s,
+                "activity_value": activity_value_f,
+                "activity_units": activity_units_s,
+                # TASK 4.1: preserve the resolved UniProt accession under
+                # the spec-canonical name ``target_uniprot_id``.
+                "target_chembl_id": (
+                    str(target_chembl_id).strip()
+                    if target_chembl_id is not None and not (
+                        isinstance(target_chembl_id, float) and pd.isna(target_chembl_id)
+                    ) and str(target_chembl_id).strip().lower() not in ("", "nan", "none", "null")
+                    else None
+                ),
+                "target_uniprot_id": uniprot_ac,
                 "evidence": "chembl_bioactivity",
                 "source": "chembl",
                 # v35 ROOT FIX (H-1): preserve the raw ChEMBL compound ID
