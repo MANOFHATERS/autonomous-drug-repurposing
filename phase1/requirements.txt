@@ -44,7 +44,7 @@ rdkit>=2024.3.1,<2025.0; python_version>="3.8"
 # Airflow 2.10.x is officially compatible with SQLAlchemy 2.0.x ONLY
 # (https://airflow.apache.org/docs/apache-airflow/2.10.5/installation/
 # prerequisites.html). Allowing `<3.0` meant a future SQLAlchemy 2.1
-# release could be pip-installed alongside `apache-airflow==2.10.5`,
+# release could be pip-installed alongside `apache-airflow==3.3.0`,
 # silently breaking the Airflow metadata DB session at import time
 # (SQLAlchemy 2.1 may remove deprecated APIs that Airflow 2.10.5 still
 # uses). Pinning `<2.1` makes the incompatibility a pip-resolver error
@@ -113,7 +113,7 @@ lxml>=5.1.0,<6.0
 # image version `==2.10.5` so pip sees the requirement is already
 # satisfied and does NOT touch Airflow. The Dockerfile.airflow has a
 # build-time assertion that verifies this at build time.
-apache-airflow==2.10.5
+apache-airflow==3.3.0
 
 # Fuzzy matching (entity resolution)
 # v122 IN-080 FIX: added upper bound `<4.0` to prevent breaking major upgrades.
