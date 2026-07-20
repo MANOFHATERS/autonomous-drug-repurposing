@@ -82,7 +82,7 @@ jobs:
             phase1/requirements.txt
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: python
           # security-extended adds 200+ extra queries beyond the default
@@ -101,7 +101,7 @@ jobs:
           pip install -q -r requirements.txt || echo "dep install partial — CodeQL will still analyze source"
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           category: "/language:python"
 
@@ -120,7 +120,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: javascript-typescript
           queries: security-extended
@@ -135,6 +135,6 @@ jobs:
           npm ci --no-audit --no-fund || npm install --no-audit --no-fund
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           category: "/language:javascript-typescript"
