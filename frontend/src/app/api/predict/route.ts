@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, internalError, writeAuditLog } from "@/lib/api-helpers";
+import { requireAuth, internalError, writeAuditLog, requireCsrfOrSend } from "@/lib/api-helpers";
 import { predictPairs, type DrugDiseasePair } from "@/lib/services/gt-inference";
 // BE-029 ROOT FIX (Team Member 12): Zod-validated request body.
 // BE-030 ROOT FIX (Team Member 12): the previous `Math.min(body.limit
@@ -40,6 +40,16 @@ import { validateBody, PredictBody } from "@/lib/zod-schemas";
  * (FastAPI + uvicorn) handles 100+ concurrent requests via asyncio.
  */
 export async function POST(req: NextRequest) {
+  // Task 11.3 ROOT FIX (v129, TM11): CSRF protection on every
+  // state-changing route. The /api/predict POST route was previously
+  // MISSING the requireCsrfOrSend() call — an attacker on evil.com
+  // could forge a POST that submits a large batch of (drug, disease)
+  // pairs and exhausts the GT service's inference capacity (100
+  // concurrent requests per the V1 criteria). The double-submit
+  // cookie pattern (see lib/api-helpers.ts) blocks this attack.
+  const csrf = await requireCsrfOrSend(req);
+  if (csrf.response) return csrf.response;
+
   const auth = await requireAuth();
   if (auth.user === null) return auth.response;
 

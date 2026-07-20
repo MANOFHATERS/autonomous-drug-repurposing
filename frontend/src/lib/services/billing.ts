@@ -101,6 +101,13 @@ export async function changePlan(
   // checks for an existing invoice with the same (organizationId, idempotencyKey)
   // BEFORE creating a new one. If found, the existing invoice is returned and
   // no new invoice is created — preventing double-charges on client retries.
+  //
+  // Task 11.7 v129 ROOT FIX: this is the SINGLE source of truth for
+  // idempotency at the DB invoice level. When the route integrates with
+  // Stripe (production), it MUST also pass `Idempotency-Key` as a request
+  // header to the Stripe API so Stripe dedupes at the gateway level too.
+  // The current implementation is DB-only (no real Stripe charges) — the
+  // comment below marks the exact integration point.
   idempotencyKey?: string,
 ): Promise<{ invoiceId: string | null; idempotentReplay: boolean }> {
   const plan = getPlan(newPlanId);
@@ -154,8 +161,31 @@ export async function changePlan(
       }
     }
 
-    const existing = await tx.subscription.findUnique({ where: { organizationId: orgId } });
-    if (existing) {
+    // ────────────────────────────────────────────────────────────────
+    // Task 11.7 v129 ROOT FIX (defensive layer): if the org is already
+    // on the requested plan, the ROUTE-level check should have caught
+    // it and returned early. But callers might invoke changePlan()
+    // directly (e.g., a migration script, a test helper). In that
+    // case, we still don't want to create a spurious invoice — return
+    // the existing subscription's invoice (if any) and skip the write.
+    // ────────────────────────────────────────────────────────────────
+    const existingSub = await tx.subscription.findUnique({ where: { organizationId: orgId } });
+    if (existingSub && existingSub.plan === newPlanId) {
+      // Already on the plan — find the latest invoice for this org
+      // (if any) and return it as an idempotent replay. This keeps
+      // the route's behavior consistent: a same-plan change never
+      // creates a new invoice, regardless of entry point.
+      const lastInvoice = await tx.billingInvoice.findFirst({
+        where: { organizationId: orgId },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
+      });
+      resultInvoiceId = lastInvoice?.id ?? null;
+      resultIdempotentReplay = true;
+      return; // Skip the update + invoice creation.
+    }
+
+    if (existingSub) {
       await tx.subscription.update({
         where: { organizationId: orgId },
         data: {
@@ -177,6 +207,33 @@ export async function changePlan(
         },
       });
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // Task 11.7 v129 STRIPE INTEGRATION POINT (production):
+    //
+    // When this codebase integrates with Stripe for real charges, the
+    // Stripe API call goes HERE. Stripe supports idempotency natively
+    // via the `Idempotency-Key` HTTP header on the Stripe API request
+    // (https://docs.stripe.com/api/idempotent_requests). The pattern:
+    //
+    //   const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+    //   const stripeInvoice = await stripe.invoices.create({
+    //     customer: org.stripeCustomerId,
+    //     subscription_data: { items: [{ plan: plan.stripePlanId }] },
+    //   }, {
+    //     idempotencyKey: idempotencyKey,  // <-- Stripe dedupes here
+    //   });
+    //
+    // The Stripe idempotency key is SEPARATE from our DB idempotency
+    // key — but we use the SAME value so the two layers stay
+    // correlated. If Stripe returns a 409 (conflict — key already
+    // used), we look up the existing Stripe invoice by key and link
+    // it to our DB invoice row.
+    //
+    // For now, the code below creates a DB-only invoice (no real
+    // charge). When Stripe is integrated, the DB invoice row becomes
+    // a SHADOW record of the Stripe invoice — both are kept in sync.
+    // ────────────────────────────────────────────────────────────────
 
     // Generate an invoice for non-free plans. This must be in the same
     // transaction — if it fails, the subscription update rolls back too.
