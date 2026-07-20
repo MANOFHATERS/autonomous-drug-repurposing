@@ -171,6 +171,11 @@ export const BillingSubscriptionBody = z.object({
   currentPassword: z.string().min(1).max(1024),
   totpCode: z.string().regex(/^\d{6}$/).optional(),
   mfaTicket: z.string().min(1).max(4096).optional(),
+  // Task 11.7 v129: idempotencyKey in the body (backward compat —
+  // clients SHOULD send it via the Idempotency-Key HTTP header instead,
+  // which is the canonical location per the IETF draft). Capped at 200
+  // chars to match the route's header cap.
+  idempotencyKey: z.string().min(1).max(200).optional(),
 }).refine(
   (data) => !(data.totpCode && data.mfaTicket),
   { message: "Provide either totpCode or mfaTicket, not both." }
