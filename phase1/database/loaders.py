@@ -2169,6 +2169,19 @@ def bulk_upsert_drugs(
             # DrugBank refresh (defeating the SW-1 patient-safety fix).
             "is_globally_approved",
             "updated_at",  # [IDEM-02/DES-05] Explicitly updated on upsert
+            # TM1 Task 1.2 ROOT FIX (v130): the structured withdrawal
+            # metadata must be in ``updatable_cols`` so a subsequent
+            # DrugBank refresh actually updates these fields on
+            # CONFLICT/UPDATE. Previously, the columns were INSERTed on
+            # first load but NEVER updated — meaning if a drug was first
+            # inserted from ChEMBL (without these fields) and later
+            # updated from DrugBank (with these fields), the update was
+            # silently dropped. Patient-safety impact: the RL ranker
+            # would see stale/NULL withdrawal metadata even after the
+            # DrugBank pipeline extracted it correctly.
+            "withdrawn_reason",
+            "withdrawn_country",
+            "withdrawn_year",
         ]
 
         log_interval = max(1, total // (batch_size * 20))  # ~20 log lines
@@ -2410,6 +2423,17 @@ def bulk_upsert_proteins(
             "function_desc",
             "string_id",
             "updated_at",  # [IDEM-02/DES-05]
+            # TM1 Task 1.3 ROOT FIX (v130): ``function`` and
+            # ``subcellular_location`` must be in ``updatable_cols`` so a
+            # subsequent UniProt refresh actually updates these fields on
+            # CONFLICT/UPDATE. Without this, the columns were INSERTed on
+            # first load but NEVER updated — meaning a UniProt annotation
+            # refresh that added/changed FUNCTION or Subcellular Location
+            # text would be silently dropped on every existing protein.
+            # Phase 3 node-feature extraction (TASK-141) reads these
+            # fields; stale NULL values would defeat the feature pipeline.
+            "function",
+            "subcellular_location",
         ]
         # gene_name still accepted for backward compat but not updatable
         # (will be inserted on new rows but never updated)

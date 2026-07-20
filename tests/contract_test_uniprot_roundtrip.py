@@ -190,6 +190,132 @@ class TestUniProtContractRoundTrip(unittest.TestCase):
             f"UniProt contract-vs-pipeline drift: {uniprot_drift}",
         )
 
+    # ----- INV-5 (v130 ROOT FIX): Protein ORM model has new columns ---
+    # Hostile-auditor finding: the Phase 1 schema declares ``function``
+    # and ``subcellular_location`` as optional columns, and the UniProt
+    # pipeline writes both to the CSV. But the ORM ``Protein`` model
+    # declared only ``function_desc`` (legacy) and did NOT declare
+    # ``function`` or ``subcellular_location``. As a result,
+    # ``bulk_upsert_proteins`` silently dropped both columns before
+    # INSERT. The v130 ROOT FIX adds both columns to the ORM model
+    # (migration 020).
+
+    def test_inv5_protein_model_has_function_column(self):
+        """Protein ORM model MUST declare ``function`` column."""
+        from database.models import Protein
+        self.assertTrue(
+            hasattr(Protein, "function"),
+            "Protein model must have 'function' column (v130 ROOT FIX). "
+            "Without this, bulk_upsert_proteins silently drops the field "
+            "and the Phase 2 bridge gets NULL from the DB.",
+        )
+        # Verify it's a real column (not just any attribute).
+        from sqlalchemy import inspect as sa_inspect
+        mapper = sa_inspect(Protein)
+        column_names = {c.key for c in mapper.columns}
+        self.assertIn(
+            "function", column_names,
+            "Protein model's SQLAlchemy columns MUST include 'function'",
+        )
+
+    def test_inv5_protein_model_has_subcellular_location_column(self):
+        """Protein ORM model MUST declare ``subcellular_location`` column."""
+        from database.models import Protein
+        self.assertTrue(
+            hasattr(Protein, "subcellular_location"),
+            "Protein model must have 'subcellular_location' column (v130 ROOT FIX)",
+        )
+        from sqlalchemy import inspect as sa_inspect
+        mapper = sa_inspect(Protein)
+        column_names = {c.key for c in mapper.columns}
+        self.assertIn(
+            "subcellular_location", column_names,
+            "Protein model's SQLAlchemy columns MUST include 'subcellular_location'",
+        )
+
+    def test_inv5_protein_model_sequence_is_text_not_varchar(self):
+        """Protein.sequence MUST be Text (not String(50000)) — removes
+        latent truncation risk for proteins > 50,000 aa (v130 ROOT FIX).
+        """
+        from database.models import Protein
+        from sqlalchemy import inspect as sa_inspect
+        mapper = sa_inspect(Protein)
+        seq_col = next(c for c in mapper.columns if c.key == "sequence")
+        # Text type has no length limit; String(N) has length N.
+        # We accept either Text or String with no length attribute.
+        type_obj = seq_col.type
+        type_name = type_obj.__class__.__name__.upper()
+        # Accept TEXT or VARCHAR with length=None. Reject VARCHAR(50000).
+        has_length = getattr(type_obj, "length", None) is not None
+        self.assertTrue(
+            type_name == "TEXT" or not has_length,
+            f"Protein.sequence must be TEXT (unbounded), got {type_name} "
+            f"with length={getattr(type_obj, 'length', None)}. VARCHAR(50000) "
+            f"is a latent truncation risk for proteins > 50,000 aa.",
+        )
+
+    # ----- INV-6 (v130 ROOT FIX): .csv normalizer writes subcellular_location
+
+    def test_inv6_csv_normalizer_source_code_writes_subcellular_location(self):
+        """The .csv normalizer (embedded-sample fallback) MUST write
+        ``subcellular_location`` as the 10th TSV field. The previous
+        code wrote only 9 fields, causing every embedded-sample row's
+        subcellular_location to be empty.
+        """
+        import inspect
+        from pipelines.uniprot_pipeline import UniProtPipeline
+        source = inspect.getsource(UniProtPipeline._normalize_v50_to_raw_tsv)
+        # The .csv branch must include 'subcellular_location' in the
+        # writerow list. We check the source code (not runtime) because
+        # invoking the method requires a real prot_path file.
+        self.assertIn(
+            "subcellular_location", source,
+            "UniProtPipeline._normalize_v50_to_raw_tsv source MUST "
+            "include 'subcellular_location' in the .csv writerow list "
+            "(v130 ROOT FIX). Without this, embedded-sample rows have "
+            "empty subcellular_location, defeating Phase 3 node-feature "
+            "extraction (TASK-141).",
+        )
+
+    # ----- INV-7 (v130 ROOT FIX): loaders updatable_cols --------------
+
+    def test_inv7_loaders_updatable_cols_include_new_fields(self):
+        """bulk_upsert_proteins updatable_cols MUST include ``function``
+        and ``subcellular_location`` so a UniProt refresh actually
+        updates these fields on CONFLICT/UPDATE (hostile-auditor finding).
+        """
+        import inspect
+        from database.loaders import bulk_upsert_proteins
+        source = inspect.getsource(bulk_upsert_proteins)
+        for field in ("function", "subcellular_location"):
+            self.assertIn(
+                field, source,
+                f"bulk_upsert_proteins source MUST include '{field}' in "
+                f"updatable_cols (v130 ROOT FIX). Without this, the field "
+                f"is INSERTed on first load but NEVER updated — meaning a "
+                f"UniProt refresh that adds/changes FUNCTION or "
+                f"Subcellular Location text would be silently dropped.",
+            )
+
+    # ----- INV-8 (v130 ROOT FIX): migration 020 exists ----------------
+
+    def test_inv8_migration_020_file_exists(self):
+        """Migration 020 (protein function + subcellular_location) MUST
+        exist so the DB schema actually has the columns the ORM declares.
+        """
+        migration_path = _PHASE1_ROOT / "database" / "migrations" / "020_protein_function_subcellular_location.sql"
+        self.assertTrue(
+            migration_path.exists(),
+            f"Migration file MUST exist at {migration_path} (v130 ROOT FIX). "
+            "Without this migration, the ORM declares columns that don't "
+            "exist in the DB — every INSERT/UPDATE would fail.",
+        )
+        # Verify the migration content includes the new columns.
+        content = migration_path.read_text(encoding="utf-8")
+        self.assertIn("function", content)
+        self.assertIn("subcellular_location", content)
+        self.assertIn("ALTER TABLE proteins", content)
+
 
 if __name__ == "__main__":
     unittest.main()

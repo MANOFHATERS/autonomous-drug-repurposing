@@ -265,6 +265,20 @@ PHASE1_OUTPUT_SCHEMA: Dict[str, SourceSpec] = {
                        description="ChEMBL assay type (A/B/F/...)."),
             ColumnSpec("target_accession", "string", nullable=True,
                        description="UniProt accession resolved from target_chembl_id."),
+            # TM1 Task 1.1 ROOT FIX (v130): Phase 2 bridge (phase1_bridge.py)
+            # and chembl_loader.py read ``uniprot_accession`` / ``target_uniprot``
+            # as the canonical name for the UniProt accession on a ChEMBL
+            # activity row. Phase 1 historically wrote only ``target_accession``,
+            # which caused the bridge to fall through to a synthetic
+            # ``CHEMBL_TGT_<digits>`` id and silently disconnect every
+            # ChEMBL Compound→Protein edge from the UniProt Protein KG.
+            # The pipeline now emits these alias columns (mirrors of
+            # ``target_accession``); declaring them here keeps the drift
+            # detector quiet and documents the contract.
+            ColumnSpec("uniprot_accession", "string", nullable=True,
+                       description="Alias for target_accession (Phase 2 contract name)."),
+            ColumnSpec("target_uniprot", "string", nullable=True,
+                       description="Alias for target_accession (legacy Phase 2 name)."),
         ),
         min_rows=1,
         description="ChEMBL bioactivity measurements (Compound-Protein edges).",

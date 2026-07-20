@@ -434,12 +434,18 @@ def _get_processed_columns(source_key: str) -> list[str]:
         # Matches the record dict in ``_parse_activities`` +
         # ``_ensure_activity_columns`` defaults + the v82 P0-D4b censor
         # columns added in ``_step_normalize_activity_values``.
+        # TM1 Task 1.1 ROOT FIX (v130): also include ``uniprot_accession``
+        # and ``target_uniprot`` alias columns (mirrors of ``target_accession``)
+        # so the Phase 2 bridge / chembl_loader that read those names can
+        # join ChEMBL Compound→Protein edges to the UniProt Protein KG
+        # instead of falling through to synthetic CHEMBL_TGT_<digits> ids.
         return [
             "activity_id", "molecule_chembl_id", "target_chembl_id",
             "target_pref_name", "activity_type", "activity_value",
             "activity_units", "pchembl_value", "assay_id",
             "standard_relation", "assay_type", "target_accession",
             "activity_censored", "activity_censor_direction",
+            "uniprot_accession", "target_uniprot",
         ]
     raise ValueError(
         f"_get_processed_columns: unknown source_key {source_key!r} "
@@ -1632,6 +1638,28 @@ class ChEMBLPipeline(BasePipeline):
         activities_df = activities_df.dropna(subset=["target_accession"]).copy()
         # Ensure string type.
         activities_df["target_accession"] = activities_df["target_accession"].astype(str)
+
+        # ----------------------------------------------------------------
+        # TM1 Task 1.1 ROOT FIX (v130) — CRITICAL contract-alignment fix
+        # ----------------------------------------------------------------
+        # Hostile-auditor finding: Phase 2 bridge (phase1_bridge.py:7366)
+        # and chembl_loader.py:2680 read ``uniprot_accession`` /
+        # ``target_uniprot`` from the activities CSV, but Phase 1 only
+        # wrote ``target_accession``. The bridge falls through to a
+        # synthetic ``CHEMBL_TGT_<digits>`` id, silently disconnecting
+        # every ChEMBL Compound→Protein edge from the UniProt Protein KG.
+        #
+        # Root fix: emit ``uniprot_accession`` and ``target_uniprot`` as
+        # alias columns that mirror ``target_accession``. This is
+        # ADDITIVE — it does not break any existing reader that consumed
+        # ``target_accession``. The alias columns are declared in
+        # phase1_schema.py so the drift detector stays quiet. Phase 2
+        # now reads a real UniProt accession (e.g. ``P23219``) instead
+        # of a synthetic id, and the ChEMBL bioactivity edges join
+        # correctly to the UniProt Protein nodes.
+        # ----------------------------------------------------------------
+        activities_df["uniprot_accession"] = activities_df["target_accession"]
+        activities_df["target_uniprot"] = activities_df["target_accession"]
 
         # Step 8: Normalise activity_value to nM, passing activity_type (S13).
         activities_df = self._step_normalize_activity_values(activities_df)
