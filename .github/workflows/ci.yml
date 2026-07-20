@@ -1267,7 +1267,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       - name: Build frontend Docker image
         # v129 TM16 ROOT FIX (Task 16.3): build the frontend Docker
         # image using the production Dockerfile (frontend/Dockerfile).
