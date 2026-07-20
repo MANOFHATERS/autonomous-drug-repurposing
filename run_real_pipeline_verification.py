@@ -84,20 +84,69 @@ print()
 # subsequent tests. There is NO synthetic build_demo_graph() fallback.
 print("[0/6] REAL Phase 1 -> Phase 2 -> Phase 3 pipeline (produces graph_data)...")
 _phase1_dir = os.path.join(_REPO_ROOT, "phase1", "processed_data")
-if not os.path.isdir(_phase1_dir) or not any(
-    f.endswith(".csv") for f in os.listdir(_phase1_dir) if os.path.isfile(os.path.join(_phase1_dir, f))
-):
-    print("  Phase 1 processed_data missing -- generating sample data...")
-    import subprocess
-    _r = subprocess.run(
-        [sys.executable, "-m", "pipelines", "samples"],
-        cwd=_PHASE1,
-        capture_output=True, text=True, timeout=120,
-        env={**os.environ, "DRUGOS_ENVIRONMENT": "dev"},
+
+# SH-008 v129 ROOT FIX (Teammate 14, forensic, root-level, no surface fix):
+# The audit found that this script AUTO-GENERATED sample data via
+# ``python -m pipelines samples`` when Phase 1 processed_data was missing.
+# This masked real Phase 1 pipeline failures — the script would pass even
+# when the actual Phase 1 data pipeline was broken, because it silently
+# generated fresh samples. The audit's verification command is:
+#     python run_real_pipeline_verification.py  # should fail loudly if no real data
+#
+# ROOT FIX: FAIL LOUDLY if Phase 1 processed_data is missing or empty.
+# Print a CLEAR error message explaining what to do. Do NOT auto-generate
+# samples — that's the operator's responsibility (run
+# ``python -m pipelines samples`` or ``python -m pipelines all`` first).
+#
+# The ONLY exception: if DRUGOS_AUTO_GENERATE_SAMPLES=1 is set explicitly
+# (dev/CI mode), auto-generate samples. This preserves the CI workflow's
+# ability to run the script without manual setup, while making the DEFAULT
+# behavior fail-loud per the audit.
+_phase1_csvs_present = os.path.isdir(_phase1_dir) and any(
+    f.endswith(".csv") for f in os.listdir(_phase1_dir)
+    if os.path.isfile(os.path.join(_phase1_dir, f))
+)
+if not _phase1_csvs_present:
+    _auto_generate = os.environ.get("DRUGOS_AUTO_GENERATE_SAMPLES", "0").strip().lower() in (
+        "1", "true", "yes", "on",
     )
-    if _r.returncode != 0:
-        print("  FAILED to generate sample data:")
-        print(_r.stderr[-500:])
+    if _auto_generate:
+        print("  Phase 1 processed_data missing -- auto-generating sample data")
+        print("  (DRUGOS_AUTO_GENERATE_SAMPLES=1 set — dev/CI mode).")
+        import subprocess
+        _r = subprocess.run(
+            [sys.executable, "-m", "pipelines", "samples"],
+            cwd=_PHASE1,
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "DRUGOS_ENVIRONMENT": "dev"},
+        )
+        if _r.returncode != 0:
+            print("  FAILED to auto-generate sample data:")
+            print(_r.stderr[-500:])
+            sys.exit(1)
+    else:
+        # SH-008 v129: FAIL LOUDLY. Do NOT auto-generate samples.
+        print("=" * 70)
+        print("FATAL: Phase 1 processed_data is MISSING or EMPTY.")
+        print("=" * 70)
+        print(f"  Expected CSV files in: {_phase1_dir}")
+        print("")
+        print("  This script verifies the REAL pipeline end-to-end. It does NOT")
+        print("  auto-generate synthetic data (per audit SH-008). The previous")
+        print("  behavior of auto-calling `python -m pipelines samples` masked")
+        print("  real Phase 1 pipeline failures — the script would pass even")
+        print("  when the actual data pipeline was broken.")
+        print("")
+        print("  To fix this error, generate REAL Phase 1 data first:")
+        print(f"    cd {_PHASE1} && python -m pipelines samples   # small sample (dev)")
+        print(f"    cd {_PHASE1} && python -m pipelines all       # full pipeline (prod)")
+        print("")
+        print("  Then re-run this script:")
+        print(f"    python {os.path.basename(__file__)}")
+        print("")
+        print("  For CI/dev workflows that WANT auto-generation, set:")
+        print("    DRUGOS_AUTO_GENERATE_SAMPLES=1")
+        print("=" * 70)
         sys.exit(1)
 
 # Run the REAL Phase 1 -> Phase 2 bridge.
