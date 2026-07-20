@@ -1,0 +1,54 @@
+# =============================================================================
+# CodeQL Python config — Autonomous Drug Repurposing Platform
+# =============================================================================
+# v129 TM16 ROOT FIX (Task 16.6): CodeQL configuration for the Python
+# codebase. Tells CodeQL which directories to index + which to ignore.
+#
+# Paths indexed:
+#   - phase1/         — Airflow DAGs, ETL pipelines, entity resolution
+#   - phase2/         — Knowledge graph builder + Neo4j bridge
+#   - graph_transformer/ — Phase 3 GT model + trainer
+#   - rl/             — Phase 4 RL ranker + reward function
+#   - shared/         — Cross-phase contracts + observability toolkit
+#   - backend/        — FastAPI backend (when present)
+#   - scripts/        — Operational scripts (gt_api.py, rl_api.py, etc.)
+#
+# Paths excluded:
+#   - **/tests/**     — test fixtures intentionally contain "unsafe"
+#     patterns (e.g. test_cypher_injection.py has Cypher injection
+#     test cases). CodeQL would flag these as real vulnerabilities.
+#   - **/fixtures/**  — sample data, not shipped code.
+#   - **/__pycache__/** — Python bytecode caches.
+#   - .venv/, venv/, node_modules/ — third-party deps.
+# =============================================================================
+
+name: "Python CodeQL Config"
+
+paths:
+  - phase1
+  - phase2
+  - graph_transformer
+  - rl
+  - shared
+  - backend
+  - scripts
+  - conftest.py
+  - run_4phase.py
+  - run_real_pipeline.py
+  - run_unified.py
+  - run_full_platform.py
+
+paths-ignore:
+  - "**/tests/**"
+  - "**/test_*/**"
+  - "**/fixtures/**"
+  - "**/__pycache__/**"
+  - "**/*.pyc"
+  - "**/.venv/**"
+  - "**/venv/**"
+  - "**/node_modules/**"
+  - "**/mlruns/**"
+  - "**/logs/**"
+  - "**/.mypy_cache/**"
+  - "**/.pytest_cache/**"
+  - "**/.ruff_cache/**"

@@ -13,3 +13,15 @@ pytest>=7.4.0,<9.0
 pytest-cov>=4.1.0,<6.0
 pytest-mock>=3.10.0,<4.0
 responses>=0.24.0,<1.0  # for mocking HTTP requests in tests
+
+# v129 TM16 ROOT FIX (Tasks 16.1 + 16.4): CI security + type-checking deps.
+# IN-019 (Task 16.1): pip-audit scans installed Python packages for known
+# CVEs using the PyPI Advisory Database. cyclonedx-bom generates a
+# CycloneDX-format Software Bill of Materials (SBOM) from requirements.txt
+# — required for supply-chain compliance (pharma partners + enterprise SOX).
+mypy>=1.8,<2.0             # Task 16.4: static type checking (--strict)
+bandit>=1.7,<2.0           # Task 16.4: security linter (block on HIGH+)
+pip-audit>=2.7,<3.0        # Task 16.1: CVE scan on Python deps
+cyclonedx-bom>=4.4,<5.0    # Task 16.1: CycloneDX SBOM generation
+types-PyYAML>=6.0,<7.0     # mypy stubs for PyYAML (used everywhere)
+types-requests>=2.31,<3.0  # mypy stubs for requests (used by all pipelines)

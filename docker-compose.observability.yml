@@ -1,0 +1,238 @@
+# =============================================================================
+# docker-compose.observability.yml — Standalone observability stack
+# =============================================================================
+# v129 TM16 ROOT FIX (Task 16.5 — IN-040/IN-041/IN-042/IN-043):
+#
+# The main docker-compose.yml (owned by TM15) already contains Prometheus,
+# Grafana, Alertmanager, OTel Collector, Jaeger, pushgateway, node-exporter,
+# cadvisor, and pg-backup. Those services are TM15's responsibility.
+#
+# THIS file is a STANDALONE observability-only compose stack that lets
+# operators bring up JUST the observability layer against an already-
+# running set of backend services (e.g. a staging cluster where the data
+# services are managed by Kubernetes but the metrics stack runs on a
+# dedicated VM). It is also what `npm run test:e2e-observability` and the
+# CI `docker-build-smoke` job use to verify the observability stack
+# boots cleanly without needing Postgres + Neo4j + Airflow + Phase1-4.
+#
+# Usage:
+#   # Bring up only the observability stack:
+#   docker compose -f docker-compose.observability.yml up -d
+#
+#   # Combine with the main compose (TM15's services + observability):
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+#
+#   # Verify health:
+#   curl http://localhost:9090/-/healthy         # Prometheus
+#   curl http://localhost:3001/api/health        # Grafana
+#   curl http://localhost:9093/-/healthy         # Alertmanager
+#   curl http://localhost:16686/api/services     # Jaeger
+#
+# Sentry is NOT run as a container here — Sentry is a SaaS product
+# (sentry.io) or self-hosted via the official self-hosted Sentry repo
+# (https://github.com/getsentry/self-hosted). The Python services read
+# SENTRY_DSN from env to know where to send events. For local dev,
+# SENTRY_DSN is unset (shared/observability/__init__.py::_init_sentry
+# gracefully no-ops).
+# =============================================================================
+
+networks:
+  observability:
+    driver: bridge
+    name: drugos-observability
+
+volumes:
+  prometheus-data:
+    name: drugos-prometheus-standalone
+  grafana-data:
+    name: drugos-grafana-standalone
+  alertmanager-data:
+    name: drugos-alertmanager-standalone
+
+services:
+  # ─── Prometheus — metrics scraper + alert evaluator ──────────────────────
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: drugos-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+      - "--web.enable-admin-api"
+      - "--web.listen-address=0.0.0.0:9090"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./observability/alertmanager.yml:/etc/prometheus/alertmanager.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ─── Grafana — dashboards + alert visualization ─────────────────────────
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: drugos-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_ALLOW_ORG_CREATE: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SERVER_HTTP_PORT: "3001"
+      GF_SERVER_ROOT_URL: "http://localhost:3001/"
+      # Sentry DSN — read by Grafana's frontend error reporting (NOT by
+      # the Python services; those read SENTRY_DSN directly from env).
+      GF_SENTRY_DSN: ${SENTRY_DSN:-}
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3001/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ─── Alertmanager — routes Prometheus alerts to PagerDuty / Slack ────────
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: drugos-alertmanager
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+      - "--web.listen-address=0.0.0.0:9093"
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9093/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ─── Pushgateway — buffer for batch-job metrics ──────────────────────────
+  # Used by scripts/restore_test.py to push backup-health metrics. Without
+  # pushgateway, batch jobs that exit before the next scrape interval lose
+  # their metrics. Prometheus scrapes pushgateway like any other target.
+  pushgateway:
+    image: prom/pushgateway:v1.11.0
+    container_name: drugos-pushgateway
+    restart: unless-stopped
+    ports:
+      - "9091:9091"
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9091/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ─── OTel Collector — receives traces from Python services, exports to Jaeger
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.112.0
+    container_name: drugos-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP (used by Python services via OTLPSpanExporter)
+    volumes:
+      - ./observability/otel-collector.yml:/etc/otelcol/config.yaml:ro
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:13133/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ─── Jaeger — distributed tracing UI ─────────────────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: drugos-jaeger
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      # Keep in-memory storage for the standalone stack. Production uses
+      # Elasticsearch or Cassandra backing storage — configured in the
+      # main docker-compose.yml by TM15.
+      SPAN_STORAGE_TYPE: memory
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "14268:14268"   # Jaeger thrift HTTP
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:16686/api/services"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ─── node-exporter — host CPU/memory/disk metrics ────────────────────────
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: drugos-node-exporter
+    restart: unless-stopped
+    command:
+      - "--path.rootfs=/host"
+    ports:
+      - "9100:9100"
+    volumes:
+      - /:/host:ro,rslave
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9100/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ─── cadvisor — container CPU/memory/disk metrics ────────────────────────
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: drugos-cadvisor
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

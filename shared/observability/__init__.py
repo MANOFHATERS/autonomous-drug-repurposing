@@ -31,9 +31,31 @@ v122 FORENSIC ROOT FIX (Teammate 15 — hostile-auditor, BUG-4/BUG-5/BUG-6):
          AND ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set. Falls back
          gracefully (no-op) if either is missing.
 
+v129 TM16 ROOT FIX (Task 16.5 — Sentry SDK, IN-043):
+    The v122 fix added /metrics + JSON logging + OTel but Sentry was
+    MISSING. The audit explicitly required "Sentry SDK with DSN from env
+    var" (IN-043). Without Sentry, production errors are logged to stdout
+    but never reach an alerting system — patient-safety incidents (e.g.
+    a hypothesis export failing for a pharma partner) can be missed for
+    hours. The fix adds ``_init_sentry(service_name)`` which:
+      * Reads ``SENTRY_DSN`` from env. If unset/empty, returns False
+        (dev runs do not need a Sentry account — graceful no-op).
+      * Reads optional ``SENTRY_ENVIRONMENT`` (default: from
+        ``DRUGOS_ENVIRONMENT`` or "development"), ``SENTRY_RELEASE``
+        (default: git SHA via ``DRUGOS_GIT_SHA`` env or "unknown"),
+        ``SENTRY_TRACES_SAMPLE_RATE`` (default: 0.0 — only errors
+        captured, no performance traces; set to 0.01 for 1% sampling).
+      * Calls ``sentry_sdk.init()`` with the FastAPIIntegration + the
+        default dedupe integration. Errors raised in async route
+        handlers are auto-captured with full request context (method,
+        path, headers filtered for PII by sentry_sdk's default
+        BeforeSendProcessor).
+      * Tags every Sentry event with ``service_name`` so we can filter
+        by service in the Sentry dashboard.
+
     Each FastAPI service calls ``configure_app(app, "<service_name>")``
     early in module init (after ``app = FastAPI(...)``). One function,
-    one import, three problems solved.
+    one import, four problems solved.
 
 Usage:
     from shared.observability import configure_app
@@ -53,6 +75,7 @@ from typing import Any, Optional
 
 _LOGGING_CONFIGURED = False
 _OTEL_CONFIGURED = False
+_SENTRY_CONFIGURED = False
 
 
 class _JsonFormatter(logging.Formatter):
@@ -239,13 +262,186 @@ def _instrument_otel(app: Any, service_name: str) -> bool:
     return True
 
 
+def _init_sentry(service_name: str) -> bool:
+    """Initialize the Sentry SDK if SENTRY_DSN is set.
+
+    Returns True if Sentry was initialized, False otherwise (graceful no-op
+    when SENTRY_DSN is unset — dev runs do not need a Sentry account).
+
+    Reads these env vars:
+      * SENTRY_DSN (required for init) — the project DSN from sentry.io.
+      * SENTRY_ENVIRONMENT (optional) — defaults to DRUGOS_ENVIRONMENT
+        env var or "development".
+      * SENTRY_RELEASE (optional) — defaults to DRUGOS_GIT_SHA env var
+        or "unknown" (set DRUGOS_GIT_SHA in the Docker build).
+      * SENTRY_TRACES_SAMPLE_RATE (optional) — float 0.0–1.0, default 0.0
+        (errors only). Set to 0.01 for 1% performance sampling.
+      * SENTRY_PROFILES_SAMPLE_RATE (optional) — float 0.0–1.0, default 0.0.
+
+    Idempotent: only initializes once per process (subsequent calls are
+    no-ops). Safe to call from configure_app() on every FastAPI app.
+    """
+    global _SENTRY_CONFIGURED
+    if _SENTRY_CONFIGURED:
+        return True
+
+    dsn = os.environ.get("SENTRY_DSN", "").strip()
+    if not dsn:
+        # Dev-mode no-op: SENTRY_DSN not set. This is the expected state
+        # for local development + CI. Production deployments MUST set
+        # SENTRY_DSN in the container env.
+        return False
+
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.logging import LoggingIntegration
+    except ImportError:
+        logging.getLogger(__name__).warning(
+            "sentry-sdk not installed — SENTRY_DSN was set but errors "
+            "will NOT be reported to Sentry. Install with: "
+            "pip install 'sentry-sdk[fastapi]>=1.40,<3.0'",
+        )
+        return False
+
+    environment = (
+        os.environ.get("SENTRY_ENVIRONMENT")
+        or os.environ.get("DRUGOS_ENVIRONMENT")
+        or "development"
+    )
+    release = os.environ.get("SENTRY_RELEASE") or os.environ.get("DRUGOS_GIT_SHA") or "unknown"
+
+    # Parse traces_sample_rate defensively — a malformed env value should
+    # NOT crash the service. Default to 0.0 (errors only, no perf traces).
+    try:
+        traces_sample_rate = float(
+            os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.0"),
+        )
+        if not 0.0 <= traces_sample_rate <= 1.0:
+            traces_sample_rate = 0.0
+    except (TypeError, ValueError):
+        traces_sample_rate = 0.0
+
+    try:
+        profiles_sample_rate = float(
+            os.environ.get("SENTRY_PROFILES_SAMPLE_RATE", "0.0"),
+        )
+        if not 0.0 <= profiles_sample_rate <= 1.0:
+            profiles_sample_rate = 0.0
+    except (TypeError, ValueError):
+        profiles_sample_rate = 0.0
+
+    # LoggingIntegration: capture ERROR+ logs as Sentry events. WARNING
+    # logs are NOT captured (would be too noisy). The integration also
+    # adds structured log records as breadcrumbs to subsequent events,
+    # giving full context when an error fires.
+    logging_integration = LoggingIntegration(
+        level=logging.INFO,          # INFO+ as breadcrumbs
+        event_level=logging.ERROR,   # ERROR+ as events
+    )
+
+    sentry_sdk.init(
+        dsn=dsn,
+        environment=environment,
+        release=release,
+        traces_sample_rate=traces_sample_rate,
+        profiles_sample_rate=profiles_sample_rate,
+        send_default_pii=False,  # NEVER send PII (HIPAA/GDPR compliance)
+        attach_stacktrace=True,  # capture stacktrace even for caught exceptions
+        max_breadcrumbs=100,     # keep last 100 log records as context
+        integrations=[
+            FastApiIntegration(),
+            logging_integration,
+        ],
+        before_send=_sentry_before_send,
+    )
+
+    # Tag every Sentry event with the service name so we can filter by
+    # service in the Sentry dashboard. set_tag() at the global scope
+    # applies to all subsequent events.
+    sentry_sdk.set_tag("service_name", service_name)
+    sentry_sdk.set_tag("component", service_name)
+    sentry_sdk.set_context("service", {
+        "name": service_name,
+        "environment": environment,
+        "release": release,
+    })
+
+    _SENTRY_CONFIGURED = True
+    logging.getLogger(__name__).info(
+        "sentry_initialized",
+        extra={
+            "service_name": service_name,
+            "environment": environment,
+            "release": release,
+            "traces_sample_rate": traces_sample_rate,
+        },
+    )
+    return True
+
+
+def _sentry_before_send(event: dict, hint: dict) -> Optional[dict]:
+    """Sentry before_send hook — strip PII + rate-limit noisy exceptions.
+
+    This runs on every Sentry event before it's sent. Two responsibilities:
+      1. Strip personally-identifiable information (PII) from request
+         headers + bodies. Even though send_default_pii=False, request
+         headers can still contain Authorization, Cookie, X-API-Key
+         values that leak credentials. We redact them explicitly.
+      2. Drop events from known-noisy exception types that flood Sentry
+         (e.g. CancelledError from graceful shutdown). These are NOT
+         real errors and would mask real incidents in the Sentry UI.
+    """
+    # ─── PII redaction on request headers + bodies ───
+    request = event.get("request", {})
+    if isinstance(request, dict):
+        headers = request.get("headers")
+        if isinstance(headers, dict):
+            redacted = {}
+            sensitive = {
+                "authorization", "cookie", "x-api-key", "x-auth-token",
+                "x-csrf-token", "proxy-authorization", "set-cookie",
+            }
+            for k, v in headers.items():
+                if isinstance(k, str) and k.lower() in sensitive:
+                    redacted[k] = "[REDACTED]"
+                else:
+                    redacted[k] = v
+            request["headers"] = redacted
+
+        # Strip query string + body — may contain patient identifiers
+        # (drug names, disease names, OMIM IDs) which are PHI under HIPAA
+        # when combined with a researcher identity. We keep method + path
+        # (needed for routing analytics) but drop everything else.
+        request.pop("query_string", None)
+        request.pop("data", None)
+        request.pop("cookies", None)
+        event["request"] = request
+
+    # ─── Drop noisy exception types ───
+    exc_info = hint.get("exc_info")
+    if exc_info:
+        exc_type = exc_info[0]
+        # asyncio.CancelledError fires on every graceful shutdown — NOT
+        # an error, just normal lifecycle. Dropping prevents Sentry
+        # floods during deploys.
+        if exc_type is not None and exc_type.__name__ == "CancelledError":
+            return None
+        # KeyboardInterrupt is user-initiated, not an error.
+        if exc_type is not None and exc_type.__name__ == "KeyboardInterrupt":
+            return None
+
+    return event
+
+
 def configure_app(app: Any, service_name: str) -> None:
     """Configure observability for a FastAPI app.
 
     Args:
         app: the FastAPI app instance.
         service_name: the service name (e.g., "phase3-gt-api") — used as
-            the OTel service.name attribute and in log lines.
+            the OTel service.name attribute, the Sentry service_name tag,
+            and in log lines.
 
     Side effects:
         * Configures JSON structured logging on the root logger (idempotent).
@@ -254,6 +450,8 @@ def configure_app(app: Any, service_name: str) -> None:
         * Mounts /metrics endpoint (Prometheus scrape target).
         * Instruments the app with OpenTelemetry (if OTEL_EXPORTER_OTLP_ENDPOINT
           is set and the package is installed).
+        * Initializes Sentry SDK (if SENTRY_DSN is set and the package is
+          installed). Errors raised in route handlers are auto-captured.
 
     Idempotent: calling this on multiple apps in the same process is safe.
     """
@@ -304,9 +502,28 @@ def configure_app(app: Any, service_name: str) -> None:
             extra={"service_name": service_name, "error": str(exc)},
         )
 
+    try:
+        sentry_enabled = _init_sentry(service_name)
+        logger.info(
+            "sentry_status",
+            extra={
+                "service_name": service_name,
+                "initialized": sentry_enabled,
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "sentry_init_failed",
+            extra={"service_name": service_name, "error": str(exc)},
+        )
+
     logger.info(
         "observability_configured",
-        extra={"service_name": service_name},
+        extra={
+            "service_name": service_name,
+            "sentry_enabled": _SENTRY_CONFIGURED,
+            "otel_enabled": _OTEL_CONFIGURED,
+        },
     )
 
 
