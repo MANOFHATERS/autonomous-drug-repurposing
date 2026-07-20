@@ -60,4 +60,4 @@ rdkit>=2024.3.1,<2025.0
 # v122 IN-080 FIX: pin to a version that ACTUALLY EXISTS on PyPI.
 # The previous `scipy>=1.18.0` was a future version that does not
 # exist — pip install would fail. scipy 1.14.x is the latest stable.
-scipy>=1.10,<2.0
+scipy>=1.18.0,<2.0
