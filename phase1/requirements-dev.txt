@@ -8,6 +8,6 @@ pytest>=7.4.4,<9.0
 pytest-mock>=3.10.0,<4.0
 pytest-cov>=4.1.0,<6.0
 # [v3.0.0] Property-based testing for deduplicator
-hypothesis>=6.92.0,<8.0
+hypothesis>=6.157.0,<8.0
 # [v3.0.0] Performance regression tests
 pytest-benchmark>=4.0.0,<6.0
