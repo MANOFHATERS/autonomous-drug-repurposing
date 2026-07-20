@@ -1,0 +1,757 @@
+{
+  "components": {
+    "schemas": {
+      "CypherBody": {
+        "description": "Raw Cypher passthrough body for POST /cypher.",
+        "properties": {
+          "cypher": {
+            "description": "Read-only Cypher query.",
+            "title": "Cypher",
+            "type": "string"
+          },
+          "params": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Parameterized query variables (scalars or lists of scalars only).",
+            "title": "Params"
+          }
+        },
+        "required": [
+          "cypher"
+        ],
+        "title": "CypherBody",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "QueryBody": {
+        "description": "Structured query body for POST /query.",
+        "properties": {
+          "disease": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Disease name (Disease.name).",
+            "title": "Disease"
+          },
+          "drug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Drug name (Compound.name).",
+            "title": "Drug"
+          },
+          "limit": {
+            "default": 100,
+            "description": "Max nodes to return.",
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "QueryBody",
+        "type": "object"
+      },
+      "ValidatedHypothesisRequest": {
+        "description": "Request body for POST /datasets/validated_hypotheses.\n\nMirrors the TM14 ``shared/contracts/writeback.py`` WRITEBACK_CSV_COLUMNS\nso the rl/service.py writeback call shape is unchanged.",
+        "properties": {
+          "disease": {
+            "description": "Disease name",
+            "minLength": 1,
+            "title": "Disease",
+            "type": "string"
+          },
+          "drug": {
+            "description": "Drug name",
+            "minLength": 1,
+            "title": "Drug",
+            "type": "string"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "original_gt_score": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Gt Score"
+          },
+          "original_rl_rank": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Rl Rank"
+          },
+          "outcome": {
+            "description": "Validation outcome",
+            "title": "Outcome",
+            "type": "string"
+          },
+          "validated_at": {
+            "description": "ISO-8601 validation timestamp",
+            "title": "Validated At",
+            "type": "string"
+          },
+          "validated_by": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validated By"
+          },
+          "validation_study_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validation Study Id"
+          },
+          "writeback_version": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Writeback Version"
+          }
+        },
+        "required": [
+          "drug",
+          "disease",
+          "outcome",
+          "validated_at"
+        ],
+        "title": "ValidatedHypothesisRequest",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Combined OpenAPI schema for all four Python services (phase1 dataset, phase2 KG, phase3 graph transformer, phase4 RL ranker). Auto-generated by frontend/scripts/extract_openapi.py \u2014 do not edit by hand.",
+    "title": "Autonomous Drug Repurposing Platform \u2014 Combined API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/cypher": {
+      "post": {
+        "description": "Raw read-only Cypher passthrough (P2-002 / P2-011 / P2-041 root fix).\n\nv109 ROOT FIX: applies the defense-in-depth ``_validate_readonly_cypher``\nvalidator (blocks subqueries, APOC, db writes, LOAD CSV, semicolons)\nAND ``_validate_cypher_params`` (rejects non-scalar params) AND\nenforces a hard 30-second server-side timeout via the Neo4j driver's\n``transaction_timeout`` parameter (the v107 docstring claimed a 30s\ntimeout but the implementation did NOT enforce one \u2014 a malicious or\nrunaway query could block the worker indefinitely).\nReturns 503 if Neo4j is not configured \u2014 the in-memory bridge cannot\nanswer arbitrary Cypher.",
+        "operationId": "kg_cypher_cypher_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CypherBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Kg Cypher Cypher Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Kg Cypher",
+        "tags": [
+          "phase2"
+        ]
+      }
+    },
+    "/datasets": {
+      "get": {
+        "description": "Return real Phase 1 dataset stats (no fabrication).",
+        "operationId": "datasets_datasets_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Datasets Datasets Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Datasets",
+        "tags": [
+          "phase1"
+        ]
+      }
+    },
+    "/datasets/validated_hypotheses": {
+      "post": {
+        "description": "Persist a validated drug-disease hypothesis to PostgreSQL.\n\nThis is the data flywheel writeback endpoint (TM3 Task 3.3 v127).\nAccepts the TM14 CSV-shape payload, translates it to the 10-column\ncanonical schema, and INSERTs into the validated_hypotheses table.",
+        "operationId": "create_validated_hypothesis_datasets_validated_hypotheses_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidatedHypothesisRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Validated Hypothesis Datasets Validated Hypotheses Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Validated Hypothesis",
+        "tags": [
+          "phase1"
+        ]
+      }
+    },
+    "/datasets/{drug}/mechanism": {
+      "get": {
+        "description": "Return the mechanism-of-action (targets + indications) for a drug.",
+        "operationId": "drug_mechanism_datasets__drug__mechanism_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "drug",
+            "required": true,
+            "schema": {
+              "title": "Drug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Drug Mechanism Datasets  Drug  Mechanism Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Drug Mechanism",
+        "tags": [
+          "phase1"
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "description": "Health endpoint. Returns service metadata + data availability.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Health Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "phase1"
+        ]
+      }
+    },
+    "/kg/explore": {
+      "get": {
+        "description": "Return a subgraph around a drug or disease.",
+        "operationId": "kg_explore_kg_explore_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "drug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Drug"
+            }
+          },
+          {
+            "in": "query",
+            "name": "disease",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Disease"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Kg Explore Kg Explore Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Kg Explore",
+        "tags": [
+          "phase2"
+        ]
+      }
+    },
+    "/kg/stats": {
+      "get": {
+        "description": "Return real KG stats from Neo4j (or in-memory bridge fallback).",
+        "operationId": "kg_stats_kg_stats_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Kg Stats Kg Stats Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Kg Stats",
+        "tags": [
+          "phase2"
+        ]
+      }
+    },
+    "/predict": {
+      "post": {
+        "description": "Endpoint extracted from service.py::predict via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
+        "operationId": "phase3_gt_predict",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "phase3_gt POST /predict (AST-extracted)",
+        "tags": [
+          "phase3_gt"
+        ]
+      }
+    },
+    "/predictions": {
+      "get": {
+        "description": "Endpoint extracted from service.py::get_predictions via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
+        "operationId": "phase3_gt_get_predictions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "phase3_gt GET /predictions (AST-extracted)",
+        "tags": [
+          "phase3_gt"
+        ]
+      }
+    },
+    "/query": {
+      "post": {
+        "description": "Structured drug/disease query (P2-002 root fix).\n\nThe frontend POSTs ``{\"drug\": \"...\", \"disease\": \"...\", \"limit\": N}``\nhere. We resolve it via Neo4j (preferred) or the in-memory BFS.",
+        "operationId": "kg_query_query_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Kg Query Query Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Kg Query",
+        "tags": [
+          "phase2"
+        ]
+      }
+    },
+    "/rank": {
+      "get": {
+        "description": "Endpoint extracted from service.py::rank_get via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
+        "operationId": "phase4_rl_rank_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "phase4_rl GET /rank (AST-extracted)",
+        "tags": [
+          "phase4_rl"
+        ]
+      },
+      "post": {
+        "description": "Endpoint extracted from service.py::rank_post via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
+        "operationId": "phase4_rl_rank_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "phase4_rl POST /rank (AST-extracted)",
+        "tags": [
+          "phase4_rl"
+        ]
+      }
+    },
+    "/rank/{drug}": {
+      "get": {
+        "description": "Endpoint extracted from service.py::rank_by_drug via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
+        "operationId": "phase4_rl_rank_by_drug",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "phase4_rl GET /rank/{drug} (AST-extracted)",
+        "tags": [
+          "phase4_rl"
+        ]
+      }
+    },
+    "/stats": {
+      "get": {
+        "description": "Phase 1 stats in the DatasetStatsResponse shape the frontend expects.\n\nThis endpoint is the contract-satisfying peer of\n``frontend/src/lib/services/dataset-stats.ts:proxyToDatasetService``.\nIt returns the fields the frontend destructures: sources, nodesLoaded,\nedgesLoaded, edgeTypesPresent, pipelineVersion, schemaVersion,\nbridgeVersion, backend, warnings, errors, generatedAt.",
+        "operationId": "stats_stats_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Stats Stats Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stats",
+        "tags": [
+          "phase1"
+        ]
+      }
+    },
+    "/top-k": {
+      "get": {
+        "description": "Endpoint extracted from service.py::top_k via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
+        "operationId": "phase3_gt_top_k",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "phase3_gt GET /top-k (AST-extracted)",
+        "tags": [
+          "phase3_gt"
+        ]
+      }
+    },
+    "/validate": {
+      "post": {
+        "description": "Endpoint extracted from service.py::validate via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
+        "operationId": "phase4_rl_validate",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "phase4_rl POST /validate (AST-extracted)",
+        "tags": [
+          "phase4_rl"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "description": "phase1 service endpoints",
+      "name": "phase1"
+    },
+    {
+      "description": "phase2 service endpoints",
+      "name": "phase2"
+    },
+    {
+      "description": "phase3_gt service endpoints",
+      "name": "phase3_gt"
+    },
+    {
+      "description": "phase4_rl service endpoints",
+      "name": "phase4_rl"
+    }
+  ]
+}
