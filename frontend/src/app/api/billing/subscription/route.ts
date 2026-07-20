@@ -93,6 +93,15 @@ export async function POST(req: NextRequest) {
   if (auth.user === null) return auth.response;
   if (!auth.user.orgId) return badRequest("No active organization");
 
+  // Task 11.7 ROOT FIX (v129, TM11): read Idempotency-Key from the
+  // HTTP HEADER (the standard location per the IETF draft
+  // https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/).
+  // The body.idempotencyKey field is kept for backward compat with
+  // existing clients (the frontend's billing form sends it in the
+  // body) — the HEADER takes precedence if both are present, since
+  // the header is the canonical location per the spec.
+  const headerIdempotencyKey = req.headers.get("idempotency-key") || "";
+
   let body: {
     planId: string;
     /** FE-039: current password (re-auth) — required for plan changes. */
@@ -110,6 +119,11 @@ export async function POST(req: NextRequest) {
      * and no new invoice is created (no double-charge). Required for
      * paid plan changes; ignored for free plan changes (no invoice to
      * dedupe).
+     *
+     * Task 11.7 v129: clients SHOULD send the key via the
+     * `Idempotency-Key` HTTP header instead (the standard location).
+     * The body field is kept for backward compat — the HEADER takes
+     * precedence if both are present.
      */
     idempotencyKey?: string;
   };
@@ -126,6 +140,16 @@ export async function POST(req: NextRequest) {
   const parsed = validateBody(BillingSubscriptionBody, body);
   if (!parsed.ok) return parsed.response;
   body = parsed.data;
+
+  // Task 11.7: header takes precedence over body (header is the
+  // canonical location per the IETF draft). Trim whitespace; the
+  // Idempotency-Key header is opaque string per the spec, but we cap
+  // at 200 chars to prevent abuse (a 1MB key would be a DoS vector).
+  const idempotencyKeyFromRequest = (
+    headerIdempotencyKey.trim() ||
+    body.idempotencyKey ||
+    ""
+  ).slice(0, 200);
 
   // FE-039 STEP 1: re-verify the user's password.
   const userRecord = await db.user.findUnique({
@@ -301,15 +325,58 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    // BE-048 v123: pass the client-supplied idempotencyKey to changePlan.
-    // If the client did not supply one, we generate a random UUID here so
-    // the route is ALWAYS idempotent (even when the client forgot to send
-    // the key) — the second POST will then create a second invoice, but at
-    // least the API contract is consistent. Clients that want idempotency
-    // MUST send the same key on retries (the frontend's billing form does
-    // this — see components/drugos/billing-screens.tsx).
+    // Task 11.7 ROOT FIX (v129, TM11): SHORT-CIRCUIT — if the org is
+    // ALREADY on the requested plan, return the existing subscription
+    // WITHOUT creating a new invoice. This is the third part of the
+    // task spec ("return existing subscription if already on the plan").
+    //
+    // The previous code always called changePlan() even when the plan
+    // was unchanged — creating a redundant invoice row (with a new
+    // idempotencyKey) for a no-op change. This wastes invoice numbers,
+    // pollutes the audit log, and confuses the customer ("why did I
+    // get an invoice for a plan I already have?").
+    //
+    // The check is BEFORE the idempotencyKey generation so we don't
+    // burn a UUID on a no-op. We still write an audit log entry so
+    // operators can see the no-op attempt (a high rate may indicate a
+    // client bug — the client should not be sending POST requests for
+    // unchanged plans).
+    const existingSub = await db.subscription.findUnique({
+      where: { organizationId: auth.user.orgId },
+      select: { id: true, plan: true, status: true },
+    });
+    if (existingSub && existingSub.plan === body.planId) {
+      await writeAuditLog({
+        user: auth.user,
+        action: "billing_plan_change_noop",
+        resource: `subscription:${auth.user.orgId}`,
+        metadata: {
+          planId: body.planId,
+          reason: "already_on_plan",
+          // Task 11.7: record the idempotencyKey even on no-ops so
+          // operators can correlate client retries.
+          idempotencyKey: idempotencyKeyFromRequest || null,
+        },
+      });
+      return NextResponse.json({
+        ok: true,
+        invoiceId: null,
+        idempotentReplay: true, // semantically: this IS a replay (the plan is already set)
+        noOp: true, // explicit flag so the client can show "You're already on this plan"
+        subscription: existingSub,
+      });
+    }
+
+    // BE-048 v123 + Task 11.7 v129: use the idempotency key from the
+    // HEADER (preferred) or body (backward compat). If neither is
+    // provided, generate a random UUID so the route is ALWAYS idempotent
+    // (even when the client forgot to send the key) — the second POST
+    // will then return the same invoice (idempotentReplay: true) instead
+    // of creating a second one. Clients that want idempotency MUST send
+    // the same key on retries (the frontend's billing form does this —
+    // see components/drugos/billing-screens.tsx).
     const idempotencyKey =
-      body.idempotencyKey ||
+      idempotencyKeyFromRequest ||
       // Generate a v4 UUID. crypto.randomUUID() is available in Node 19+;
       // fallback to randomBytes for older runtimes.
       (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -328,6 +395,7 @@ export async function POST(req: NextRequest) {
         // idempotent replay — a high replay rate may indicate client-side
         // bugs or network issues that warrant investigation.
         idempotencyKey,
+        idempotencyKeySource: headerIdempotencyKey.trim() ? "header" : (body.idempotencyKey ? "body" : "generated"),
         idempotentReplay: result.idempotentReplay,
         invoiceId: result.invoiceId,
       },
