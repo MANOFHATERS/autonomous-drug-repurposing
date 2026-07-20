@@ -414,6 +414,128 @@ def test_param_validation_rejects_non_dict() -> None:
     assert err is not None and "dict" in err.lower()
 
 
+# ─── Test 11: v130 FORENSIC ROOT FIX — hostile-auditor bypass tests ─────────
+# These tests verify the v130 fix for the 5 confirmed bypasses in the v109
+# validator. Each bypass was VERIFIED by running the validator against the
+# hostile input BEFORE the fix and confirming the query was ACCEPTED (BUG).
+# After the fix, each query is REJECTED.
+
+@pytest.mark.parametrize(
+    "cypher",
+    [
+        # Bypass 1: comment between CALL and apoc — the regex ``\bCALL\s+apoc\.``
+        # requires whitespace between CALL and apoc, but ``/*x*/`` is not
+        # whitespace. Without comment stripping, the regex does NOT match
+        # and the call bypasses the APOC whitelist.
+        "MATCH (n) CALL/*x*/apoc.destroy.nodes([n]) RETURN n",
+        # Bypass 2: backtick-quoted identifier — ``CALL `apoc`.destroy.nodes``
+        # the regex doesn't account for backticks around the namespace.
+        "MATCH (n) CALL `apoc`.destroy.nodes([n]) RETURN n",
+        # Bypass 3: newline + comment — same root cause as bypass 1.
+        "MATCH (n) CALL\n/*x*/\napoc.destroy.nodes([n]) RETURN n",
+        # Bypass 4: apoc procedure with no forbidden keyword in its name.
+        # ``apoc.refactor.mergeNodes`` does NOT contain CREATE/MERGE/DELETE
+        # (the 'merge' here is part of 'mergeNodes', not the Cypher MERGE
+        # keyword). The ONLY thing that catches it is the APOC whitelist
+        # regex — which is itself bypassable via comments (bypass 1).
+        "MATCH (n), (m) CALL/*x*/apoc.refactor.mergeNodes([n, m]) RETURN n",
+        # Bypass 5: apoc.periodic.iterate can execute arbitrary Cypher.
+        "MATCH (n) CALL/*x*/apoc.periodic.iterate('MATCH (x) RETURN x', 'DELETE x', {batchSize:100}) RETURN n",
+        # Bypass 6: same comment bypass on db.* procedures.
+        "MATCH (n) CALL/*x*/db.createIndex('Drug', 'id') RETURN n",
+        # Bypass 7: extra whitespace + comment — same root cause.
+        "MATCH (n) CALL  /*x*/  apoc.destroy.nodes([n]) RETURN n",
+        # Bypass 8: apoc.cypher.runFirstColumn (executes arbitrary Cypher).
+        "MATCH (n) CALL/*x*/apoc.cypher.runFirstColumn('MATCH (x) DELETE x', {}) RETURN n",
+    ],
+    ids=[
+        "comment_bypass_apoc_destroy",
+        "backtick_bypass_apoc_destroy",
+        "newline_comment_bypass_apoc_destroy",
+        "comment_bypass_apoc_refactor_mergeNodes",
+        "comment_bypass_apoc_periodic_iterate",
+        "comment_bypass_db_createIndex",
+        "whitespace_comment_bypass_apoc_destroy",
+        "comment_bypass_apoc_cypher_runFirstColumn",
+    ],
+)
+def test_v130_bypass_fixes_reject_hostile_queries(cypher: str) -> None:
+    """v130 ROOT FIX: each of these queries was ACCEPTED by the v109
+    validator (verified by running the validator against the hostile input
+    BEFORE the fix). After the v130 fix (comment stripping + backtick
+    normalization + proc-name extraction via m.end()), each is REJECTED.
+    """
+    err = _validate_readonly_cypher(cypher)
+    assert err is not None, (
+        f"v130 BYPASS REGRESSION: validator accepted a hostile query that "
+        f"was supposed to be rejected after the v130 fix. Query: {cypher!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "cypher",
+    [
+        # Benign: block comment with apoc word (the call is INSIDE the
+        # comment, not actually executed). After comment stripping, the
+        # query is just ``MATCH (n)  RETURN n`` — clean.
+        "MATCH (n) /* CALL apoc.create.node(['X'], {}) */ RETURN n",
+        # Benign: nested block comment.
+        "MATCH (n) /* outer /* inner */ outer */ RETURN n",
+        # Benign: line comment.
+        "MATCH (n) // CALL apoc.create.node(['X'], {})\nRETURN n",
+        # Benign: backtick-quoted LABEL (not a procedure namespace).
+        "MATCH (n:`Compound`) RETURN n",
+        # Benign: backtick-quoted property name.
+        "MATCH (n) WHERE n.`uniprot_id` = 'P12345' RETURN n",
+        # Benign: backtick-quoted relationship type.
+        "MATCH (n:Compound)-[:`treats`]->(d:Disease) RETURN d",
+    ],
+    ids=[
+        "block_comment_with_apoc_word",
+        "nested_block_comment",
+        "line_comment",
+        "backtick_label",
+        "backtick_property",
+        "backtick_reltype",
+    ],
+)
+def test_v130_bypass_fixes_do_not_false_positive_benign(cypher: str) -> None:
+    """v130 ROOT FIX: the comment-stripping + backtick normalization must
+    NOT cause false-positive rejections of benign queries that happen to
+    contain comments or backtick-quoted identifiers.
+
+    These queries were CHOSEN to verify that the fix is surgical — it
+    strips comments and backticks without breaking legitimate uses.
+    """
+    err = _validate_readonly_cypher(cypher)
+    assert err is None, (
+        f"v130 FALSE POSITIVE: validator rejected a benign query that "
+        f"should be accepted. Query: {cypher!r}. Error: {err!r}"
+    )
+
+
+def test_v130_strip_comments_and_backticks_function_exists() -> None:
+    """v130 ROOT FIX: the new normalization function must exist and be
+    importable. This is a structural test — it verifies the fix is
+    actually in the codebase, not just in the test suite.
+    """
+    from phase2.service import _strip_comments_and_backticks
+    # Basic smoke test: stripping a comment works.
+    assert _strip_comments_and_backticks("MATCH (n) /* x */ RETURN n") == \
+        "MATCH (n)   RETURN n"
+    # Backtick normalization.
+    assert _strip_comments_and_backticks("CALL `apoc`.foo()") == \
+        "CALL apoc.foo()"
+    # String literal preservation (the // inside the URL is NOT stripped).
+    assert _strip_comments_and_backticks(
+        "MATCH (n) WHERE n.url = 'http://x.com' RETURN n"
+    ) == "MATCH (n) WHERE n.url = 'http://x.com' RETURN n"
+    # Line comment stripping.
+    assert _strip_comments_and_backticks(
+        "MATCH (n) // comment\nRETURN n"
+    ) == "MATCH (n) \nRETURN n"
+
+
 if __name__ == "__main__":
     # Allow `python test_cypher_injection.py` for direct invocation.
     sys.exit(pytest.main([__file__, "-v", "--tb=short"]))

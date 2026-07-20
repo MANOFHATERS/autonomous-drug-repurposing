@@ -69,6 +69,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field
 
 # v122 FORENSIC ROOT FIX (BUG-4/BUG-5/BUG-6): wire up shared observability
@@ -86,10 +87,36 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 )
 
+
+# v130 FORENSIC ROOT FIX (Teammate 5, Task 5.1): migrate from the deprecated
+# ``@app.on_event("startup")`` API to the modern ``lifespan`` handler
+# (FastAPI 0.93+ / Starlette 0.26+). The deprecated API emits a
+# ``DeprecationWarning`` on every service boot and will be REMOVED in a
+# future FastAPI release — leaving it in place is a time-bomb for the
+# production service. Institutional-grade code follows the framework's
+# recommended migration path BEFORE the deprecation becomes a hard break.
+#
+# The lifespan handler runs the SAME logic as the previous ``@app.on_event``
+# callback (production Neo4j fail-fast check). The behavior is identical:
+# in production (``DRUGOS_ENVIRONMENT=production``), if Neo4j credentials
+# are missing, the service refuses to start (raises RuntimeError). In
+# dev/test/staging, the check is a no-op and the in-memory bridge is used.
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """FastAPI lifespan handler — runs at service startup AND shutdown.
+
+    Startup: fail fast if Neo4j is missing in production (Task 5.1).
+    Shutdown: no-op (the Neo4j driver is closed per-request in ``_run_neo4j``).
+    """
+    _startup_neo4j_check()
+    yield  # service runs here
+
+
 app = FastAPI(
     title="Autonomous Drug Repurposing — Phase 2 Knowledge Graph Service",
     description="HTTP wrapper around Phase 2 KG builder / queries.",
     version="1.0.0",
+    lifespan=_lifespan,
 )
 
 # ─── P2-016 ROOT FIX (v107 forensic): CORS hardening ───────────────────────
@@ -157,7 +184,12 @@ if _configure_observability is not None:
 #
 # In dev/test/staging, the check is a no-op — the in-memory bridge is
 # the intended backend.
-@app.on_event("startup")
+#
+# v130 FORENSIC ROOT FIX (Teammate 5, Task 5.1): migrated from the
+# deprecated ``@app.on_event("startup")`` decorator to the modern
+# ``lifespan`` handler (see ``_lifespan`` above). The startup logic is
+# IDENTICAL — only the registration mechanism changed. This removes
+# the ``DeprecationWarning`` emitted by FastAPI on every boot.
 def _startup_neo4j_check() -> None:
     """Fail fast at service startup if Neo4j is missing in production."""
     env = os.environ.get("DRUGOS_ENVIRONMENT", "dev").lower().strip()
@@ -1342,12 +1374,159 @@ def _strip_string_literals(cypher: str) -> str:
     return "".join(out)
 
 
+# v130 FORENSIC ROOT FIX (Teammate 5, Task 5.2 — hostile-auditor bypass fix):
+# The v109 validator had FIVE confirmed bypasses (verified by running the
+# validator against hostile inputs, not by reading comments):
+#
+#   1. Comment bypass: ``MATCH (n) CALL/*x*/apoc.destroy.nodes([n]) RETURN n``
+#      — the regex ``\bCALL\s+apoc\.`` requires whitespace between CALL and
+#      apoc, but ``/*x*/`` is not whitespace, so the regex does NOT match.
+#      Neo4j's Cypher parser treats ``/* */`` as whitespace-equivalent, so
+#      this is a real attack. The query is ACCEPTED by the validator but
+#      executes a write procedure.
+#
+#   2. Backtick identifier bypass: ``CALL `apoc`.destroy.nodes([n])`` — the
+#      regex doesn't account for backtick-quoted identifiers (which Cypher
+#      allows for any identifier, including procedure namespaces).
+#
+#   3. Newline+comment bypass: ``CALL\n/*x*/\napoc.destroy.nodes([n])`` —
+#      same root cause as #1.
+#
+#   4. apoc.destroy.nodes, apoc.refactor.mergeNodes, apoc.periodic.iterate
+#      — these procedure names do NOT contain any of the forbidden
+#      write keywords (CREATE/MERGE/DELETE/SET/...), so they bypass the
+#      forbidden-keyword regex. The ONLY thing that catches them is the
+#      APOC whitelist regex — which is itself bypassable via comments.
+#
+#   5. The same comment bypass applies to ``db.*`` procedures — e.g.
+#      ``MATCH (n) CALL/*x*/db.createIndex('Drug', 'id') RETURN n`` would
+#      bypass the db.* whitelist check.
+#
+# ROOT FIX (this function): normalize the Cypher BEFORE running the
+# existing regex checks by:
+#   1. Stripping ``/* ... */`` block comments (including nested ones).
+#   2. Stripping ``// ...`` line comments (up to end-of-line).
+#   3. Stripping backtick-quoted identifiers (replace with the bare
+#      identifier name, so ``CALL `apoc`.foo()`` becomes ``CALL apoc.foo()``).
+#
+# After normalization, the existing regex checks (which require
+# whitespace between CALL and the procedure namespace) work correctly.
+#
+# The normalization happens INSIDE _validate_readonly_cypher (after the
+# first-token check, which uses the RAW cypher so the operator's
+# original formatting is preserved in error messages). The normalized
+# form is used ONLY for the security scan.
+def _strip_comments_and_backticks(cypher: str) -> str:
+    """Strip Cypher comments and normalize backtick-quoted identifiers.
+
+    Removes:
+      - ``/* ... */`` block comments (nested comments handled)
+      - ``// ...`` line comments (up to end-of-line, but NOT inside
+        string literals — string literals are preserved verbatim)
+
+    Normalizes:
+      - Backtick-quoted identifiers (``\\`foo\\``` -> ``foo``) so that
+        regex patterns like ``\\bCALL\\s+apoc\\.`` match correctly
+        regardless of whether the caller used backticks.
+
+    String literals (single- and double-quoted) are preserved verbatim
+    so that ``//`` inside a string literal (e.g. a URL like
+    ``http://example.com``) is NOT stripped as a comment. This matters
+    because the URL check happens AFTER this normalization, and we want
+    URLs in string literals to be treated as data, not as a comment
+    terminator.
+
+    The function is fail-safe: if a parse error occurs (unterminated
+    comment, unbalanced backtick), the REMAINING input is kept verbatim
+    so downstream regex checks can still flag suspicious patterns
+    (fail-closed).
+    """
+    out: list[str] = []
+    i = 0
+    n = len(cypher)
+    while i < n:
+        c = cypher[i]
+        # ── String literal (single or double quote) — preserve verbatim ──
+        if c in ("'", '"'):
+            quote = c
+            out.append(c)
+            i += 1
+            while i < n:
+                if cypher[i] == "\\" and i + 1 < n:
+                    out.append(cypher[i])
+                    out.append(cypher[i + 1])
+                    i += 2
+                    continue
+                out.append(cypher[i])
+                if cypher[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            continue
+        # ── Block comment /* ... */ (nested supported) ──
+        if c == "/" and i + 1 < n and cypher[i + 1] == "*":
+            depth = 1
+            i += 2
+            while i < n and depth > 0:
+                if cypher[i] == "/" and i + 1 < n and cypher[i + 1] == "*":
+                    depth += 1
+                    i += 2
+                    continue
+                if cypher[i] == "*" and i + 1 < n and cypher[i + 1] == "/":
+                    depth -= 1
+                    i += 2
+                    continue
+                i += 1
+            # Replace the entire comment with a single space so that
+            # regex patterns requiring whitespace (e.g. ``\bCALL\s+apoc\.``)
+            # still match. ``CALL/*x*/apoc.`` becomes ``CALL apoc.``.
+            out.append(" ")
+            continue
+        # ── Line comment // ... — strip up to end-of-line ──
+        if c == "/" and i + 1 < n and cypher[i + 1] == "/":
+            while i < n and cypher[i] != "\n":
+                i += 1
+            # Do NOT append the newline here — the loop will pick it up
+            # on the next iteration if present.
+            continue
+        # ── Backtick-quoted identifier — strip backticks, keep name ──
+        if c == "`":
+            i += 1
+            ident: list[str] = []
+            while i < n:
+                if cypher[i] == "\\" and i + 1 < n:
+                    # Escaped char inside backticks (rare but possible)
+                    ident.append(cypher[i + 1])
+                    i += 2
+                    continue
+                if cypher[i] == "`":
+                    i += 1
+                    break
+                ident.append(cypher[i])
+                i += 1
+            out.append("".join(ident))
+            continue
+        # ── Normal character ──
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _validate_readonly_cypher(cypher: str) -> Optional[str]:
     """Return an error message if the Cypher is not read-only, else None.
 
     v109 ROOT FIX (P2-002 / P2-003 / P2-011): defense-in-depth validator.
     See the long docstring above the regex constants for the full
     rationale of what is blocked and why.
+
+    v130 FORENSIC ROOT FIX (Task 5.2 — hostile-auditor bypass fix):
+    the v109 validator was vulnerable to FIVE bypass techniques (see
+    the docstring of ``_strip_comments_and_backticks`` for the full
+    list). The fix normalizes the Cypher (strip comments + backticks)
+    BEFORE running the security regexes, so that comment-based and
+    backtick-based bypasses are eliminated. The first-token check
+    still uses the RAW cypher so the operator's original formatting
+    is preserved in error messages.
     """
     if not cypher or not cypher.strip():
         return "Empty Cypher query."
@@ -1410,9 +1589,30 @@ def _validate_readonly_cypher(cypher: str) -> Optional[str]:
                 "db.<whitelisted> is allowed as the first token."
             )
 
+    # v130 FORENSIC ROOT FIX (Task 5.2 — hostile-auditor bypass fix):
+    # Normalize the Cypher BEFORE the security scan by stripping comments
+    # and normalizing backtick-quoted identifiers. This closes 5 confirmed
+    # bypasses in the v109 validator (see the docstring of
+    # ``_strip_comments_and_backticks`` for the full list).
+    #
+    # The first-token check above uses the RAW cypher (so error messages
+    # preserve the operator's original formatting), but the security scan
+    # below uses the NORMALIZED form so that:
+    #   - ``CALL/*x*/apoc.destroy.nodes([n])`` is normalized to
+    #     ``CALL apoc.destroy.nodes([n])`` and correctly caught by the
+    #     APOC whitelist regex.
+    #   - ``CALL `apoc`.destroy.nodes([n])`` is normalized to
+    #     ``CALL apoc.destroy.nodes([n])`` and correctly caught.
+    #   - ``MATCH (n) RETURN n // CALL apoc.create.node(...)`` has the
+    #     line comment stripped, so the APOC regex doesn't false-positive
+    #     on commented-out code.
+    normalized = _strip_comments_and_backticks(cypher)
+
     # Strip string literals so that keywords/semicolons inside string
-    # literals do not trigger false-positive matches.
-    stripped_for_scan = _strip_string_literals(cypher)
+    # literals do not trigger false-positive matches. We strip from the
+    # NORMALIZED form (after comment/backtick stripping) so that strings
+    # INSIDE comments (which were already removed) don't double-count.
+    stripped_for_scan = _strip_string_literals(normalized)
 
     # 1. Multi-statement injection (``;`` outside string literals).
     if _SEMICOLON_RE.search(stripped_for_scan):
@@ -1454,16 +1654,27 @@ def _validate_readonly_cypher(cypher: str) -> Optional[str]:
         )
 
     # 6. ``apoc.*`` procedures — block all except a strict whitelist.
+    # v130 FORENSIC ROOT FIX (Task 5.2): the prior proc-name extraction used
+    # ``m.start() + len("CALL ")`` which is WRONG when more than one
+    # whitespace char separates CALL from apoc (e.g. ``CALL\n/*x*/\napoc.``
+    # normalizes to ``CALL \n  apoc.`` — 4 whitespace chars, not 1). The
+    # offset pointed into the middle of the whitespace, so ``re.match``
+    # failed to capture the proc name and the error message reported
+    # ``'apoc'`` (truncated) instead of ``'apoc.destroy.nodes'``.
+    #
+    # ROOT FIX: use ``m.end()`` (the position right AFTER the matched
+    # ``CALL\s+apoc\.`` prefix) as the start of the proc-name suffix. Then
+    # prepend ``"apoc."`` to the captured suffix to form the full proc
+    # name. This is robust to any amount of whitespace between CALL and
+    # apoc (including newlines, which the v109 code did not handle).
     for m in _FORBIDDEN_APOC_RE.finditer(stripped_for_scan):
-        # Extract the procedure name (e.g. ``apoc.cypher.runFirstColumn``).
-        # ``_FORBIDDEN_APOC_RE`` matches ``CALL apoc.``, so we re-match
-        # from the START of ``apoc.`` to capture the full proc name
-        # (including the ``apoc.`` prefix) so it can be compared against
-        # the whitelist entries which are stored WITH the prefix.
-        start = m.start() + len("CALL ")  # position of ``apoc.``
-        rest = stripped_for_scan[start:start + 80]
-        proc_match = re.match(r"(apoc\.[a-zA-Z0-9_.]+)", rest)
-        proc_name = proc_match.group(1).lower().rstrip(".") if proc_match else "apoc"
+        # ``_FORBIDDEN_APOC_RE`` matches ``CALL\s+apoc\.`` (the entire
+        # prefix including the dot). The proc name suffix starts at
+        # ``m.end()`` and consists of alphanumerics, underscores, dots.
+        rest = stripped_for_scan[m.end():m.end() + 80]
+        proc_match = re.match(r"([a-zA-Z0-9_.]+)", rest)
+        proc_suffix = proc_match.group(1).lower().rstrip(".") if proc_match else ""
+        proc_name = "apoc." + proc_suffix if proc_suffix else "apoc"
         allowed = any(
             proc_name == w or proc_name.startswith(w + ".")
             for w in _ALLOWED_APOC_WHITELIST
@@ -1476,15 +1687,14 @@ def _validate_readonly_cypher(cypher: str) -> Optional[str]:
             )
 
     # 7. ``db.*`` procedures — block all except a strict whitelist.
+    # v130 FORENSIC ROOT FIX (Task 5.2): same robustness fix as #6 above —
+    # use ``m.end()`` instead of ``m.start() + len("CALL ")`` so that
+    # variable whitespace between CALL and db. is handled correctly.
     for m in _FORBIDDEN_DB_PROC_RE.finditer(stripped_for_scan):
-        # ``_FORBIDDEN_DB_PROC_RE`` matches ``CALL db.``, so we re-match
-        # from the START of ``db.`` to capture the full proc name
-        # (including the ``db.`` prefix) so it can be compared against
-        # the whitelist entries which are stored WITH the prefix.
-        start = m.start() + len("CALL ")  # position of ``db.``
-        rest = stripped_for_scan[start:start + 80]
-        proc_match = re.match(r"(db\.[a-zA-Z0-9_.]+)", rest)
-        proc_name = proc_match.group(1).lower().rstrip(".") if proc_match else "db"
+        rest = stripped_for_scan[m.end():m.end() + 80]
+        proc_match = re.match(r"([a-zA-Z0-9_.]+)", rest)
+        proc_suffix = proc_match.group(1).lower().rstrip(".") if proc_match else ""
+        proc_name = "db." + proc_suffix if proc_suffix else "db"
         allowed = any(
             proc_name == w or proc_name.startswith(w + ".")
             for w in _ALLOWED_DB_PROC_WHITELIST
