@@ -52,7 +52,7 @@ rdkit>=2024.3.1,<2025.0; python_version>="3.8"
 sqlalchemy>=2.0.25,<2.1
 # v122 IN-080 FIX: added upper bound `<3.0` to prevent breaking major
 # upgrades (psycopg2-binary 3.x may have API changes).
-psycopg2-binary>=2.9.9,<3.0
+psycopg2-binary>=2.9.12,<3.0
 
 # XML parsing (DrugBank)
 # v122 IN-080 FIX: added upper bound `<6.0` to prevent breaking major upgrades.
