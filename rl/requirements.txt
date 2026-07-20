@@ -29,7 +29,7 @@ stable-baselines3>=2.9.0,<3.0
 
 # ─── Data manipulation ─────────────────────────────────────────────────────
 pandas>=2.1.4,<3.0
-numpy>=1.26.3,<2.0
+numpy>=2.5.1,<3.0
 # v122 IN-080 FIX: pin scikit-learn to a version that ACTUALLY EXISTS on
 # PyPI. The previous `scikit-learn>=1.9.0` was a future version that does
 # not exist (latest is 1.5.x as of 2024-12) — `pip install -r rl/requirements.txt`
