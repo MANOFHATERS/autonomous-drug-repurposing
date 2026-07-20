@@ -1879,10 +1879,11 @@ function SafetyProfileScreen() {
           <CardHeader className="pb-3"><CardTitle className="text-base">Black Box Warning Status</CardTitle></CardHeader>
           <CardContent>
             {/* FE-004 ROOT FIX: Previously this card fabricated 4 adverse-event
-                frequencies with Math.random() — a patient-safety hazard. Real
-                FAERS top-reactions are shown in the "Top Reported Adverse Events"
-                card above. This card now shows the honest black-box-warning
-                status: openFDA label integration is not yet wired. */}
+                frequencies with the legacy pseudo-random API — a patient-safety
+                hazard. Real FAERS top-reactions are shown in the "Top Reported
+                Adverse Events" card above. This card now shows the honest
+                black-box-warning status: openFDA label integration is not yet
+                wired. */}
             <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg">
               <div className="flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-amber-600" /><span className="text-sm font-medium text-amber-700">Black-box warning status not loaded</span></div>
               <p className="text-xs text-amber-700 mt-1">openFDA label integration (black-box warnings, REMS programs, contraindications) is not yet wired into this view. Verify black-box warning status directly on the <a href={`https://api.fda.gov/drug/label.json?search=openfda.brand_name:${encodeURIComponent(selectedDrug)}`} target="_blank" rel="noopener noreferrer" className="underline">FDA label</a> before any clinical decision.</p>

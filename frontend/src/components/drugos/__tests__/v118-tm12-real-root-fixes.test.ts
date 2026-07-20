@@ -36,34 +36,55 @@ function stripComments(src: string): string {
 }
 
 describe('v118 TM12 — Real Root-Fix Verification (Red-Team)', () => {
-  describe('FE-013: app-shell.tsx category labels (not terse ids)', () => {
-    const appShell = read('src/components/layout/app-shell.tsx');
-
-    it('sidebar renders category.label, NOT category.id', () => {
-      // The buggy pattern: <span className="flex-1 text-left">{category.id}</span>
-      // The fixed pattern: <span className="flex-1 text-left">{category.label}</span>
-      const idRender = appShell.match(/{category\.id}/g);
-      // The `id` field is still used for navigation lookup, but NOT rendered as the label.
-      // Verify the render call uses `label`:
-      expect(appShell).toContain('{category.label}');
-      // And the buggy direct render of `category.id` is gone (only used in lookup, not rendered):
-      const renderIdPattern = /\{category\.id\}/g;
-      const matches = appShell.match(renderIdPattern) || [];
-      // We expect ZERO direct renders of `{category.id}` in JSX.
-      // (Lookup uses `category.id === activeMeta.category` which is JS, not a render.)
-      const jsxRenders = appShell
-        .split('\n')
-        .filter((l) => /\{category\.id\}/.test(l) && !/.+===.+/.test(l) && !/\/\/.*/.test(l));
-      expect(jsxRenders.length).toBe(0);
+  // v129 ROOT FIX (hostile-auditor pass): the dead AppShell at
+  // src/components/layout/app-shell.tsx has been DELETED (Task 12.6).
+  // The original v118 test expected the dead AppShell to STILL EXIST
+  // and render category.label. That test was correct for v118 (when
+  // the dead AppShell still existed) but is now obsolete — Task 12.6
+  // explicitly says "delete the dead AppShell; port useNotifications()
+  // into the live AppShell". The live AppShell lives in
+  // src/components/drugos/app-router.tsx and already uses category.label
+  // (it renders `group.label` and `item.label`, not the ids).
+  describe('FE-012 + FE-028: dead AppShell is deleted; live AppShell uses useNotifications', () => {
+    it('the dead AppShell at components/layout/app-shell.tsx is GONE', () => {
+      // Task 12.6: "delete the dead AppShell". The file MUST NOT exist.
+      const fs = require('node:fs');
+      const path = require('node:path');
+      const deadAppShellPath = path.resolve(ROOT, 'src/components/layout/app-shell.tsx');
+      expect(fs.existsSync(deadAppShellPath)).toBe(false);
     });
 
-    it('breadcrumb renders categoryLabel, NOT category id', () => {
-      expect(appShell).toContain('{activeMeta.categoryLabel}');
-      // The buggy pattern `{activeMeta.category}` (rendered as the link text) is gone.
-      const buggy = appShell
+    it('the live AppShell in app-router.tsx calls useNotificationsFeed', () => {
+      // Task 12.6: "port useNotifications() into the live AppShell".
+      // The live AppShell must actually call the real notifications hook.
+      const appRouter = read('src/components/drugos/app-router.tsx');
+      expect(appRouter).toContain('useNotificationsFeed');
+      // And it must use the result as notifData (the bell badge + dropdown).
+      expect(appRouter).toMatch(/notifications:\s*notifData/);
+      expect(appRouter).toMatch(/unreadCount:\s*unreadNotifs/);
+    });
+
+    it('the live AppShell sidebar renders group.label and item.label (NOT ids)', () => {
+      // FE-013 (the original test's intent): sidebar labels must be human-readable,
+      // not terse ids. The live AppShell renders {group.label} and {item.label}.
+      const appRouter = read('src/components/drugos/app-router.tsx');
+      // The sidebar group header renders the label.
+      expect(appRouter).toContain('{group.label}');
+      // Each sidebar item renders the label.
+      expect(appRouter).toContain('{item.label}');
+      // The buggy pattern — rendering {item.id} or {group.id} as the visible
+      // text content — is gone. Note: `key={item.id}` is a React key prop
+      // (NOT visible to users) and is CORRECT React practice — we allow it.
+      // We only flag {item.id} when it appears as rendered JSX text, not as a prop value.
+      const buggyItem = appRouter
         .split('\n')
-        .filter((l) => /\{activeMeta\.category\}/.test(l) && !/\.categoryLabel/.test(l) && !/===/.test(l) && !/\/\//.test(l));
-      expect(buggy.length).toBe(0);
+        .filter((l) =>
+          /\{item\.id\}/.test(l) &&
+          !/===/.test(l) &&
+          !/\/\//.test(l) &&
+          !/key=/.test(l)  // allow key={item.id} (React key, not visible)
+        );
+      expect(buggyItem.length).toBe(0);
     });
   });
 
