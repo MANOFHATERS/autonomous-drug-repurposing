@@ -189,8 +189,15 @@ EXPOSE 8002 8003
 
 # IN-061: HEALTHCHECK in the Dockerfile (fallback for `docker run` without
 # compose). compose overrides with its own healthcheck per service.
+# v128 TM15 Task 15.3 ROOT FIX: switched from /healthz to /health to match
+# graph_transformer.service:app's actual route (graph_transformer/service.py:592).
+# The previous /healthz would return 404 from the default CMD below, causing
+# `docker run` (without compose) to mark the container unhealthy.
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=120s \
-    CMD curl -fsS http://localhost:8002/healthz || exit 1
+    CMD curl -fsS http://localhost:8002/health || exit 1
 
 # ─── Default command (overridden by docker-compose per service) ─────────
-CMD ["uvicorn", "scripts.gt_api:app", "--host", "0.0.0.0", "--port", "8002"]
+# v128 TM15 Task 15.3 ROOT FIX: switched from scripts.gt_api:app to
+# graph_transformer.service:app to match the compose default + the frontend's
+# Zod schema (see compose comment block at phase3-gt-api service).
+CMD ["uvicorn", "graph_transformer.service:app", "--host", "0.0.0.0", "--port", "8002"]

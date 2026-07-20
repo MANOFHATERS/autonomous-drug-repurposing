@@ -1,11 +1,13 @@
 # =============================================================================
-# docker-compose.gpu.yml — GPU override for phase3-trainer + phase4-rl
+# docker-compose.gpu.yml — GPU override for phase3-trainer + phase3-gt-api + phase4-rl
 # =============================================================================
 # v116 ROOT FIX (Teammate 15, issue IN-006):
 #   The DOCX V1 launch criteria require "AWS/GCP GPU". This override file
 #   adds deploy.resources.reservations.devices (Docker Compose v2 GPU syntax)
-#   and switches phase3-trainer to Dockerfile.gpu (CUDA torch).
+#   and switches phase3-trainer / phase3-gt-api / phase4-rl to Dockerfile.gpu
+#   (CUDA torch).
 #
+# v128 TM15 Task 15.4 ROOT FIX (verification):
 #   The base docker-compose.yml stays CPU-only so CI/dev laptops work. Apply
 #   GPU mode with:
 #     docker-compose -f docker-compose.yml -f docker-compose.gpu.yml \
@@ -14,7 +16,20 @@
 #   Requires the NVIDIA Container Toolkit installed on the host:
 #     https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
 #
-#   Verify with: docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
+#   GPU verification commands (replace "gt-training" in the audit task with
+#   the actual compose service name "phase3-trainer"):
+#
+#     # 1. Verify GPU device is detected inside the trainer container:
+#     docker-compose -f docker-compose.yml -f docker-compose.gpu.yml \
+#       run --rm phase3-trainer python -c 'import torch; print("cuda available:", torch.cuda.is_available()); print("device count:", torch.cuda.device_count())'
+#
+#     # 2. Verify the base image can see the GPU at all (no torch):
+#     docker run --rm --gpus all nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04 nvidia-smi
+#
+#     # 3. Verify the GPU image's torch is the CUDA build (not CPU):
+#     docker-compose -f docker-compose.yml -f docker-compose.gpu.yml \
+#       run --rm phase3-trainer python -c 'import torch; print(torch.__version__); assert "+cu121" in torch.__version__, "expected CUDA build"; print("OK: CUDA torch")'
+#
 # =============================================================================
 services:
   phase3-trainer:

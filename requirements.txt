@@ -73,13 +73,24 @@ apache-airflow==2.10.5
 # ─── Phase 2: Knowledge Graph Construction ─────────────────────────────────
 neo4j>=5.0,<6.0
 networkx>=3.0,<4.0
-torch>=2.0,<3.0
+# v128 TM15 Task 15.7 ROOT FIX: tightened torch + PyG pins to match the
+# exact pins in Dockerfile.ml (torch==2.2.0+cpu, torch-geometric==2.5.3,
+# torch-scatter==2.1.2+pt22cpu, torch-sparse==0.6.18+pt22cpu). The previous
+# `torch>=2.0,<3.0` allowed pip to install torch 2.5.x in dev/CI, which is
+# ABI-incompatible with the torch-scatter 2.1.2 wheels (built against torch
+# 2.2.0 ONLY — see https://data.pyg.org/whl/torch-2.2.0+cpu.html). Importing
+# torch_scatter with torch 2.5 raises `undefined symbol: _ZN3...` at runtime
+# — a "works in Docker, breaks in venv" hazard. Pinning the SAME minor
+# (2.2.x) in BOTH the requirements files AND the Dockerfiles eliminates
+# the version drift.
+torch>=2.2.0,<2.3.0
 # IN-069 ROOT FIX: torch-scatter + torch-sparse are REQUIRED by PyG code
 # that uses torch_scatter.scatter_max / torch_sparse.SparseTensor. The wheels
 # are built against specific torch versions; see https://data.pyg.org/whl/
-torch-geometric>=2.4,<3.0
-torch-scatter>=2.1,<3.0
-torch-sparse>=0.6,<1.0
+# v128 TM15 Task 15.7: pinned to match Dockerfile.ml's exact versions.
+torch-geometric>=2.5.0,<2.6.0
+torch-scatter>=2.1.2,<2.2.0
+torch-sparse>=0.6.18,<0.7.0
 scikit-learn>=1.3,<2.0
 transformers>=4.30,<5.0
 mlflow>=2.0,<3.0
