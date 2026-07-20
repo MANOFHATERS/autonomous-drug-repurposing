@@ -886,7 +886,6 @@ Stage Summary:
 - Branch: teammate-6-tasks-6-1-to-6-5-forensic-root-fix-v127 (preserved on origin for traceability).
 
 ---
-<<<<<<< HEAD
 Task ID: TM2-v128
 Agent: Teammate 2 (Cosmic, GLM main agent, in-band, v128 forensic verification pass)
 Task: Verify (and merge) all 22 Teammate-2 swim-lane issues are fixed at root level, write real-code verification tests, push to a branch, merge to main, re-clone to verify.
