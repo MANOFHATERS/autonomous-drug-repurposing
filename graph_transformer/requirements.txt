@@ -49,7 +49,7 @@ rapidfuzz>=3.6.1,<4.0
 # The previous `rdkit>=2026.3.4` was a future version that does not
 # exist — pip install would fail. RDKit uses calendar versioning
 # (YYYY.M.x); 2024.9.x is the latest stable as of 2024-12.
-rdkit>=2024.3.1,<2025.0
+rdkit>=2026.3.4,<2027.0
 # P3-025 ROOT FIX (v113 forensic): scipy.sparse is required for the
 # pathway_score computation in gt_rl_bridge.py. The previous code
 # allocated two dense (num_pathways, num_diseases) and (num_drugs,
