@@ -35,3 +35,40 @@ Stage Summary:
 - Pricing page now reflects the real backend plan tiers.
 - App is running cleanly on port 3000 with no runtime errors.
 - Final upgraded codebase zipped to `/home/z/my-project/download/drugos_v0.6.0_upgraded.zip`.
+
+---
+Task ID: TM13-v129
+Agent: Teammate 13 (Frontend UI: shadcn/ui, Tailwind, Configs, Static Content)
+Task: Forensic root-fix of Teammate 13 tasks 13.1-13.5 (FE-011, FE-030, FE-029, SH-006, FE-024)
+
+Work Log:
+- Read project docx (Team_Cosmic_Build_Process_Updated.docx) end-to-end — confirmed this is the Autonomous Drug Repurposing Platform with 6 phases (Data Ingestion → KG → Graph Transformer → RL Ranker → API/Dashboard → V1 Launch). Teammate 13 owns frontend UI: shadcn/ui, Tailwind, configs, static content.
+- Cloned repo, set git identity (MANOFHATERS / manoj.c@atraiuniversity.edu.in).
+- Read actual code (NOT comments, NOT tests) for every file in Teammate 13's swim lane:
+  * frontend/tailwind.config.ts (91 lines)
+  * frontend/src/app/globals.css (162 lines)
+  * frontend/src/app/layout.tsx (115 lines)
+  * frontend/src/components/error-boundary.tsx (199 lines)
+  * frontend/src/components/drugos/score-bar.tsx (216 lines, canonical)
+  * frontend/src/components/drugos/safety-badge.tsx (57 lines, canonical)
+  * frontend/src/components/drugos/app-router.tsx (3192 lines, esp. CoreScreenBridge at line 3016)
+  * frontend/src/components/drugos/core-screens.tsx (3387 lines, esp. remainingScreens spread at line 3385)
+  * frontend/src/components/drugos/remaining-screens.tsx (3864 lines, exports remainingScreens record at line 3825)
+  * frontend/contracts/api_contracts.ts (606 lines, hand-written)
+  * frontend/components.json (shadcn config)
+  * frontend/postcss.config.mjs (5 lines)
+  * frontend/package.json (Next 16, React 19, Tailwind v4)
+  * phase1/service.py, phase2/service.py, graph_transformer/service.py, rl/service.py (FastAPI services)
+  * shared/contracts/urls.py (canonical URL contract)
+
+Code-state assessment (red-team, hostile-auditor):
+- Task 13.1 (FE-011): ALREADY correctly fixed in code. tailwind.config.ts uses var(--xxx) directly, no hsl() wrapper. globals.css defines HEX values for both light+dark. Tailwind v4 @theme inline block maps --color-* to var(--*) correctly.
+- Task 13.2 (FE-030): NOT FIXED. remaining-screens.tsx is 3864 lines, statically imported by core-screens.tsx, spread into coreScreens, rendered by CoreScreenBridge with NO Suspense boundary.
+- Task 13.3 (FE-029): PARTIALLY FIXED. error-boundary.tsx exists and is wired into layout.tsx at root. BUT src/app/error.tsx DOES NOT EXIST (Next.js per-route error boundary convention is missing).
+- Task 13.4 (SH-006): NOT FIXED. api_contracts.ts is 606 lines of hand-written code, divergent from Python OpenAPI schemas.
+- Task 13.5 (FE-024): ALREADY correctly fixed in code. All imports use canonical paths. No local ScoreBar/SafetyBadge definitions exist anywhere in the codebase.
+
+Stage Summary:
+- Identified which tasks are actually fixed vs aspirational claims.
+- Tasks 13.1 and 13.5 are real fixes; will add regression guards (runtime tests).
+- Tasks 13.2, 13.3, 13.4 need real code changes — proceeding to implement.

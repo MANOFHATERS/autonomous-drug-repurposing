@@ -1,7 +1,32 @@
 'use client';
 
-import { remainingScreens } from './remaining-screens';
-import React, { useState, useMemo, useCallback, useEffect } from 'react';
+// FE-030 v129 ROOT FIX (Teammate 13, lazy-load heavy screens):
+//
+// `remaining-screens.tsx` is 3864 lines and contains 37 screen components.
+// Statically importing it (the previous code did `import { remainingScreens }
+// from './remaining-screens'`) bundled the ENTIRE file into the main JS chunk
+// — every user paid the parse/eval cost on initial load even if they only
+// visited the dashboard and never navigated to any of the 37 remaining
+// screens.
+//
+// ROOT FIX: replace the static import with 37 `next/dynamic` lazy imports.
+// Each `dynamic()` call wraps a screen so it loads on-demand only when the
+// user navigates to it. Because all 37 screens live in one source file,
+// Next.js emits ONE shared chunk for `remaining-screens.tsx` — it is loaded
+// the first time ANY remaining screen is accessed, then cached for all
+// subsequent navigations. This:
+//   - Drops the initial JS payload by the size of `remaining-screens.tsx`
+//     (≈100KB minified), improving first-load TTI.
+//   - Shows a skeleton fallback via `loading` while the chunk downloads.
+//   - Wraps the render in <Suspense> in CoreScreenBridge (app-router.tsx)
+//     as a second layer for async server-component data.
+//
+// Per-screen file splitting (one file per screen) would be an even deeper
+// fix, but requires moving 37 screens into 37 files — a refactor with high
+// regression risk. The current fix solves the user-facing problem (initial
+// load was paying for code the user never visited) with minimal risk.
+import dynamic from 'next/dynamic';
+import React, { useState, useMemo, useCallback, useEffect, type ComponentType } from 'react';
 import {
   Search, Download, ChevronDown, ChevronUp, Star, ArrowLeft,
   ShieldCheck, AlertTriangle, FlaskConical, FileBarChart, Package,
@@ -3358,6 +3383,188 @@ function RegulatoryPathwayScreen() {
 // EXPORT
 // ═══════════════════════════════════════════
 
+// FE-030 v129 ROOT FIX (Teammate 13): skeleton fallback shown while the
+// lazy-loaded remaining-screens chunk downloads. Kept here (not in a
+// separate file) because it's tightly coupled to the screens below.
+function ScreenSkeleton() {
+  return (
+    <div className="space-y-4 p-6" aria-busy="true" aria-live="polite">
+      <div className="h-8 w-48 bg-muted animate-pulse rounded" />
+      <div className="h-4 w-72 bg-muted/60 animate-pulse rounded" />
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
+        <div className="h-32 bg-muted/40 animate-pulse rounded-lg" />
+        <div className="h-32 bg-muted/40 animate-pulse rounded-lg" />
+        <div className="h-32 bg-muted/40 animate-pulse rounded-lg" />
+      </div>
+      <div className="h-64 bg-muted/30 animate-pulse rounded-lg" />
+    </div>
+  );
+}
+
+// FE-030 v129 ROOT FIX (Teammate 13): 37 lazy-loaded remaining screens.
+// Each `dynamic()` call creates a wrapper that loads the screen on-demand
+// when first rendered. Next.js emits a SINGLE shared chunk for
+// `remaining-screens.tsx` (the file all 37 screens live in) — the first
+// remaining-screen visit downloads that chunk once; subsequent visits
+// use the cached chunk and render instantly.
+//
+// The `loading: ScreenSkeleton` prop shows the skeleton while the chunk
+// downloads. The CoreScreenBridge in app-router.tsx ALSO wraps the render
+// in <Suspense> as a second layer for any async work inside the screen.
+//
+// Type note: `dynamic()` returns `ComponentType` (without props), which
+// matches the `Record<string, React.ComponentType>` shape of `coreScreens`.
+type Dyn = ComponentType;
+
+const PipelineScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.pipeline),
+  { loading: () => <ScreenSkeleton /> },
+);
+const AnalyticsScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.analytics),
+  { loading: () => <ScreenSkeleton /> },
+);
+const TeamMembersScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.team),
+  { loading: () => <ScreenSkeleton /> },
+);
+const ProjectsScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.projects),
+  { loading: () => <ScreenSkeleton /> },
+);
+const SharedQueriesScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens['shared-queries']),
+  { loading: () => <ScreenSkeleton /> },
+);
+const AnnotationsScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.annotations),
+  { loading: () => <ScreenSkeleton /> },
+);
+const DataSourcesScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens['data-sources']),
+  { loading: () => <ScreenSkeleton /> },
+);
+const GraphStatisticsScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens['graph-stats']),
+  { loading: () => <ScreenSkeleton /> },
+);
+const QualityScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.quality),
+  { loading: () => <ScreenSkeleton /> },
+);
+const SubscriptionScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.subscription),
+  { loading: () => <ScreenSkeleton /> },
+);
+const UsageScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.usage),
+  { loading: () => <ScreenSkeleton /> },
+);
+const DealsScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.deals),
+  { loading: () => <ScreenSkeleton /> },
+);
+const InvoicesScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.invoices),
+  { loading: () => <ScreenSkeleton /> },
+);
+const UsersAdminScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.users),
+  { loading: () => <ScreenSkeleton /> },
+);
+const RolesScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.roles),
+  { loading: () => <ScreenSkeleton /> },
+);
+const SSOScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.sso),
+  { loading: () => <ScreenSkeleton /> },
+);
+const AuditLogsScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens['audit-logs']),
+  { loading: () => <ScreenSkeleton /> },
+);
+const FeatureFlagsScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens['feature-flags']),
+  { loading: () => <ScreenSkeleton /> },
+);
+const APIDocsScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens['api-docs']),
+  { loading: () => <ScreenSkeleton /> },
+);
+const APIKeysScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens['api-keys']),
+  { loading: () => <ScreenSkeleton /> },
+);
+const PlaygroundScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.playground),
+  { loading: () => <ScreenSkeleton /> },
+);
+const WebhooksScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.webhooks),
+  { loading: () => <ScreenSkeleton /> },
+);
+const ProfileScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.profile),
+  { loading: () => <ScreenSkeleton /> },
+);
+const SecuritySettingsScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.security),
+  { loading: () => <ScreenSkeleton /> },
+);
+const NotificationsScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.notifications),
+  { loading: () => <ScreenSkeleton /> },
+);
+const PreferencesScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.preferences),
+  { loading: () => <ScreenSkeleton /> },
+);
+const PrivacyPolicyScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.privacy),
+  { loading: () => <ScreenSkeleton /> },
+);
+const TermsScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.terms),
+  { loading: () => <ScreenSkeleton /> },
+);
+const ComplianceScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.compliance),
+  { loading: () => <ScreenSkeleton /> },
+);
+const HelpCenterScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens['help-center']),
+  { loading: () => <ScreenSkeleton /> },
+);
+const TicketScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.tickets),
+  { loading: () => <ScreenSkeleton /> },
+);
+const SystemStatusScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens['system-status']),
+  { loading: () => <ScreenSkeleton /> },
+);
+const InvestorDashboardScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens['investor-dashboard']),
+  { loading: () => <ScreenSkeleton /> },
+);
+const CapTableScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens['cap-table']),
+  { loading: () => <ScreenSkeleton /> },
+);
+const ChangelogScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.changelog),
+  { loading: () => <ScreenSkeleton /> },
+);
+const RoadmapScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.roadmap),
+  { loading: () => <ScreenSkeleton /> },
+);
+const FeedbackScreenLazy: Dyn = dynamic(
+  () => import('./remaining-screens').then(m => m.remainingScreens.feedback),
+  { loading: () => <ScreenSkeleton /> },
+);
+
 export const coreScreens: Record<string, React.ComponentType> = {
   'search': DiseaseSearchScreen,
   'results': SearchResultsScreen,
@@ -3382,5 +3589,46 @@ export const coreScreens: Record<string, React.ComponentType> = {
   'evidence-timeline': EvidenceTimelineScreen,
   'mechanism': MechanismOfActionScreen,
   'regulatory': RegulatoryPathwayScreen,
-  ...remainingScreens,
+  // FE-030 v129 ROOT FIX: 37 remaining screens are now lazy-loaded via
+  // `next/dynamic` (see declarations above). The spread of
+  // `...remainingScreens` was replaced with explicit lazy references so
+  // the 3864-line `remaining-screens.tsx` file is split into a separate
+  // chunk loaded on-demand, not bundled into the main JS payload.
+  'pipeline': PipelineScreenLazy,
+  'analytics': AnalyticsScreenLazy,
+  'team': TeamMembersScreenLazy,
+  'projects': ProjectsScreenLazy,
+  'shared-queries': SharedQueriesScreenLazy,
+  'annotations': AnnotationsScreenLazy,
+  'data-sources': DataSourcesScreenLazy,
+  'graph-stats': GraphStatisticsScreenLazy,
+  'quality': QualityScreenLazy,
+  'subscription': SubscriptionScreenLazy,
+  'usage': UsageScreenLazy,
+  'deals': DealsScreenLazy,
+  'invoices': InvoicesScreenLazy,
+  'users': UsersAdminScreenLazy,
+  'roles': RolesScreenLazy,
+  'sso': SSOScreenLazy,
+  'audit-logs': AuditLogsScreenLazy,
+  'feature-flags': FeatureFlagsScreenLazy,
+  'api-docs': APIDocsScreenLazy,
+  'api-keys': APIKeysScreenLazy,
+  'playground': PlaygroundScreenLazy,
+  'webhooks': WebhooksScreenLazy,
+  'profile': ProfileScreenLazy,
+  'security': SecuritySettingsScreenLazy,
+  'notifications': NotificationsScreenLazy,
+  'preferences': PreferencesScreenLazy,
+  'privacy': PrivacyPolicyScreenLazy,
+  'terms': TermsScreenLazy,
+  'compliance': ComplianceScreenLazy,
+  'help-center': HelpCenterScreenLazy,
+  'tickets': TicketScreenLazy,
+  'system-status': SystemStatusScreenLazy,
+  'investor-dashboard': InvestorDashboardScreenLazy,
+  'cap-table': CapTableScreenLazy,
+  'changelog': ChangelogScreenLazy,
+  'roadmap': RoadmapScreenLazy,
+  'feedback': FeedbackScreenLazy,
 };

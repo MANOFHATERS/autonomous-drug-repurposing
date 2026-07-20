@@ -16,7 +16,9 @@
     "test:integration": "node scripts/run-integration-tests.js",
     "test:e2e": "node scripts/run-e2e-tests.js",
     "tsc": "tsc --noEmit",
-    "postinstall": "prisma generate || true"
+    "postinstall": "prisma generate || true",
+    "gen:contracts": "python3 scripts/extract_openapi.py && python3 scripts/generate_api_contracts.py",
+    "check:contracts": "bash scripts/check-contracts.sh"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -108,6 +110,7 @@
     "eslint": "^10",
     "eslint-config-next": "^16.1.1",
     "jest": "^30.4.2",
+    "openapi-typescript": "^7.13.0",
     "pg-mem": "^3.0.14",
     "supertest": "^7.2.2",
     "tailwindcss": "^4",
