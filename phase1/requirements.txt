@@ -142,7 +142,7 @@ python-dotenv>=1.0.0,<2.0
 # install the top-level file -- it installs ONLY phase1/requirements.txt.
 # v122 IN-080 FIX: added upper bounds to prevent breaking major upgrades.
 fastapi>=0.110,<1.0
-uvicorn[standard]>=0.27,<1.0
+uvicorn[standard]>=0.51.0,<1.0
 
 # v39 ROOT FIX (P1 #66): added filelock and pyarrow. base_pipeline.py
 # imports filelock with a try/except fallback, but the fallback sets
