@@ -1234,3 +1234,41 @@ Stage Summary:
 - All YAML files syntactically valid.
 - CI now has 19 jobs (was 11), all BLOCKING (was 2 non-blocking), with single ci-success aggregator.
 - Branch teammate-16-infra-cicd-observability-security-v129 ready to push + merge.
+
+---
+Task ID: TM16-v129-workflow-push (Tasks 16.1-16.7 — workflow files push)
+Agent: Teammate 16 (Cosmic, GLM main agent, follow-up to v129)
+Task: User updated PAT with workflow scope — push the 2 remaining .github/workflows/ files (ci.yml + codeql.yml) that were blocked in the original v129 push, then re-verify on a fresh main clone.
+
+Work Log:
+- User confirmed PAT was updated with the `workflow` scope (required for pushing to .github/workflows/ via git push or Contents API).
+- Switched to branch teammate-16-infra-cicd-observability-security-v129, restored the stashed workflow file changes.
+- Committed the 2 workflow files: .github/workflows/ci.yml (19 jobs total, 9 new TM16 jobs) + .github/workflows/codeql.yml (NEW — Python + JS/TS analysis).
+- Pushed the TM16 branch — succeeded this time (workflow scope granted).
+- Merged to main (commit 4b1a250): `Merge teammate-16-infra-cicd-observability-security-v129: v129 TM16 ROOT FIX workflow files`.
+- Pushed main to origin.
+- Re-cloned fresh: `git clone https://github.com/MANOFHATERS/autonomous-drug-repurposing.git`.
+- Verified ALL TM16 files present on fresh main clone (12 files total):
+  * .github/workflows/ci.yml (74KB, 19 jobs)
+  * .github/workflows/codeql.yml (4.9KB, 2 jobs)
+  * .github/SECURITY.md (8.2KB)
+  * .github/codeql/python-config.yml + javascript-config.yml
+  * docker-compose.observability.yml (8.9KB, 8 services)
+  * shared/observability/__init__.py (20KB — with _init_sentry + _sentry_before_send)
+  * tests/team_cosmic_v129/test_tm16_v129_real_root_fixes.py (30KB, 67 tests)
+  * requirements.txt (with sentry-sdk[fastapi])
+  * requirements-dev.txt (with mypy + bandit + pip-audit + cyclonedx-bom)
+- Ran the FULL 67-test verification suite on the fresh main clone: 67/67 PASS.
+- Verified NO job in ci.yml has continue-on-error (all 19 jobs are BLOCKING).
+- Verified ci-success requires all 18 jobs (10 pre-existing + 9 new TM16, minus ci-success itself).
+
+Stage Summary:
+- v129 TM16 ROOT FIX is now FULLY on main — all 7 tasks, all 12 files.
+- 67/67 hostile-auditor verification tests PASS on fresh main clone.
+- CI workflow now has 19 jobs (was 11), ALL BLOCKING (was 2 non-blocking).
+- CodeQL workflow added (2 jobs: analyze-python + analyze-javascript, security-extended query suite).
+- Sentry SDK fully integrated (PII redaction + PHI stripping + CancelledError suppression).
+- Standalone observability stack (8 services with healthchecks) added.
+- Comprehensive SECURITY.md documenting defense-in-depth posture + secret scanning + push protection setup.
+- Merge commit: 4b1a250 (on origin/main).
+- Branch: teammate-16-infra-cicd-observability-security-v129 (preserved on origin for traceability).
