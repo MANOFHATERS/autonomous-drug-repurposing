@@ -990,7 +990,7 @@ jobs:
             phase1/requirements.txt
 
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
@@ -1118,7 +1118,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
@@ -1168,7 +1168,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
@@ -1196,7 +1196,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
@@ -1223,7 +1223,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
