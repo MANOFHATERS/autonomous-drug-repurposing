@@ -107,7 +107,7 @@ psutil>=5.9,<7.0
 
 # ─── Phase 4: RL Hypothesis Ranker ─────────────────────────────────────────
 gymnasium>=0.29,<1.0
-stable-baselines3>=2.2,<3.0
+stable-baselines3>=2.9.0,<3.0
 # P4-012 + RT-005 ROOT FIX (consolidated — IN-017/P1-002/SH-028): biopython
 # is a MANDATORY production dependency. rl/rl_drug_ranker.py::literature_crosscheck
 # uses Bio.Entrez to query PubMed for the V1 launch criterion "≥5
