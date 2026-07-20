@@ -40,7 +40,7 @@
 # Build:
 #   docker build -f Dockerfile.python-ml -t drugos-python-ml:2.0.0 .
 # =============================================================================
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # IN-012: pin pip for reproducibility.
 RUN pip install --no-cache-dir --upgrade \

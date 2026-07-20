@@ -43,7 +43,7 @@
 #   Stage 1 (builder): compile heavy deps (torch, PyG, RDKit wheels)
 #   Stage 2 (runtime): copy only installed site-packages + repo source
 # =============================================================================
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 # IN-012: pin pip for reproducible builder stage.
 RUN pip install --no-cache-dir --upgrade \
@@ -116,7 +116,7 @@ RUN pip install --no-cache-dir --prefix=/install \
 # Python version, or the copied site-packages won't load — extension
 # modules compiled for cp314 cannot be imported by cp312, and vice
 # versa). Match the builder's Python exactly.
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 # IN-012: reproducibility env vars.
 ENV PYTHONDONTWRITEBYTECODE=1 \
