@@ -6358,3 +6358,283 @@ if __name__ == "__main__":
         file=sys.stderr,
     )
     sys.exit(1)
+
+
+# ============================================================================
+# Section L -- TASK 4.3 ROOT FIX: InChIKey-canonical crosswalk builder
+# ============================================================================
+#
+# TASK 4.3 ROOT FIX (Teammate 4, hostile-auditor pass):
+#   The previous entity_resolver relied on a 30-entry BUILTIN crosswalk
+#   (loaded from a YAML file -- DrugBank<->ChEMBL hand-curated pairs,
+#   UniProt<->NCBI Gene, OMIM<->DOID). That builtin crosswalk covered
+#   ~30 drugs out of 10,000 -- the other 99.7% of compounds had no
+#   cross-source canonicalization. The audit (P2-020) flagged this
+#   as a data-integrity bug: the same drug appearing as ChEMBL123,
+#   DB00123, CID12345, etc. stayed as 4 disjoint Compound nodes in
+#   the KG, and the Graph Transformer learned 4 different embeddings
+#   for the same molecule.
+#
+# ROOT FIX: ``build_inchikey_crosswalk_from_phase1`` reads the THREE
+#   Phase 1 sources that emit InChIKey (chembl_drugs.csv,
+#   drugbank_drugs.csv, pubchem_enrichment.csv), groups every
+#   source-specific ID under its canonical 27-char InChIKey, and
+#   returns a structured result that:
+#     1. verifies each drug (InChIKey) appears exactly once
+#     2. flags duplicates (same InChIKey appearing with DIFFERENT
+#        source IDs within the SAME source -- a real data-quality
+#        red flag that needs human review)
+#     3. returns the cross-source mappings (same InChIKey appearing
+#        in ChEMBL + DrugBank + PubChem -- the EXPECTED merge case)
+#
+# Verification: ``python -m pytest phase2/tests/test_entity_resolver_inchikey.py -v``
+
+
+def build_inchikey_crosswalk_from_phase1(
+    chembl_csv: Optional["Path"] = None,
+    drugbank_csv: Optional["Path"] = None,
+    pubchem_csv: Optional["Path"] = None,
+    *,
+    processed_dir: Optional["Path"] = None,
+) -> Dict[str, Any]:
+    """Build an InChIKey-canonical compound crosswalk from Phase 1 sources.
+
+    Reads chembl_drugs.csv, drugbank_drugs.csv, pubchem_enrichment.csv.
+    Groups every source-specific ID under its canonical 27-char InChIKey
+    (14 + "-" + 10 + "-" + 1).
+
+    Returns a structured result with:
+      - ``crosswalk``: dict ``{inchikey: {"chembl_id": ..., "drugbank_id": ...,
+        "pubchem_cid": ..., "sources": [...], "name": ...}}`` -- each
+        inchikey appears EXACTLY ONCE.
+      - ``duplicate_inchikeys_within_source``: dict ``{source_name:
+        List[(inchikey, [source_ids])]}`` -- InChIKeys that appear with
+        DIFFERENT source IDs within the SAME source.
+      - ``stats``: dict with row counts, unique InChIKey count, etc.
+    """
+    import csv as _csv
+    from pathlib import Path as _Path
+
+    if processed_dir is None:
+        processed_dir = _Path(__file__).resolve().parents[2] / "phase1" / "processed_data"
+    processed_dir = _Path(processed_dir)
+
+    chembl_path = _Path(chembl_csv) if chembl_csv else processed_dir / "chembl_drugs.csv"
+    drugbank_path = _Path(drugbank_csv) if drugbank_csv else processed_dir / "drugbank_drugs.csv"
+    pubchem_path = _Path(pubchem_csv) if pubchem_csv else processed_dir / "pubchem_enrichment.csv"
+
+    _IK_RE = re.compile(r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$")
+
+    def _norm_ik(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float) and pd.isna(value):
+            return ""
+        s = str(value).strip().upper()
+        if s.lower() in ("", "nan", "none", "null", "na"):
+            return ""
+        return s
+
+    def _norm_str(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float) and pd.isna(value):
+            return ""
+        s = str(value).strip()
+        if s.lower() in ("nan", "none", "null", "na"):
+            return ""
+        return s
+
+    crosswalk: Dict[str, Dict[str, Any]] = {}
+    within_source_dup: Dict[str, Dict[str, List[str]]] = {
+        "chembl": {}, "drugbank": {}, "pubchem": {},
+    }
+    stats: Dict[str, Any] = {
+        "chembl_rows_read": 0,
+        "drugbank_rows_read": 0,
+        "pubchem_rows_read": 0,
+        "chembl_rows_with_valid_inchikey": 0,
+        "drugbank_rows_with_valid_inchikey": 0,
+        "pubchem_rows_with_valid_inchikey": 0,
+        "unique_inchikeys": 0,
+        "drugs_in_multiple_sources": 0,
+        "within_source_duplicate_groups": 0,
+        "files_present": {"chembl": False, "drugbank": False, "pubchem": False},
+    }
+
+    def _register(inchikey: str, source: str, source_id: str,
+                  name: str = "", row_idx: int = -1) -> None:
+        if not inchikey or not _IK_RE.match(inchikey):
+            return
+        entry = crosswalk.setdefault(
+            inchikey,
+            {"chembl_id": "", "drugbank_id": "", "pubchem_cid": "",
+             "name": "", "sources": [], "first_seen_row": row_idx},
+        )
+        if source == "chembl":
+            if entry["chembl_id"] and entry["chembl_id"] != source_id:
+                within_source_dup["chembl"].setdefault(inchikey, []).append(source_id)
+            if not entry["chembl_id"]:
+                entry["chembl_id"] = source_id
+            elif source_id and source_id != entry["chembl_id"]:
+                if source_id not in within_source_dup["chembl"].get(inchikey, []):
+                    within_source_dup["chembl"].setdefault(inchikey, []).append(source_id)
+        elif source == "drugbank":
+            if entry["drugbank_id"] and entry["drugbank_id"] != source_id:
+                within_source_dup["drugbank"].setdefault(inchikey, []).append(source_id)
+            if not entry["drugbank_id"]:
+                entry["drugbank_id"] = source_id
+            elif source_id and source_id != entry["drugbank_id"]:
+                if source_id not in within_source_dup["drugbank"].get(inchikey, []):
+                    within_source_dup["drugbank"].setdefault(inchikey, []).append(source_id)
+        elif source == "pubchem":
+            if entry["pubchem_cid"] and entry["pubchem_cid"] != source_id:
+                within_source_dup["pubchem"].setdefault(inchikey, []).append(source_id)
+            if not entry["pubchem_cid"]:
+                entry["pubchem_cid"] = source_id
+            elif source_id and source_id != entry["pubchem_cid"]:
+                if source_id not in within_source_dup["pubchem"].get(inchikey, []):
+                    within_source_dup["pubchem"].setdefault(inchikey, []).append(source_id)
+        if source not in entry["sources"]:
+            entry["sources"].append(source)
+        if name and not entry["name"]:
+            entry["name"] = name
+
+    if chembl_path.exists():
+        stats["files_present"]["chembl"] = True
+        try:
+            with open(chembl_path, "r", encoding="utf-8") as fh:
+                reader = _csv.DictReader(fh)
+                for row_idx, row in enumerate(reader):
+                    stats["chembl_rows_read"] += 1
+                    ik = _norm_ik(row.get("inchikey"))
+                    chembl_id = _norm_str(row.get("chembl_id"))
+                    if not ik or not _IK_RE.match(ik) or not chembl_id:
+                        continue
+                    stats["chembl_rows_with_valid_inchikey"] += 1
+                    _register(ik, "chembl", chembl_id,
+                              name=_norm_str(row.get("name")), row_idx=row_idx)
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning("build_inchikey_crosswalk_from_phase1: %s: %s", chembl_path, exc)
+    else:
+        logger.warning("build_inchikey_crosswalk_from_phase1: %s not found", chembl_path)
+
+    if drugbank_path.exists():
+        stats["files_present"]["drugbank"] = True
+        try:
+            with open(drugbank_path, "r", encoding="utf-8") as fh:
+                reader = _csv.DictReader(fh)
+                for row_idx, row in enumerate(reader):
+                    stats["drugbank_rows_read"] += 1
+                    ik = _norm_ik(row.get("inchikey"))
+                    if not ik or not _IK_RE.match(ik):
+                        continue
+                    stats["drugbank_rows_with_valid_inchikey"] += 1
+                    drugbank_id = _norm_str(row.get("drugbank_id"))
+                    chembl_id = _norm_str(row.get("chembl_id"))
+                    name = _norm_str(row.get("name"))
+                    if drugbank_id:
+                        _register(ik, "drugbank", drugbank_id, name=name, row_idx=row_idx)
+                    if chembl_id:
+                        existing = crosswalk.get(ik, {}).get("chembl_id", "")
+                        if not existing:
+                            _register(ik, "chembl", chembl_id, name=name, row_idx=row_idx)
+                        elif existing != chembl_id:
+                            within_source_dup["chembl"].setdefault(ik, []).append(chembl_id)
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning("build_inchikey_crosswalk_from_phase1: %s: %s", drugbank_path, exc)
+    else:
+        logger.warning("build_inchikey_crosswalk_from_phase1: %s not found", drugbank_path)
+
+    if pubchem_path.exists():
+        stats["files_present"]["pubchem"] = True
+        try:
+            with open(pubchem_path, "r", encoding="utf-8") as fh:
+                reader = _csv.DictReader(fh)
+                for row_idx, row in enumerate(reader):
+                    stats["pubchem_rows_read"] += 1
+                    ik = _norm_ik(row.get("inchikey"))
+                    pubchem_cid = _norm_str(row.get("pubchem_cid"))
+                    if not ik or not _IK_RE.match(ik) or not pubchem_cid:
+                        continue
+                    stats["pubchem_rows_with_valid_inchikey"] += 1
+                    _register(ik, "pubchem", pubchem_cid, row_idx=row_idx)
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning("build_inchikey_crosswalk_from_phase1: %s: %s", pubchem_path, exc)
+    else:
+        logger.warning("build_inchikey_crosswalk_from_phase1: %s not found", pubchem_path)
+
+    stats["unique_inchikeys"] = len(crosswalk)
+    stats["drugs_in_multiple_sources"] = sum(
+        1 for entry in crosswalk.values() if len(entry["sources"]) >= 2
+    )
+    stats["within_source_duplicate_groups"] = sum(
+        len(dups) for dups in within_source_dup.values()
+    )
+
+    # TASK 4.3 fix: build the result dict explicitly (no comprehension
+    # that references undefined `entry`).
+    duplicate_inchikeys_within_source: Dict[str, List[Tuple[str, List[str]]]] = {}
+    for source, dups in within_source_dup.items():
+        if not dups:
+            continue
+        source_id_key = source + "_id"
+        result_list: List[Tuple[str, List[str]]] = []
+        for ik, ids in dups.items():
+            entry = crosswalk.get(ik, {})
+            primary_id = entry.get(source_id_key, "")
+            all_ids = set(ids)
+            if primary_id:
+                all_ids.add(primary_id)
+            result_list.append((ik, sorted(all_ids)))
+        duplicate_inchikeys_within_source[source] = result_list
+
+    logger.info(
+        "build_inchikey_crosswalk_from_phase1: %d unique InChIKeys, "
+        "%d in multiple sources, %d within-source duplicate groups",
+        stats["unique_inchikeys"],
+        stats["drugs_in_multiple_sources"],
+        stats["within_source_duplicate_groups"],
+    )
+
+    return {
+        "crosswalk": crosswalk,
+        "duplicate_inchikeys_within_source": duplicate_inchikeys_within_source,
+        "stats": stats,
+    }
+
+
+def register_phase1_inchikey_crosswalk(
+    crosswalk_result: Dict[str, Any],
+    *,
+    crosswalk: Optional["IDCrosswalk"] = None,
+) -> int:
+    """Push a crosswalk built by :func:`build_inchikey_crosswalk_from_phase1`
+    into the global IDCrosswalk singleton.
+
+    Returns the number of mappings registered.
+    """
+    if crosswalk is None:
+        crosswalk = get_default_crosswalk()
+    n = 0
+    for inchikey, entry in crosswalk_result.get("crosswalk", {}).items():
+        n += crosswalk.register_compound_inchikey(
+            inchikey, inchikey,
+            source="entity_resolver:inchikey_canonical",
+            confidence="verified",
+        )
+        for alias_key in ("chembl_id", "drugbank_id", "pubchem_cid"):
+            alias_val = entry.get(alias_key, "")
+            if alias_val and isinstance(alias_val, str) and alias_val.strip():
+                n += crosswalk.register_compound_inchikey(
+                    alias_val.strip(), inchikey,
+                    source=f"entity_resolver:{alias_key}",
+                    confidence="verified",
+                )
+    return n
+
+
+__all__.extend([
+    "build_inchikey_crosswalk_from_phase1",
+    "register_phase1_inchikey_crosswalk",
+])
