@@ -15,11 +15,15 @@
 neo4j>=5.0,<6.0
 pandas>=2.0,<3.0
 networkx>=3.0,<4.0
-numpy>=1.24,<3.0
-torch>=2.0,<3.0
-torch-geometric>=2.4,<3.0
-torch-scatter>=2.1,<3.0
-torch-sparse>=0.6,<1.0
+numpy>=1.24,<2.0
+# v128 TM15 Task 15.7 ROOT FIX: tightened torch + PyG pins to match the
+# root requirements.txt and Dockerfile.ml exact pins. Previously
+# `torch>=2.0,<3.0` allowed pip to install torch 2.5.x in dev —
+# ABI-incompatible with torch-scatter 2.1.2 (built against torch 2.2.0 only).
+torch>=2.2.0,<2.3.0
+torch-geometric>=2.5.0,<2.6.0
+torch-scatter>=2.1.2,<2.2.0
+torch-sparse>=0.6.18,<0.7.0
 
 # v109 ROOT FIX (P2-017): the previous requirements.txt was MISSING
 # fastapi, uvicorn, and pydantic — the ``service.py`` FastAPI service

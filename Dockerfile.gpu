@@ -150,7 +150,15 @@ USER drugos
 
 EXPOSE 8002 8003
 
+# v128 TM15 Task 15.3 ROOT FIX: switched HEALTHCHECK from /healthz to /health
+# to match graph_transformer.service:app's actual route (the default CMD below).
+# The previous /healthz would return 404 from graph_transformer.service:app,
+# causing `docker run` (without compose) to mark the container unhealthy.
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=120s \
-    CMD curl -fsS http://localhost:8002/healthz || exit 1
+    CMD curl -fsS http://localhost:8002/health || exit 1
 
-CMD ["uvicorn", "scripts.gt_api:app", "--host", "0.0.0.0", "--port", "8002"]
+# v128 TM15 Task 15.3 ROOT FIX: switched default CMD from scripts.gt_api:app
+# to graph_transformer.service:app. This aligns the GPU image's default with
+# the CPU image (Dockerfile.ml) and with the compose phase3-gt-api service
+# command. scripts/gt_api.py is preserved for backward compat.
+CMD ["uvicorn", "graph_transformer.service:app", "--host", "0.0.0.0", "--port", "8002"]

@@ -19,8 +19,10 @@
 #       GPU passthrough. CPU default works on CI/dev laptops.
 #   IN-007 (CRITICAL): --gt-epochs ${GT_EPOCHS:-80} --rl-timesteps
 #       ${RL_TIMESTEPS:-5000} — matches run_4phase.py canonical defaults.
-#   IN-008/BE-005 (CRITICAL): DATASET_SERVICE_URL points to phase1-service:8000
+#   IN-008/BE-005 (CRITICAL): DATASET_SERVICE_URL points to phase1-service:8001
 #       (the real FastAPI service), not phase1-airflow:8000 (dead port).
+#       v128 TM15 Task 15.2 ROOT FIX: port bumped from 8000 to 8001 (canonical
+#       per phase1/service.py:17 docstring). DATASET_SERVICE_URL → 8001.
 #   IN-010 (HIGH): AIRFLOW__API__AUTH_BACKENDS=deny_all,
 #       AIRFLOW__WEBSERVER__SECRET_KEY required, no host port.
 #   IN-028 (LOW): removed deprecated `version: "3.8"`.
@@ -257,7 +259,11 @@ services:
     # IN-099 v17: init:true for zombie reaping.
     init: true
     environment:
-      MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?sslmode=require
+      # v128 TM15 Task 15.1 ROOT FIX: previous `${POSTGRES_PASSWORD}` (no :?ERROR)
+      # silently embedded an empty password into this URL if POSTGRES_PASSWORD was
+      # unset — MLflow would fail with a confusing "authentication failed" error
+      # instead of compose failing fast. The :?ERROR guard makes the failure loud.
+      MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD:?ERROR — POSTGRES_PASSWORD must be set — copy .env.example to .env (TM15 v128)}@postgres:5432/${POSTGRES_DB:-drugos}?sslmode=require
       MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlruns
       MLFLOW_ADMIN_USERNAME: ${MLFLOW_ADMIN_USERNAME:-mlflow_admin}
       # IN-088 v117: password read from /run/secrets/mlflow_admin_password.
@@ -312,7 +318,9 @@ services:
     init: true
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?sslmode=require
+      # v128 TM15 Task 15.1 ROOT FIX: same :?ERROR guard as MLflow above —
+      # prevents silent empty password in Airflow's SQLAlchemy conn URL.
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD:?ERROR — POSTGRES_PASSWORD must be set — copy .env.example to .env (TM15 v128)}@postgres:5432/${POSTGRES_DB:-drugos}?sslmode=require
       # IN-049 + IN-088 v117: Fernet key from /run/secrets/airflow_fernet_key.
       # Airflow supports the _FILE suffix for Fernet key via the
       # airflow-entrypoint.sh wrapper (reads the file and exports the
@@ -357,6 +365,16 @@ services:
   # ===========================================================================
   # Phase 1 — Dataset Service (FastAPI: /health, /stats, /datasets)
   # BE-005/IN-008 ROOT FIX: this is the REAL service the frontend proxies to.
+  #
+  # v128 TM15 Task 15.2 ROOT FIX: previous compose used port 8000 + a custom
+  # `python /opt/phase1/service_entrypoint.py` wrapper. The task spec (and
+  # phase1/service.py:17 docstring) declare the canonical form as
+  #   `uvicorn phase1.service:app --host 0.0.0.0 --port 8001`
+  # which is what the frontend contract, the .env.example, and the audit
+  # verification command (`curl http://localhost:8001/datasets`) all expect.
+  # Switching to the canonical uvicorn invocation removes a layer of
+  # indirection (the entrypoint wrapper) and aligns the service with the
+  # contract documented in phase1/service.py.
   # ===========================================================================
   phase1-service:
     build:
@@ -365,12 +383,15 @@ services:
     # IN-099 v117: init:true for zombie reaping.
     init: true
     environment:
-      PHASE1_SERVICE_PORT: "8000"
+      # v128 TM15 Task 15.2: canonical port is 8001 (was 8000). Matches the
+      # phase1/service.py:17 docstring and the audit verification command.
+      PHASE1_SERVICE_PORT: "8001"
       PHASE1_SERVICE_HOST: "0.0.0.0"
       PHASE1_PROCESSED_DIR: /opt/phase1/processed_data
       PYTHONPATH: /opt/phase1:/opt/repo
     # IN-003: expose (internal) — frontend reaches it via the app network.
-    expose: ["8000"]
+    # v128 TM15 Task 15.2: expose 8001 (was 8000) to match the canonical port.
+    expose: ["8001"]
     volumes:
       - ./phase1:/opt/phase1
       - ./:/opt/repo:ro
@@ -385,12 +406,26 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      # v128 TM15 Task 15.2: healthcheck on canonical port 8001.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8001/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 5
       start_period: 30s
-    command: ["python", "/opt/phase1/service_entrypoint.py"]
+    # v128 TM15 Task 15.2 ROOT FIX: invoke uvicorn directly on the canonical
+    # phase1.service:app ASGI target. The previous `python /opt/phase1/
+    # service_entrypoint.py` wrapper added an extra layer with its own
+    # argparse + reload logic — but the wrapper is NOT what the task spec
+    # or phase1/service.py docstring specify. Going through uvicorn directly:
+    #   1. Eliminates the wrapper as a single point of failure (if the
+    #      wrapper had a bug, BOTH prod and dev would break).
+    #   2. Matches the contract phase1/service.py:17 declares.
+    #   3. Allows `uvicorn --reload` for dev (via a dev compose override).
+    #   4. Produces cleaner stack traces (no wrapper frames at the top).
+    # The wrapper is still on disk at phase1/service_entrypoint.py for
+    # operators who prefer it, but the default compose invocation now uses
+    # the canonical uvicorn form.
+    command: ["uvicorn", "phase1.service:app", "--host", "0.0.0.0", "--port", "8001"]
     deploy:
       resources:
         limits: { memory: 1g, cpus: '1' }
@@ -571,12 +606,32 @@ services:
     depends_on:
       phase3-trainer: { condition: service_completed_successfully }
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8002/healthz || exit 1"]
+      # v128 TM15 Task 15.3 ROOT FIX: graph_transformer.service exposes
+      # /health (not /healthz). The previous /healthz healthcheck would
+      # always return 404 from graph_transformer.service:app, causing
+      # Docker to mark the container unhealthy and the frontend's
+      # depends_on: phase3-gt-api { condition: service_healthy } to never
+      # resolve — the frontend would never start. Switching to /health
+      # matches the actual route declared at graph_transformer/service.py:592.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8002/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
-    command: ["uvicorn", "scripts.gt_api:app", "--host", "0.0.0.0", "--port", "8002"]
+    # v128 TM15 Task 15.3 ROOT FIX: switch from scripts.gt_api:app to
+    # graph_transformer.service:app. The audit (SH-006) found that these two
+    # modules expose DIFFERENT response shapes for /api/predict:
+    #   - scripts/gt_api.py returns {scores, backend, model_version}
+    #   - graph_transformer/service.py returns {predictions, source,
+    #     modelVersion, generatedAt, count, checkpointPath}
+    # The frontend's Zod schema (frontend/contracts/api_contracts.ts)
+    # validates the SECOND shape — the first shape would fail Zod validation
+    # and the frontend's /api/predict route would return 500 to the client.
+    # Using graph_transformer.service:app directly eliminates the shape
+    # mismatch at the source. scripts/gt_api.py is preserved for backward
+    # compat with operators who explicitly invoke it, but is no longer the
+    # compose default.
+    command: ["uvicorn", "graph_transformer.service:app", "--host", "0.0.0.0", "--port", "8002"]
     deploy:
       resources:
         limits: { memory: 2g, cpus: '2' }
@@ -651,12 +706,17 @@ services:
     # optimization, SSR, etc. that need zombie reaping.
     init: true
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-drugos}?schema=public&sslmode=require
+      # v128 TM15 Task 15.1 ROOT FIX: same :?ERROR guard on the frontend's
+      # DATABASE_URL — previously silently empty if POSTGRES_PASSWORD was unset.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-drugos}:${POSTGRES_PASSWORD:?ERROR — POSTGRES_PASSWORD must be set — copy .env.example to .env (TM15 v128)}@postgres:5432/${POSTGRES_DB:-drugos}?schema=public&sslmode=require
       DRUGOS_NEO4J_URI: bolt+s://neo4j:7687
       DRUGOS_NEO4J_USER: neo4j
       DRUGOS_NEO4J_PASSWORD: ${NEO4J_PASSWORD:?ERROR — NEO4J_PASSWORD must be set}
-      # BE-005/IN-008: frontend proxies to the REAL phase1 FastAPI service.
-      DATASET_SERVICE_URL: http://phase1-service:8000
+      # BE-005/IN-008 + v128 TM15 Task 15.2 ROOT FIX: frontend proxies to
+      # the REAL phase1 FastAPI service on the canonical port 8001 (was 8000).
+      # The port change aligns with phase1/service.py:17's declared contract
+      # and the audit verification command `curl http://localhost:8001/datasets`.
+      DATASET_SERVICE_URL: http://phase1-service:8001
       KG_SERVICE_URL: http://phase2-kg-api:8001
       GT_SERVICE_URL: http://phase3-gt-api:8002
       RL_SERVICE_URL: http://phase4-rl:8003
@@ -889,6 +949,15 @@ services:
     volumes:
       - backups:/backups
       - ./observability/backup.sh:/backup.sh:ro
+      # v128 TM15 Task 15.6 ROOT FIX: mount mlflow_data read-only so the
+      # backup script can tar.gz the MLflow artifact store (/mlruns). The
+      # Postgres metadata for MLflow is already covered by the main pg_dump
+      # (MLflow's backend store is the same DrugOS Postgres DB). This mount
+      # covers the ARTIFACT store (model weights, calibration plots, etc.)
+      # which is NOT in Postgres — losing it means losing every trained
+      # model checkpoint, which is the most expensive output of the platform
+      # (Phase 3 GT training takes 6+ hours on GPU).
+      - mlflow_data:/mlruns:ro
     # IN-088 v117 + v122: mount both postgres + neo4j secrets so the
     # backup script can read either via the _FILE pattern.
     secrets:

@@ -62,6 +62,9 @@ mkdir -p "$BACKUP_DIR"
 
 # v122 BUG-2/BUG-3 fix: read passwords from _FILE if set (Docker secret
 # pattern). Fall back to the bare env var for backward compat.
+# v128 TM15 Task 15.6 ROOT FIX: added MLFLOW_ARTIFACT_DIR support so the
+# MLflow backup section can locate the mounted artifact store. Compose sets
+# this to /mlruns (the read-only mount of the mlflow_data volume).
 _read_secret() {
     # Args: file_var_name bare_var_name
     # Echoes the secret value. Exits 1 if neither is set.
@@ -186,14 +189,53 @@ print(f'OK: wrote {len(cypher_text)} bytes to $NEO4J_FILE')
         rm -f "$TMP_RESP"
     fi
 
+    # ─── MLflow artifact backup (v128 TM15 Task 15.6 ROOT FIX) ────────
+    # The audit (IN-005) required backups for Postgres, Neo4j, AND MLflow.
+    # The previous backup.sh only covered Postgres + Neo4j. MLflow's backend
+    # metadata (experiments, runs, params, metrics) is stored in Postgres
+    # and is already covered by pg_dump above. But MLflow's ARTIFACT store
+    # (model checkpoints, calibration plots, feature importance plots) is
+    # stored on the filesystem at /mlruns — NOT in Postgres. Without this
+    # tar.gz backup, a disk failure would lose every trained model
+    # checkpoint (6+ hours of GPU training each).
+    MLFLOW_FILE="$BACKUP_DIR/mlflow-${TIMESTAMP}.tar.gz"
+    MLFLOW_ARTIFACT_DIR="${MLFLOW_ARTIFACT_DIR:-/mlruns}"
+    if [ ! -d "$MLFLOW_ARTIFACT_DIR" ]; then
+        echo "  ⚠ MLflow backup SKIPPED: artifact dir $MLFLOW_ARTIFACT_DIR not mounted (set MLFLOW_ARTIFACT_DIR or mount mlflow_data)" >&2
+    else
+        # Use tar with --exclude for .lock files (MLflow creates transient
+        # .lock files during runs; tarring them produces a corrupt archive
+        # if the lock is held mid-write). --warning=no-file-changed suppresses
+        # the warning tar emits when a file changes mid-read.
+        if tar --warning=no-file-changed --warning=no-file-removed \
+                --exclude='*.lock' --exclude='*.tmp' \
+                -czf "$MLFLOW_FILE" \
+                -C "$(dirname "$MLFLOW_ARTIFACT_DIR")" \
+                "$(basename "$MLFLOW_ARTIFACT_DIR")" 2>/dev/null; then
+            echo "  ✓ MLflow backup: $MLFLOW_FILE ($(du -h "$MLFLOW_FILE" | cut -f1))"
+        else
+            # tar exits 1 on minor warnings (file changed) even when the
+            # archive is valid. Check the archive integrity before declaring failure.
+            if gzip -t "$MLFLOW_FILE" 2>/dev/null; then
+                echo "  ✓ MLflow backup: $MLFLOW_FILE ($(du -h "$MLFLOW_FILE" | cut -f1)) (with non-fatal tar warnings)"
+            else
+                echo "  ✗ MLflow backup FAILED (tar returned non-zero and archive is corrupt)" >&2
+                rm -f "$MLFLOW_FILE"
+            fi
+        fi
+    fi
+
     # ─── Retention: delete backups older than RETENTION_DAYS ────────────
     find "$BACKUP_DIR" -name "postgres-*.sql.gz" -mtime +"${RETENTION_DAYS}" -delete 2>/dev/null || true
     find "$BACKUP_DIR" -name "neo4j-*.cypher.gz" -mtime +"${RETENTION_DAYS}" -delete 2>/dev/null || true
+    # v128 TM15 Task 15.6: also clean up old MLflow backups.
+    find "$BACKUP_DIR" -name "mlflow-*.tar.gz" -mtime +"${RETENTION_DAYS}" -delete 2>/dev/null || true
     echo "  ✓ Retention: kept last ${RETENTION_DAYS} days of backups"
 
     # ─── Summary: count successful backups so the operator can verify ───
     PG_COUNT="$(find "$BACKUP_DIR" -name "postgres-*.sql.gz" 2>/dev/null | wc -l | tr -d ' ')"
     NEO4J_COUNT="$(find "$BACKUP_DIR" -name "neo4j-*.cypher.gz" 2>/dev/null | wc -l | tr -d ' ')"
-    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Backup cycle $TIMESTAMP complete. Postgres backups: $PG_COUNT, Neo4j backups: $NEO4J_COUNT. Sleeping 24h..."
+    MLFLOW_COUNT="$(find "$BACKUP_DIR" -name "mlflow-*.tar.gz" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Backup cycle $TIMESTAMP complete. Postgres: $PG_COUNT, Neo4j: $NEO4J_COUNT, MLflow: $MLFLOW_COUNT. Sleeping 24h..."
     sleep 86400
 done
