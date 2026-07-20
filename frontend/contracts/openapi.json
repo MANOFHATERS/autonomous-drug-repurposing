@@ -42,6 +42,57 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "PredictRequest": {
+        "description": "Request body for /predict.\n\nEither provide an explicit list of pairs, or leave pairs empty to\nscore all drug-disease pairs in the graph.",
+        "properties": {
+          "disease": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disease"
+          },
+          "drug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drug"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "pairs": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pairs"
+          }
+        },
+        "title": "PredictRequest",
+        "type": "object"
+      },
       "QueryBody": {
         "description": "Structured query body for POST /query.",
         "properties": {
@@ -79,6 +130,112 @@
           }
         },
         "title": "QueryBody",
+        "type": "object"
+      },
+      "RankRequest": {
+        "properties": {
+          "disease": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disease"
+          },
+          "drug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drug"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "RankRequest",
+        "type": "object"
+      },
+      "ValidateRequest": {
+        "description": "Request body for /validate (Issue 227).\n\nMatches the ValidatedHypothesis dataclass in phase4/writeback.py.\nThe frontend's RlValidateRequestSchema (ml-contracts.ts) is the\nTypeScript mirror of this Pydantic model \u2014 the two MUST stay in sync.\n\nSH-004 ROOT FIX: the `outcome` field accepts the 4 canonical\nvalues from shared.contracts.writeback.VALID_OUTCOMES. The\nfrontend's ValidateRequest type mirrors this enum exactly.",
+        "properties": {
+          "disease": {
+            "title": "Disease",
+            "type": "string"
+          },
+          "drug": {
+            "title": "Drug",
+            "type": "string"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "original_gt_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Gt Score"
+          },
+          "original_rl_rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Rl Rank"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "validated_by": {
+            "title": "Validated By",
+            "type": "string"
+          },
+          "validation_study_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validation Study Id"
+          }
+        },
+        "required": [
+          "drug",
+          "disease",
+          "outcome",
+          "validated_by"
+        ],
+        "title": "ValidateRequest",
         "type": "object"
       },
       "ValidatedHypothesisRequest": {
@@ -517,21 +674,43 @@
     },
     "/predict": {
       "post": {
-        "description": "Endpoint extracted from service.py::predict via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
-        "operationId": "phase3_gt_predict",
+        "description": "Score drug-disease pairs with the GT model.\n\nP3-002 ROOT FIX: response shape aligned with frontend contract\n(``{predictions, source, modelVersion, generatedAt, count,\ncheckpointPath}``) so this service is a drop-in HTTP replacement\nfor the subprocess path (``scripts/gt_inference.py``).\n\nP3-050 ROOT FIX (v113): rate-limited via an asyncio semaphore\n(``GT_MAX_CONCURRENT_INFERENCE``, default 4). Requests beyond the\nlimit are queued. The graph encoding is cached at startup and\nreused (no per-request encode).\n\nSH-031 ROOT FIX (v120 forensic, hostile-auditor): the previous\nv113 docstring claimed ``error_count`` and ``error_rate`` were\nreturned as HTTP response HEADERS (``X-Error-Count`` /\n``X-Error-Rate``) so monitoring could see them without breaking\nthe TS contract. That claim was FALSE \u2014 the actual code at the\nbottom of this function returns BOTH fields in the JSON body\n(lines ``\"error_count\": error_count`` and ``\"error_rate\": ...``).\nThe runtime Zod schema in ``frontend/src/lib/ml-contracts.ts``\nalready accepts them as optional fields (``error_count?: number``,\n``error_rate?: number``), and the v120 static TS contract\n(``frontend/contracts/api_contracts.ts``) now declares them as\noptional too. So returning them in the body is CONTRACT-COMPLIANT\n\u2014 no header refactor needed. The docstring has been corrected to\nmatch the code. The user's audit (\"comments and tests are fakes\n... when I manually check code it's 100 percent broken\") was dead\nright: the comment described a refactor that was never done.",
+        "operationId": "predict_predict_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PredictRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Predict Predict Post",
                   "type": "object"
                 }
               }
             },
-            "description": "Successful response"
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
-        "summary": "phase3_gt POST /predict (AST-extracted)",
+        "summary": "Predict",
         "tags": [
           "phase3_gt"
         ]
@@ -539,21 +718,87 @@
     },
     "/predictions": {
       "get": {
-        "description": "Endpoint extracted from service.py::get_predictions via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
-        "operationId": "phase3_gt_get_predictions",
+        "description": "Retrieve PREDICTED_TREATS edges from Neo4j.\n\nTM7-v127 ROOT FIX (Task 7.5): the audit requires \"a query to\nretrieve predictions from Neo4j for the backend.\" This endpoint\nlets the backend / frontend query the GT model's predictions\nDIRECTLY from the Phase 2 KG (no separate gt_predictions.csv\nread).\n\nArgs (query params):\n    drug: Filter by drug name (case-insensitive). If None, all drugs.\n    disease: Filter by disease name (case-insensitive). If None, all diseases.\n    min_score: Only return edges with score >= min_score (default 0.0).\n    limit: Max number of edges to return (default 50, max 500).\n\nReturns:\n    Dict with keys:\n      - 'predictions': list of {drug, disease, score, confidence,\n        model_version, generated_at}.\n      - 'count': int.\n      - 'source': 'neo4j' or 'no_neo4j'.\n      - 'neo4j_configured': bool.",
+        "operationId": "get_predictions_predictions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "drug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Drug"
+            }
+          },
+          {
+            "in": "query",
+            "name": "disease",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Disease"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_score",
+            "required": false,
+            "schema": {
+              "default": 0.0,
+              "title": "Min Score",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Predictions Predictions Get",
                   "type": "object"
                 }
               }
             },
-            "description": "Successful response"
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
-        "summary": "phase3_gt GET /predictions (AST-extracted)",
+        "summary": "Get Predictions",
         "tags": [
           "phase3_gt"
         ]
@@ -605,41 +850,170 @@
     },
     "/rank": {
       "get": {
-        "description": "Endpoint extracted from service.py::rank_get via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
-        "operationId": "phase4_rl_rank_get",
+        "description": "Get ranked hypotheses (optionally filtered by drug/disease).\n\nINT-022: accepts offset for pagination.\n\nBE-035 + BE-043 ROOT FIX (v118): accepts ``org_id`` query param.\nThe frontend's rl-ranker.ts now forwards the user's active orgId\nhere; the service logs it for audit and may use it to filter\ncandidates by org ownership in a future update.",
+        "operationId": "rank_get_rank_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "drug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Drug"
+            }
+          },
+          {
+            "in": "query",
+            "name": "disease",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Disease"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "BE-035 + BE-043 ROOT FIX (v118): the org scope for the candidate fetch. Forwarded by the frontend's getRankedHypotheses (rl-ranker.ts). Logged for audit (21 CFR Part 11). May be used to filter candidates by org ownership in a future update.",
+            "in": "query",
+            "name": "org_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "BE-035 + BE-043 ROOT FIX (v118): the org scope for the candidate fetch. Forwarded by the frontend's getRankedHypotheses (rl-ranker.ts). Logged for audit (21 CFR Part 11). May be used to filter candidates by org ownership in a future update.",
+              "title": "Org Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Rank Get Rank Get",
                   "type": "object"
                 }
               }
             },
-            "description": "Successful response"
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
-        "summary": "phase4_rl GET /rank (AST-extracted)",
+        "summary": "Rank Get",
         "tags": [
           "phase4_rl"
         ]
       },
       "post": {
-        "description": "Endpoint extracted from service.py::rank_post via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
-        "operationId": "phase4_rl_rank_post",
+        "description": "Get ranked hypotheses with body filters.\n\nBE-035 + BE-043 ROOT FIX (v118): accepts ``org_id`` query param.\nThe frontend's rl-ranker.ts now forwards the user's active orgId\nhere; the service logs it for audit and may use it to filter\ncandidates by org ownership in a future update.\n\nINT-022: offset from query params (POST body doesn't include it).\nFastAPI parses offset from the query string even for POST.",
+        "operationId": "rank_post_rank_post",
+        "parameters": [
+          {
+            "description": "BE-035 + BE-043 ROOT FIX (v118): the org scope for the candidate fetch. Forwarded by the frontend's getRankedHypotheses (rl-ranker.ts). Logged for audit (21 CFR Part 11).",
+            "in": "query",
+            "name": "org_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "BE-035 + BE-043 ROOT FIX (v118): the org scope for the candidate fetch. Forwarded by the frontend's getRankedHypotheses (rl-ranker.ts). Logged for audit (21 CFR Part 11).",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RankRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Rank Post Rank Post",
                   "type": "object"
                 }
               }
             },
-            "description": "Successful response"
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
-        "summary": "phase4_rl POST /rank (AST-extracted)",
+        "summary": "Rank Post",
         "tags": [
           "phase4_rl"
         ]
@@ -647,21 +1021,85 @@
     },
     "/rank/{drug}": {
       "get": {
-        "description": "Endpoint extracted from service.py::rank_by_drug via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
-        "operationId": "phase4_rl_rank_by_drug",
+        "description": "Get ranked hypotheses for a specific drug.\n\nP4-042 ROOT FIX (LOW \u2014 Team Cosmic / Phase 4): URL-decode the drug\nname before matching. FastAPI automatically decodes path parameters,\nso `rank/aspirin%20EC` reaches this function with drug=\"aspirin EC\".\nThe previous docstring claimed the search was a case-insensitive\nsubstring match on generic names, but did not document that the path\nparameter is URL-decoded by FastAPI. The fix adds explicit\ndocumentation and a defensive urllib.parse.unquote call (in case a\nfuture middleware re-encodes the path). The actual matching is done\nby _rank_impl (case-insensitive substring on drug name).\n\nBE-035 + BE-043 ROOT FIX (v118): accepts ``org_id`` query param.",
+        "operationId": "rank_by_drug_rank__drug__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "drug",
+            "required": true,
+            "schema": {
+              "title": "Drug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "BE-035 + BE-043 ROOT FIX (v118): the org scope for the candidate fetch.",
+            "in": "query",
+            "name": "org_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "BE-035 + BE-043 ROOT FIX (v118): the org scope for the candidate fetch.",
+              "title": "Org Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Rank By Drug Rank  Drug  Get",
                   "type": "object"
                 }
               }
             },
-            "description": "Successful response"
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
-        "summary": "phase4_rl GET /rank/{drug} (AST-extracted)",
+        "summary": "Rank By Drug",
         "tags": [
           "phase4_rl"
         ]
@@ -693,21 +1131,45 @@
     },
     "/top-k": {
       "get": {
-        "description": "Endpoint extracted from service.py::top_k via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
-        "operationId": "phase3_gt_top_k",
+        "description": "Return the top-k novel predictions from the GT model.\n\nP3-002 ROOT FIX: response shape aligned with frontend contract.\nUses ``top_k_novel_predictions`` from ``graph_transformer.inference``\n(the SAME function the subprocess path uses) so HTTP and subprocess\nproduce identical results.",
+        "operationId": "top_k_top_k_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "k",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "title": "K",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Top K Top K Get",
                   "type": "object"
                 }
               }
             },
-            "description": "Successful response"
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
-        "summary": "phase3_gt GET /top-k (AST-extracted)",
+        "summary": "Top K",
         "tags": [
           "phase3_gt"
         ]
@@ -715,21 +1177,43 @@
     },
     "/validate": {
       "post": {
-        "description": "Endpoint extracted from service.py::validate via AST parsing (service could not be imported \u2014 likely missing optional Python deps like torch/gymnasium).",
-        "operationId": "phase4_rl_validate",
+        "description": "Write a validated hypothesis back to all 3 phases (data flywheel).\n\nIssue 227 ROOT FIX: this endpoint replaces the subprocess shell-out\nfrom the frontend's /api/hypothesis/validate route. The frontend now\nproxies to RL_SERVICE_URL/validate via HTTP.\n\nThe endpoint calls phase4.writeback.write_validated_hypothesis()\nwhich:\n  1. Appends to phase1/processed_data/validated_hypotheses.csv\n     (becomes a new labeled data point for future KG builds).\n  2. Adds a VALIDATED_TREATS edge to Neo4j (when available) with\n     validated_at timestamp + validated_by partner identifier.\n  3. Appends to graph_transformer/retrain_triggered.json so the\n     next GT training run includes this pair in known_pairs.\n\nReturns the writeback result containing:\n  - phase1_csv_path: path to the appended CSV\n  - phase2_neo4j_written: whether the Neo4j edge was added\n  - phase3_trigger_path: path to the retrain trigger JSON\n  - validated_hypothesis: the ValidatedHypothesis record\n  - writeback_version: the writeback module version\n\nErrors:\n  - 400: invalid outcome enum value\n  - 500: writeback failed (CSV append error, Neo4j connection error, etc.)",
+        "operationId": "validate_validate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidateRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Validate Validate Post",
                   "type": "object"
                 }
               }
             },
-            "description": "Successful response"
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
-        "summary": "phase4_rl POST /validate (AST-extracted)",
+        "summary": "Validate",
         "tags": [
           "phase4_rl"
         ]

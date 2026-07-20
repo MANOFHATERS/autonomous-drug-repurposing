@@ -2,6 +2,30 @@
 
 import * as React from "react"
 import * as RechartsPrimitive from "recharts"
+// FE-024/swim-lane ROOT FIX (Teammate 13, hostile-auditor): Recharts v3
+// changed its TypeScript types. The previous code used
+// `React.ComponentProps<typeof RechartsPrimitive.Tooltip>` which resolves to
+// Recharts' `TooltipProps` — but `TooltipProps` deliberately OMITS `active`,
+// `payload`, and `label` (they're listed in `PropertiesReadFromContext` and
+// moved to `TooltipContentProps`). The result: `tsc --noEmit` reported 8
+// errors (TS2339 Property 'payload'/'label' does not exist, TS7006 implicit
+// any on item/index, TS2344 Pick constraint failure, TS2339 .length/.map on
+// {}). The runtime code worked because Recharts injects those props at
+// runtime — but the types were lying.
+//
+// ROOT FIX: import the proper v3 types and define explicit prop interfaces.
+// `TooltipContentProps` (from recharts) DOES include `active`, `payload`,
+// `label`. `TooltipPayload` is `ReadonlyArray<TooltipPayloadEntry>`. We Pick
+// the three runtime-injected fields and merge with the div props + custom
+// props. For the legend, `LegendPayload` is the proper item type; we extend
+// it with `dataKey` (which Recharts passes at runtime but doesn't declare
+// in the type — this is a known Recharts v3 type gap).
+import type {
+  TooltipContentProps,
+  TooltipPayload,
+  TooltipPayloadEntry,
+  LegendPayload,
+} from "recharts"
 
 import { cn } from "@/lib/utils"
 
@@ -104,6 +128,35 @@ ${colorConfig
 
 const ChartTooltip = RechartsPrimitive.Tooltip
 
+// ChartTooltipContent prop type — ROOT FIX for Recharts v3 type gap.
+// `active`, `payload`, `label` come from `TooltipContentProps` (the runtime
+// props Recharts injects). `formatter`/`labelFormatter` signatures match
+// Recharts' own `Formatter` type so consumer functions type-check.
+type ChartTooltipContentProps = Pick<
+  TooltipContentProps,
+  "active" | "payload" | "label"
+> &
+  Omit<React.ComponentProps<"div">, "color"> & {
+    hideLabel?: boolean
+    hideIndicator?: boolean
+    indicator?: "line" | "dot" | "dashed"
+    nameKey?: string
+    labelKey?: string
+    labelFormatter?: (
+      value: React.ReactNode,
+      payload: TooltipPayload
+    ) => React.ReactNode
+    labelClassName?: string
+    formatter?: (
+      value: TooltipPayloadEntry["value"],
+      name: TooltipPayloadEntry["name"],
+      item: TooltipPayloadEntry,
+      index: number,
+      payload: TooltipPayloadEntry["payload"]
+    ) => React.ReactNode
+    color?: string
+  }
+
 function ChartTooltipContent({
   active,
   payload,
@@ -118,14 +171,7 @@ function ChartTooltipContent({
   color,
   nameKey,
   labelKey,
-}: React.ComponentProps<typeof RechartsPrimitive.Tooltip> &
-  React.ComponentProps<"div"> & {
-    hideLabel?: boolean
-    hideIndicator?: boolean
-    indicator?: "line" | "dot" | "dashed"
-    nameKey?: string
-    labelKey?: string
-  }) {
+}: ChartTooltipContentProps) {
   const { config } = useChart()
 
   const tooltipLabel = React.useMemo(() => {
@@ -186,7 +232,7 @@ function ChartTooltipContent({
 
           return (
             <div
-              key={item.dataKey}
+              key={String(item.dataKey ?? index)}
               className={cn(
                 "[&>svg]:text-muted-foreground flex w-full flex-wrap items-stretch gap-2 [&>svg]:h-2.5 [&>svg]:w-2.5",
                 indicator === "dot" && "items-center"
@@ -250,17 +296,30 @@ function ChartTooltipContent({
 
 const ChartLegend = RechartsPrimitive.Legend
 
+// ChartLegendContent prop type — ROOT FIX for Recharts v3 type gap.
+// `LegendPayload` is Recharts v3's proper legend item type. We extend it
+// with `dataKey` because Recharts passes `dataKey` at runtime (the legend
+// item is built from the series config) but the v3 type doesn't declare it.
+// `verticalAlign` is typed as a union matching Recharts' runtime values.
+type ChartLegendItem = LegendPayload & {
+  dataKey?: string | number
+}
+
+type ChartLegendContentProps = Omit<React.ComponentProps<"div">, "color"> & {
+  payload?: ChartLegendItem[]
+  verticalAlign?: "top" | "bottom" | "middle"
+  hideIcon?: boolean
+  nameKey?: string
+  color?: string
+}
+
 function ChartLegendContent({
   className,
   hideIcon = false,
   payload,
   verticalAlign = "bottom",
   nameKey,
-}: React.ComponentProps<"div"> &
-  Pick<RechartsPrimitive.LegendProps, "payload" | "verticalAlign"> & {
-    hideIcon?: boolean
-    nameKey?: string
-  }) {
+}: ChartLegendContentProps) {
   const { config } = useChart()
 
   if (!payload?.length) {

@@ -118,10 +118,23 @@ const bcrypt: typeof bcryptNative = (() => {
 // the build to succeed on exotic platforms.
 let argon2: typeof import("@node-rs/argon2") | null = null;
 let argon2LoadError: string | null = null;
+// FE-024/swim-lane v131 ROOT FIX (Teammate 13, hostile-auditor): the
+// previous code used `require("@node-rs/argon2")` directly. In an ESM
+// module (this file uses `import` statements), `require()` is:
+//   1. Forbidden by `@typescript-eslint/no-require-imports`.
+//   2. Not available in pure ESM contexts (Next.js App Router route
+//      handlers run as ESM).
+// ROOT FIX: use Node's `createRequire(import.meta.url)` to create a
+// CJS-compatible require function inside an ESM module. This is the
+// canonical Node.js pattern for synchronously loading a CJS package
+// from an ESM file. The try/catch is preserved so a missing optional
+// @node-rs/argon2 package falls back to bcrypt (TM10 v128 behavior).
+import { createRequire } from "module";
+const esmRequire = createRequire(import.meta.url);
 try {
   // Dynamic import so the build doesn't fail if the package is somehow
   // missing — the fallback to bcrypt kicks in instead.
-  argon2 = require("@node-rs/argon2");
+  argon2 = esmRequire("@node-rs/argon2");
 } catch (e: unknown) {
   argon2LoadError = e instanceof Error ? e.message : String(e);
   console.warn(
