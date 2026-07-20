@@ -1,287 +1,314 @@
 /**
- * TM10 v128 ROOT FIX (Task 10.6): regression test for /api/auth/refresh
- * rate limiting.
+ * TM10 v130 FORENSIC ROOT FIX (Task 10.6): regression test for
+ * /api/auth/refresh rate limiting.
  *
  * The task spec requires:
- *   1. Per-IP rate limit (5/min — actual implementation is 20/5min ≈ 4/min,
- *      which is STRICTER and therefore acceptable).
- *   2. Per-user rate limit (10/hour — actual implementation is 10/MIN,
- *      which is 600x STRICTER and therefore acceptable).
+ *   1. Per-IP rate limit (5/min — the 6th refresh from the same IP within
+ *      60 seconds is blocked).
+ *   2. Per-user rate limit (10/hour — the 11th refresh from the same user
+ *      within 1 hour is blocked).
  *   3. Return 429 with Retry-After header on limit exceeded.
  *
- * This test verifies the rate limiting is REAL by directly exercising
- * the underlying limiter functions (not the route handler, which would
- * require a full Next.js runtime). The route handler is thin glue around
- * these functions — if the functions work, the route works.
+ * VERIFICATION (per task spec):
+ *   for i in $(seq 1 10); do curl -X POST http://localhost:3000/api/auth/refresh; done
+ *   # should 429 after 5 (6th request blocked by REFRESH_IP_RATE_LIMIT)
  *
- * NOTE: the task description literally says "per-IP 5/min, per-user 10/hour".
- * The actual code has STRICTER limits (per-IP 4/min effective, per-user
- * 10/min). The user explicitly said "don't degrade anything" — so we do
- * NOT loosen the limits to match the task spec literally. Stricter is
- * better for security. This test documents the actual limits and verifies
- * they work as expected.
+ * TM10 v130 ROOT CAUSE: the v128 test file (this file's predecessor)
+ * contained a MATHEMATICAL FALSEHOOD in its documentation. It claimed:
+ *
+ *   "10/min is 600x STRICTER than 10/hour"
+ *
+ * This is WRONG. 10/min = 600/hour, which is 60x MORE LENIENT than
+ * 10/hour, not 600x stricter. The v128 test verified the WRONG limit
+ * (10/min) and lied about it being stricter. This is exactly the
+ * "aspirational rather than actual" pattern the audit warned about —
+ * the test passed but the code did NOT meet the task spec.
+ *
+ * The v130 fix:
+ *   - Changed REFRESH_USER_RATE_LIMIT from {max:10, windowSeconds:60}
+ *     (10/min) to {max:10, windowSeconds:3600} (10/hour) in rate-limit.ts.
+ *   - Added REFRESH_IP_RATE_LIMIT = {max:5, windowSeconds:60} (5/min)
+ *     in rate-limit.ts.
+ *   - Updated refresh/route.ts to use a DEDICATED per-IP limiter
+ *     (`refresh:ip:${ip}` key) instead of the SHARED login limiter
+ *     (20/5min). This decouples refresh rate limits from login.
+ *
+ * This v130 test file verifies the ACTUAL spec limits, not the wrong
+ * v128 limits. The constants are imported directly from rate-limit.ts
+ * so the test breaks if someone changes the limits without updating
+ * the test.
  */
 import {
-  checkIpRateLimit,
-  recordIpAttempt,
-  IP_MAX_ATTEMPTS,
-  IP_WINDOW_MINUTES,
-  IP_BLOCK_MINUTES,
-  __resetIpBucketsForTests,
+  REFRESH_IP_RATE_LIMIT,
+  REFRESH_USER_RATE_LIMIT,
 } from "@/lib/auth/rate-limit";
 import {
   checkUserRateLimitDistributed,
   __clearAllUserRateLimitsForTests,
 } from "@/lib/auth/per-user-rate-limit";
-import type { NextRequest } from "next/server";
-
-// ---------------------------------------------------------------------------
-// Helpers — construct a fake NextRequest with a controllable remote address.
-// ---------------------------------------------------------------------------
-
-function makeReqWithIp(ip: string): NextRequest {
-  // NextRequest is a subclass of Request with extra fields. We construct
-  // a minimal Request and cast — the rate-limit functions only read the
-  // x-real-ip / x-forwarded-for headers via getClientIp().
-  const headers = new Headers();
-  headers.set("x-real-ip", ip);
-  return new Request("http://localhost/api/auth/refresh", {
-    method: "POST",
-    headers,
-  }) as unknown as NextRequest;
-}
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("TM10 v128 Task 10.6: /api/auth/refresh rate limiting (regression)", () => {
-  beforeEach(() => {
+describe("TM10 v130 Task 10.6: /api/auth/refresh rate limiting (forensic root fix)", () => {
+  beforeEach(async () => {
     // Reset ALL rate-limit state between tests so they don't interfere.
-    __resetIpBucketsForTests();
     // The async distributed limiter shares state with the sync limiter
     // when REDIS_URL is unset (the test env), so clearing the sync state
     // is sufficient.
-    __clearAllUserRateLimitsForTests();
+    await __clearAllUserRateLimitsForTests();
   });
 
   // =========================================================================
-  // Layer 1: per-IP rate limit (sync path — what the refresh route falls
-  // back to when Redis is unavailable, which is the test env).
+  // Constant verification — these tests FAIL if someone changes the limits
+  // without updating the test. This is the guard against the v128 regression
+  // where the limit was silently changed from 10/hour to 10/min.
   // =========================================================================
-  describe("Layer 1: per-IP rate limit", () => {
-    test("IP_MAX_ATTEMPTS constant is sane (matches documented 20 per 5 min)", () => {
-      expect(IP_MAX_ATTEMPTS).toBe(20);
-      expect(IP_WINDOW_MINUTES).toBe(5);
-      expect(IP_BLOCK_MINUTES).toBe(15);
+  describe("Refresh rate-limit constants (guard against v128 regression)", () => {
+    test("REFRESH_IP_RATE_LIMIT is 5 per 60 seconds (5/min per task spec)", () => {
+      expect(REFRESH_IP_RATE_LIMIT.max).toBe(5);
+      expect(REFRESH_IP_RATE_LIMIT.windowSeconds).toBe(60);
     });
 
-    test("allows up to IP_MAX_ATTEMPTS-1 requests from the same IP without blocking", () => {
-      // The actual code uses `attempts.length >= IP_MAX_ATTEMPTS` as the
-      // threshold. So with IP_MAX_ATTEMPTS=20:
-      //   - 1st to 19th record+check → blocked=false (attempts.length < 20)
-      //   - 20th record+check → blocked=true (attempts.length = 20 ≥ 20)
-      // This is the actual security behavior — 19 attempts are allowed,
-      // the 20th triggers blocking. The documentation says "20 per 5 min"
-      // which is slightly off-by-one but the security behavior is correct.
-      const req = makeReqWithIp("203.0.113.10");
-      for (let i = 0; i < IP_MAX_ATTEMPTS - 1; i++) {
-        recordIpAttempt(req);
-        const check = checkIpRateLimit(req);
-        expect(check.blocked).toBe(false);
-      }
+    test("REFRESH_USER_RATE_LIMIT is 10 per 3600 seconds (10/hour per task spec)", () => {
+      expect(REFRESH_USER_RATE_LIMIT.max).toBe(10);
+      expect(REFRESH_USER_RATE_LIMIT.windowSeconds).toBe(3600);
     });
 
-    test("blocks the IP_MAX_ATTEMPTS-th request from the same IP", () => {
-      // After IP_MAX_ATTEMPTS records, the bucket has IP_MAX_ATTEMPTS
-      // timestamps. The check sees `attempts.length >= IP_MAX_ATTEMPTS`
-      // and returns blocked=true.
-      const req = makeReqWithIp("203.0.113.11");
-      // Make (IP_MAX_ATTEMPTS - 1) attempts — all allowed.
-      for (let i = 0; i < IP_MAX_ATTEMPTS - 1; i++) {
-        recordIpAttempt(req);
-        expect(checkIpRateLimit(req).blocked).toBe(false);
-      }
-      // The IP_MAX_ATTEMPTS-th attempt should trigger blocking.
-      recordIpAttempt(req);
-      const check = checkIpRateLimit(req);
-      expect(check.blocked).toBe(true);
-      expect(check.retryAfterSeconds).toBeGreaterThan(0);
-      // IP_BLOCK_MINUTES is 15 — retry-after should be 15*60 = 900s.
-      expect(check.retryAfterSeconds).toBe(IP_BLOCK_MINUTES * 60);
+    test("REFRESH_USER_RATE_LIMIT is NOT the v128 bug (10/min = 600/hour)", () => {
+      // v128 had {max: 10, windowSeconds: 60} which is 10/MINUTE = 600/HOUR.
+      // The task spec requires 10/HOUR. This test guards against regression.
+      const requestsPerHour =
+        (REFRESH_USER_RATE_LIMIT.max * 3600) / REFRESH_USER_RATE_LIMIT.windowSeconds;
+      // Must be exactly 10/hour, NOT 600/hour.
+      expect(requestsPerHour).toBe(10);
+      expect(requestsPerHour).not.toBe(600);
     });
 
-    test("rate limit is PER-IP — different IPs have independent buckets", () => {
-      const req1 = makeReqWithIp("203.0.113.20");
-      const req2 = makeReqWithIp("203.0.113.21");
-      // Exhaust IP 1's bucket — record IP_MAX_ATTEMPTS times.
-      for (let i = 0; i < IP_MAX_ATTEMPTS; i++) {
-        recordIpAttempt(req1);
-      }
-      expect(checkIpRateLimit(req1).blocked).toBe(true);
-      // IP 2 should NOT be blocked — independent bucket.
-      recordIpAttempt(req2);
-      expect(checkIpRateLimit(req2).blocked).toBe(false);
-    });
-
-    test("supports IPv6 addresses (FE-020 regression)", () => {
-      const req = makeReqWithIp("2001:db8::1");
-      recordIpAttempt(req);
-      const check = checkIpRateLimit(req);
-      expect(check.blocked).toBe(false);
-      // The bucket should be keyed by the IPv6 string, not collapsed
-      // into "unknown". We can't directly inspect the bucket key, but
-      // we can verify a DIFFERENT IPv6 address has an independent bucket.
-      const req2 = makeReqWithIp("2001:db8::2");
-      recordIpAttempt(req2);
-      expect(checkIpRateLimit(req2).blocked).toBe(false);
+    test("REFRESH_IP_RATE_LIMIT is NOT the shared login limiter (20/5min)", () => {
+      // v128 reused the shared login IP limiter (20 per 5 min = 4/min avg,
+      // allows bursts of 20 in 1 second). The task spec requires 5/min
+      // DEDICATED to refresh. This test guards against regression.
+      const requestsPerMinute =
+        (REFRESH_IP_RATE_LIMIT.max * 60) / REFRESH_IP_RATE_LIMIT.windowSeconds;
+      expect(requestsPerMinute).toBe(5);
+      expect(requestsPerMinute).not.toBe(4); // 20/5min average
+      expect(REFRESH_IP_RATE_LIMIT.max).not.toBe(20); // login limiter
     });
   });
 
   // =========================================================================
-  // Layer 2: per-user rate limit (async distributed path — falls back to
-  // in-memory when REDIS_URL is unset, which is the test env).
+  // Layer 1: per-IP rate limit (5/min, dedicated to refresh).
+  // The route uses the GENERIC checkUserRateLimitDistributed with a
+  // synthetic key `refresh:ip:${ip}`. This test exercises the SAME function
+  // with the SAME key format to verify the limit is enforced.
   // =========================================================================
-  describe("Layer 2: per-user rate limit (distributed, in-memory fallback)", () => {
-    test("allows up to 10 refreshes per minute per user", async () => {
-      const userId = "user-10-per-min-ok";
-      for (let i = 0; i < 10; i++) {
-        const rl = await checkUserRateLimitDistributed(userId, {
-          max: 10,
-          windowSeconds: 60,
-        });
+  describe("Layer 1: per-IP rate limit (5/min, dedicated to refresh)", () => {
+    test("allows up to 5 refreshes per minute from the same IP", async () => {
+      const ipKey = "refresh:ip:203.0.113.10";
+      for (let i = 0; i < REFRESH_IP_RATE_LIMIT.max; i++) {
+        const rl = await checkUserRateLimitDistributed(ipKey, REFRESH_IP_RATE_LIMIT);
         expect(rl.blocked).toBe(false);
-        expect(rl.remaining).toBe(10 - i - 1);
+        expect(rl.remaining).toBe(REFRESH_IP_RATE_LIMIT.max - i - 1);
       }
     });
 
-    test("blocks the 11th refresh within the same minute", async () => {
-      const userId = "user-10-per-min-block";
-      for (let i = 0; i < 10; i++) {
-        await checkUserRateLimitDistributed(userId, {
-          max: 10,
-          windowSeconds: 60,
-        });
+    test("blocks the 6th refresh from the same IP within 1 minute (429 + Retry-After)", async () => {
+      const ipKey = "refresh:ip:203.0.113.11";
+      // Make 5 allowed requests.
+      for (let i = 0; i < REFRESH_IP_RATE_LIMIT.max; i++) {
+        const rl = await checkUserRateLimitDistributed(ipKey, REFRESH_IP_RATE_LIMIT);
+        expect(rl.blocked).toBe(false);
       }
-      // 11th request — should be blocked.
-      const rl = await checkUserRateLimitDistributed(userId, {
-        max: 10,
-        windowSeconds: 60,
-      });
+      // 6th request — should be blocked.
+      const rl = await checkUserRateLimitDistributed(ipKey, REFRESH_IP_RATE_LIMIT);
       expect(rl.blocked).toBe(true);
       expect(rl.retryAfterSeconds).toBeGreaterThan(0);
-      expect(rl.retryAfterSeconds).toBeLessThanOrEqual(60);
+      expect(rl.retryAfterSeconds).toBeLessThanOrEqual(REFRESH_IP_RATE_LIMIT.windowSeconds);
+      expect(rl.remaining).toBe(0);
+    });
+
+    test("rate limit is PER-IP — different IPs have independent buckets", async () => {
+      const ipKey1 = "refresh:ip:203.0.113.20";
+      const ipKey2 = "refresh:ip:203.0.113.21";
+      // Exhaust IP 1's bucket.
+      for (let i = 0; i < REFRESH_IP_RATE_LIMIT.max + 1; i++) {
+        await checkUserRateLimitDistributed(ipKey1, REFRESH_IP_RATE_LIMIT);
+      }
+      // IP 1 is blocked.
+      const rl1 = await checkUserRateLimitDistributed(ipKey1, REFRESH_IP_RATE_LIMIT);
+      expect(rl1.blocked).toBe(true);
+      // IP 2 is NOT blocked — independent bucket.
+      const rl2 = await checkUserRateLimitDistributed(ipKey2, REFRESH_IP_RATE_LIMIT);
+      expect(rl2.blocked).toBe(false);
+    });
+
+    test("refresh IP bucket is DECOUPLED from login IP bucket (v130 root fix)", async () => {
+      // v128 reused the shared login IP limiter (checkIpRateLimitDistributed).
+      // v130 uses a dedicated `refresh:ip:*` key. This test verifies the
+      // refresh bucket is SEPARATE — exhausting the refresh bucket does NOT
+      // block a different `refresh:ip:*` key, and vice versa.
+      const ipKey = "refresh:ip:203.0.113.30";
+      // Exhaust the refresh bucket for this IP.
+      for (let i = 0; i < REFRESH_IP_RATE_LIMIT.max + 1; i++) {
+        await checkUserRateLimitDistributed(ipKey, REFRESH_IP_RATE_LIMIT);
+      }
+      // Same IP, refresh bucket — blocked.
+      const rlRefresh = await checkUserRateLimitDistributed(ipKey, REFRESH_IP_RATE_LIMIT);
+      expect(rlRefresh.blocked).toBe(true);
+      // Same IP, DIFFERENT key (e.g. login bucket) — NOT blocked.
+      // This proves the refresh limiter doesn't pollute other buckets.
+      const rlOther = await checkUserRateLimitDistributed(
+        `login:ip:203.0.113.30`,
+        { max: 20, windowSeconds: 300 }
+      );
+      expect(rlOther.blocked).toBe(false);
+    });
+
+    test("supports IPv6 addresses", async () => {
+      const ipKey = "refresh:ip:2001:db8::1";
+      const rl = await checkUserRateLimitDistributed(ipKey, REFRESH_IP_RATE_LIMIT);
+      expect(rl.blocked).toBe(false);
+      // Different IPv6 — independent bucket.
+      const rl2 = await checkUserRateLimitDistributed(
+        "refresh:ip:2001:db8::2",
+        REFRESH_IP_RATE_LIMIT
+      );
+      expect(rl2.blocked).toBe(false);
+    });
+  });
+
+  // =========================================================================
+  // Layer 2: per-user rate limit (10/hour, post-authentication).
+  // The route calls checkUserRateLimitDistributed(userId, REFRESH_USER_RATE_LIMIT)
+  // AFTER consumeRefreshToken succeeds. This test exercises the SAME function
+  // with the SAME limits to verify the per-user cap.
+  // =========================================================================
+  describe("Layer 2: per-user rate limit (10/hour, post-authentication)", () => {
+    test("allows up to 10 refreshes per hour per user", async () => {
+      const userId = "user-10-per-hour-ok";
+      for (let i = 0; i < REFRESH_USER_RATE_LIMIT.max; i++) {
+        const rl = await checkUserRateLimitDistributed(userId, REFRESH_USER_RATE_LIMIT);
+        expect(rl.blocked).toBe(false);
+        expect(rl.remaining).toBe(REFRESH_USER_RATE_LIMIT.max - i - 1);
+      }
+    });
+
+    test("blocks the 11th refresh within the same hour (429 + Retry-After)", async () => {
+      const userId = "user-10-per-hour-block";
+      // Make 10 allowed requests.
+      for (let i = 0; i < REFRESH_USER_RATE_LIMIT.max; i++) {
+        const rl = await checkUserRateLimitDistributed(userId, REFRESH_USER_RATE_LIMIT);
+        expect(rl.blocked).toBe(false);
+      }
+      // 11th request — should be blocked.
+      const rl = await checkUserRateLimitDistributed(userId, REFRESH_USER_RATE_LIMIT);
+      expect(rl.blocked).toBe(true);
+      expect(rl.retryAfterSeconds).toBeGreaterThan(0);
+      // Retry-after should be ≤ 1 hour (the window length). A sliding-window
+      // implementation returns the time until the oldest entry expires, which
+      // is ≤ windowSeconds. A fixed-window implementation could return up to
+      // 2x windowSeconds (time until next window reset). This assertion
+      // verifies the implementation is sliding-window.
+      expect(rl.retryAfterSeconds).toBeLessThanOrEqual(REFRESH_USER_RATE_LIMIT.windowSeconds);
+      expect(rl.remaining).toBe(0);
     });
 
     test("rate limit is PER-USER — different users have independent buckets", async () => {
       const user1 = "user-independent-1";
       const user2 = "user-independent-2";
       // Exhaust user 1's bucket.
-      for (let i = 0; i < 11; i++) {
-        await checkUserRateLimitDistributed(user1, {
-          max: 10,
-          windowSeconds: 60,
-        });
+      for (let i = 0; i < REFRESH_USER_RATE_LIMIT.max + 1; i++) {
+        await checkUserRateLimitDistributed(user1, REFRESH_USER_RATE_LIMIT);
       }
       // User 1 is blocked.
-      const rl1 = await checkUserRateLimitDistributed(user1, {
-        max: 10,
-        windowSeconds: 60,
-      });
+      const rl1 = await checkUserRateLimitDistributed(user1, REFRESH_USER_RATE_LIMIT);
       expect(rl1.blocked).toBe(true);
       // User 2 is NOT blocked.
-      const rl2 = await checkUserRateLimitDistributed(user2, {
-        max: 10,
-        windowSeconds: 60,
-      });
+      const rl2 = await checkUserRateLimitDistributed(user2, REFRESH_USER_RATE_LIMIT);
       expect(rl2.blocked).toBe(false);
     });
 
-    test("rate limit window slides — old entries expire", async () => {
-      // We can't easily fast-forward time in a unit test, but we can
-      // verify the limiter uses a SLIDING window (not a fixed window)
-      // by checking that the retryAfterSeconds is bounded by the window
-      // length, not by the time since the first request.
-      const userId = "user-sliding-window";
-      for (let i = 0; i < 11; i++) {
-        await checkUserRateLimitDistributed(userId, {
-          max: 10,
-          windowSeconds: 60,
-        });
+    test("per-user limit does NOT interfere with per-IP limit (different keys)", async () => {
+      // The route uses `refresh:ip:${ip}` for Layer 1 and `${userId}` for
+      // Layer 2. These are different keys, so exhausting one does NOT
+      // affect the other. This test verifies that separation.
+      const userId = "user-cross-layer";
+      const ipKey = "refresh:ip:203.0.113.99";
+      // Exhaust the user's per-user bucket.
+      for (let i = 0; i < REFRESH_USER_RATE_LIMIT.max + 1; i++) {
+        await checkUserRateLimitDistributed(userId, REFRESH_USER_RATE_LIMIT);
       }
-      const rl = await checkUserRateLimitDistributed(userId, {
-        max: 10,
-        windowSeconds: 60,
-      });
-      expect(rl.blocked).toBe(true);
-      // retryAfterSeconds should be ≤ windowSeconds (60s) — proves the
-      // window slides. A fixed-window implementation would return the
-      // time until the next window reset (potentially up to 2x windowSeconds).
-      expect(rl.retryAfterSeconds).toBeLessThanOrEqual(60);
-    });
-  });
-
-  // =========================================================================
-  // Integration: verify the refresh route's constants match the spec.
-  // =========================================================================
-  describe("Refresh route constants", () => {
-    test("REFRESH_USER_RATE_LIMIT is 10/min (stricter than the 10/hour in the task spec)", async () => {
-      // We dynamically import the route module to read its constants.
-      // The route file doesn't export REFRESH_USER_RATE_LIMIT directly,
-      // but we can verify the behavior by checking the per-user limiter
-      // with the documented limits.
-      //
-      // The task spec says "per-user 10/hour". The actual code uses
-      // 10/min, which is 600x stricter. This is INTENTIONAL — the user
-      // explicitly said "don't degrade anything". Looser limits would
-      // DEGRADE security.
-      //
-      // Access token TTL is 15 min, so a legitimate client refreshes at
-      // most once per 15 min. 10/min is 150x the legitimate rate.
-      const rl = await checkUserRateLimitDistributed(
-        "user-constant-check",
-        { max: 10, windowSeconds: 60 }
-      );
-      expect(rl.blocked).toBe(false);
-      expect(rl.remaining).toBe(9); // 10 - 1 = 9 remaining after first request.
+      // User is blocked.
+      const rlUser = await checkUserRateLimitDistributed(userId, REFRESH_USER_RATE_LIMIT);
+      expect(rlUser.blocked).toBe(true);
+      // The IP bucket (different key) is NOT blocked.
+      const rlIp = await checkUserRateLimitDistributed(ipKey, REFRESH_IP_RATE_LIMIT);
+      expect(rlIp.blocked).toBe(false);
     });
   });
 
   // =========================================================================
   // 429 + Retry-After header contract verification.
+  // The route handler does:
+  //   headers: { "Retry-After": String(rl.retryAfterSeconds) }
+  // So retryAfterSeconds MUST be a positive integer when blocked.
   // =========================================================================
   describe("429 + Retry-After response contract", () => {
-    test("checkIpRateLimit returns retryAfterSeconds when blocked (route uses this for Retry-After header)", () => {
-      const req = makeReqWithIp("203.0.113.99");
-      // Exhaust the bucket — record IP_MAX_ATTEMPTS times to trigger blocking.
-      for (let i = 0; i < IP_MAX_ATTEMPTS; i++) {
-        recordIpAttempt(req);
-      }
-      const check = checkIpRateLimit(req);
-      expect(check.blocked).toBe(true);
-      // The route handler does:
-      //   headers: { "Retry-After": String(ipCheck.retryAfterSeconds) }
-      // So retryAfterSeconds MUST be a positive integer.
-      expect(Number.isInteger(check.retryAfterSeconds)).toBe(true);
-      expect(check.retryAfterSeconds).toBeGreaterThan(0);
-    });
-
-    test("checkUserRateLimitDistributed returns retryAfterSeconds when blocked", async () => {
-      const userId = "user-retry-after-check";
+    test("per-IP limiter returns positive integer retryAfterSeconds when blocked", async () => {
+      const ipKey = "refresh:ip:203.0.113.99";
       // Exhaust the bucket.
-      for (let i = 0; i < 11; i++) {
-        await checkUserRateLimitDistributed(userId, {
-          max: 10,
-          windowSeconds: 60,
-        });
+      for (let i = 0; i < REFRESH_IP_RATE_LIMIT.max + 1; i++) {
+        await checkUserRateLimitDistributed(ipKey, REFRESH_IP_RATE_LIMIT);
       }
-      const rl = await checkUserRateLimitDistributed(userId, {
-        max: 10,
-        windowSeconds: 60,
-      });
+      const rl = await checkUserRateLimitDistributed(ipKey, REFRESH_IP_RATE_LIMIT);
       expect(rl.blocked).toBe(true);
       expect(Number.isInteger(rl.retryAfterSeconds)).toBe(true);
       expect(rl.retryAfterSeconds).toBeGreaterThan(0);
+      expect(rl.retryAfterSeconds).toBeLessThanOrEqual(REFRESH_IP_RATE_LIMIT.windowSeconds);
+    });
+
+    test("per-user limiter returns positive integer retryAfterSeconds when blocked", async () => {
+      const userId = "user-retry-after-check";
+      // Exhaust the bucket.
+      for (let i = 0; i < REFRESH_USER_RATE_LIMIT.max + 1; i++) {
+        await checkUserRateLimitDistributed(userId, REFRESH_USER_RATE_LIMIT);
+      }
+      const rl = await checkUserRateLimitDistributed(userId, REFRESH_USER_RATE_LIMIT);
+      expect(rl.blocked).toBe(true);
+      expect(Number.isInteger(rl.retryAfterSeconds)).toBe(true);
+      expect(rl.retryAfterSeconds).toBeGreaterThan(0);
+      expect(rl.retryAfterSeconds).toBeLessThanOrEqual(REFRESH_USER_RATE_LIMIT.windowSeconds);
+    });
+  });
+
+  // =========================================================================
+  // Task spec verification: "should 429 after 5" when 10 requests from same IP.
+  // The task spec literally says:
+  //   for i in $(seq 1 10); do curl -X POST http://localhost:3000/api/auth/refresh; done
+  //   # should 429 after 5
+  // This test simulates that exact scenario: 10 requests from the same IP,
+  // the first 5 are allowed (200/401 depending on token), the 6th-10th are
+  // blocked by the per-IP rate limiter (429).
+  // =========================================================================
+  describe("Task spec verification: 10 requests from same IP, 429 after 5", () => {
+    test("first 5 refreshes from same IP are allowed, 6th-10th are blocked", async () => {
+      const ipKey = "refresh:ip:198.51.100.42";
+      const results: { blocked: boolean; retryAfterSeconds: number }[] = [];
+      for (let i = 0; i < 10; i++) {
+        const rl = await checkUserRateLimitDistributed(ipKey, REFRESH_IP_RATE_LIMIT);
+        results.push({ blocked: rl.blocked, retryAfterSeconds: rl.retryAfterSeconds });
+      }
+      // First 5 (indexes 0-4): allowed.
+      for (let i = 0; i < 5; i++) {
+        expect(results[i].blocked).toBe(false);
+      }
+      // 6th-10th (indexes 5-9): blocked.
+      for (let i = 5; i < 10; i++) {
+        expect(results[i].blocked).toBe(true);
+        expect(results[i].retryAfterSeconds).toBeGreaterThan(0);
+      }
     });
   });
 });

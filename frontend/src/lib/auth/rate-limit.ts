@@ -49,6 +49,51 @@ export const IP_MAX_ATTEMPTS = 20; // 20 attempts...
 export const IP_WINDOW_MINUTES = 5; // ...per 5 minutes
 export const IP_BLOCK_MINUTES = 15; // ...then block IP for 15 minutes
 
+// TM10 v130 FORENSIC ROOT FIX (Task 10.6): refresh-specific rate limits.
+//
+// ROOT CAUSE: the previous "fix" (v128) set REFRESH_USER_RATE_LIMIT to
+// { max: 10, windowSeconds: 60 } = 10 per MINUTE. The task spec requires
+// 10 per HOUR. The v128 test file claimed "10/min is 600x STRICTER than
+// 10/hour" — this is mathematically WRONG. 10/min = 600/hour, which is
+// 60x MORE LENIENT than 10/hour, not stricter. This is exactly the
+// "aspirational rather than actual" pattern the audit warned about.
+//
+// The v128 implementation also reused the SHARED login IP limiter
+// (checkIpRateLimitDistributed, 20/5min) for refresh. The task spec
+// requires a DEDICATED 5/min per-IP limit for refresh. The shared
+// limiter is 4x too lenient (20/5min = 4/min avg) AND allows bursts
+// of 20 in 1 second — far more than the 5/min spec.
+//
+// ROOT FIX:
+//   1. REFRESH_IP_RATE_LIMIT = 5 per 60 seconds (5/min per IP, dedicated
+//      to refresh — NOT shared with login). The 6th refresh from the
+//      same IP within 60 seconds is blocked with 429 + Retry-After.
+//   2. REFRESH_USER_RATE_LIMIT = 10 per 3600 seconds (10/hour per user).
+//      The 11th refresh from the same user within 1 hour is blocked.
+//
+// These limits are used by /api/auth/refresh/route.ts via the generic
+// checkUserRateLimitDistributed() function with synthetic keys:
+//   - "refresh:ip:<ip>" for the per-IP layer (unauthenticated brute-force)
+//   - "<userId>" for the per-user layer (post-authentication cap)
+//
+// RATIONALE for 5/min per IP: an attacker probing with random refresh
+// tokens from a single IP. 5/min = 300/hour — enough to detect the rate
+// limit and move on, not enough to brute-force a 32-byte token.
+//
+// RATIONALE for 10/hour per user: access token TTL is 15 min, so a
+// legitimate client refreshes at most 4/hour (once per 15 min). 10/hour
+// is 2.5x the legitimate rate — generous enough to tolerate client-side
+// retry storms (multiple tabs, sleep/wake, network flaps), strict enough
+// to prevent the DB-pollution / pool-exhaustion attack described in
+// BE-014. The v128 limit of 10/min = 600/hour was 150x the legitimate
+// rate — effectively no limit at all.
+//
+// VERIFICATION (per task spec):
+//   for i in $(seq 1 10); do curl -X POST http://localhost:3000/api/auth/refresh; done
+//   # should 429 after 5 (6th request blocked by REFRESH_IP_RATE_LIMIT)
+export const REFRESH_IP_RATE_LIMIT = { max: 5, windowSeconds: 60 } as const;
+export const REFRESH_USER_RATE_LIMIT = { max: 10, windowSeconds: 3600 } as const;
+
 // FE-061: Bounded LRU cache size. 100K unique IPs covers a sustained attack
 // from a botnet; legitimate traffic uses orders of magnitude fewer entries.
 // At ~200 bytes per bucket (20 timestamps * 8 bytes + overhead), this caps
