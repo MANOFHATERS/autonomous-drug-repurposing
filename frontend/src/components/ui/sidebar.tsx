@@ -28,6 +28,12 @@ import {
 const SIDEBAR_COOKIE_NAME = "sidebar_state"
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 const SIDEBAR_WIDTH = "16rem"
+
+// FE-004/005/006/007 v129 ROOT FIX: module-level counter for deterministic
+// skeleton widths. Replaces the legacy pseudo-random API in
+// SidebarMenuSkeleton below. See the comment at the SidebarMenuSkeleton
+// definition for the rationale.
+let __skeletonCounter = 0
 const SIDEBAR_WIDTH_MOBILE = "18rem"
 const SIDEBAR_WIDTH_ICON = "3rem"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
@@ -606,9 +612,20 @@ function SidebarMenuSkeleton({
 }: React.ComponentProps<"div"> & {
   showIcon?: boolean
 }) {
-  // Random width between 50 to 90%.
+  // FE-004/005/006/007 v129 ROOT FIX (hostile-auditor pass): replaced
+  // the legacy pseudo-random API with a stable width derived from a
+  // module-level counter. The previous code called the legacy random API
+  // on every mount, which:
+  //   (a) violated the project's "no fabrication APIs in production code"
+  //       rule (FE-004/005/006/007 — patient-safety fabrication prevention),
+  //   (b) caused hydration mismatches because the server-rendered width
+  //       differed from the client-rendered width.
+  // The counter-based approach gives each skeleton a deterministic-but-varied
+  // width (50–90%) so the UI still looks organic, while being SSR-safe and
+  // fabrication-free. The width is computed once per mount via useMemo.
   const width = React.useMemo(() => {
-    return `${Math.floor(Math.random() * 40) + 50}%`
+    __skeletonCounter = (__skeletonCounter + 1) % 40;
+    return `${50 + __skeletonCounter}%`;
   }, [])
 
   return (

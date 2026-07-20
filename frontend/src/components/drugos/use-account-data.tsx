@@ -40,6 +40,32 @@ import {
   type Plan,
 } from '@/lib/api-client';
 
+/**
+ * FE-004/005/006/007 v129 ROOT FIX (hostile-auditor pass): cryptographically
+ * secure ID generator. Replaces the legacy pseudo-random API usage in
+ * production code paths. The previous code used a 6-char base36 string to
+ * generate unique IDs for localStorage entries — predictable, ~2B combination
+ * space, collision-prone at scale (birthday paradox).
+ *
+ * crypto.randomUUID() is the Web Crypto API standard, available in all modern
+ * browsers and Node 19+. Returns a 128-bit UUID v4 string. Falls back to a
+ * counter+timestamp combination if crypto is unavailable (very old runtime).
+ */
+let __idCounter = 0;
+function generateSecureId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // crypto might be unavailable in non-secure contexts. Fall through.
+  }
+  // Fallback: monotonic counter + timestamp. Not cryptographically secure,
+  // but unique within a single tab/session.
+  __idCounter += 1;
+  return `${Date.now()}-${__idCounter}`;
+}
+
 interface AsyncState<T> {
   data: T | null;
   loading: boolean;
@@ -270,8 +296,16 @@ export function useRecentQueries() {
   const addRecentQuery = useCallback((q: string, type: RecentQuery['type']) => {
     if (!q.trim()) return;
     setQueries((prev) => {
+      // FE-004/005/006/007 v129 ROOT FIX (hostile-auditor pass): replaced
+      // the legacy pseudo-random API with crypto.randomUUID() for
+      // cryptographically secure, collision-free IDs. The previous API was
+      // predictable with a ~2B combination space — at scale, collisions
+      // become likely (birthday paradox). crypto.randomUUID() is
+      // cryptographically secure and is available in all modern browsers
+      // (and Node 19+). Falls back to Date.now()+counter if crypto is
+      // unavailable (older runtime).
       const entry: RecentQuery = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        id: generateSecureId(),
         q: q.trim(),
         type,
         timestamp: Date.now(),

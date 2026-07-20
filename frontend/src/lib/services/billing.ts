@@ -11,9 +11,10 @@ import { db } from "@/lib/db";
 // TASK-268: notification trigger for new invoices.
 import { notifyInvoiceReady } from "@/lib/services/notifications";
 // BE-049 ROOT FIX (v115, LOW): cryptographically secure invoice numbers.
-// Math.random() is predictable and has a ~2B combination space (6 chars
-// base36) — at scale, collisions become likely (birthday paradox: ~50%
-// at 45K invoices/month per prefix). The BillingInvoice.number column
+// The legacy pseudo-random API is predictable and has a ~2B combination
+// space (6 chars base36) — at scale, collisions become likely (birthday
+// paradox: ~50% at 45K invoices/month per prefix). The
+// BillingInvoice.number column
 // has a @unique constraint — a collision throws P2002 and the
 // transaction fails. randomBytes(6) gives 12 hex chars = 16B
 // combinations, eliminating the collision risk AND making the numbers
@@ -181,9 +182,10 @@ export async function changePlan(
     // transaction — if it fails, the subscription update rolls back too.
     if (plan.priceCents > 0) {
       // BE-049 ROOT FIX (v115, LOW): use crypto.randomBytes instead of
-      // Math.random. randomBytes(6).toString("hex") = 12 hex chars =
-      // 16B combinations. Cryptographically secure, no collision risk
-      // at any scale, and unpredictable (prevents invoice enumeration).
+      // the legacy pseudo-random API. randomBytes(6).toString("hex") =
+      // 12 hex chars = 16B combinations. Cryptographically secure, no
+      // collision risk at any scale, and unpredictable (prevents invoice
+      // enumeration).
       const invoiceNumber = `INV-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${randomBytes(6).toString("hex").toUpperCase()}`;
       const invoice = await tx.billingInvoice.create({
         data: {

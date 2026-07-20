@@ -3189,3 +3189,59 @@ export default function DrugOSApp() {
     </RouterContext.Provider>
   )
 }
+
+// =====================================================================
+// FE-001 ROOT FIX (v129): Named exports for Next.js App Router pages.
+//
+// Each Next.js route file (app/(group)/path/page.tsx) imports the
+// corresponding page component here and renders it inside the appropriate
+// layout (PublicLayout for marketing, AppShell for app pages). The
+// NextRouterProvider (in next-router-provider.tsx) is mounted once at the
+// root layout and bridges the legacy RouterContext to next/navigation's
+// real useRouter, so all the existing `navigate({...})` calls in these
+// components now produce REAL URL paths instead of query strings.
+// =====================================================================
+
+export {
+  PublicLayout,
+  LandingPage,
+  PricingPage,
+  AboutPage,
+  SecurityPage,
+  StatusPage,
+  BlogPage,
+  ContactPage,
+  CareersPage,
+  CaseStudiesPage,
+  FeaturePage,
+  LoginPage,
+  RegisterPage,
+  ForgotPasswordPage,
+  ResetPasswordPage,
+  MFAChallengePage,
+  EmailVerificationPage,
+  AcademicVerificationPage,
+  OrgSelectionPage,
+  OnboardingWelcomePage,
+  OnboardingRolePage,
+  OnboardingWorkspacePage,
+  OnboardingInvitePage,
+  AdminApprovalPage,
+  AccountLockedPage,
+  AppShell,
+  AppDashboard,
+  AppSearchPage,
+  AppSearchResultsPage,
+  AppSectionRenderer,
+  CoreScreenBridge,
+  AppPlaceholderSection,
+  sidebarNavGroups,
+}
+
+// Also export the legacy RouterContext + useRouter so the new
+// NextRouterProvider can override them. Importers that need the router
+// should import from next-router-provider.tsx instead.
+export {
+  RouterContext,
+  useRouter as useDrugOSRouter,
+}
