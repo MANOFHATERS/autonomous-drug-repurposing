@@ -22,6 +22,6 @@ responses>=0.24.0,<1.0  # for mocking HTTP requests in tests
 mypy>=1.8,<2.0             # Task 16.4: static type checking (--strict)
 bandit>=1.7,<2.0           # Task 16.4: security linter (block on HIGH+)
 pip-audit>=2.7,<3.0        # Task 16.1: CVE scan on Python deps
-cyclonedx-bom>=4.4,<5.0    # Task 16.1: CycloneDX SBOM generation
+cyclonedx-bom>=7.3.0,<8.0    # Task 16.1: CycloneDX SBOM generation
 types-PyYAML>=6.0,<7.0     # mypy stubs for PyYAML (used everywhere)
 types-requests>=2.31,<3.0  # mypy stubs for requests (used by all pipelines)
