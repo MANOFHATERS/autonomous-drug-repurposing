@@ -72,3 +72,31 @@ Stage Summary:
 - Identified which tasks are actually fixed vs aspirational claims.
 - Tasks 13.1 and 13.5 are real fixes; will add regression guards (runtime tests).
 - Tasks 13.2, 13.3, 13.4 need real code changes — proceeding to implement.
+
+---
+Task ID: TM13-v129-VERIFICATION
+Agent: Teammate 13 (verification pass)
+Task: Verify all 5 fixes are persisted on main after merge
+
+Work Log:
+- Pushed branch fix/tm13-v129-forensic-root-fixes to origin.
+- Encountered merge conflict on frontend/src/app/error.tsx (Teammate 12 had also created one in commit 31c4ba5). Resolved by taking Teammate 13's version (strict superset: includes dev-mode stack traces, AlertCircle lucide icon, production-safe digest-only display, plus same (error, reset) signature Next.js requires).
+- Pulled latest main (other agents — Teammate 4, Teammate 11 — had pushed in parallel). Merged cleanly.
+- Pushed merged main to origin (commit 306763d).
+- Re-cloned repo to /home/z/my-project/repo-verify/autonomous-drug-repurposing to verify fixes are persisted on main.
+- Verified on fresh clone:
+  * Task 13.1: tailwind.config.ts has NO hsl(var()) in active code (1 match in a comment explaining what was removed). var(--xxx) direct on lines 40-79. globals.css defines HEX values for both light + dark themes.
+  * Task 13.2: core-screens.tsx has 40 dynamic() calls (37 screens + 3 in comments). app-router.tsx has 6 Suspense references including <Suspense> wrapper with fallback in CoreScreenBridge.
+  * Task 13.3: src/app/error.tsx (6778 bytes) and src/app/global-error.tsx (5729 bytes) both exist.
+  * Task 13.4: api_contracts.ts has AUTO-GENERATED header. extract_openapi.py (16034 bytes), generate_api_contracts.py (21570 bytes), check-contracts.sh (3298 bytes) all exist and are executable.
+  * Task 13.5: NO local function ScoreBar/SafetyBadge definitions outside canonical files (empty grep result).
+- Ran regression tests on fresh clone: 29/29 pass.
+- Ran check-contracts.sh on fresh clone: passes (api_contracts.ts in sync with Python OpenAPI schemas).
+- Ran tsc --noEmit on fresh clone: zero errors in changed files (pre-existing chart.tsx errors are unrelated shadcn/ui issues outside swim lane).
+
+Stage Summary:
+- All 5 Teammate 13 tasks (13.1-13.5) are verified persisted on main.
+- 29/29 regression test guards pass on freshly-cloned main.
+- Contract check passes on freshly-cloned main.
+- tsc --noEmit is clean for all Teammate 13 changed files.
+- Branch fix/tm13-v129-forensic-root-fixes merged to main via commit 6a9de30, then integrated with parallel work in commit 306763d.
