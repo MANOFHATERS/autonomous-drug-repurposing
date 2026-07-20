@@ -51,7 +51,7 @@ torch>=2.0,<3.0
 # gate now FAILS (not skips) — see rl/scientific_thresholds.py
 # MIN_LITERATURE_SUPPORTED. The Dockerfile.ml pins ==1.83; the root
 # requirements.txt pins >=1.83,<2.0. We match the root pin.
-biopython>=1.83,<2.0
+biopython>=1.87,<2.0
 
 # pyyaml: MANDATORY for load_reward_weights_for_tenant() in
 # rl/rl_drug_ranker.py. Without it, the per-tenant reward-weights loader
