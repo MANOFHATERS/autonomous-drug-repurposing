@@ -5536,8 +5536,19 @@ class BasePipeline(ABC):
             "chembl": "drugs.csv",
             "drugbank": "drugbank_drugs.csv",
             "uniprot": "proteins.csv",
-            "string": "protein_protein_interactions.csv",
-            "disgenet": "gene_disease_associations.csv",
+            # v130 TM2 ROOT FIX (Task 2.1 + 2.2): write the CANONICAL
+            # filename declared in phase1/contracts/phase1_schema.py, NOT
+            # the legacy alias. Phase 2's standalone loaders
+            # (string_loader.DEFAULT_STRING_PPI_CSV,
+            #  disgenet_loader.DEFAULT_DISGENET_CSV) look up the canonical
+            # filename — they do NOT consult the schema's `aliases` tuple.
+            # The previous alias-based filenames caused Phase 2 to see
+            # ZERO PPI / GDA edges even when Phase 1 produced them
+            # (audit P2-008 for STRING, equivalent for DisGeNET).
+            # The schema's `aliases` tuple still lets the bridge resolve
+            # either name, so backward compatibility is preserved.
+            "string": "string_protein_protein_interactions.csv",
+            "disgenet": "disgenet_gene_disease_associations.csv",
             "omim": "omim_gene_disease_associations.csv",
             "pubchem": "pubchem_enrichment.csv",
         }

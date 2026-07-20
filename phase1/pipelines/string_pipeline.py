@@ -209,6 +209,11 @@ EXPECTED_OUTPUT_COLUMNS: tuple[str, ...] = (
     "string_id_b",
     "uniprot_id_a",
     "uniprot_id_b",
+    # v130 TM2 ROOT FIX (Task 2.1): alias columns consumed by phase2's
+    # standalone StringLoader (string_to_edge_records_from_phase1).
+    # Same values as uniprot_id_a/b. The bridge accepts both names.
+    "uniprot_ac_a",
+    "uniprot_ac_b",
     "combined_score",
     "source",
     "neighborhood",
@@ -2210,6 +2215,7 @@ class StringPipeline(BasePipeline):
         Output columns (reconciled with ``pipelines/schema/v1.json``):
             - string_id_a, string_id_b      (required, from links.protein1/protein2)
             - uniprot_id_a, uniprot_id_b    (optional, from mapping)
+            - uniprot_ac_a, uniprot_ac_b    (aliases for uniprot_id_a/b — v130 TM2)
             - combined_score                (required, int [0,1000])
             - source                        (controlled vocab: "string")
             - neighborhood, fusion, cooccurrence, coexpression  (optional sub-scores)
@@ -2217,15 +2223,35 @@ class StringPipeline(BasePipeline):
             - score_json                    (JSON-packed sub-scores)
             - created_at, string_version, pipeline_run_id, source_url, source_sha256
               (provenance -- NOT loaded to DB; for CSV audit only -- GAP-14.3)
+
+        v130 TM2 ROOT FIX (Task 2.1 — STRING PPI produces ZERO Phase 2 edges):
+            The phase2 standalone StringLoader
+            (string_to_edge_records_from_phase1) reads ONLY ``uniprot_ac_a`` /
+            ``uniprot_ac_b`` (with ``protein_a``/``protein_b`` as fallback) —
+            it does NOT check ``uniprot_id_a`` / ``uniprot_id_b``. Phase 1
+            previously emitted only ``uniprot_id_a`` / ``uniprot_id_b``,
+            so phase2 StringLoader saw empty UniProt accessions and produced
+            ZERO (Protein, interacts_with, Protein) edges — even though the
+            CSV itself had valid data. ROOT FIX: also emit ``uniprot_ac_a``
+            and ``uniprot_ac_b`` as alias columns (same values). The bridge
+            (phase1_bridge._load_string_ppi) already accepts both names, so
+            backward compatibility is preserved. The phase1_schema.py
+            ``any_of_groups`` already lists both names as accepted.
         """
         # FIX GAP-2.7: Use self.source_name (not hardcoded "string").
         # FIX GUARD-2.1: Output the schema-conformant column names
         # (string_id_a/string_id_b/uniprot_id_a/uniprot_id_b).
+        # v130 TM2: also emit uniprot_ac_a/uniprot_ac_b as aliases so
+        # phase2's standalone StringLoader can read them.
         output_df = pd.DataFrame({
             "string_id_a": df["protein1"].astype(str),
             "string_id_b": df["protein2"].astype(str),
             "uniprot_id_a": df["uniprot_a"].astype(str),
             "uniprot_id_b": df["uniprot_b"].astype(str),
+            # v130 TM2 ROOT FIX (Task 2.1): alias columns for phase2
+            # StringLoader consumption. Same values as uniprot_id_a/b.
+            "uniprot_ac_a": df["uniprot_a"].astype(str),
+            "uniprot_ac_b": df["uniprot_b"].astype(str),
             "combined_score": pd.to_numeric(df["combined_score"], errors="coerce"),
             "source": self.source_name,
         })
@@ -2303,8 +2329,11 @@ class StringPipeline(BasePipeline):
         # a PPI edge from STRING would NOT join with a protein from
         # UniProt or an interaction from DrugBank, silently dropping the
         # edge from the knowledge graph.
+        # v130 TM2 ROOT FIX (Task 2.1): also normalize the alias columns
+        # ``uniprot_ac_a`` / ``uniprot_ac_b`` so phase2 StringLoader gets
+        # canonical-form accessions too.
         if len(output_df) > 0:
-            for col in ("uniprot_id_a", "uniprot_id_b"):
+            for col in ("uniprot_id_a", "uniprot_id_b", "uniprot_ac_a", "uniprot_ac_b"):
                 if col in output_df.columns:
                     output_df[col] = output_df[col].apply(
                         lambda x: normalize_uniprot_id(x)
@@ -2406,7 +2435,13 @@ class StringPipeline(BasePipeline):
             "detailed_mode": STRING_DETAILED_MODE,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        output_path = PROCESSED_DATA_DIR / "protein_protein_interactions.csv"
+        # v130 TM2 ROOT FIX (Task 2.1): use the canonical filename
+        # (string_protein_protein_interactions.csv) — matches what
+        # base_pipeline._get_processed_filename() writes and what phase2
+        # string_loader.DEFAULT_STRING_PPI_CSV reads. The previous
+        # hardcoded "protein_protein_interactions.csv" wrote the sidecar
+        # next to a file that no longer exists (the alias).
+        output_path = PROCESSED_DATA_DIR / "string_protein_protein_interactions.csv"
         metadata_path = output_path.with_suffix(".csv.metadata.json")
         metadata_path.parent.mkdir(parents=True, exist_ok=True)
         metadata_path.write_text(
@@ -2416,7 +2451,8 @@ class StringPipeline(BasePipeline):
 
     def _write_transformation_log(self) -> Path:
         """Write ``.csv.transform.json`` next to the cleaned CSV (GAP-16.3)."""
-        output_path = PROCESSED_DATA_DIR / "protein_protein_interactions.csv"
+        # v130 TM2 ROOT FIX (Task 2.1): canonical filename (see above).
+        output_path = PROCESSED_DATA_DIR / "string_protein_protein_interactions.csv"
         transform_path = output_path.with_suffix(".csv.transform.json")
         transform_path.parent.mkdir(parents=True, exist_ok=True)
         transform_path.write_text(

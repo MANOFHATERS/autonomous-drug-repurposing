@@ -1448,6 +1448,23 @@ class OMIMPipeline(BasePipeline):
                     df[col] = None
             # Populate lineage columns (OMIM-specific).
             self._populate_lineage_columns(df)
+            # v130 TM2 ROOT FIX (Task 2.3 — genetic_basis missing in sample mode):
+            # The embedded-sample short-circuit previously BYPASSED the
+            # genetic_basis population at line ~1745 (which only ran on
+            # the full-data morbidmap path). This meant the sample-mode
+            # CSV had NO genetic_basis column, so phase2 omim_loader
+            # could not distinguish causal from susceptibility
+            # associations when running in sample mode — breaking the
+            # (Gene)-[:CAUSES]->(Disease) edge creation logic.
+            # ROOT FIX: populate genetic_basis from association_type
+            # here too, mirroring the full-data path. The values are
+            # copied verbatim (mendelian_phenotype, gene_locus,
+            # susceptibility, causal, etc.) — phase2 omim_loader's
+            # _OMIM_ASSOC_TYPE_TO_REL dict then maps them to edge types.
+            if "association_type" in df.columns:
+                df["genetic_basis"] = df["association_type"]
+            else:
+                df["genetic_basis"] = None
             # Persist as the canonical OMIM output.
             self._save_processed_csv(df, OMIM_OUTPUT_PATH, primary_source="omim")
             self._write_manifest(df, clean_started_at, datetime.now(timezone.utc))

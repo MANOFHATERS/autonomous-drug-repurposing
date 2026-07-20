@@ -2672,6 +2672,23 @@ class DisGeNETPipeline(BasePipeline):
             else:
                 df["confidence_tier"] = None
                 df["confidence_tier_method"] = CONFIDENCE_TIER_METHOD_VERSION
+            # v130 TM2 ROOT FIX (Task 2.2 — prevalence missing in sample mode):
+            # The embedded-sample short-circuit previously BYPASSED
+            # ``_ensure_gda_columns`` and ``_populate_prevalence``, so the
+            # ``prevalence_per_10k`` column was NEVER added in sample mode.
+            # This meant:
+            #   - Phase 1 sample-mode CSV had NO prevalence column
+            #   - Phase 2 disgenet_loader could not preserve prevalence
+            #   - Phase 4 RL agent could not use prevalence for market_opportunity
+            # The "Task 2.2 ROOT FIX" comments above were ASPIRATIONAL —
+            # they only ran on the FULL-data path (line ~2806+), not the
+            # embedded-sample path. ROOT FIX: call both functions here
+            # too, mirroring the full-data path. This ensures the column
+            # is present AND populated with real epidemiological values
+            # (cystic fibrosis = 0.4/10K RARE, migraine = 500/10K common)
+            # regardless of which mode produced the CSV.
+            df = self._ensure_gda_columns(df)
+            df = self._populate_prevalence(df)
             # Persist as the canonical DisGeNET output.
             from config.settings import PROCESSED_DATA_DIR
             output_path = PROCESSED_DATA_DIR / "disgenet_gene_disease_associations.csv"
