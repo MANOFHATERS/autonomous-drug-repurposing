@@ -84,7 +84,7 @@ uvicorn[standard]>=0.27,<1.0
 # v122 IN-080 FIX: pin prometheus-client to a version that ACTUALLY
 # EXISTS on PyPI. The previous `>=0.25.0` was a future version that
 # does not exist (latest is 0.21.0 as of 2024-12). pip install would fail.
-prometheus-client>=0.20,<1.0
+prometheus-client>=0.25.0,<1.0
 
 # psutil: imported by rl/rl_drug_ranker.py for system metrics in the
 # scientific_validation report. Without it, the report's memory/CPU
