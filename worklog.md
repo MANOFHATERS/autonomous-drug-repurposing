@@ -1497,3 +1497,84 @@ Test results:
 - 3 contract test files: 51 tests, all PASS.
 - 1 real code integration test file: 6 tests, all PASS (when run alone); 2 SKIP when run with contract tests (pre-existing mapper conflict, unrelated to v130).
 - Total: 57 tests PASS + 2 SKIP (with clear skip reasons).
+
+---
+Task ID: teammate-16-v130-forensic-root-fixes
+Agent: Teammate 16 (Infrastructure: CI/CD, Observability, Security)
+Task: v130 forensic root-cause audit of all 7 TM16 tasks. Hostile-auditor mode: assume every comment is a lie, verify by executing real binaries.
+
+Work Log:
+- Read project docx (Cosmic_Build_Process_Updated.docx) end-to-end: confirmed this is a 4-phase ML platform (Phase 1 dataset ingestion → Phase 2 Neo4j KG → Phase 3 Graph Transformer → Phase 4 RL ranker). TM16 owns the infra swim lane (.github/, frontend configs, frontend/scripts/, observability).
+- Cloned repo to /home/z/my-project/repo/autonomous-drug-repurposing, checked out new branch teammate-16-v130-forensic-root-fixes.
+- Read AGENTS_FILE_OWNERSHIP.md + ISSUE_OWNERSHIP.md to confirm TM16 swim lane boundaries (do NOT touch frontend/src/, docker-compose.yml, phase1/, phase2/, rl/, graph_transformer/).
+- Red-team audit of .github/workflows/ci.yml (1642 lines) — read every TM16-owned job line by line:
+    * Task 16.1 (security-scan): Trivy ✓, pip-audit (present but wasteful + over-strict), npm audit ✓, CycloneDX SBOM Python ✗ (BROKEN — see below), CycloneDX SBOM npm ✓
+    * Task 16.2 (frontend CI): build ✓, lint ✓, Jest (test:unit) ✓, Playwright ✓
+    * Task 16.3 (docker-build-smoke): builds frontend + python-ml + airflow images, runs frontend container, curls /api/health ✓ — BUT missing observability stack verification
+    * Task 16.4 (mypy + bandit + coverage): all 3 present + blocking + Codecov upload ✓
+    * Task 16.5 (observability): shared/observability/__init__.py has /metrics endpoint + JSON formatter + Sentry SDK init + OTel ✓ — all 4 FastAPI services (phase1/phase2/rl/gt_api) call configure_app ✓ — docker-compose.observability.yml has Prometheus + Grafana + Alertmanager + OTel + Jaeger + node-exporter + cadvisor ✓ — BUT no CI step actually curls Prometheus/Grafana to verify they boot
+    * Task 16.6 (Dependabot + CodeQL): dependabot.yml covers pip + npm + docker + github-actions ✓ — codeql.yml analyzes Python + JS with security-extended ✓ — secret scanning + push protection are repo settings (need gh API enable)
+    * Task 16.7 (lint + e2e blocking): continue-on-error removed from lint + e2e-sample-mode + frontend-lint + frontend-e2e ✓ — ci-success requires all 18 jobs ✓
+- ROOT CAUSE BUGS FOUND (real, not aspirational):
+  BUG #1 (CRITICAL): cyclonedx-py invocation in security-scan job uses `--output-file X --1`. Verified by installing cyclonedx-bom 4.x locally and running `cyclonedx-py environment --help`:
+    * `--output-file` is NOT a valid flag (correct: `--outfile` / `-o`)
+    * `--1` is NOT a valid flag (correct: `--sv 1.5` / `--schema-version 1.5`)
+    Running the v129 command produces: "cyclonedx-py: error: unrecognized arguments: --output-file --1" → EVERY CI run that reaches this step FAILS.
+    The v129 test suite missed this because it only checked that the step NAME contained "CycloneDX SBOM" — never executed the binary.
+  BUG #2 (EFFICIENCY): pip-audit was run TWICE (once for JSON, once for columns). Doubled network calls to OSV.
+  BUG #3 (OVER-STRICT): pip-audit blocked on ANY vuln (LOW/MEDIUM/HIGH/CRITICAL) — task 16.1 requires only CRITICAL, task 16.4 requires HIGH+. No severity filtering.
+  BUG #4 (MISSING): No CI step verifies the observability stack actually boots. Task 16.5 verification was aspirational — no curl http://localhost:9090/-/healthy.
+
+- ROOT FIXES APPLIED (root cause, not surface):
+  FIX #1: cyclonedx-py invocation → `--outfile sbom-python.cdx.json --sv 1.5` + JSON validity check
+  FIX #2: pip-audit → single run with `--vulnerability-service osv --aliases --format json`, parse JSON in Python, distinguish exit code 0/1/2 (no vulns / vulns found / pip-audit broke), block only on vulns WITH fix_versions (institutional approach — vulns without fixes can't be remediated)
+  FIX #3: Added observability smoke test step in docker-build-smoke job — `docker compose -f docker-compose.observability.yml up -d`, wait up to 90s for Prometheus (http://localhost:9090/-/healthy) AND Grafana (http://localhost:3001/api/health), verify HTTP 200, tear down with `docker compose down -v`
+  FIX #4: Added tests/team_cosmic_v130/ to flake8 lint scope (was missing — new test dir would have been silently unlinted)
+
+- NEW TEST FILE: tests/team_cosmic_v130/test_tm16_v130_cyclonedx_real_flags.py (26 tests)
+  This is the test the v129 suite SHOULD have had but didn't. It:
+    * Actually executes `cyclonedx-py environment --help` and `pip-audit --help` via subprocess
+    * Parses argparse usage output to extract valid flag names
+    * Asserts every flag invoked in ci.yml is in the binary's help output
+    * Asserts the v130 cyclonedx-py command runs successfully end-to-end and produces a valid CycloneDX SBOM with >0 components
+    * Asserts the v130 pip-audit command uses --vulnerability-service osv, --strict, --format json, runs EXACTLY ONCE (not twice)
+    * Asserts the observability smoke test step exists, curls Prometheus + Grafana, brings up compose stack, has tear-down with if: always()
+    * Asserts lint + e2e + frontend-lint + frontend-e2e have NO continue-on-error
+    * Asserts ci-success requires all 18 blocking jobs
+
+- REAL-CODE VERIFICATION (not smoke tests):
+  * Installed cyclonedx-bom 4.x + pip-audit 2.10.1 locally
+  * Ran the v130 cyclonedx-py command: produced valid CycloneDX SBOM with 35 components ✓
+  * Ran the v130 pip-audit JSON parser against a synthetic report: correctly identified 1 HIGH+ vuln with fix, exited 1 ✓
+  * Ran the v130 test suite: 26/26 PASS (with pip-audit installed), 22/26 PASS + 4 SKIP (without pip-audit) ✓
+  * Ran the v129 test suite against the modified ci.yml: 65/66 PASS + 1 SKIP (sentry-sdk not installed locally) — NO regressions introduced ✓
+  * Ran flake8 with the v130 lint scope: 0 errors ✓
+  * YAML syntax check: valid, 19 jobs ✓
+
+- Files modified (all in TM16 swim lane):
+  * .github/workflows/ci.yml (lines ~1005-1095: pip-audit + cyclonedx-py rewrite; lines ~1391-1451: observability smoke test added; line ~170: lint scope expanded)
+  * tests/team_cosmic_v130/__init__.py (NEW — empty package marker)
+  * tests/team_cosmic_v130/test_tm16_v130_cyclonedx_real_flags.py (NEW — 26 real-binary verification tests)
+  * worklog.md (this entry)
+
+Stage Summary:
+- Task 16.1: FIXED — cyclonedx-py now uses valid `--outfile` + `--sv 1.5` flags; pip-audit runs once with OSV + severity filtering; SBOM is verified to be valid CycloneDX JSON with components.
+- Task 16.2: VERIFIED — frontend-build, frontend-lint, frontend-test, frontend-e2e all present and BLOCKING (no continue-on-error).
+- Task 16.3: VERIFIED + ENHANCED — docker-build-smoke builds 3 images + curls /api/health. Added observability stack smoke test (Task 16.5 verification).
+- Task 16.4: VERIFIED — mypy --strict, bandit -lll, pytest --cov-fail-under=70 all present and BLOCKING. Codecov upload present.
+- Task 16.5: FIXED — added CI step that brings up docker-compose.observability.yml and curls Prometheus (/-/healthy) + Grafana (/api/health). shared/observability/__init__.py has /metrics + JSON logging + Sentry SDK init verified by reading actual code.
+- Task 16.6: VERIFIED — dependabot.yml covers 4 ecosystems (pip × 4 dirs, npm, docker, github-actions). codeql.yml runs security-extended on Python + JS. Secret scanning + push protection are GitHub repo settings (will enable via gh API after push).
+- Task 16.7: VERIFIED — lint + e2e-sample-mode + frontend-lint + frontend-e2e have NO continue-on-error. ci-success requires all 18 jobs.
+
+Test results (real code, not smoke tests):
+- v130 suite: 26/26 PASS (with cyclonedx-bom + pip-audit installed)
+- v129 suite (regression check): 65/66 PASS + 1 SKIP (sentry-sdk not installed locally) — NO regressions
+- flake8 (TM16 scope including v130 tests): 0 errors
+- YAML syntax: valid, 19 jobs
+
+Next steps:
+- Commit + push to teammate-16-v130-forensic-root-fixes branch
+- Verify branch files via git ls-remote
+- Merge to main via `git merge --no-ff`
+- Re-clone main to verify fixes are present
+- Enable GitHub secret scanning + push protection via gh API (or document that user must enable in repo settings)
