@@ -19,7 +19,7 @@
 # gymnasium: required at MODULE IMPORT TIME by rl/rl_drug_ranker.py
 # (DrugRankingEnv inherits from gym.Env at class-definition time, so
 # gymnasium CANNOT be lazy-imported).
-gymnasium>=0.29,<1.0
+gymnasium>=1.3.0,<2.0
 
 # stable-baselines3: lazy-imported inside train_agent() only when PPO
 # training is actually invoked. Listed here so a fresh `pip install -r
