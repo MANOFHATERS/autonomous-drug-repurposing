@@ -32,7 +32,7 @@ torch-geometric>=2.5.0,<2.6.0
 torch-scatter>=2.1.2,<2.2.0
 torch-sparse>=0.6.18,<0.7.0
 scikit-learn>=1.3,<2.0
-pandas>=2.1.4,<3.0
+pandas>=3.0.3,<4.0
 numpy>=1.26.3,<2.0
 # Rapidfuzz is used by the Phase 2 adapter's fuzzy KP resolver.
 rapidfuzz>=3.6.1,<4.0
