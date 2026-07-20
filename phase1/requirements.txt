@@ -153,7 +153,7 @@ uvicorn[standard]>=0.27,<1.0
 # PyPI. The previous `>=3.30.3` was a future version that does not
 # exist (latest is 3.16.1 as of 2024-12). pip install would fail.
 # Also added upper bound `<4.0` to prevent breaking major upgrades.
-filelock>=3.10,<4.0
+filelock>=3.31.1,<4.0
 # v122 IN-080 FIX: added upper bound `<18.0` to prevent breaking major
 # upgrades (pyarrow 18.x may have ABI changes).
 pyarrow>=14.0.0,<18.0
