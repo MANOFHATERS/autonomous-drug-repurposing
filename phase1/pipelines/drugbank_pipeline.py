@@ -2299,10 +2299,25 @@ class DrugBankPipeline(BasePipeline):
         withdrawn_reason: str | None = None
         withdrawn_country: str | None = None
         withdrawn_year: int | None = None
-        # DrugBank 5.x uses <withdrawn-notice> under <drug>; older
-        # releases use <withdrawn_notice>. Try both spellings.
+        # DrugBank 5.x uses <withdrawn> as the canonical XML element per
+        # the official DrugBank XML schema (https://docs.drugbank.com/xml).
+        # Some older releases and the embedded-sample fixture use the
+        # <withdrawn-notice> / <withdrawn_notice> spelling. Try ALL three
+        # tag variants so the parser works on every DrugBank distribution
+        # the platform will encounter in production.
+        #
+        # TM1 Task 1.2 ROOT FIX (v130): the previous code only tried
+        # ``db:withdrawn-notice`` and ``db:withdrawn_notice``. The real
+        # DrugBank 5.x production XML uses ``<withdrawn>`` as documented
+        # in the schema — meaning the parser would silently return
+        # None for withdrawn_reason / withdrawn_country / withdrawn_year
+        # on every real DrugBank file, while passing on the fixture
+        # (which uses the wrong tag). The is_withdrawn BOOLEAN was
+        # unaffected (it comes from <groups>), but the structured
+        # withdrawal metadata (reason/country/year) was lost. Root fix:
+        # add ``db:withdrawn`` as the FIRST tag to try.
         notice_elems: list[Any] = []
-        for tag in ("db:withdrawn-notice", "db:withdrawn_notice"):
+        for tag in ("db:withdrawn", "db:withdrawn-notice", "db:withdrawn_notice"):
             notice_elems.extend(elem.findall(tag, NS))
         if notice_elems:
             reasons: list[str] = []

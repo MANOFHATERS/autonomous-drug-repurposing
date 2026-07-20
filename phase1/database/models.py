@@ -1251,13 +1251,53 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # v43 ROOT FIX (Chain 8): Text -> String(50000) to match SQL migration 001
     # (line 394). Text is unbounded in SQLite; VARCHAR(50000) in PostgreSQL.
     # Dev/test SQLite accepted 100KB sequences; prod PostgreSQL rejected.
-    sequence: Mapped[Optional[str]] = mapped_column(String(50000), nullable=True)
+    #
+    # TM1 Task 1.3 ROOT FIX (v130): revert String(50000) -> Text. Titin
+    # (~34,350 aa) fits within 50,000 chars, but the cap is a latent
+    # truncation risk for hypothetical proteins > 50,000 aa and for
+    # future ChEMBL/UniProt releases that may include larger sequences.
+    # PostgreSQL ``Text`` has no length limit; SQLite ``Text`` is also
+    # unbounded. Migration 020 alters the column type from VARCHAR(50000)
+    # to TEXT. The ``String(50000)`` cap was originally added to match
+    # migration 001's CREATE TABLE — but migration 020 supersedes it.
+    sequence: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # v43 ROOT FIX (Chain 8): Text -> String(10000) to match SQL migration 001
     # (line 395).
-    function_desc: Mapped[Optional[str]] = mapped_column(String(10000), nullable=True)
+    #
+    # TM1 Task 1.3 ROOT FIX (v130): revert String(10000) -> Text. UniProt
+    # FUNCTION descriptions for multifunctional proteins (e.g. BRCA1,
+    # p53) can exceed 10,000 chars. The cap was a latent truncation risk.
+    function_desc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     string_id: Mapped[Optional[str]] = mapped_column(
         String(STRING_ID_LENGTH), nullable=True,
     )
+    # ----------------------------------------------------------------
+    # TM1 Task 1.3 ROOT FIX (v130) — add ``function`` and
+    # ``subcellular_location`` columns to the Protein ORM model.
+    # ----------------------------------------------------------------
+    # Hostile-auditor finding: the Phase 1 schema (phase1_schema.py)
+    # declares ``function`` and ``subcellular_location`` as optional
+    # columns of the ``uniprot_proteins`` source, and the UniProt
+    # pipeline writes both to the CSV. But the ORM ``Protein`` model
+    # declared only ``function_desc`` (legacy name) and did NOT declare
+    # ``function`` or ``subcellular_location``. As a result,
+    # ``bulk_upsert_proteins`` silently dropped both columns before
+    # INSERT (loaders.py:3670 does ``df[[c for c in load_columns if c
+    # in df.columns]]`` where ``load_columns`` is derived from
+    # ``Protein.__table__.columns``). The Phase 2 bridge then queried
+    # the DB and got NULL for both fields, propagating empty strings
+    # into the KG Protein nodes — defeating the Phase 3 node-feature
+    # extraction (TASK-141).
+    #
+    # Root fix: declare both columns on the ORM. Migration 020 adds
+    # them to the ``proteins`` table. ``function`` is an alias for
+    # ``function_desc`` (kept distinct so downstream consumers that
+    # read ``function`` get the value without a rename); ``subcellular_location``
+    # is a new column. Both are nullable because non-human or
+    # poorly-annotated proteins may not have these fields.
+    # ----------------------------------------------------------------
+    function: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    subcellular_location: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # -- relationships --
     # v89 ROOT FIX (BUG #20 -- P1 N+1 explosion under bulk loads):

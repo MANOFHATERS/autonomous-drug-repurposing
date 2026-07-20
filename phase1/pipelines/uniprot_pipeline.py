@@ -1031,8 +1031,20 @@ class UniProtPipeline(BasePipeline):
             elif suffix == ".csv":
                 # Embedded samples use the already-cleaned schema:
                 # uniprot_id, uniprot_ac, protein_name, gene_symbol,
-                # gene_name, organism, protein_length, function.
+                # gene_name, organism, protein_length, function,
+                # subcellular_location.
                 # Map back to the raw TSV schema.
+                #
+                # TM1 Task 1.3 ROOT FIX (v130): the previous writerow
+                # wrote only 9 fields (entry, gene_names, gene_primary,
+                # protein_name, organism, length, sequence, string_xref,
+                # function_desc) — but TSV_HEADER has 10 columns
+                # (including "Subcellular location [CC]"). The missing
+                # 10th field caused every embedded-sample row's
+                # subcellular_location to be empty, silently destroying
+                # the Phase 3 node-feature signal. Root fix: append
+                # ``subcellular_location`` as the 10th field so the TSV
+                # row matches the header.
                 import pandas as _pd
                 df = _pd.read_csv(prot_path)
                 for _, df_row in df.iterrows():
@@ -1045,9 +1057,11 @@ class UniProtPipeline(BasePipeline):
                     sequence = str(df_row.get("sequence") or "")
                     string_xref = str(df_row.get("string_id") or "")
                     function_desc = str(df_row.get("function") or df_row.get("function_desc") or "")
+                    subcellular_location = str(df_row.get("subcellular_location") or "")
                     writer.writerow([
                         entry, gene_names, gene_primary, protein_name,
                         organism, length, sequence, string_xref, function_desc,
+                        subcellular_location,
                     ])
                     rows_written += 1
 

@@ -223,6 +223,124 @@ class TestDrugBankWithdrawnContract(unittest.TestCase):
             f"DrugBank 'drugs' contract-vs-pipeline drift: {drugs_drift}",
         )
 
+    # ----- INV-6 (v130 ROOT FIX): <withdrawn> tag (real DrugBank 5.x) -
+    # Hostile-auditor finding: the previous parser only tried
+    # ``<db:withdrawn-notice>`` and ``<db:withdrawn_notice>``. The real
+    # DrugBank 5.x production XML uses ``<db:withdrawn>`` per the
+    # official schema (https://docs.drugbank.com/xml). The fixture uses
+    # ``<withdrawn-notice>`` so existing tests passed, but production
+    # would silently return None for withdrawn_reason/country/year on
+    # every real DrugBank file. The v130 ROOT FIX adds
+    # ``<db:withdrawn>`` as the FIRST tag to try.
+
+    def test_inv6_parser_handles_real_drugbank_withdrawn_tag(self):
+        """The parser MUST handle the real DrugBank 5.x ``<withdrawn>``
+        tag (not just the ``<withdrawn-notice>`` fixture spelling).
+
+        This test builds a synthetic DrugBank <drug> element that uses
+        ``<db:withdrawn>`` (the production XML tag) and verifies the
+        parser extracts reason/country/year from it. If the parser only
+        tries ``<withdrawn-notice>``, this test FAILS — proving the
+        production bug.
+        """
+        from lxml import etree
+        from pipelines.drugbank_pipeline import NS
+
+        # Build a minimal DrugBank <drug> element using the REAL
+        # <withdrawn> tag (per DrugBank 5.x XML schema).
+        # Use the SAME namespace the production parser expects
+        # (http://drugbank.ca — see config.settings.DRUGBANK_XML_NAMESPACE).
+        xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<drugbank xmlns="http://drugbank.ca" version="5.1">
+  <drug type="small-molecule" created="2005-06-13" updated="2024-01-15">
+    <drugbank-id primary="true">DB99999</drugbank-id>
+    <name>test_withdrawn_drug_v130</name>
+    <description>A test drug using the real DrugBank 5.x withdrawn tag.</description>
+    <groups>
+      <group>approved</group>
+      <group>withdrawn</group>
+    </groups>
+    <withdrawn>
+      <country>US</country>
+      <year>2020</year>
+      <reason>cardiovascular events</reason>
+    </withdrawn>
+    <calculated-properties>
+      <property>
+        <kind>Molecular Weight</kind>
+        <value>300.5</value>
+        <source>ChemAxon</source>
+      </property>
+    </calculated-properties>
+  </drug>
+</drugbank>"""
+        tree = etree.fromstring(xml)
+        drug_elem = tree.find(".//db:drug", NS)
+        self.assertIsNotNone(drug_elem, "Failed to find <db:drug> in test XML")
+
+        result = self.pipeline._parse_drug_element(drug_elem)
+        self.assertIsNotNone(result, "_parse_drug_element returned None for test drug")
+        drug_rec, _ = result
+        self.assertIsNotNone(drug_rec, "drug_rec is None")
+
+        # The CRITICAL assertions: structured withdrawal metadata MUST
+        # be extracted from the <withdrawn> tag.
+        self.assertTrue(
+            drug_rec["is_withdrawn"],
+            "is_withdrawn must be True (drug has <withdrawn> + groups has 'withdrawn')",
+        )
+        self.assertEqual(
+            drug_rec["withdrawn_reason"], "cardiovascular events",
+            f"withdrawn_reason must be 'cardiovascular events', got "
+            f"{drug_rec['withdrawn_reason']!r} — parser did NOT extract "
+            f"from <withdrawn> tag (v130 ROOT FIX regression)",
+        )
+        self.assertEqual(
+            drug_rec["withdrawn_year"], 2020,
+            f"withdrawn_year must be 2020, got {drug_rec['withdrawn_year']!r}",
+        )
+        self.assertEqual(
+            drug_rec["withdrawn_country"], "US",
+            f"withdrawn_country must be 'US', got {drug_rec['withdrawn_country']!r}",
+        )
+
+    def test_inv6_parser_source_code_includes_withdrawn_tag(self):
+        """The parser source code MUST include 'db:withdrawn' in the tag
+        tuple (defensive check — if the v130 ROOT FIX is reverted, this
+        test fails immediately).
+        """
+        import inspect
+        from pipelines.drugbank_pipeline import DrugBankPipeline
+        source = inspect.getsource(DrugBankPipeline._parse_drug_element)
+        self.assertIn(
+            '"db:withdrawn"', source,
+            "DrugBankPipeline._parse_drug_element source MUST include "
+            "'db:withdrawn' in the tag tuple (v130 ROOT FIX). Without "
+            "this tag, the parser silently returns None for "
+            "withdrawn_reason/country/year on every real DrugBank 5.x "
+            "production XML file.",
+        )
+
+    # ----- INV-7 (v130 ROOT FIX): loaders updatable_cols includes withdrawn fields
+
+    def test_inv7_loaders_updatable_cols_include_withdrawn_fields(self):
+        """bulk_upsert_drugs updatable_cols MUST include withdrawn_reason,
+        withdrawn_country, withdrawn_year so a DrugBank refresh actually
+        updates these fields on CONFLICT/UPDATE (hostile-auditor finding).
+        """
+        import inspect
+        from database.loaders import bulk_upsert_drugs
+        source = inspect.getsource(bulk_upsert_drugs)
+        for field in ("withdrawn_reason", "withdrawn_country", "withdrawn_year"):
+            self.assertIn(
+                field, source,
+                f"bulk_upsert_drugs source MUST include '{field}' in "
+                f"updatable_cols (v130 ROOT FIX). Without this, the field "
+                f"is INSERTed on first load but NEVER updated — meaning a "
+                f"DrugBank refresh that adds/changes withdrawal metadata "
+                f"would be silently dropped.",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
