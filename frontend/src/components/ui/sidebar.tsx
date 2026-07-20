@@ -29,11 +29,17 @@ const SIDEBAR_COOKIE_NAME = "sidebar_state"
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 const SIDEBAR_WIDTH = "16rem"
 
-// FE-004/005/006/007 v129 ROOT FIX: module-level counter for deterministic
-// skeleton widths. Replaces the legacy pseudo-random API in
-// SidebarMenuSkeleton below. See the comment at the SidebarMenuSkeleton
-// definition for the rationale.
-let __skeletonCounter = 0
+// FE-004/005/006/007 v131 ROOT FIX (Teammate 13, hostile-auditor): the
+// previous code used a module-level `let __skeletonCounter = 0` that was
+// reassigned inside SidebarMenuSkeleton's useMemo. This violated the
+// `react/no-callback-assignment` rule (Cannot reassign variables declared
+// outside of the component/hook) AND was fragile: module-level mutable
+// state in a React component is a bug factory (it leaks across mounts,
+// breaks SSR consistency under concurrent rendering, and makes testing
+// non-deterministic). The fix uses React.useId() — a stable, SSR-safe
+// unique ID per component instance — and derives a deterministic width
+// from it. No module-level mutation, no hydration mismatch, no rule
+// violation. The module-level counter is GONE.
 const SIDEBAR_WIDTH_MOBILE = "18rem"
 const SIDEBAR_WIDTH_ICON = "3rem"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
@@ -612,21 +618,37 @@ function SidebarMenuSkeleton({
 }: React.ComponentProps<"div"> & {
   showIcon?: boolean
 }) {
-  // FE-004/005/006/007 v129 ROOT FIX (hostile-auditor pass): replaced
-  // the legacy pseudo-random API with a stable width derived from a
-  // module-level counter. The previous code called the legacy random API
-  // on every mount, which:
-  //   (a) violated the project's "no fabrication APIs in production code"
-  //       rule (FE-004/005/006/007 — patient-safety fabrication prevention),
-  //   (b) caused hydration mismatches because the server-rendered width
-  //       differed from the client-rendered width.
-  // The counter-based approach gives each skeleton a deterministic-but-varied
-  // width (50–90%) so the UI still looks organic, while being SSR-safe and
-  // fabrication-free. The width is computed once per mount via useMemo.
+  // FE-004/005/006/007 v131 ROOT FIX (Teammate 13, hostile-auditor):
+  // Replaced the module-level __skeletonCounter with React.useId().
+  //
+  // The previous v129 code used `__skeletonCounter = (counter + 1) % 40`
+  // inside useMemo. This violated the react-hooks rule (Cannot reassign
+  // variables declared outside of the component/hook) AND was fragile:
+  //   - Module-level mutable state leaks across mounts (a remount doesn't
+  //     reset the counter, so widths drift over a session).
+  //   - Under React 19 concurrent rendering, two skeletons rendered in the
+  //     same pass could read the same counter value (race).
+  //   - The counter was a global singleton — tests that render the sidebar
+  //     multiple times got non-deterministic widths.
+  //
+  // ROOT FIX: React.useId() returns a stable, SSR-safe unique string per
+  // component instance (e.g. ":r5:"). We hash its character codes to get
+  // a deterministic 0–39 value, giving a 50–90% width. Each skeleton gets
+  // a different width (because each has a different useId), the width is
+  // stable across server/client (no hydration mismatch), and there is NO
+  // module-level mutable state.
+  const uniqueId = React.useId()
   const width = React.useMemo(() => {
-    __skeletonCounter = (__skeletonCounter + 1) % 40;
-    return `${50 + __skeletonCounter}%`;
-  }, [])
+    // Derive a deterministic 0–39 from the unique ID's character codes.
+    // This is a simple hash — not cryptographic, just enough to spread
+    // skeletons across the 50–90% width range without collisions.
+    let hash = 0
+    for (let i = 0; i < uniqueId.length; i++) {
+      hash = (hash * 31 + uniqueId.charCodeAt(i)) >>> 0
+    }
+    const offset = hash % 40
+    return `${50 + offset}%`
+  }, [uniqueId])
 
   return (
     <div

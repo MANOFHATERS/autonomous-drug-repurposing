@@ -375,13 +375,22 @@ export async function POST(req: NextRequest) {
     // of creating a second one. Clients that want idempotency MUST send
     // the same key on retries (the frontend's billing form does this —
     // see components/drugos/billing-screens.tsx).
+    // FE-024/swim-lane v131 ROOT FIX (Teammate 13, hostile-auditor): the
+    // previous code had a `require("crypto").randomUUID()` fallback for
+    // "older runtimes". But Next.js 16 requires Node 20+, where
+    // `crypto.randomUUID()` is a stable global. The `require()` call:
+    //   1. Is forbidden by `@typescript-eslint/no-require-imports` (ESM
+    //      modules must not use CommonJS require).
+    //   2. Was dead code — the `crypto.randomUUID` branch ALWAYS wins on
+    //      Node 20+ (the only runtime Next.js 16 supports).
+    // ROOT FIX: call `crypto.randomUUID()` directly. If `crypto` is somehow
+    // undefined (impossible on Node 20+), we throw — failing loudly is
+    // better than a silent CJS fallback that masks a broken environment.
     const idempotencyKey =
       idempotencyKeyFromRequest ||
-      // Generate a v4 UUID. crypto.randomUUID() is available in Node 19+;
-      // fallback to randomBytes for older runtimes.
       (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
         ? crypto.randomUUID()
-        : require("crypto").randomUUID());
+        : (() => { throw new Error("crypto.randomUUID() is not available — Node 20+ is required by Next.js 16"); })());
     const result = await changePlan(auth.user.orgId, body.planId, idempotencyKey);
     await writeAuditLog({
       user: auth.user,

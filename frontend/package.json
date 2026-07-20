@@ -17,7 +17,7 @@
     "test:e2e": "node scripts/run-e2e-tests.js",
     "tsc": "tsc --noEmit",
     "postinstall": "prisma generate || true",
-    "gen:contracts": "python3 scripts/extract_openapi.py && python3 scripts/generate_api_contracts.py",
+    "gen:contracts": "python3 scripts/extract_openapi.py && node scripts/assemble-contracts.mjs",
     "check:contracts": "bash scripts/check-contracts.sh"
   },
   "dependencies": {
@@ -107,7 +107,7 @@
     "@types/react-dom": "^19",
     "@types/supertest": "^7.2.1",
     "bun-types": "^1.3.4",
-    "eslint": "^10",
+    "eslint": "^9.39.5",
     "eslint-config-next": "^16.1.1",
     "jest": "^30.4.2",
     "openapi-typescript": "^7.13.0",
@@ -115,6 +115,6 @@
     "supertest": "^7.2.2",
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.5",
-    "typescript": "7.0.2"
+    "typescript": "^5.9.3"
   }
 }

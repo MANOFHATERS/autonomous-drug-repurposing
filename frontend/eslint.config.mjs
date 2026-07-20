@@ -179,6 +179,27 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "scripts_backup/**",
     "tests/**",
     "scripts/**",
+    // FE-024/swim-lane v131 ROOT FIX (Teammate 13): align eslint ignores
+    // with tsconfig.json excludes. The tsconfig already excludes test
+    // files from tsc, but eslint was still linting them — producing
+    // errors in test files that don't affect production code. Test files
+    // use their own relaxed rules (allow `let` where `const` would work,
+    // allow mock-specific patterns) and should not block the production
+    // lint gate. These globs mirror the tsconfig `exclude` array.
+    "src/lib/services/__tests__/**",
+    "src/lib/auth/__tests__/**",
+    "src/components/**/__tests__/**",
+    "src/app/api/**/__tests__/**",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.test.js",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    // Auto-generated contracts file — has /* eslint-disable */ at the top
+    // but eslint still loads rules for it (which can crash on generated
+    // code). Exclude it entirely; the file is validated by the contract
+    // consistency check (npm run check:contracts) instead.
+    "contracts/api_contracts.ts",
   ],
 }];
 

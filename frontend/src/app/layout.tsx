@@ -5,9 +5,26 @@ import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 import { SessionProvider } from "@/components/drugos/session-provider";
 import { ThemeProvider } from "next-themes";
-// FE-029 v123 FORENSIC ROOT FIX: wrap the entire app in an ErrorBoundary
-// so a render crash in any component shows a recovery UI instead of
-// white-screening the whole layout.
+// FE-029 v131 ROOT FIX (Teammate 13, hostile-auditor): the previous
+// layout.tsx passed `onError={(error, info) => console.error(...)}` to
+// <ErrorBoundary>. But layout.tsx is a Server Component (no 'use client'),
+// and Next.js FORBIDS passing functions (event handlers, callbacks) from
+// Server Components to Client Components. The build failed during static
+// prerendering of /_not-found with:
+//   Error: Event handlers cannot be passed to Client Component props.
+//     {onError: function onError, children: ...}
+//
+// ROOT FIX: remove the onError prop entirely. The ErrorBoundary class
+// component already logs every caught error via console.error in its
+// componentDidCatch lifecycle method (see error-boundary.tsx line 69).
+// The onError prop in layout.tsx was redundant — it just logged the same
+// error a SECOND time with a [RootErrorBoundary] prefix. Removing it:
+//   1. Fixes the Server→Client function passing violation.
+//   2. Lets the static prerendering of /_not-found succeed.
+//   3. Loses ZERO functionality (ErrorBoundary still catches + logs).
+// Operators who want Sentry/Bugsnag wiring should pass onError from a
+// CLIENT Component (e.g. a wrapper inside the ErrorBoundary tree), not
+// from this Server Component layout.
 import { ErrorBoundary } from "@/components/error-boundary";
 // FE-030 v123 FORENSIC ROOT FIX: wrap async content in <Suspense> so the
 // server can stream HTML to the client BEFORE all async data has loaded.
@@ -60,13 +77,7 @@ export default function RootLayout({
       >
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem disableTransitionOnChange>
           <SessionProvider>
-            <ErrorBoundary
-              onError={(error, info) => {
-                if (typeof console !== "undefined" && console.error) {
-                  console.error("[RootErrorBoundary]", error, info.componentStack);
-                }
-              }}
-            >
+            <ErrorBoundary>
               <Suspense
                 fallback={
                   <div
