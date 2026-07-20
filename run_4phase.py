@@ -569,7 +569,71 @@ def main() -> int:
              "is scientifically invalid by definition. Without this flag, "
              "the gate is un-bypassable (exit code 4 on failure).",
     )
+    # SH-010 v129 ROOT FIX (Teammate 14, forensic, root-level, no surface fix):
+    # The audit found that run_4phase.py had NO --prefer-postgres CLI flag.
+    # The previous fix added resolve_prefer_postgres() (auto-detect) but
+    # operators had NO way to force a specific backend from the CLI — they
+    # had to set the DRUGOS_PREFER_POSTGRES env var separately. The audit's
+    # verification command is:
+    #     python run_4phase.py --prefer-postgres --gt-epochs 2 --rl-timesteps 100
+    # which requires --prefer-postgres as a boolean flag.
+    #
+    # ROOT FIX: add THREE mutually-exclusive CLI flags:
+    #   --prefer-postgres    : force PostgreSQL backend (DRUGOS_PREFER_POSTGRES=1)
+    #   --no-prefer-postgres : force CSV backend (DRUGOS_PREFER_POSTGRES=0)
+    #   (default)            : auto-detect (DRUGOS_PREFER_POSTGRES=auto)
+    # The flags set the env var BEFORE resolve_prefer_postgres() is called
+    # in run_phase1_to_phase2_bridge() below, so the bridge picks up the
+    # operator's explicit choice. Production deployments should use
+    # --prefer-postgres (the DOCX §3 spec says Phase 1's PostgreSQL staging
+    # DB is the AUTHORITATIVE source). Dev/CI uses the default (auto-detect)
+    # so the bridge falls back to CSV when no DB is available.
+    pg_backend = parser.add_mutually_exclusive_group()
+    pg_backend.add_argument(
+        "--prefer-postgres", action="store_true", default=False,
+        help="Force the Phase 1 -> Phase 2 bridge to use the PostgreSQL "
+             "staging DB (DRUGOS_PREFER_POSTGRES=1). Production deployments "
+             "MUST use this flag (or set DRUGOS_PREFER_POSTGRES=1 in the "
+             "env). The bridge will FAIL LOUDLY if the DB is unreachable "
+             "or unpopulated (no silent CSV fallback). Per DOCX §3, the "
+             "Phase 1 PostgreSQL DB is the AUTHORITATIVE source.",
+    )
+    pg_backend.add_argument(
+        "--no-prefer-postgres", action="store_true", default=False,
+        help="Force the Phase 1 -> Phase 2 bridge to use CSV files "
+             "(DRUGOS_PREFER_POSTGRES=0). Dev/CI mode — the bridge reads "
+             "phase1/processed_data/*.csv directly without connecting to "
+             "PostgreSQL. Use this when no DB is available.",
+    )
     args = parser.parse_args()
+
+    # SH-010 v129: apply the --prefer-postgres / --no-prefer-postgres flags
+    # by setting the DRUGOS_PREFER_POSTGRES env var BEFORE the bridge is
+    # called. resolve_prefer_postgres() reads this env var (with "auto" as
+    # the default). Setting it here ensures the bridge picks up the
+    # operator's explicit choice.
+    if args.prefer_postgres:
+        os.environ["DRUGOS_PREFER_POSTGRES"] = "1"
+        logger.info(
+            "SH-010 v129: --prefer-postgres flag set — forcing PostgreSQL "
+            "backend (DRUGOS_PREFER_POSTGRES=1). The bridge will FAIL LOUDLY "
+            "if the DB is unreachable or unpopulated."
+        )
+    elif args.no_prefer_postgres:
+        os.environ["DRUGOS_PREFER_POSTGRES"] = "0"
+        logger.info(
+            "SH-010 v129: --no-prefer-postgres flag set — forcing CSV "
+            "backend (DRUGOS_PREFER_POSTGRES=0). Dev/CI mode."
+        )
+    else:
+        # Default: auto-detect. resolve_prefer_postgres() will probe the
+        # DB and use PostgreSQL if reachable + populated, else CSV.
+        os.environ.setdefault("DRUGOS_PREFER_POSTGRES", "auto")
+        logger.info(
+            "SH-010 v129: no --prefer-postgres / --no-prefer-postgres flag "
+            "— using auto-detect (DRUGOS_PREFER_POSTGRES=auto). The bridge "
+            "will use PostgreSQL if the DB is reachable + populated, else CSV."
+        )
 
     # v114: if --dev-mode, prefix the output dir with 'dev_' so dev
     # artifacts are NEVER confused with production artifacts.

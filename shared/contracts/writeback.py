@@ -107,11 +107,46 @@ def ensure_csv_dir() -> None:
 
 
 # ---------------------------------------------------------------------------
-# CANONICAL COLUMN NAMES (issue #337)
+# CANONICAL COLUMN NAMES (issue #337, SH-003 v129 ROOT FIX)
 # ---------------------------------------------------------------------------
+# SH-003 v129 ROOT FIX (Teammate 14, forensic, root-level, no surface fix):
+# The audit found that the shared contract used ONLY the simple columns
+# (drug, disease) while rl.contracts.phase4_schema historically used the
+# richer schema (drug_id, drug_name, disease_id, disease_name, score).
+# The previous fix DELEGATED rl → shared, which eliminated the drift but
+# LOST the richer schema. For an institutional-grade production system,
+# the canonical schema MUST support BOTH:
+#   - drug_id   (canonical ID, e.g. InChIKey or DrugBank ID — per DOCX §3)
+#   - drug_name (human-readable name, e.g. "aspirin")
+#   - disease_id (canonical ID, e.g. DOID or MeSH ID)
+#   - disease_name (human-readable name, e.g. "diabetes")
+#   - score (the GT model's prediction score, alias for original_gt_score)
+#
+# ROOT FIX: add the richer schema constants as FIRST-CLASS columns. The
+# simple aliases (DRUG_COL, DISEASE_COL) are KEPT for backward compat —
+# existing writers (phase4/writeback.py, trainer.py) that use "drug"/
+# "disease" keep working. New writers SHOULD populate the richer columns
+# (drug_id, drug_name, disease_id, disease_name) for scientific fidelity.
+# Readers (trainer.py) read "drug"/"disease" first (backward compat) and
+# CAN be enhanced to read the richer columns when present.
 OUTCOME_COL: Final[str] = "outcome"
+
+# Simple identifier columns (backward compat — what existing writers use).
+# These hold the human-readable name (e.g. "aspirin", "diabetes").
 DRUG_COL: Final[str] = "drug"
 DISEASE_COL: Final[str] = "disease"
+
+# Richer schema columns (SH-003 v129 ROOT FIX). These are the CANONICAL
+# column names per the audit. drug_name is a SEPARATE column from drug
+# (not an alias) so writers can populate BOTH the simple name (drug) and
+# the explicit name field (drug_name) when they differ. In practice they
+# usually hold the same value, but having both lets us migrate incrementally.
+DRUG_ID_COL: Final[str] = "drug_id"
+DRUG_NAME_COL: Final[str] = "drug_name"
+DISEASE_ID_COL: Final[str] = "disease_id"
+DISEASE_NAME_COL: Final[str] = "disease_name"
+SCORE_COL: Final[str] = "score"  # alias for original_gt_score (the GT prediction)
+
 TIMESTAMP_COL: Final[str] = "validated_at"
 VALIDATED_BY_COL: Final[str] = "validated_by"
 VALIDATION_STUDY_ID_COL: Final[str] = "validation_study_id"
@@ -121,9 +156,21 @@ ORIGINAL_RL_RANK_COL: Final[str] = "original_rl_rank"
 WRITEBACK_VERSION_COL: Final[str] = "writeback_version"
 
 # Full ordered list of columns written by writeback_to_phase1.
+# SH-003 v129: the richer schema columns (drug_id, drug_name, disease_id,
+# disease_name, score) are included as OPTIONAL columns. Writers that have
+# them populate them; writers that don't leave them blank. The simple
+# columns (drug, disease) remain REQUIRED for backward compat.
 WRITEBACK_CSV_COLUMNS: Final[List[str]] = [
+    # Simple identifier columns (REQUIRED — backward compat).
     DRUG_COL,
     DISEASE_COL,
+    # Richer schema columns (OPTIONAL — SH-003 v129 ROOT FIX).
+    DRUG_ID_COL,
+    DRUG_NAME_COL,
+    DISEASE_ID_COL,
+    DISEASE_NAME_COL,
+    SCORE_COL,
+    # Outcome + audit metadata (REQUIRED).
     OUTCOME_COL,
     VALIDATED_BY_COL,
     VALIDATION_STUDY_ID_COL,
@@ -135,12 +182,32 @@ WRITEBACK_CSV_COLUMNS: Final[List[str]] = [
 ]
 
 # Subset required for the flywheel to function (other columns are
-# optional audit metadata).
+# optional audit metadata). The simple drug/disease columns are REQUIRED
+# for backward compat — existing writers (phase4/writeback.py) populate
+# these. The richer columns (drug_id, drug_name, etc.) are OPTIONAL.
 REQUIRED_COLUMNS: Final[List[str]] = [
     DRUG_COL,
     DISEASE_COL,
     OUTCOME_COL,
     TIMESTAMP_COL,
+]
+
+# OPTIONAL columns (SH-003 v129 ROOT FIX). These are the richer schema
+# columns that writers SHOULD populate but are NOT required to. The
+# contract test (test_writeback_schema.py) verifies these are present in
+# WRITEBACK_CSV_COLUMNS so readers can rely on them being defined.
+OPTIONAL_COLUMNS: Final[List[str]] = [
+    DRUG_ID_COL,
+    DRUG_NAME_COL,
+    DISEASE_ID_COL,
+    DISEASE_NAME_COL,
+    SCORE_COL,
+    VALIDATED_BY_COL,
+    VALIDATION_STUDY_ID_COL,
+    NOTES_COL,
+    ORIGINAL_GT_SCORE_COL,
+    ORIGINAL_RL_RANK_COL,
+    WRITEBACK_VERSION_COL,
 ]
 
 
@@ -348,9 +415,18 @@ WRITEBACK_INCONCLUSIVE_OUTCOMES: Tuple[str, ...] = (
 WRITEBACK_OUTCOME_VALUES: Tuple[str, ...] = tuple(VALID_OUTCOMES)
 
 # DTYPES (informational; CSV is text, dtypes are applied on read).
+# SH-003 v129 ROOT FIX: added dtypes for the richer schema columns.
 WRITEBACK_DTYPES: dict = {
+    # Simple identifier columns (backward compat).
     DRUG_COL: "str",
     DISEASE_COL: "str",
+    # Richer schema columns (SH-003 v129).
+    DRUG_ID_COL: "str",
+    DRUG_NAME_COL: "str",
+    DISEASE_ID_COL: "str",
+    DISEASE_NAME_COL: "str",
+    SCORE_COL: "float",
+    # Outcome + audit metadata.
     OUTCOME_COL: "str",
     TIMESTAMP_COL: "str",
     VALIDATED_BY_COL: "str",
@@ -398,7 +474,7 @@ __all__ = [
     "LEGACY_RL_VALIDATED_CSV",
     "get_validated_csv_path",
     "ensure_csv_dir",
-    # Columns
+    # Columns (simple — backward compat)
     "OUTCOME_COL",
     "DRUG_COL",
     "DISEASE_COL",
@@ -411,6 +487,13 @@ __all__ = [
     "WRITEBACK_VERSION_COL",
     "WRITEBACK_CSV_COLUMNS",
     "REQUIRED_COLUMNS",
+    # Columns (richer schema — SH-003 v129 ROOT FIX)
+    "DRUG_ID_COL",
+    "DRUG_NAME_COL",
+    "DISEASE_ID_COL",
+    "DISEASE_NAME_COL",
+    "SCORE_COL",
+    "OPTIONAL_COLUMNS",
     # Outcomes
     "OUTCOME_VALIDATED_POSITIVE",
     "OUTCOME_VALIDATED_TOXIC",

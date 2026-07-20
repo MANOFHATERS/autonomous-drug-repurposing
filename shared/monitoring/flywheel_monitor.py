@@ -34,10 +34,12 @@ import csv
 import json
 import logging
 import os
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -511,6 +513,549 @@ def alert_on_failures(statuses: List[FlywheelStepStatus]) -> int:
     return len(failures)
 
 
+# ===========================================================================
+# SH-013 v129 ROOT FIX (Teammate 14, forensic, root-level, no surface fix):
+# ATOMIC DATA FLYWHEEL TRIGGER
+# ===========================================================================
+# The audit found that the data flywheel trigger→fine-tune hop was broken:
+# writeback writes to validated_hypotheses.csv AND retrain_triggered.json,
+# then retrain_on_validated reads the CSV and fine-tunes the model. If the
+# retrain FAILS (e.g., checkpoint corrupt, OOM, bug), the CSV and JSON have
+# ALREADY been updated — the validated pair is recorded as "processed" but
+# the model never learned it. The next run sees the pair in the CSV and
+# skips it (idempotent), so the model NEVER learns from this validation.
+# This is silent data loss in the flywheel — the exact pattern the audit
+# flagged as "aspirational rather than actual".
+#
+# ROOT FIX: this function makes the trigger ATOMIC. It:
+#   1. Validates inputs (drug, disease, outcome must be non-empty + valid).
+#   2. BACKS UP the current validated_hypotheses.csv and retrain_triggered.json.
+#   3. Appends the validated hypothesis to the CSV (atomic write: temp + rename).
+#   4. Appends to the retrain trigger JSON (atomic write: temp + rename).
+#   5. Calls retrain_on_validated to fine-tune the GT model.
+#   6. If retrain fails OR raises, ROLLS BACK the CSV and JSON to their
+#      pre-trigger state (restores from backup).
+#   7. Cleans up backups on success.
+#   8. Returns a status dict.
+#
+# The atomicity guarantee: either BOTH the writeback AND the retrain succeed,
+# or NEITHER does. This is the "single transaction" the audit requires.
+#
+# This function is the SINGLE entry point for the data flywheel trigger.
+# The frontend's /api/hypothesis/validate route, the Airflow weekly task,
+# and any other trigger source SHOULD call this function (not the raw
+# write_validated_hypothesis + retrain_on_validated pair).
+# ===========================================================================
+
+
+def _atomic_write_csv(
+    csv_path: str,
+    rows: List[Dict[str, str]],
+    fieldnames: List[str],
+) -> None:
+    """Atomically write a CSV file (temp file + fsync + rename).
+
+    This is the low-level atomic write primitive. It writes to a temp file
+    in the SAME directory as csv_path, fsyncs the temp file, then renames
+    it to csv_path. On POSIX systems, rename is atomic — a reader either
+    sees the old file or the new file, never a partial write.
+    """
+    csv_dir = os.path.dirname(csv_path)
+    if csv_dir:
+        os.makedirs(csv_dir, exist_ok=True)
+    # NamedTemporaryFile in the SAME directory as the target (so rename is atomic).
+    # delete=False because we rename it manually.
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(csv_path)}.",
+        suffix=".tmp",
+        dir=csv_dir or None,
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+        # fsync the temp file before rename for durability.
+        import os as _os_mod
+        if hasattr(_os_mod, "fsync"):
+            with open(tmp_path, "rb") as f:
+                _os_mod.fsync(f.fileno())
+        # Atomic rename (POSIX). On Windows, os.replace is atomic too.
+        os.replace(tmp_path, csv_path)
+    except Exception:
+        # Clean up the temp file on any error.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write_json(json_path: str, data: Any) -> None:
+    """Atomically write a JSON file (temp file + fsync + rename)."""
+    json_dir = os.path.dirname(json_path)
+    if json_dir:
+        os.makedirs(json_dir, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(json_path)}.",
+        suffix=".tmp",
+        dir=json_dir or None,
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write("\n")
+        import os as _os_mod
+        if hasattr(_os_mod, "fsync"):
+            with open(tmp_path, "rb") as f:
+                _os_mod.fsync(f.fileno())
+        os.replace(tmp_path, json_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _read_csv_rows(csv_path: str) -> Tuple[List[Dict[str, str]], List[str]]:
+    """Read a CSV file and return (rows, fieldnames). Returns ([], []) if not exists."""
+    if not os.path.exists(csv_path):
+        return [], []
+    with open(csv_path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        fieldnames = reader.fieldnames or []
+        return rows, fieldnames
+
+
+def _read_json_list(json_path: str) -> List[Dict[str, Any]]:
+    """Read a JSON file and return a list of dicts. Returns [] if not exists or invalid."""
+    if not os.path.exists(json_path):
+        return []
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+        return []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def trigger_flywheel_retrain_atomically(
+    drug: str,
+    disease: str,
+    outcome: str,
+    checkpoint_path: str,
+    validated_by: str = "automated",
+    validation_study_id: Optional[str] = None,
+    notes: str = "",
+    original_gt_score: Optional[float] = None,
+    original_rl_rank: Optional[int] = None,
+    fine_tune_epochs: int = 10,
+    learning_rate: float = 1e-4,
+    csv_path: Optional[str] = None,
+    retrain_trigger_path: Optional[str] = None,
+    output_checkpoint_path: Optional[str] = None,
+    skip_retrain: bool = False,
+    drug_id: Optional[str] = None,
+    drug_name: Optional[str] = None,
+    disease_id: Optional[str] = None,
+    disease_name: Optional[str] = None,
+    score: Optional[float] = None,
+) -> Dict[str, Any]:
+    """SH-013 v129 ROOT FIX: Atomically trigger the data flywheel.
+
+    This is the SINGLE entry point for the data flywheel trigger. It
+    atomically writes a validated hypothesis to the CSV + JSON trigger,
+    then calls retrain_on_validated to fine-tune the GT model. If the
+    retrain fails, the CSV and JSON are ROLLED BACK to their pre-trigger
+    state — no silent data loss.
+
+    The atomicity guarantee: either BOTH the writeback AND the retrain
+    succeed, or NEITHER does. This is the "single transaction" the audit
+    requires (SH-013).
+
+    Args:
+        drug: Drug name (e.g. "aspirin"). REQUIRED.
+        disease: Disease name (e.g. "diabetes"). REQUIRED.
+        outcome: One of VALID_OUTCOMES (validated_positive |
+            validated_toxic | validated_negative | invalidated). REQUIRED.
+        checkpoint_path: Path to the trained GT checkpoint (.pt file).
+        validated_by: Who validated (e.g. "wet_lab:partner_a").
+        validation_study_id: Optional study ID (e.g. "NCT12345678").
+        notes: Free-text notes from the validator.
+        original_gt_score: The GT model's original prediction score [0, 1].
+        original_rl_rank: The RL ranker's original rank (1-indexed).
+        fine_tune_epochs: Number of fine-tune epochs (default 10).
+        learning_rate: Fine-tune learning rate (default 1e-4).
+        csv_path: Path to validated_hypotheses.csv. If None, uses
+            get_validated_csv_path().
+        retrain_trigger_path: Path to retrain_triggered.json. If None,
+            uses <repo>/graph_transformer/retrain_triggered.json.
+        output_checkpoint_path: Where to save the fine-tuned model. If
+            None, overwrites the input checkpoint.
+        skip_retrain: If True, only writeback (no retrain). For testing
+            the atomic write/rollback in isolation.
+        drug_id: Optional canonical drug ID (e.g. InChIKey) — SH-003 v129.
+        drug_name: Optional explicit drug name field — SH-003 v129.
+        disease_id: Optional canonical disease ID (e.g. DOID) — SH-003 v129.
+        disease_name: Optional explicit disease name field — SH-003 v129.
+        score: Optional composite score — SH-003 v129.
+
+    Returns:
+        Dict with keys:
+        - status: "success" | "rolled_back" | "writeback_only"
+        - validated_pair: Tuple[str, str] — the (drug, disease) pair.
+        - outcome: str — the outcome enum value.
+        - csv_path: str — the CSV path.
+        - retrain_trigger_path: str — the JSON trigger path.
+        - retrain_result: Dict — the result from retrain_on_validated (if run).
+        - error: Optional[str] — error message if rolled back.
+        - timestamp: str — ISO 8601 timestamp of the trigger.
+        - rollback_performed: bool — True if rollback was triggered.
+    """
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    # ------------------------------------------------------------------
+    # Step 1: import the canonical schema constants.
+    # ------------------------------------------------------------------
+    try:
+        import sys as _sys
+        _repo_root = str(Path(__file__).resolve().parents[2])
+        if _repo_root not in _sys.path:
+            _sys.path.insert(0, _repo_root)
+        from shared.contracts.writeback import (
+            DRUG_COL, DISEASE_COL, OUTCOME_COL, TIMESTAMP_COL,
+            VALIDATED_BY_COL, VALIDATION_STUDY_ID_COL, NOTES_COL,
+            ORIGINAL_GT_SCORE_COL, ORIGINAL_RL_RANK_COL, WRITEBACK_VERSION_COL,
+            DRUG_ID_COL, DRUG_NAME_COL, DISEASE_ID_COL, DISEASE_NAME_COL, SCORE_COL,
+            WRITEBACK_CSV_COLUMNS, VALID_OUTCOMES, WRITEBACK_VERSION,
+            get_validated_csv_path,
+        )
+    except Exception as exc:
+        return {
+            "status": "rolled_back",
+            "validated_pair": (drug or "", disease or ""),
+            "outcome": outcome or "",
+            "csv_path": csv_path or "",
+            "retrain_trigger_path": retrain_trigger_path or "",
+            "retrain_result": {},
+            "error": f"failed to import shared.contracts.writeback: {exc}",
+            "timestamp": timestamp,
+            "rollback_performed": False,
+        }
+
+    # ------------------------------------------------------------------
+    # Step 2: validate inputs.
+    # ------------------------------------------------------------------
+    if not drug or not isinstance(drug, str) or not drug.strip():
+        return {
+            "status": "rolled_back",
+            "validated_pair": (drug or "", disease or ""),
+            "outcome": outcome or "",
+            "csv_path": csv_path or "",
+            "retrain_trigger_path": retrain_trigger_path or "",
+            "retrain_result": {},
+            "error": "drug must be a non-empty string",
+            "timestamp": timestamp,
+            "rollback_performed": False,
+        }
+    if not disease or not isinstance(disease, str) or not disease.strip():
+        return {
+            "status": "rolled_back",
+            "validated_pair": (drug, disease or ""),
+            "outcome": outcome or "",
+            "csv_path": csv_path or "",
+            "retrain_trigger_path": retrain_trigger_path or "",
+            "retrain_result": {},
+            "error": "disease must be a non-empty string",
+            "timestamp": timestamp,
+            "rollback_performed": False,
+        }
+    if outcome not in VALID_OUTCOMES:
+        return {
+            "status": "rolled_back",
+            "validated_pair": (drug, disease),
+            "outcome": outcome or "",
+            "csv_path": csv_path or "",
+            "retrain_trigger_path": retrain_trigger_path or "",
+            "retrain_result": {},
+            "error": f"outcome {outcome!r} is not valid. Must be one of: {list(VALID_OUTCOMES)}",
+            "timestamp": timestamp,
+            "rollback_performed": False,
+        }
+
+    # Resolve paths.
+    if csv_path is None:
+        csv_path = get_validated_csv_path()
+    if retrain_trigger_path is None:
+        _repo_root = Path(__file__).resolve().parents[2]
+        retrain_trigger_path = str(_repo_root / "graph_transformer" / "retrain_triggered.json")
+
+    # ------------------------------------------------------------------
+    # Step 3: BACK UP the current CSV and JSON (for rollback).
+    # ------------------------------------------------------------------
+    csv_backup = csv_path + ".bak"
+    json_backup = retrain_trigger_path + ".bak"
+    try:
+        if os.path.exists(csv_path):
+            shutil.copy2(csv_path, csv_backup)
+        else:
+            # Remove stale backup if CSV doesn't exist.
+            if os.path.exists(csv_backup):
+                os.unlink(csv_backup)
+        if os.path.exists(retrain_trigger_path):
+            shutil.copy2(retrain_trigger_path, json_backup)
+        else:
+            if os.path.exists(json_backup):
+                os.unlink(json_backup)
+    except Exception as exc:
+        return {
+            "status": "rolled_back",
+            "validated_pair": (drug, disease),
+            "outcome": outcome,
+            "csv_path": csv_path,
+            "retrain_trigger_path": retrain_trigger_path,
+            "retrain_result": {},
+            "error": f"failed to back up CSV/JSON for rollback: {exc}",
+            "timestamp": timestamp,
+            "rollback_performed": False,
+        }
+
+    # ------------------------------------------------------------------
+    # Step 4: APPEND to CSV (atomic write).
+    # ------------------------------------------------------------------
+    try:
+        existing_rows, existing_fieldnames = _read_csv_rows(csv_path)
+        # Merge existing fieldnames with the canonical schema (in case the
+        # existing CSV has a subset or superset of columns).
+        canonical_fieldnames = list(WRITEBACK_CSV_COLUMNS)
+        # Preserve any extra columns from the existing CSV (forward-compat).
+        for fn in existing_fieldnames:
+            if fn not in canonical_fieldnames:
+                canonical_fieldnames.append(fn)
+
+        new_row: Dict[str, str] = {
+            DRUG_COL: drug.strip(),
+            DISEASE_COL: disease.strip(),
+            OUTCOME_COL: outcome,
+            TIMESTAMP_COL: timestamp,
+            VALIDATED_BY_COL: validated_by,
+            VALIDATION_STUDY_ID_COL: validation_study_id or "",
+            NOTES_COL: notes or "",
+            ORIGINAL_GT_SCORE_COL: (
+                "" if original_gt_score is None else f"{float(original_gt_score):.6f}"
+            ),
+            ORIGINAL_RL_RANK_COL: (
+                "" if original_rl_rank is None else str(int(original_rl_rank))
+            ),
+            WRITEBACK_VERSION_COL: WRITEBACK_VERSION,
+            # SH-003 v129: richer schema columns (optional).
+            DRUG_ID_COL: drug_id or "",
+            DRUG_NAME_COL: drug_name or drug.strip(),
+            DISEASE_ID_COL: disease_id or "",
+            DISEASE_NAME_COL: disease_name or disease.strip(),
+            # SH-013 v129 ROOT FIX (bug caught in E2E test): the score
+            # column is INDEPENDENT of original_gt_score. The previous
+            # logic incorrectly required original_gt_score to be non-None
+            # before writing score — this meant score=0.87 with no
+            # original_gt_score wrote "" instead of "0.870000". The score
+            # column represents the composite/final score (which may differ
+            # from the original GT prediction). Write it whenever it's
+            # provided.
+            SCORE_COL: "" if score is None else f"{float(score):.6f}",
+        }
+        all_rows = existing_rows + [new_row]
+        _atomic_write_csv(csv_path, all_rows, canonical_fieldnames)
+        logger.info(
+            "SH-013 v129: atomically appended validated hypothesis to %s "
+            "(row %d, outcome=%s)", csv_path, len(all_rows), outcome,
+        )
+    except Exception as exc:
+        # Rollback not needed — the atomic write either succeeded or didn't
+        # touch the original (temp + rename). But the backup is still there
+        # for safety; clean it up.
+        _cleanup_backup(csv_backup)
+        _cleanup_backup(json_backup)
+        return {
+            "status": "rolled_back",
+            "validated_pair": (drug, disease),
+            "outcome": outcome,
+            "csv_path": csv_path,
+            "retrain_trigger_path": retrain_trigger_path,
+            "retrain_result": {},
+            "error": f"failed to atomically write CSV: {exc}",
+            "timestamp": timestamp,
+            "rollback_performed": False,
+        }
+
+    # ------------------------------------------------------------------
+    # Step 5: APPEND to retrain_triggered.json (atomic write).
+    # ------------------------------------------------------------------
+    try:
+        trigger_entries = _read_json_list(retrain_trigger_path)
+        new_entry = {
+            "drug": drug.strip(),
+            "disease": disease.strip(),
+            "outcome": outcome,
+            "validated_at": timestamp,
+            "validated_by": validated_by,
+            "validation_study_id": validation_study_id or "",
+            # SH-003 v129: richer schema fields (optional).
+            "drug_id": drug_id or "",
+            "drug_name": drug_name or drug.strip(),
+            "disease_id": disease_id or "",
+            "disease_name": disease_name or disease.strip(),
+        }
+        trigger_entries.append(new_entry)
+        _atomic_write_json(retrain_trigger_path, trigger_entries)
+        logger.info(
+            "SH-013 v129: atomically appended trigger entry to %s "
+            "(entry %d, outcome=%s)",
+            retrain_trigger_path, len(trigger_entries), outcome,
+        )
+    except Exception as exc:
+        # CSV was already updated. Roll it back to the backup.
+        _restore_from_backup(csv_path, csv_backup)
+        _cleanup_backup(csv_backup)
+        _cleanup_backup(json_backup)
+        return {
+            "status": "rolled_back",
+            "validated_pair": (drug, disease),
+            "outcome": outcome,
+            "csv_path": csv_path,
+            "retrain_trigger_path": retrain_trigger_path,
+            "retrain_result": {},
+            "error": f"failed to atomically write JSON trigger: {exc}",
+            "timestamp": timestamp,
+            "rollback_performed": True,
+        }
+
+    # ------------------------------------------------------------------
+    # Step 6: if skip_retrain, stop here (writeback only).
+    # ------------------------------------------------------------------
+    if skip_retrain:
+        _cleanup_backup(csv_backup)
+        _cleanup_backup(json_backup)
+        return {
+            "status": "writeback_only",
+            "validated_pair": (drug, disease),
+            "outcome": outcome,
+            "csv_path": csv_path,
+            "retrain_trigger_path": retrain_trigger_path,
+            "retrain_result": {"skipped": True},
+            "error": None,
+            "timestamp": timestamp,
+            "rollback_performed": False,
+        }
+
+    # ------------------------------------------------------------------
+    # Step 7: CALL retrain_on_validated (the fine-tune step).
+    # ------------------------------------------------------------------
+    retrain_result: Dict[str, Any] = {}
+    retrain_error: Optional[str] = None
+    try:
+        # Lazy import to avoid loading torch when this module is imported
+        # (the health-check functions don't need torch).
+        from graph_transformer.training.trainer import retrain_on_validated
+        retrain_result = retrain_on_validated(
+            checkpoint_path=checkpoint_path,
+            validated_csv_path=csv_path,
+            output_checkpoint_path=output_checkpoint_path,
+            fine_tune_epochs=fine_tune_epochs,
+            learning_rate=learning_rate,
+        )
+        # Check if retrain itself reported an error.
+        if retrain_result.get("error"):
+            retrain_error = retrain_result["error"]
+    except Exception as exc:
+        retrain_error = f"retrain_on_validated raised: {exc}"
+        logger.exception("SH-013 v129: retrain_on_validated raised an exception")
+
+    # ------------------------------------------------------------------
+    # Step 8: if retrain failed, ROLL BACK the CSV and JSON.
+    # ------------------------------------------------------------------
+    if retrain_error is not None:
+        logger.error(
+            "SH-013 v129: retrain failed (%s) — rolling back CSV and JSON "
+            "to their pre-trigger state. The validated pair will be retried "
+            "on the next trigger.", retrain_error,
+        )
+        _restore_from_backup(csv_path, csv_backup)
+        _restore_from_backup(retrain_trigger_path, json_backup)
+        _cleanup_backup(csv_backup)
+        _cleanup_backup(json_backup)
+        return {
+            "status": "rolled_back",
+            "validated_pair": (drug, disease),
+            "outcome": outcome,
+            "csv_path": csv_path,
+            "retrain_trigger_path": retrain_trigger_path,
+            "retrain_result": retrain_result,
+            "error": retrain_error,
+            "timestamp": timestamp,
+            "rollback_performed": True,
+        }
+
+    # ------------------------------------------------------------------
+    # Step 9: SUCCESS — clean up backups and return.
+    # ------------------------------------------------------------------
+    _cleanup_backup(csv_backup)
+    _cleanup_backup(json_backup)
+    logger.info(
+        "SH-013 v129: atomic flywheel trigger SUCCESS — pair (%s, %s) "
+        "outcome=%s written to CSV+JSON and model fine-tuned (%d pairs added).",
+        drug, disease, outcome,
+        retrain_result.get("validated_pairs_added", 0),
+    )
+    return {
+        "status": "success",
+        "validated_pair": (drug, disease),
+        "outcome": outcome,
+        "csv_path": csv_path,
+        "retrain_trigger_path": retrain_trigger_path,
+        "retrain_result": retrain_result,
+        "error": None,
+        "timestamp": timestamp,
+        "rollback_performed": False,
+    }
+
+
+def _cleanup_backup(backup_path: str) -> None:
+    """Delete a backup file if it exists. Swallows errors (best-effort)."""
+    try:
+        if os.path.exists(backup_path):
+            os.unlink(backup_path)
+    except OSError as exc:
+        logger.warning("SH-013 v129: failed to clean up backup %s: %s", backup_path, exc)
+
+
+def _restore_from_backup(target_path: str, backup_path: str) -> None:
+    """Restore a file from its backup. Swallows errors (best-effort)."""
+    try:
+        if os.path.exists(backup_path):
+            shutil.copy2(backup_path, target_path)
+            logger.info("SH-013 v129: restored %s from backup", target_path)
+        else:
+            # No backup means the file didn't exist before — delete the
+            # current file to restore the "didn't exist" state.
+            if os.path.exists(target_path):
+                os.unlink(target_path)
+                logger.info(
+                    "SH-013 v129: deleted %s (no backup — file didn't exist before)",
+                    target_path,
+                )
+    except OSError as exc:
+        logger.error(
+            "SH-013 v129: FAILED to restore %s from backup %s: %s. "
+            "The file may be in an inconsistent state — manual intervention required.",
+            target_path, backup_path, exc,
+        )
+
+
 __all__ = [
     "FlywheelStepStatus",
     "FLYWHEEL_STALENESS_HOURS",
@@ -520,4 +1065,12 @@ __all__ = [
     "check_rl_ranker_health",
     "run_all_checks",
     "alert_on_failures",
+    # SH-013 v129 ROOT FIX: atomic flywheel trigger + helpers.
+    "trigger_flywheel_retrain_atomically",
+    "_atomic_write_csv",
+    "_atomic_write_json",
+    "_read_csv_rows",
+    "_read_json_list",
+    "_cleanup_backup",
+    "_restore_from_backup",
 ]
