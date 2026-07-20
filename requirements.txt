@@ -152,4 +152,4 @@ opentelemetry-sdk>=1.25,<2.0
 # captures exceptions raised in async route handlers with request context
 # (method, path, headers filtered for PII). Pinned <3.0 to avoid breaking
 # changes in the next major release.
-sentry-sdk[fastapi]>=1.40,<3.0
+sentry-sdk[fastapi]>=2.66.0,<3.0
