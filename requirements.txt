@@ -131,3 +131,14 @@ uvicorn[standard]>=0.27,<1.0
 opentelemetry-instrumentation-fastapi>=0.45b0,<1.0
 opentelemetry-exporter-otlp>=1.25,<2.0
 opentelemetry-sdk>=1.25,<2.0
+
+# v129 TM16 ROOT FIX (Task 16.5 — Sentry SDK for error tracking, IN-043):
+# shared/observability/__init__.py::configure_app() initializes Sentry if
+# SENTRY_DSN is set in env. Falls back gracefully (no-op) when SENTRY_DSN
+# is missing — dev runs do not need a Sentry account. Production deploys
+# set SENTRY_DSN in the container env (docker-compose, K8s Secret, etc.).
+# The [fastapi] extra installs sentry_sdk.integrations.fastapi — auto-
+# captures exceptions raised in async route handlers with request context
+# (method, path, headers filtered for PII). Pinned <3.0 to avoid breaking
+# changes in the next major release.
+sentry-sdk[fastapi]>=1.40,<3.0

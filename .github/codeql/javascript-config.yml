@@ -1,0 +1,44 @@
+# =============================================================================
+# CodeQL JavaScript/TypeScript config — Autonomous Drug Repurposing Platform
+# =============================================================================
+# v129 TM16 ROOT FIX (Task 16.6): CodeQL configuration for the frontend
+# (Next.js 16 + React 19 + TypeScript). Tells CodeQL which directories
+# to index + which to ignore.
+#
+# Paths indexed:
+#   - frontend/src/  — application code (pages, components, hooks, lib)
+#   - frontend/scripts/ — operational scripts (verify-*, run-*)
+#
+# Paths excluded:
+#   - frontend/node_modules/ — third-party deps (CodeQL does not analyze
+#     third-party code, but indexing it wastes time + memory).
+#   - frontend/.next/ — Next.js build output (generated, not source).
+#   - frontend/src_backup/ — legacy backup code, not shipped.
+#   - frontend/public_backup/ — legacy static assets.
+#   - **/__tests__/** — test files (intentionally contain "unsafe"
+#     patterns like XSS test cases).
+#   - **/*.test.ts — Jest/Playwright test files.
+# =============================================================================
+
+name: "JavaScript/TypeScript CodeQL Config"
+
+paths:
+  - frontend/src
+  - frontend/scripts
+
+paths-ignore:
+  - frontend/node_modules
+  - frontend/.next
+  - frontend/src_backup
+  - frontend/public_backup
+  - "**/__tests__/**"
+  - "**/*.test.ts"
+  - "**/*.test.tsx"
+  - "**/*.test.js"
+  - "**/*.test.jsx"
+  - "**/*.spec.ts"
+  - "**/*.spec.tsx"
+  - "**/*.spec.js"
+  - "**/*.spec.jsx"
+  - frontend/playwright-report
+  - frontend/test-results
