@@ -143,6 +143,18 @@ python-dotenv>=1.0.0,<2.0
 # v122 IN-080 FIX: added upper bounds to prevent breaking major upgrades.
 fastapi>=0.110,<1.0
 uvicorn[standard]>=0.51.0,<1.0
+# TEAMMATE-4 ROOT FIX: Phase 1 service uses pandas to compute the
+# UNION of uniprot_ids + string_ids (was previously using max() which
+# undercounted proteins that appear in only one source). pandas is
+# already in the top-level requirements.txt but listed here too so a
+# phase1-only install (pip install -r phase1/requirements.txt) gets it.
+pandas>=2.1.4,<3.0
+# TEAMMATE-4 ROOT FIX: phase1/service.py uses Pydantic v2 for the
+# ValidatedHypothesisRequest model on POST /datasets/validated_hypotheses.
+# FastAPI already pulls pydantic as a transitive dep, but pinning it
+# explicitly here ensures the v2 API (field_validator, ConfigDict) is
+# available.
+pydantic>=2.5,<3.0
 
 # v39 ROOT FIX (P1 #66): added filelock and pyarrow. base_pipeline.py
 # imports filelock with a try/except fallback, but the fallback sets
