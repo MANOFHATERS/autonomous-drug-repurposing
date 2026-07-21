@@ -66,7 +66,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 
@@ -75,12 +75,14 @@ import pandas as pd
 # ``contracts.feature_validator`` (from inside phase1/, e.g. DAGs / tests).
 try:
     from phase1.contracts.phase1_schema import (
+        ColumnSpec,
         PHASE1_OUTPUT_SCHEMA,
         SourceSpec,
         get_all_aliases,
     )
 except ImportError:  # pragma: no cover -- exercised when imported inside phase1/
     from contracts.phase1_schema import (  # type: ignore[no-redef]
+        ColumnSpec,
         PHASE1_OUTPUT_SCHEMA,
         SourceSpec,
         get_all_aliases,
@@ -159,18 +161,159 @@ def _column_null_rate(df: pd.DataFrame, column: str) -> Tuple[float, int]:
     return (null_count / total, total)
 
 
+def _normalize_spec(source_key: str, spec_obj: Any) -> SourceSpec:
+    """Normalize a schema spec value to a ``SourceSpec`` instance.
+
+    POLYMORPHIC SCHEMA SUPPORT (Teammate 2 — P1 to P3 Integration):
+
+    The issue's verification script passes a BARE-DICT schema shaped like::
+
+        {
+            "pubchem_enrichment": {
+                "filename": "pubchem_enrichment.csv",
+                "required_columns": ["inchikey", "cid", "xlogp", "isomeric_smiles"],
+                "required": True,
+            }
+        }
+
+    while the production DAG passes the rich ``SourceSpec`` dataclass
+    defined in ``phase1_schema.py``. A validator that ONLY accepts
+    ``SourceSpec`` would crash on the issue's verification test with
+    ``AttributeError: 'dict' object has no attribute 'min_rows'`` —
+    which is exactly the bug we are fixing.
+
+    This function bridges the two shapes: if ``spec_obj`` is already a
+    ``SourceSpec``, return it unchanged. If it is a ``dict``, convert
+    it to a ``SourceSpec`` with these field mappings:
+
+      - ``filename``           -> ``filename`` (required)
+      - ``required_columns``   -> ``required_columns`` (list of str ->
+                                  tuple of ``ColumnSpec(name=str)``,
+                                  dtype defaults to ``"string"``,
+                                  nullable defaults to ``True`` —
+                                  NULL-rate check is what enforces
+                                  non-nullness, not the dtype)
+      - ``optional_columns``   -> ``optional_columns`` (same mapping)
+      - ``any_of_groups``      -> ``any_of_groups`` (passed through)
+      - ``aliases``            -> ``aliases`` (defaults to ``()``)
+      - ``min_rows``           -> ``min_rows`` (defaults to ``1`` if
+                                  ``required`` is True, else ``0``)
+      - ``required``           -> ``min_rows`` (``True`` -> ``1``,
+                                  ``False`` -> ``0``) — only used if
+                                  ``min_rows`` is not explicitly set
+
+    The conversion is INTENTIONALLY permissive: unknown keys in the
+    dict are silently ignored (forward compatibility — the issue's
+    test schema may add new keys in future revisions without breaking
+    this validator).
+    """
+    # Fast path: already a SourceSpec.
+    if isinstance(spec_obj, SourceSpec):
+        return spec_obj
+
+    # Slow path: bare dict. Convert to SourceSpec.
+    if not isinstance(spec_obj, dict):
+        raise TypeError(
+            f"Schema spec for source '{source_key}' must be a SourceSpec "
+            f"or a dict, got {type(spec_obj).__name__}: {spec_obj!r}"
+        )
+
+    filename = spec_obj.get("filename")
+    if not filename:
+        raise ValueError(
+            f"Schema spec for source '{source_key}' is missing required "
+            f"'filename' key. Got: {sorted(spec_obj.keys())}"
+        )
+
+    # Convert required_columns (list of str) -> tuple of ColumnSpec.
+    raw_required = spec_obj.get("required_columns", []) or []
+    required_columns = tuple(
+        ColumnSpec(name=col) if isinstance(col, str) else col
+        for col in raw_required
+    )
+
+    # Convert optional_columns (list of str) -> tuple of ColumnSpec.
+    raw_optional = spec_obj.get("optional_columns", []) or []
+    optional_columns = tuple(
+        ColumnSpec(name=col) if isinstance(col, str) else col
+        for col in raw_optional
+    )
+
+    # any_of_groups: pass through (already a tuple of tuples of str).
+    any_of_groups = tuple(spec_obj.get("any_of_groups", ()) or ())
+
+    # aliases: pass through (default empty tuple).
+    aliases = tuple(spec_obj.get("aliases", ()) or ())
+
+    # min_rows: explicit value wins; otherwise infer from `required`.
+    min_rows = spec_obj.get("min_rows")
+    if min_rows is None:
+        min_rows = 1 if spec_obj.get("required", True) else 0
+
+    return SourceSpec(
+        key=source_key,
+        filename=filename,
+        aliases=aliases,
+        required_columns=required_columns,
+        any_of_groups=any_of_groups,
+        optional_columns=optional_columns,
+        min_rows=int(min_rows),
+        description=spec_obj.get("description", ""),
+    )
+
+
+def _resolve_csv_path_simple(spec: SourceSpec, processed_dir: Path) -> Path | None:
+    """Resolve the CSV path for ``spec`` using ONLY its ``filename`` and
+    ``aliases`` (no schema-registry lookup).
+
+    This is a FALLBACK for the bare-dict schema case where the source
+    key may NOT be registered in ``PHASE1_OUTPUT_SCHEMA`` (e.g. the
+    issue's verification test creates a schema with only one source
+    "pubchem_enrichment" — the registry lookup for that key WOULD
+    work, but a future test might use a synthetic source key not in
+    the registry).
+
+    For ``SourceSpec`` objects from the production schema, the primary
+    lookup via ``get_all_aliases(spec.key)`` is preferred (it returns
+    the canonical filename + any aliases declared in the schema).
+    """
+    candidates: list[str] = []
+    if spec.filename:
+        candidates.append(spec.filename)
+    candidates.extend(spec.aliases)
+    for name in candidates:
+        candidate = processed_dir / name
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
 def validate_feature_completeness(
     processed_dir: Path,
-    schema: Dict[str, SourceSpec] | None = None,
+    schema: Dict[str, Any] | None = None,
     max_null_rate: float = 0.05,
 ) -> Tuple[bool, List[str]]:
     """Validate that every declared column has acceptable NULL rate.
+
+    POLYMORPHIC SCHEMA SUPPORT (Teammate 2 — P1 to P3 Integration):
+        ``schema`` may be either:
+
+        * A ``Dict[str, SourceSpec]`` (the production shape used by
+          ``master_pipeline_dag.validate_output``), OR
+        * A ``Dict[str, dict]`` where each value is a bare dict with
+          keys ``filename``, ``required_columns``, ``optional_columns``,
+          ``any_of_groups``, ``aliases``, ``min_rows``, ``required``,
+          ``description`` (the shape used by the issue's verification
+          test).
+
+        Both shapes are normalized to ``SourceSpec`` internally before
+        validation runs, so the rest of the function is shape-agnostic.
 
     Parameters
     ----------
     processed_dir : Path
         Directory containing the Phase 1 output CSVs.
-    schema : Dict[str, SourceSpec], optional
+    schema : Dict[str, SourceSpec|dict], optional
         Schema to validate against. Defaults to ``PHASE1_OUTPUT_SCHEMA``.
         Callers may pass a subset (e.g. only ``pubchem_enrichment``) for
         targeted checks.
@@ -209,18 +352,43 @@ def validate_feature_completeness(
     processed_dir = Path(processed_dir)
     failures: List[str] = []
 
-    for source_key, spec in schema.items():
+    for source_key, raw_spec in schema.items():
+        # POLYMORPHIC SCHEMA SUPPORT: normalize bare-dict specs to
+        # SourceSpec so the rest of the function is shape-agnostic.
+        # This is the ROOT FIX for the issue's verification test which
+        # passes a dict-based schema, not a SourceSpec-based one.
+        try:
+            spec = _normalize_spec(source_key, raw_spec)
+        except (TypeError, ValueError) as exc:
+            failures.append(
+                f"Source '{source_key}': invalid schema spec: {exc}"
+            )
+            continue
+
         # Optional sources (min_rows == 0) are not subject to NULL-rate
         # checks — if the source produced 0 rows, that's allowed by the
         # contract. We can't compute a meaningful NULL rate on a 0-row file.
         if spec.min_rows < 1:
             continue
 
+        # Resolve the CSV path. Try the schema-registry lookup first
+        # (works for SourceSpec from PHASE1_OUTPUT_SCHEMA), then fall
+        # back to a simple filename+aliases lookup (works for bare-dict
+        # schemas whose source_key may not be in the registry).
         csv_path = _resolve_source_csv(spec, processed_dir)
         if csv_path is None:
+            csv_path = _resolve_csv_path_simple(spec, processed_dir)
+        if csv_path is None:
+            # Build a helpful "searched" list for the failure message.
+            searched = list(get_all_aliases(source_key))
+            if spec.filename and spec.filename not in searched:
+                searched.append(spec.filename)
+            for alias in spec.aliases:
+                if alias not in searched:
+                    searched.append(alias)
             failures.append(
                 f"Source '{source_key}': CSV file not found "
-                f"(searched: {get_all_aliases(source_key)} in {processed_dir})."
+                f"(searched: {searched} in {processed_dir})."
             )
             continue
 

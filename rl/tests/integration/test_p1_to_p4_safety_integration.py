@@ -233,3 +233,175 @@ def test_run_pipeline_uses_phase1_safety_when_dir_set(monkeypatch):
         )
         assert reward_fn._safety_source in ('merged', 'phase1')
         assert 'fakewithdrawaldrug' in reward_fn._withdrawn_drugs
+
+
+# =============================================================================
+# FORENSIC v133 REGRESSION TESTS — numpy.bool_ handling (P0 patient safety)
+# =============================================================================
+# These tests catch the regression where ``_check_withdrawn`` and
+# ``RewardFunction.compute()`` used ``if _rw is True:`` (identity check),
+# which FAILS for ``numpy.bool_`` values returned by pandas when reading
+# a CSV with a bool-dtype column.
+#
+# In production:
+#   1. Phase 1 DrugBank pipeline writes ``drugbank_drugs.csv`` with
+#      ``is_withdrawn`` as a bool column.
+#   2. pandas reads the CSV → ``df["is_withdrawn"].dtype == bool``.
+#   3. When the RL env iterates rows, ``row.get("is_withdrawn")`` returns
+#      a ``numpy.bool_`` instance (NOT a Python ``bool``).
+#   4. The identity check ``numpy.bool_(True) is True`` returns ``False``
+#      because they are different types.
+#   5. Result: the withdrawn drug is NOT detected → ranked HIGH →
+#      PATIENT SAFETY HAZARD.
+#
+# The fix uses ``isinstance(_rw, (bool, np.bool_))`` which correctly
+# matches BOTH Python ``bool`` AND ``numpy.bool_``.
+# =============================================================================
+
+@pytest.mark.integration
+def test_check_withdrawn_handles_numpy_bool_true():
+    """_check_withdrawn must detect numpy.bool_(True) as withdrawn.
+
+    This is the P0 patient-safety regression test. When pandas reads a CSV
+    with a bool-dtype column, row.get('is_withdrawn') returns numpy.bool_,
+    NOT Python bool. The previous `is True` identity check failed for
+    numpy.bool_, causing withdrawn drugs to be missed.
+    """
+    import numpy as np
+    from rl.rl_drug_ranker import RewardFunction, _check_withdrawn
+
+    reward_fn = RewardFunction()
+    # Simulate a row from a pandas DataFrame with bool dtype
+    row = pd.Series({'is_withdrawn': np.bool_(True)})
+    is_withdrawn, is_unknown = _check_withdrawn(row, 'fakewithdrawaldrug_xyz', reward_fn)
+    assert is_withdrawn is True, (
+        'numpy.bool_(True) must be detected as withdrawn — patient-safety '
+        'critical. Previous code used `is True` identity check which fails '
+        'for numpy.bool_ (different type from Python bool).'
+    )
+    assert is_unknown is False
+
+
+@pytest.mark.integration
+def test_check_withdrawn_handles_numpy_bool_false():
+    """_check_withdrawn must treat numpy.bool_(False) as not withdrawn."""
+    import numpy as np
+    from rl.rl_drug_ranker import RewardFunction, _check_withdrawn
+
+    reward_fn = RewardFunction()
+    row = pd.Series({'is_withdrawn': np.bool_(False)})
+    is_withdrawn, is_unknown = _check_withdrawn(row, 'aspirin_not_in_set', reward_fn)
+    assert is_withdrawn is False
+    assert is_unknown is False
+
+
+@pytest.mark.integration
+def test_production_csv_to_compute_withdrawn_drug_gets_negative_reward():
+    """PRODUCTION REGRESSION TEST: CSV → pandas → row → compute() → -1.0.
+
+    This test simulates the REAL production path:
+      1. Write a CSV with is_withdrawn=True (as Phase 1 DrugBank pipeline does)
+      2. Read it with pd.read_csv (is_withdrawn column gets bool dtype)
+      3. Get a row from the DataFrame (row.get('is_withdrawn') returns numpy.bool_)
+      4. Call RewardFunction.compute(row) — must return -1.0
+
+    The previous code failed this test because `numpy.bool_(True) is True`
+    returns False. The fix uses isinstance(_rw, (bool, np.bool_)).
+    """
+    from rl.rl_drug_ranker import RewardFunction, DRUG_COL, DISEASE_COL, FEATURE_COLS
+
+    csv_content = (
+        'drug,disease,is_withdrawn,gnn_score,safety_score,market_score,'
+        'confidence,pathway_score,patent_score,rare_disease_flag,'
+        'unmet_need_score,efficacy_score,adme_score\n'
+        'fakewithdrawaldrug_xyz,some_disease,True,0.95,1.0,0.9,0.9,0.9,0.9,'
+        '0.9,0.9,0.9,0.9\n'
+        'aspirin,headache,False,0.95,1.0,0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.9\n'
+    )
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+        f.write(csv_content)
+        csv_path = f.name
+    try:
+        df = pd.read_csv(csv_path)
+        # Confirm the CSV produced a bool-dtype column (this is what triggers
+        # the numpy.bool_ behavior in production).
+        assert df['is_withdrawn'].dtype == bool, (
+            f'Test setup error: expected bool dtype, got {df["is_withdrawn"].dtype}'
+        )
+
+        # Get the row with is_withdrawn=True
+        row_withdrawn = df.iloc[0]
+        # Verify the value is numpy.bool_ (the bug trigger)
+        _rw = row_withdrawn.get('is_withdrawn')
+        assert isinstance(_rw, (bool,)) or hasattr(_rw, 'item'), (
+            f'Test setup error: expected numpy.bool_ or bool, got {type(_rw).__name__}'
+        )
+
+        # The CRITICAL assertion: compute() must return -1.0
+        reward_fn = RewardFunction()
+        reward = reward_fn.compute(row_withdrawn)
+        assert reward == -1.0, (
+            f'PATIENT SAFETY HAZARD: is_withdrawn=True (numpy.bool_) drug '
+            f'got reward={reward} (expected -1.0). The `_check_withdrawn` '
+            f'helper must use isinstance(_rw, (bool, np.bool_)) instead of '
+            f'`_rw is True` (identity check fails for numpy.bool_).'
+        )
+
+        # Sanity check: the safe drug should NOT get -1.0
+        row_safe = df.iloc[1]
+        reward_safe = reward_fn.compute(row_safe)
+        assert reward_safe != -1.0, (
+            f'Safe drug (is_withdrawn=False) got reward=-1.0 — over-rejection.'
+        )
+    finally:
+        os.unlink(csv_path)
+
+
+@pytest.mark.integration
+def test_is_withdrawn_truthy_handles_numpy_bool():
+    """_is_withdrawn_truthy must handle numpy.bool_ correctly."""
+    import numpy as np
+    from rl.reward import _is_withdrawn_truthy, _is_withdrawn_unknown
+
+    assert _is_withdrawn_truthy(np.bool_(True)) is True
+    assert _is_withdrawn_truthy(np.bool_(False)) is False
+    assert _is_withdrawn_truthy(True) is True
+    assert _is_withdrawn_truthy(False) is False
+    assert _is_withdrawn_truthy('true') is True
+    assert _is_withdrawn_truthy('false') is False
+    assert _is_withdrawn_truthy(None) is False
+    # numpy.bool_ is never "unknown"
+    assert _is_withdrawn_unknown(np.bool_(True)) is False
+    assert _is_withdrawn_unknown(np.bool_(False)) is False
+    assert _is_withdrawn_unknown(None) is True
+    assert _is_withdrawn_unknown('') is True
+
+
+@pytest.mark.integration
+def test_reward_function_compute_redundant_check_handles_numpy_bool():
+    """RewardFunction.compute()'s redundant is_withdrawn check must handle numpy.bool_.
+
+    The compute() method has a defense-in-depth redundant check after
+    _check_withdrawn. This check must also handle numpy.bool_ correctly.
+    """
+    import numpy as np
+    from rl.rl_drug_ranker import RewardFunction, DRUG_COL, DISEASE_COL, FEATURE_COLS
+
+    # Build a row with numpy.bool_ is_withdrawn=True for a drug NOT in any set
+    row = pd.Series({
+        DRUG_COL: 'unknownwithdrawndrug_xyz',
+        DISEASE_COL: 'some_disease',
+        'is_withdrawn': np.bool_(True),
+    })
+    for col in FEATURE_COLS:
+        row[col] = 0.9
+    row['safety_score'] = 1.0
+    row['gnn_score'] = 0.95
+
+    reward_fn = RewardFunction()
+    reward = reward_fn.compute(row)
+    assert reward == -1.0, (
+        f'numpy.bool_(True) drug got reward={reward} (expected -1.0). '
+        f'The redundant is_withdrawn check in compute() must use '
+        f'isinstance(_rw, (bool, np.bool_)) instead of `is True`.'
+    )
