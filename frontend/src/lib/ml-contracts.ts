@@ -214,6 +214,18 @@ export const GraphSourceStatSchema = z.object({
 export const KgStatsResponseSchema = z.object({
   sources: z.array(GraphSourceStatSchema),
   nodeCount: z.number(),
+  // Teammate 8 ROOT FIX: canonicalNodeCount — count of CANONICAL-type
+  // nodes only (Compound, Protein, Pathway, Disease, ClinicalOutcome).
+  // The Phase 2 service emits this directly (phase2/service.py:
+  // _compute_canonical_node_count); the backend FastAPI proxy passes
+  // it through unchanged. The frontend's Knowledge Graph Explorer
+  // displays BOTH nodeCount (total, includes non-canonical types like
+  // Gene/MedDRA_Term/Anatomy) AND canonicalNodeCount (canonical
+  // scientific entities only). The field is OPTIONAL in the schema
+  // for backward compat with older Phase 2 deployments that don't
+  // emit it yet — when missing, kg-service.ts derives it client-side
+  // by summing the canonical entries in nodeTypeCounts.
+  canonicalNodeCount: z.number().optional(),
   edgeCount: z.number(),
   nodeTypeCounts: z.record(z.string(), z.number()),
   edgeTypeCounts: z.record(z.string(), z.number()),
@@ -304,13 +316,33 @@ export type DatasetHealthResponse = z.infer<typeof DatasetHealthResponseSchema>;
 // ============================================================================
 // Canonical node types — per project docx Phase 2 (5 types)
 // ============================================================================
+// Teammate 8 ROOT FIX: the previous list used "ClinicalOutcomes" (PLURAL),
+// but the Phase 2 KG label vocabulary uses the SINGULAR form
+// "ClinicalOutcome" (see phase2/service.py::CANONICAL_NODE_TYPES and
+// drugos_graph.schemas). The plural form caused every ClinicalOutcome
+// node to be classified as non-canonical by the frontend's transform
+// layer (kg-service.ts:175 `if (CANONICAL_NODE_TYPE_SET.has(type))`),
+// silently dropping them from the canonical nodeCount. The dashboard
+// under-reported the canonical node count by the entire
+// ClinicalOutcome population — a scientific reporting bug.
+//
+// ROOT FIX: align with the Phase 2 contract — use "ClinicalOutcome"
+// (singular). This matches:
+//   - phase2/service.py:CANONICAL_NODE_TYPES (the Python source of truth)
+//   - drugos_graph.schemas (the Pydantic KG label enum)
+//   - phase2/drugos_graph/kg_builder.py (the Neo4j label writer)
+//
+// The previous plural form was a typo that propagated from an early
+// Phase 2 design doc; the Phase 2 service code has ALWAYS used the
+// singular form. This fix aligns the frontend with the actual Phase 2
+// implementation.
 
 export const CANONICAL_NODE_TYPES = [
   "Compound",
   "Protein",
   "Pathway",
   "Disease",
-  "ClinicalOutcomes",
+  "ClinicalOutcome", // SINGULAR — matches Phase 2 KG label vocabulary
 ] as const;
 
 export type CanonicalNodeType = (typeof CANONICAL_NODE_TYPES)[number];

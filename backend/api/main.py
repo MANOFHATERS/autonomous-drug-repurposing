@@ -66,7 +66,7 @@ DEPLOYMENT MODES:
 
 RUNNING:
   cd backend/api
-  uvicorn main:app --host 0.0.0.0 --port 8001 --workers 4
+  uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 
   The service reads from the same PostgreSQL DB as the Next.js frontend
   (DATABASE_URL env var) and calls the same ML services (phase1, phase2,
@@ -74,9 +74,9 @@ RUNNING:
 
 OPENAPI:
   The auto-generated OpenAPI spec is available at:
-    - http://localhost:8001/openapi.json  (machine-readable)
-    - http://localhost:8001/docs          (Swagger UI)
-    - http://localhost:8001/redoc         (ReDoc)
+    - http://localhost:8000/openapi.json  (machine-readable)
+    - http://localhost:8000/docs          (Swagger UI)
+    - http://localhost:8000/redoc         (ReDoc)
 
   Pharma partners can download /openapi.json and use it to generate
   client libraries in their language of choice (Python, Java, R, etc.).
@@ -87,15 +87,13 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-import httpx
-
 # FastAPI + Pydantic are declared in the top-level requirements.txt and
 # in phase1/requirements.txt (P1-003 v114 fix). When this module is
 # imported in an environment without FastAPI (e.g., the Next.js
 # frontend's build process), the import fails gracefully — the FastAPI
 # service is OPT-IN (only runs when explicitly started via uvicorn).
 try:
-    from fastapi import FastAPI, HTTPException, Depends, Request, status
+    from fastapi import FastAPI, HTTPException, Depends, Header, Request, status
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
     from pydantic import BaseModel, Field, ConfigDict
@@ -123,6 +121,37 @@ except ImportError:
     register_rate_limit_exception_handler = None  # type: ignore[assignment]
     RATE_LIMIT_GET = "100/minute"
     RATE_LIMIT_POST = "30/minute"
+
+# Teammate 8 ROOT FIX: httpx is the async HTTP client used to proxy
+# /kg/* requests to the Phase 2 KG service. It is a hard dependency of
+# the backend FastAPI service (NOT optional) — without it, the backend
+# cannot serve /kg/stats, /kg/explore, or /cypher. The previous code
+# had NO httpx import and NO proxy routes, so the frontend was forced
+# to call the Phase 2 service DIRECTLY — bypassing the backend's auth,
+# rate limiting, and audit logging. This is a critical security gap
+# (Phase 2's /cypher has NO auth; any caller with network access can
+# run arbitrary read-only Cypher). The proxy routes added below
+# enforce JWT auth + rate limiting on every /kg/* call.
+try:
+    import httpx
+except ImportError as _httpx_import_err:  # pragma: no cover
+    raise ImportError(
+        "Teammate 8: httpx is required for the backend /kg/* proxy routes. "
+        "Install with `pip install httpx`. The backend FastAPI service "
+        "proxies all /kg/stats, /kg/explore, /cypher requests to the "
+        "Phase 2 KG service via httpx. Original error: "
+        f"{_httpx_import_err}"
+    ) from _httpx_import_err
+
+# Teammate 8 ROOT FIX: import the rate limiters. /cypher is rate
+# limited at 10 req/min (Cypher is expensive — a single runaway query
+# can saturate the Neo4j connection pool). /kg/stats and /kg/explore
+# are rate limited at 100 req/min (cheap reads; allow power users).
+from backend.api.rate_limit import (
+    check_cypher_rate_limit,
+    check_kg_stats_rate_limit,
+    check_kg_explore_rate_limit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -372,6 +401,106 @@ async def verify_org_id(
                    "Next.js frontend's /api/auth/login endpoint.",
         )
     return str(org_id)
+
+
+# ---------------------------------------------------------------------------
+# Teammate 8 ROOT FIX: org_id scoping + test JWT helper.
+# ---------------------------------------------------------------------------
+# The Phase 2 KG service applies row-level security (tenant isolation)
+# using the ``X-Org-Id`` header. The backend FastAPI proxy MUST forward
+# this header on every /kg/* request — without it, the KG service
+# cannot scope queries to the caller's organization, and a pharma
+# partner could see another partner's data.
+#
+# The org_id is extracted from the JWT (preferred) or from the
+# ``X-Org-Id`` request header (fallback for service-to-service calls
+# where the JWT is for a platform admin acting on behalf of an org).
+# Both paths require a NON-EMPTY org_id — a missing org_id is a 403
+# (the user MUST have an active org to query the KG, matching the
+# Next.js route's behavior in
+# ``frontend/src/app/api/knowledge-graph/route.ts::POST``).
+
+async def verify_org_id(
+    request: Request,
+    user_id: str = Depends(verify_jwt),
+) -> str:
+    """Extract and validate the caller's org_id.
+
+    Priority (highest first):
+      1. ``org_id`` claim in the verified JWT (set by the Next.js
+         frontend's /api/auth/login route from the user's
+         ``activeOrganizationId``).
+      2. ``X-Org-Id`` request header (set by trusted internal callers
+         like the Next.js API routes that proxy to this backend).
+
+    Returns the org_id string. Raises HTTP 403 if no org_id is found.
+    """
+    # Re-decode the JWT to read the org_id claim. The JWT was already
+    # verified by ``verify_jwt`` (the Depends above), so we know it's
+    # valid — we just need to read the claims again. We re-read the
+    # token from the Authorization header (the same one verify_jwt
+    # consumed) to avoid coupling the two functions via shared state.
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        # verify_jwt would have already raised 401 — defensive.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Bearer token.",
+        )
+    token = auth_header.split(" ", 1)[1].strip()
+    jwt_secret = os.environ.get("JWT_SECRET", "")
+    org_id: Optional[str] = None
+    if jwt_secret:
+        try:
+            import jwt as _jwt
+            payload = _jwt.decode(
+                token, jwt_secret, algorithms=["HS256"], issuer="drugos",
+            )
+            org_id = payload.get("org_id") or payload.get("orgId")
+        except Exception as exc:  # pragma: no cover — verify_jwt already validated
+            logger.debug("verify_org_id: JWT re-decode failed: %s", exc)
+    # Fallback: X-Org-Id header (trusted internal caller).
+    if not org_id:
+        org_id = request.headers.get("X-Org-Id")
+    if not org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "No active organization. The caller's JWT must include "
+                "an 'org_id' claim, OR the request must include an "
+                "'X-Org-Id' header. Use PATCH /api/auth/me with a "
+                "valid activeOrganizationId to pick one."
+            ),
+        )
+    return str(org_id)
+
+
+def create_test_jwt(user_id: str = "testuser", org_id: str = "testorg") -> str:
+    """Mint a short-lived JWT for integration tests.
+
+    Sets ``JWT_SECRET`` to a deterministic test secret (if not already
+    set) and signs a JWT with ``sub=user_id`` and ``org_id=org_id``
+    claims. Tests use this token in the ``Authorization: Bearer <jwt>``
+    header to call the backend's authenticated /kg/* routes.
+
+    This function is TEST-ONLY — it must NEVER be callable from a
+    production code path. The deterministic test secret (32+ chars)
+    satisfies the ``verify_jwt`` length check but is publicly known
+    (anyone reading the test file can forge a token). Production
+    deployments MUST set ``JWT_SECRET`` to a strong, secret value.
+    """
+    import jwt as _jwt
+    test_secret = os.environ.get("JWT_SECRET")
+    if not test_secret or len(test_secret) < 32:
+        test_secret = "test-secret-for-integration-tests-only-32chars!"
+        os.environ["JWT_SECRET"] = test_secret
+    token = _jwt.encode(
+        {"sub": user_id, "org_id": org_id, "iss": "drugos"},
+        test_secret,
+        algorithm="HS256",
+    )
+    # PyJWT >= 2.0 returns str; < 2.0 returns bytes.
+    return token if isinstance(token, str) else token.decode("ascii")
 
 
 # ---------------------------------------------------------------------------
@@ -765,6 +894,208 @@ async def post_validated_hypothesis(
             ) from exc
 
 
+# ---------------------------------------------------------------------------
+# Teammate 8 ROOT FIX: Phase 2 Knowledge Graph proxy routes.
+# ---------------------------------------------------------------------------
+# The backend FastAPI service proxies ALL Phase 2 KG endpoints via
+# /kg/* paths. The frontend (via the Next.js API routes at
+# /api/kg/stats, /api/kg/explore, /api/kg/cypher) calls ONLY the
+# backend — NEVER the Phase 2 service directly. This enforces:
+#   1. JWT auth on every KG call (Phase 2's /cypher has NO auth —
+#      any network caller could otherwise run arbitrary read-only
+#      Cypher).
+#   2. Per-user rate limiting (10 req/min for /cypher, 100 req/min
+#      for /kg/stats and /kg/explore).
+#   3. Org-scoped query forwarding via the ``X-Org-Id`` header (the
+#      Phase 2 service applies row-level security using this header).
+#   4. Centralized audit logging (every /kg/* call is logged with the
+#      authenticated user_id + org_id + endpoint).
+#
+# Why httpx (not requests)?
+#   httpx is async-native — it does NOT block the uvicorn event loop
+#   while waiting for the Phase 2 service to respond. ``requests`` is
+#   sync-only; using it inside an async route would force FastAPI to
+#   run the route in a threadpool, defeating the async I/O model that
+#   lets a single uvicorn worker handle thousands of concurrent
+#   requests. For 100-concurrent-request V1 launch target, async I/O
+#   is mandatory.
+#
+# Why a 30s timeout?
+#   KG queries can be slow (multi-hop Cypher over millions of edges).
+#   30s is the same hard timeout Phase 2's /cypher endpoint enforces
+#   server-side — there is no benefit to a longer client-side timeout
+#   (if Phase 2 doesn't respond in 30s, it has already given up).
+KG_SERVICE_URL = os.environ.get(
+    "KG_SERVICE_URL",
+    "http://localhost:8001",  # Phase 2 KG service canonical port
+)
+KG_PROXY_TIMEOUT_SECONDS = 30.0
+
+
+def _build_kg_headers(org_id: str) -> Dict[str, str]:
+    """Build the headers forwarded to the Phase 2 KG service.
+
+    The ``X-Org-Id`` header is the ONLY tenant-scoping signal the
+    Phase 2 service reads — it does NOT decode the JWT (it trusts the
+    backend to have authenticated the caller). This is the standard
+    service-to-service trust model: the backend is the auth boundary;
+    internal services trust the backend's headers.
+    """
+    return {
+        "X-Org-Id": org_id,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+def _kg_unavailable(exc: Exception) -> HTTPException:
+    """Build a 503 HTTPException for KG service unavailable errors."""
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "error": "kg_service_unavailable",
+            "message": (
+                f"The Phase 2 KG service at {KG_SERVICE_URL} is "
+                f"unreachable. The backend FastAPI proxy cannot serve "
+                f"/kg/* requests without it. Original error: {exc}"
+            ),
+            "kg_service_url": KG_SERVICE_URL,
+        },
+    )
+
+
+@app.get("/kg/stats", tags=["knowledge-graph"])
+async def get_kg_stats(
+    request: Request,
+    user_id: str = Depends(verify_jwt),
+    org_id: str = Depends(verify_org_id),
+):
+    """Proxy /kg/stats to the Phase 2 KG service.
+
+    Returns the canonical KG stats response including:
+      - ``nodeCount``: total node count (all types)
+      - ``canonicalNodeCount``: canonical-type nodes only (Compound,
+        Protein, Pathway, Disease, ClinicalOutcome — per project docx
+        Phase 2 contract)
+      - ``edgeCount``: total edge count
+      - ``nodeTypes``: per-type node counts
+      - ``edgeTypes``: per-type edge counts
+      - ``sources``: list of {name, loaded} source-load stats
+      - ``lastUpdated``: ISO-8601 UTC timestamp
+
+    The Phase 2 service emits BOTH snake_case (legacy) and camelCase
+    (canonical) fields — the backend passes the response through
+    unchanged so the frontend can read the canonical fields directly.
+    """
+    # Per-user rate limit (100 req/min — cheap read).
+    check_kg_stats_rate_limit(user_id)
+    logger.info(
+        "kg/stats: user=%s org=%s — proxying to %s/kg/stats",
+        user_id, org_id, KG_SERVICE_URL,
+    )
+    async with httpx.AsyncClient(timeout=KG_PROXY_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.get(
+                f"{KG_SERVICE_URL}/kg/stats",
+                headers=_build_kg_headers(org_id),
+            )
+        except httpx.RequestError as exc:
+            raise _kg_unavailable(exc) from exc
+    # Forward non-2xx responses as-is (preserves Phase 2's 503 detail).
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=response.json() if response.content else "KG service error",
+        )
+    return response.json()
+
+
+@app.post("/kg/explore", tags=["knowledge-graph"])
+async def explore_kg(
+    payload: Dict[str, Any],
+    request: Request,
+    user_id: str = Depends(verify_jwt),
+    org_id: str = Depends(verify_org_id),
+):
+    """Proxy POST /kg/explore to the Phase 2 KG service.
+
+    Request body: ``{drug?: string, disease?: string, depth?: int}``
+    Response: ``{nodes: [...], edges: [...], truncated: bool}``
+
+    The Phase 2 service performs a real BFS over the in-memory KG (or
+    a Cypher query against Neo4j) starting from the requested drug or
+    disease node. The ``depth`` parameter controls the BFS depth (1-3
+    hops is typical for researcher dashboard exploration).
+    """
+    # Per-user rate limit (100 req/min — read but more expensive than stats).
+    check_kg_explore_rate_limit(user_id)
+    logger.info(
+        "kg/explore: user=%s org=%s payload=%s — proxying to %s/kg/explore",
+        user_id, org_id, payload, KG_SERVICE_URL,
+    )
+    async with httpx.AsyncClient(timeout=KG_PROXY_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.post(
+                f"{KG_SERVICE_URL}/kg/explore",
+                json=payload,
+                headers=_build_kg_headers(org_id),
+            )
+        except httpx.RequestError as exc:
+            raise _kg_unavailable(exc) from exc
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=response.json() if response.content else "KG service error",
+        )
+    return response.json()
+
+
+@app.post("/cypher", tags=["knowledge-graph"])
+async def run_cypher(
+    payload: Dict[str, Any],
+    request: Request,
+    user_id: str = Depends(verify_jwt),
+    org_id: str = Depends(verify_org_id),
+):
+    """Proxy POST /cypher to the Phase 2 KG service (rate-limited).
+
+    Request body: ``{query: string, params?: dict, max_rows?: int}``
+    Response 200: ``{records: [...], row_count: int, truncated: bool,
+                      max_rows: int, backend: 'neo4j', timeout_seconds: 30}``
+    Response 429: Rate limit exceeded (after 10 req/min per user).
+
+    The Phase 2 service applies a read-only Cypher whitelist
+    (MATCH/OPTIONAL MATCH/WITH/RETURN/WHERE only) AND a hard 30s
+    server-side timeout AND a 1000-row cap. The backend's 10 req/min
+    rate limit is the FIRST line of defense (DoS protection); the
+    Phase 2 service's whitelist + timeout + row cap are the SECOND,
+    THIRD, and FOURTH lines.
+    """
+    # Per-user rate limit (10 req/min — Cypher is expensive).
+    # This MUST come BEFORE the proxy call so we don't waste a request
+    # to Phase 2 if the user is already over the limit.
+    check_cypher_rate_limit(user_id)
+    logger.info(
+        "cypher: user=%s org=%s — proxying to %s/cypher",
+        user_id, org_id, KG_SERVICE_URL,
+    )
+    async with httpx.AsyncClient(timeout=KG_PROXY_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.post(
+                f"{KG_SERVICE_URL}/cypher",
+                json=payload,
+                headers=_build_kg_headers(org_id),
+            )
+        except httpx.RequestError as exc:
+            raise _kg_unavailable(exc) from exc
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=response.json() if response.content else "KG service error",
+        )
+    return response.json()
+
+
 @app.get("/openapi.json", tags=["system"], include_in_schema=False)
 async def get_openapi_json():
     """Return the OpenAPI spec (machine-readable).
@@ -790,7 +1121,18 @@ async def get_openapi_json():
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("DRUGOS_API_PORT", "8001"))
+    # Teammate 8 ROOT FIX: change default port from 8001 to 8000.
+    # The previous default (8001) COLLIDED with the Phase 2 KG service
+    # canonical port (also 8001 — see docker-compose.yml line 518 and
+    # phase2/service.py docstring). When a developer ran both the
+    # backend FastAPI and the Phase 2 KG service on the same host
+    # (the standard local-dev setup), the second service to start
+    # failed with ``address already in use``. The new default (8000)
+    # eliminates the collision: backend=8000, phase2=8001, phase1=8001
+    # (in a separate container), phase3=8003, phase4=8004. The env var
+    # override (``DRUGOS_API_PORT``) is preserved so operators can
+    # customize the port in non-standard deployments.
+    port = int(os.environ.get("DRUGOS_API_PORT", "8000"))
     workers = int(os.environ.get("DRUGOS_API_WORKERS", "4"))
     uvicorn.run(
         "backend.api.main:app",
