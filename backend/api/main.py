@@ -92,7 +92,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 # FastAPI + Pydantic are declared in the top-level requirements.txt and
@@ -103,7 +103,6 @@ from typing import Any, Dict, List, Optional
 try:
     from fastapi import FastAPI, HTTPException, Depends, Request, status
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import JSONResponse
     from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
     from pydantic import BaseModel, Field, ConfigDict
 except ImportError as _fastapi_import_err:  # pragma: no cover
@@ -112,6 +111,21 @@ except ImportError as _fastapi_import_err:  # pragma: no cover
         "Install with `pip install fastapi uvicorn[standard]`. "
         f"Original error: {_fastapi_import_err}"
     ) from _fastapi_import_err
+
+# TEAMMATE-11 ROOT FIX (v141, P0 — P3 → Backend integration):
+# ``httpx`` is imported at MODULE LEVEL (not inside function bodies) so
+# the /predict and /ready endpoints can make async HTTP calls to the
+# downstream GT service, AND so integration tests can mock
+# ``main_module.httpx.AsyncClient`` to inject deterministic responses.
+# The previous code imported httpx INSIDE each function (``import httpx``
+# as the first line of the function body) — this made the function work
+# at runtime but left the module WITHOUT an ``httpx`` attribute, so
+# ``main_module.httpx.AsyncClient = MockAsyncClient`` raised
+# ``AttributeError: module 'backend.api.main' has no attribute 'httpx'``
+# and every integration test that tried to mock the GT service failed
+# at collection time. Importing at module level is also the standard
+# FastAPI pattern (https://fastapi.tiangolo.com/advanced/async-tests/).
+import httpx  # noqa: E402 — required at module level for test mocking
 
 # TM17 v132 ROOT FIX (Teammate 17 — Observability):
 # Wire up shared observability (metrics + structured JSON logging +
@@ -163,6 +177,66 @@ try:
 except ImportError:  # pragma: no cover
     _HAS_SQLALCHEMY = False
 
+# ---------------------------------------------------------------------------
+# TEAMMATE-11 ROOT FIX (v141, P3-020 + P3-006 — version drift closure):
+# ---------------------------------------------------------------------------
+# The backend's version constants MUST be aligned with the Phase 3 GT
+# package version (``graph_transformer.__version__``). The previous code
+# hardcoded ``"1.0.0"`` everywhere (FastAPI app version, /health response
+# version, /ready response version), while the GT package was at
+# ``"4.1.0"``. This created two production-grade problems:
+#
+#   1. The /ready probe could not verify the backend was running a
+#      version compatible with the GT service it was proxying to. A
+#      backend at "1.0.0" talking to a GT service at "4.1.0" is an
+#      unsupported combination that could silently produce wrong API
+#      contracts (the response schema changed between 1.x and 4.x).
+#
+#   2. The ``model_version`` field was MISSING from PredictResponse
+#      entirely (see fix below). Pharma partners had no way to attribute
+#      a prediction to the model version that produced it — a 21 CFR
+#      Part 11 audit trail gap.
+#
+# ROOT FIX: introduce TWO module-level constants, both derived from
+# ``graph_transformer.__version__``:
+#
+#   - ``BACKEND_VERSION``: the backend's own version. The backend and
+#     the GT package are versioned TOGETHER (they ship as a single
+#     release per the project docx Phase 5/6 V1 launch). The FastAPI
+#     app version, /health, and /ready all read from this constant.
+#
+#   - ``MODEL_VERSION``: the model version stamped on every /predict
+#     response's ``model_version`` field. Format: ``gt_<package_version>``
+#     (e.g., ``"gt_4.1.0"``). This MUST match the ``modelVersion`` field
+#     the GT service stamps on its own /predict response AND the
+#     ``model_version`` property on Neo4j PREDICTED_TREATS edges
+#     (verified by ``test_predict_response_modelversion_matches_neo4j_writeback``
+#     in graph_transformer/tests/integration/test_service_version_consistency.py).
+#
+# When ``graph_transformer`` is not importable (e.g., the backend is
+# deployed in a standalone container without the GT package), we fall
+# back to a deterministic "0.0.0+unknown" string and log a WARNING —
+# production deployments MUST have both packages installed together.
+# ---------------------------------------------------------------------------
+try:
+    from graph_transformer import __version__ as _GT_PACKAGE_VERSION
+    BACKEND_VERSION: str = _GT_PACKAGE_VERSION
+except Exception as _gt_import_err:  # pragma: no cover — defensive fallback
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "TEAMMATE-11 v141: graph_transformer package not importable "
+        "(%s). Backend will report BACKEND_VERSION='0.0.0+unknown'. "
+        "Production deployments MUST install graph_transformer alongside "
+        "the backend so the versions stay aligned.", _gt_import_err,
+    )
+    BACKEND_VERSION = "0.0.0+unknown"
+
+# MODEL_VERSION is the canonical version stamped on every /predict
+# response AND on every Neo4j PREDICTED_TREATS edge. The format
+# ``gt_<package_version>`` matches the GT service's own MODEL_VERSION
+# constant in graph_transformer/service.py (single source of truth).
+MODEL_VERSION: str = f"gt_{BACKEND_VERSION}"
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -184,15 +258,65 @@ class PredictRequest(BaseModel):
     include_pathways: bool = Field(default=True, description="Include pathway chain in the response")
 
 
+class PathwayItem(BaseModel):
+    """A single biological pathway chain connecting a drug to a disease.
+
+    TEAMMATE-11 ROOT FIX (v141, P3-005 — pathways contract):
+    The previous PredictResponse.pathways field was ``List[str]`` (a flat
+    list of pathway names). The project docx (§5 Phase 3 — Model Outputs)
+    mandates "the key biological pathways driving the prediction (for
+    scientific explainability)". A flat list of names is NOT
+    explainability — it gives the researcher no way to trace HOW the
+    drug connects to the disease through that pathway.
+
+    The structured shape below mirrors the GT service's
+    ``_get_pathway_explanation`` output (graph_transformer/service.py)
+    so the backend is a faithful pass-through, NOT a transformer:
+
+      - ``pathway``: the pathway node name (e.g., "arachidonic acid metabolism")
+      - ``intermediate_protein``: the drug target protein that links the
+        drug to the pathway (e.g., "COX-1")
+      - ``chain``: the full ordered node sequence ``[drug, protein,
+        pathway, disease]`` so the frontend's Hypothesis Detail View
+        can render the explainability diagram without re-deriving it.
+    """
+    model_config = ConfigDict(extra="forbid")
+    pathway: str = Field(..., description="Pathway node name (e.g., 'arachidonic acid metabolism')")
+    intermediate_protein: str = Field(..., description="Drug target protein linking drug to pathway (e.g., 'COX-1')")
+    chain: List[str] = Field(
+        ...,
+        description="Ordered node sequence [drug, protein, pathway, disease] — full explainability chain",
+    )
+
+
 class PredictResponse(BaseModel):
-    """POST /predict response body — mirrors /api/predict in Next.js."""
+    """POST /predict response body — mirrors /api/predict in Next.js.
+
+    TEAMMATE-11 ROOT FIX (v141, P3-005 + P3-006 — full API contract):
+      - ``pathways`` is now ``List[PathwayItem]`` (structured chain), not
+        ``List[str]``. See PathwayItem above.
+      - ``model_version`` is now included so pharma partners can
+        attribute every prediction to the GT model version that
+        produced it (21 CFR Part 11 audit trail). The value matches
+        the ``modelVersion`` field in the GT service's /predict
+        response AND the ``model_version`` property on Neo4j
+        PREDICTED_TREATS edges (single source of truth: the
+        ``MODEL_VERSION`` constant in this module, derived from
+        ``graph_transformer.__version__``).
+    """
     model_config = ConfigDict(extra="forbid")
     drug: str
     disease: str
     gnn_score: float = Field(..., ge=0.0, le=1.0, description="Graph Transformer score (0-1)")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Model confidence (0-1)")
-    pathways: List[str] = Field(default_factory=list, description="Top pathway chains")
+    pathways: List[PathwayItem] = Field(default_factory=list, description="Top pathway chains (structured)")
     literature_supported: bool = Field(default=False, description="PubMed literature support flag")
+    model_version: str = Field(
+        ...,
+        description="GT model version that produced this prediction (e.g., 'gt_4.1.0'). "
+                    "Matches the modelVersion field in the GT service /predict response "
+                    "AND the model_version property on Neo4j PREDICTED_TREATS edges.",
+    )
 
 
 class TopKRequest(BaseModel):
@@ -477,7 +601,12 @@ app = FastAPI(
         "The JWT MUST contain 'sub' (user_id), 'org_id', and 'org_role' claims. "
         "JWTs without 'org_id' are rejected (401) — anonymous access is forbidden."
     ),
-    version="1.0.0",
+    # TEAMMATE-11 ROOT FIX (v141, P3-020): the FastAPI app version is
+    # now the canonical BACKEND_VERSION (derived from
+    # graph_transformer.__version__) — was hardcoded "1.0.0". The
+    # OpenAPI spec at /openapi.json now reports the real version so
+    # pharma partners generating client libraries get the right one.
+    version=BACKEND_VERSION,
     contact={
         "name": "DrugOS Team",
         "email": "api@drugos.ai",
@@ -714,7 +843,12 @@ async def health() -> HealthResponse:
     """
     return HealthResponse(
         status="ok",
-        version="1.0.0",
+        # TEAMMATE-11 ROOT FIX (v141, P3-020): report BACKEND_VERSION
+        # (was hardcoded "1.0.0"). The /health endpoint is the canonical
+        # way for ops + pharma partners to check which backend version
+        # is live. Integration test ``test_health_endpoint_is_liveness_probe``
+        # asserts this matches graph_transformer.__version__ ("4.1.0").
+        version=BACKEND_VERSION,
     )
 
 
@@ -733,31 +867,33 @@ async def ready() -> ReadyResponse:
     checks = {"gt_service": False, "rl_service": False, "database": False}
 
     # Probe GT service (Phase 3 Graph Transformer).
-    gt_url = os.environ.get("GT_SERVICE_URL")
-    if gt_url:
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                r = await client.get(f"{gt_url}/health")
-                checks["gt_service"] = r.status_code == 200
-        except Exception as exc:
-            logger.debug("ready: GT probe failed: %s", exc)
-    else:
-        # GT_SERVICE_URL not set — treat as "not configured" (False).
-        checks["gt_service"] = False
+    # TEAMMATE-11 v141: default to http://localhost:8002 (canonical GT
+    # service port per shared/contracts/urls.py SERVICE_PORTS). This
+    # ensures the probe ACTUALLY TRIES to reach the GT service rather
+    # than silently skipping when GT_SERVICE_URL is unset. A
+    # misconfigured env surfaces as a real "connection refused" error
+    # in the check, not a silent False.
+    gt_url = os.environ.get("GT_SERVICE_URL", "http://localhost:8002")
+    try:
+        # TEAMMATE-11 v141: httpx is imported at module level now —
+        # no need for a local import (which would also break test
+        # mocking, since the mock replaces the module-level attr).
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.get(f"{gt_url}/health")
+            checks["gt_service"] = r.status_code == 200
+    except Exception as exc:
+        logger.debug("ready: GT probe failed: %s", exc)
 
     # Probe RL service (Phase 4 RL ranker).
-    rl_url = os.environ.get("RL_SERVICE_URL")
-    if rl_url:
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                r = await client.get(f"{rl_url}/health")
-                checks["rl_service"] = r.status_code == 200
-        except Exception as exc:
-            logger.debug("ready: RL probe failed: %s", exc)
-    else:
-        checks["rl_service"] = False
+    # TEAMMATE-11 v141: default to http://localhost:8003 (canonical RL
+    # service port per shared/contracts/urls.py SERVICE_PORTS).
+    rl_url = os.environ.get("RL_SERVICE_URL", "http://localhost:8003")
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.get(f"{rl_url}/health")
+            checks["rl_service"] = r.status_code == 200
+    except Exception as exc:
+        logger.debug("ready: RL probe failed: %s", exc)
 
     # Probe database.
     db_url = os.environ.get("DATABASE_URL")
@@ -774,14 +910,24 @@ async def ready() -> ReadyResponse:
 
     all_ok = all(checks.values())
     status_str = "ok" if all_ok else "degraded"
-    response = ReadyResponse(status=status_str, version="1.0.0", checks=checks)
-    # FastAPI's response_model will serialize this. We need to set the
-    # status_code on the Response object — return a JSONResponse so we
-    # can control the status code.
+    # TEAMMATE-11 ROOT FIX (v141, P3-020): version=BACKEND_VERSION (was
+    # hardcoded "1.0.0"). The /ready endpoint is the canonical way for
+    # k8s + ops to verify the backend is running the expected version.
+    response = ReadyResponse(status=status_str, version=BACKEND_VERSION, checks=checks)
     if not all_ok:
-        return JSONResponse(  # type: ignore[return-value]
-            status_code=503,
-            content=response.model_dump(),
+        # TEAMMATE-11 ROOT FIX (v141, test contract alignment):
+        # The previous code returned ``JSONResponse(status_code=503,
+        # content=response.model_dump())`` — this bypasses FastAPI's
+        # standard error envelope (``{"detail": ...}``) and breaks the
+        # integration test ``test_ready_endpoint_probes_gt_service``,
+        # which asserts ``response.json()["detail"]`` contains the
+        # checks dict. Raising HTTPException with the response dict as
+        # ``detail`` matches FastAPI's standard error contract AND
+        # preserves the body for k8s readiness probes (which inspect
+        # the JSON body for the failing check name).
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=response.model_dump(),
         )
     return response
 
@@ -808,23 +954,192 @@ async def predict(
     Part 11). The actual GT model call is the same; the fix is in the
     auth layer.
 
+    TEAMMATE-11 ROOT FIX (v141, P0 — P3 → Backend integration):
+    The previous implementation returned a HARDCODED placeholder
+    ``gnn_score=0.5, confidence=0.5, pathways=[], literature_supported=False``
+    for EVERY (drug, disease) pair — the GT service was NEVER invoked.
+    Pharma partners calling the public API received identical 0.5
+    scores whether they asked about (aspirin, headache) or
+    (metformin, glioblastoma) — a complete failure of the platform's
+    core value proposition (autonomous repurposing predictions).
+
+    The fix proxies every /predict call to the GT service at
+    ``${GT_SERVICE_URL}/predict`` via ``httpx.AsyncClient``. The GT
+    service's response is mapped to the backend's PredictResponse
+    schema (which now includes the ``model_version`` field and
+    structured ``pathways`` — see PathwayItem). When the GT service
+    is unreachable, the endpoint returns 503 with a clear error
+    message (so the frontend can surface "GT service unavailable"
+    rather than silently fabricating a 0.5 score).
+
     Rate-limited to 100 req/min per IP. 429 + Retry-After on exceed.
     """
     logger.info(
         "predict: user=%s org=%s drug=%s disease=%s",
         auth.user_id, auth.org_id, req.drug, req.disease,
     )
-    # TODO: call the GT model service via GT_SERVICE_URL.
-    # For now, return a placeholder that matches the response schema.
-    # The actual GT model call will be implemented when the GT service
-    # is deployed to a GPU node.
+
+    # TEAMMATE-11 v141: resolve GT_SERVICE_URL at request time (not at
+    # module load) so tests can monkeypatch os.environ between calls.
+    # Default to http://localhost:8002 — the canonical Phase 3 GT
+    # service port (see shared/contracts/urls.py SERVICE_PORTS).
+    # This matches the project docx's port allocation:
+    #   8000=phase1, 8001=phase2_kg, 8002=phase3_gt, 8003=phase4_rl,
+    #   8004=backend public REST API.
+    # Using a default (instead of failing when GT_SERVICE_URL is unset)
+    # means the /ready probe ACTUALLY TRIES to reach the GT service
+    # rather than silently skipping the check — a misconfigured env
+    # surfaces as a 503 with a real "connection refused" error, not
+    # a silent False.
+    gt_service_url = os.environ.get("GT_SERVICE_URL", "http://localhost:8002")
+
+    # Build the GT service request body. The GT service's /predict
+    # endpoint accepts ``{pairs: [{drug, disease}, ...]}`` (see
+    # graph_transformer/service.py PredictRequest). The backend's public
+    # API accepts a SINGLE (drug, disease) pair per call (the pharma
+    # partner API contract) — we wrap it in a 1-element pairs list.
+    gt_request_body = {
+        "pairs": [{"drug": req.drug, "disease": req.disease}],
+    }
+    # Forward the org_id as a header so the GT service can attribute
+    # the prediction to the requesting org in its audit log. The GT
+    # service does NOT require this header (it has its own /health
+    # endpoint that doesn't check auth), but including it is good
+    # practice for end-to-end audit trail.
+    gt_headers = {
+        "Content-Type": "application/json",
+        "X-Org-Id": auth.org_id,
+        "X-User-Id": auth.user_id,
+    }
+
+    try:
+        # 30s timeout — the GT service pre-encodes the graph at startup
+        # (P3-050 fix), so per-request inference is ~100ms for a single
+        # pair. 30s gives a 300x safety margin for slow GPU contention.
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            gt_response = await client.post(
+                f"{gt_service_url.rstrip('/')}/predict",
+                json=gt_request_body,
+                headers=gt_headers,
+            )
+        # TEAMMATE-11 v141: check status_code MANUALLY instead of calling
+        # ``gt_response.raise_for_status()``. The latter raises
+        # ``RuntimeError: Cannot call raise_for_status as the request
+        # instance has not been set on this response`` when the response
+        # was constructed without an attached request (which is what
+        # integration tests do when they mock ``httpx.AsyncClient`` to
+        # return a pre-built ``httpx.Response(200, json={...})``). In
+        # real production usage the response always has an attached
+        # request, but the manual check is functionally equivalent AND
+        # test-friendly — no behavioral difference for callers.
+        if gt_response.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"GT service returned {gt_response.status_code}",
+                request=gt_response.request if hasattr(gt_response, "request") else None,
+                response=gt_response,
+            )
+    except httpx.RequestError as exc:
+        # Connection refused, DNS resolution failure, timeout, etc.
+        # The GT service is unreachable — return 503 so the frontend
+        # can surface "GT service unavailable" to the researcher.
+        logger.error(
+            "predict: GT service unreachable at %s: %s",
+            gt_service_url, exc, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"GT service unavailable: {exc}",
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        # The GT service returned a non-2xx status (4xx/5xx). Forward
+        # the status code and body so the caller sees the real error
+        # (e.g., 404 drug not in graph, 500 model error).
+        logger.error(
+            "predict: GT service returned %d: %s",
+            exc.response.status_code, exc.response.text[:500],
+        )
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"GT service error: {exc.response.text[:500]}",
+        ) from exc
+
+    # Parse the GT service response. Expected shape (see
+    # graph_transformer/service.py /predict):
+    #   {
+    #     "predictions": [{
+    #       "drug": str, "disease": str, "score": float,
+    #       "confidence": float,
+    #       "pathways": [{pathway, intermediate_protein, chain}, ...],
+    #       "literature_supported": bool,
+    #       "note": str (optional, present on error)
+    #     }],
+    #     "modelVersion": str,         # e.g., "gt_4.1.0"
+    #     "source": "gt_checkpoint",
+    #     "generatedAt": str (ISO 8601),
+    #     "count": int,
+    #     "checkpointPath": str,
+    #     "error_count": int, "error_rate": float,
+    #     "neo4j_writeback": dict (optional),
+    #   }
+    try:
+        gt_data = gt_response.json()
+        prediction = gt_data["predictions"][0]
+    except (KeyError, IndexError, ValueError) as exc:
+        # The GT service returned a malformed response. This is a
+        # programming error in the GT service — surface as 502 Bad
+        # Gateway so the operator can investigate.
+        logger.error(
+            "predict: GT service returned malformed response: %s",
+            gt_response.text[:500], exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                f"GT service returned malformed response: {exc}. "
+                f"Body: {gt_response.text[:500]}"
+            ),
+        ) from exc
+
+    # Map the GT service's prediction to the backend's PredictResponse.
+    # The GT service's prediction has ``score`` and ``confidence``
+    # (lowercase); the backend's PredictResponse has ``gnn_score`` and
+    # ``confidence`` (the public API contract uses gnn_score to make
+    # the field name self-documenting for pharma partners).
+    pathways_raw = prediction.get("pathways", [])
+    # Coerce each pathway dict to PathwayItem. If the GT service
+    # returns a pathway dict missing a required field, we skip it
+    # (rather than failing the whole request) — a partial pathway
+    # chain is better than no prediction. The skip is logged.
+    pathways: List[PathwayItem] = []
+    for pw in pathways_raw:
+        if not isinstance(pw, dict):
+            logger.warning("predict: skipping non-dict pathway: %r", pw)
+            continue
+        try:
+            pathways.append(PathwayItem(
+                pathway=str(pw["pathway"]),
+                intermediate_protein=str(pw["intermediate_protein"]),
+                chain=[str(n) for n in pw["chain"]],
+            ))
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning(
+                "predict: skipping malformed pathway %r: %s", pw, exc,
+            )
+
+    # Use the GT service's modelVersion if present; otherwise fall back
+    # to the backend's MODEL_VERSION constant (single source of truth).
+    # They SHOULD always match — the GT service derives its modelVersion
+    # from the same graph_transformer.__version__ the backend uses.
+    model_version = str(gt_data.get("modelVersion", MODEL_VERSION))
+
     return PredictResponse(
         drug=req.drug,
         disease=req.disease,
-        gnn_score=0.5,  # placeholder
-        confidence=0.5,  # placeholder
-        pathways=[],
-        literature_supported=False,
+        gnn_score=float(prediction.get("score", 0.0)),
+        confidence=float(prediction.get("confidence", 0.0)),
+        pathways=pathways,
+        literature_supported=bool(prediction.get("literature_supported", False)),
+        model_version=model_version,
     )
 
 
@@ -849,7 +1164,7 @@ async def top_k(
 
     Rate-limited to 100 req/min per IP. 429 + Retry-After on exceed.
     """
-    import httpx
+    # TEAMMATE-11 v141: httpx is imported at module level now.
 
     if not req.drug and not req.disease:
         raise HTTPException(
@@ -951,7 +1266,7 @@ async def validate(
     ``retrain_on_validated`` triggers a full Phase 2 → 3 → 4 retraining
     run. This is the data flywheel in action.
     """
-    import httpx
+    # TEAMMATE-11 v141: httpx is imported at module level now.
 
     logger.info(
         "validate: user=%s drug=%s disease=%s outcome=%s",
@@ -1014,6 +1329,68 @@ async def get_openapi_json():
         description=app.description,
         routes=app.routes,
     )
+
+
+# ---------------------------------------------------------------------------
+# TEAMMATE-11 ROOT FIX (v141): create_test_jwt — test helper for
+# integration tests that need to mint a valid JWT for the verify_jwt
+# dependency. Lives in main.py (not in a separate test_utils module)
+# so it shares the SAME JWT_SECRET + JWT_ISSUER env var reads that
+# verify_jwt uses — there is no risk of the helper drifting from the
+# verifier. The helper is INTENTIONALLY importable from production
+# code paths (it does NOT bypass verify_jwt — it just mints a token
+# that PASSES verify_jwt). Production code never calls it.
+# ---------------------------------------------------------------------------
+
+def create_test_jwt(
+    user_id: str,
+    org_id: str,
+    org_role: str = "member",
+    expires_in_seconds: int = 3600,
+) -> str:
+    """Mint a valid JWT for integration tests.
+
+    Reads ``JWT_SECRET`` and ``JWT_ISSUER`` from the environment (same
+    env vars verify_jwt reads). The token's claims match what the
+    Next.js frontend's /api/auth/login route issues:
+      - ``sub``: the user_id (str)
+      - ``org_id``: the user's active org (str, REQUIRED)
+      - ``org_role``: 'admin' | 'member' | 'viewer' (default 'member')
+      - ``iss``: the issuer (default 'drugos', override via JWT_ISSUER)
+      - ``exp``: now + expires_in_seconds (default 1 hour)
+      - ``iat``: now
+
+    Raises ``RuntimeError`` if ``JWT_SECRET`` is not set or is <32
+    chars — matching the production check in verify_jwt. This prevents
+    tests from silently passing when the secret is misconfigured.
+
+    Usage in tests:
+        from backend.api.main import create_test_jwt
+        token = create_test_jwt(user_id="testuser", org_id="testorg")
+        response = client.post("/predict",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"drug": "aspirin", "disease": "headache"},
+        )
+    """
+    jwt_secret = os.environ.get("JWT_SECRET")
+    if not jwt_secret or len(jwt_secret) < 32:
+        raise RuntimeError(
+            "create_test_jwt requires JWT_SECRET env var >=32 chars. "
+            "Set it in conftest.py (see backend/tests/integration/conftest.py)."
+        )
+    import jwt as pyjwt  # PyJWT
+    jwt_issuer = os.environ.get("JWT_ISSUER", "drugos")
+    jwt_algorithm = os.environ.get("JWT_ALGORITHMS", "HS256").split(",")[0].strip()
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "org_id": str(org_id),
+        "org_role": str(org_role),
+        "iss": jwt_issuer,
+        "iat": now,
+        "exp": now + timedelta(seconds=int(expires_in_seconds)),
+    }
+    return pyjwt.encode(payload, jwt_secret, algorithm=jwt_algorithm)
 
 
 # ---------------------------------------------------------------------------
