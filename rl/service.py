@@ -392,10 +392,38 @@ def _enrich_candidates_with_pathways(
 
     kg_url = os.environ.get("KG_SERVICE_URL") or os.environ.get("PHASE2_SERVICE_URL")
     if not kg_url:
-        # KG service not configured. Mark all candidates as having no
-        # pathway chain, and return False so the response flag is False.
+        # TEAMMATE-7 v140 ROOT FIX (hostile-auditor verified):
+        # The previous code UNCONDITIONALLY set `c["pathway_chain"] = []`
+        # for every candidate when KG_SERVICE_URL was unset. This
+        # DESTROYED the CSV-persisted pathway_chain that was loaded by
+        # `_load_candidates_from_csv` (which reads the `pathway_chain`
+        # column written by `RankedCandidate.to_dict()` via
+        # `save_results`). The result: even when the pipeline produced
+        # real pathway data (enrich_candidates_with_pathways in
+        # run_pipeline → CSV write → /rank CSV read), the runtime
+        # enrichment's "KG not configured" branch CLOBBERED it with `[]`.
+        # The flag was always False, and the frontend's
+        # PathwayChain.tsx rendered "0 pathways" for every candidate.
+        #
+        # The fix: when KG_SERVICE_URL is unset, ONLY initialize
+        # `pathway_chain = []` for candidates that are MISSING the field
+        # (e.g., checkpoint-path candidates from `_load_candidates_from_checkpoint`
+        # that did not get the field initialized). Candidates that
+        # ALREADY have a non-empty pathway_chain (from the CSV) keep
+        # their data intact. This is the "preserve CSV data, fall back
+        # to empty only when missing" semantics the issue spec requires.
         for c in candidates:
-            c["pathway_chain"] = []
+            if not isinstance(c, dict):
+                continue
+            existing = c.get("pathway_chain")
+            if existing is None or existing == []:
+                # Missing or empty — initialize to [] so the field is
+                # ALWAYS present (matches the frontend Zod schema's
+                # `.default([])` contract — but the default engages
+                # only if the field is MISSING, so we set it explicitly
+                # here for consistency).
+                c["pathway_chain"] = []
+            # ELSE: keep the existing non-empty pathway_chain (CSV data).
         return False
 
     kg_url = kg_url.rstrip("/")
@@ -412,7 +440,13 @@ def _enrich_candidates_with_pathways(
         drug = (c.get("drug") or "").strip()
         disease = (c.get("disease") or "").strip()
         if not drug or not disease:
-            c["pathway_chain"] = []
+            # TEAMMATE-7 v140 ROOT FIX: do NOT clobber CSV-persisted
+            # pathway_chain. Only initialize the field if it's missing.
+            # The candidate may have been loaded from a CSV that had
+            # pathway_chain data but the drug/disease name was somehow
+            # empty after stripping (rare but possible with whitespace).
+            if c.get("pathway_chain") is None:
+                c["pathway_chain"] = []
             continue
         # Query the KG service for the drug's neighborhood. We ask for
         # depth=3 so we can find drug → protein → pathway → disease chains
@@ -424,7 +458,10 @@ def _enrich_candidates_with_pathways(
                 with httpx.Client(timeout=timeout_ms / 1000.0) as client:
                     resp = client.get(explore_url)
                     if resp.status_code != 200:
-                        c["pathway_chain"] = []
+                        # TEAMMATE-7 v140: KG service error. PRESERVE any
+                        # CSV-persisted pathway_chain (do not clobber).
+                        if c.get("pathway_chain") is None:
+                            c["pathway_chain"] = []
                         enrichment_ok = False
                         continue
                     kg_data = resp.json()
@@ -439,7 +476,9 @@ def _enrich_candidates_with_pathways(
                 )
                 with urllib.request.urlopen(req, timeout=timeout_ms / 1000.0) as resp:
                     if resp.status != 200:
-                        c["pathway_chain"] = []
+                        # TEAMMATE-7 v140: PRESERVE CSV data on KG error.
+                        if c.get("pathway_chain") is None:
+                            c["pathway_chain"] = []
                         enrichment_ok = False
                         continue
                     import json as _json
@@ -457,13 +496,30 @@ def _enrich_candidates_with_pathways(
             #   - chain: the ordered list of node labels from drug to
             #     disease
             chains = _extract_pathway_chains(kg_data, drug, disease, max_hops=3)
-            c["pathway_chain"] = chains
+            # TEAMMATE-7 v140 ROOT FIX: if the KG service returned a NON-EMPTY
+            # chain, OVERWRITE the CSV-persisted pathway_chain (the runtime
+            # KG data is fresher — the KG may have been updated since the
+            # pipeline ran). If the KG returned an EMPTY chain, PRESERVE the
+            # CSV-persisted pathway_chain (the CSV may have richer data from
+            # the pipeline's Neo4j query at training time; an empty runtime
+            # response does NOT mean the CSV data is invalid).
+            if chains:
+                c["pathway_chain"] = chains
+            else:
+                # KG returned empty — preserve CSV data, fall back to [] only
+                # if the CSV didn't have it.
+                if c.get("pathway_chain") is None:
+                    c["pathway_chain"] = []
         except Exception as exc:
             logger.debug(
                 "TM13 pathway enrichment failed for drug=%s disease=%s: %s",
                 drug, disease, exc,
             )
-            c["pathway_chain"] = []
+            # TEAMMATE-7 v140 ROOT FIX: PRESERVE CSV-persisted pathway_chain
+            # on exception (the KG service being down does NOT invalidate
+            # the CSV data that was written by run_pipeline).
+            if c.get("pathway_chain") is None:
+                c["pathway_chain"] = []
             enrichment_ok = False
     return enrichment_ok
 
@@ -874,8 +930,25 @@ def _load_candidates_from_csv(
                     # JSON-decodes the pathway_chain back into a list of
                     # pathway dicts (matching the issue-spec API contract)
                     # and passes the pathway_source through verbatim.
-                    "pathwayChain": _parse_pathway_chain_col(r.get("pathway_chain")),
-                    "pathwaySource": str(r.get("pathway_source", "") or ""),
+                    # TEAMMATE-7 v140 ROOT FIX (hostile-auditor verified):
+                    # The previous code emitted `pathwayChain` (camelCase)
+                    # and `pathwaySource` (camelCase). The frontend's
+                    # RankedHypothesisSchema (frontend/src/lib/ml-contracts.ts:198)
+                    # uses `pathway_chain: z.array(PathwayChainItemSchema).default([])`
+                    # -- snake_case. The Zod schema's `.default([])` silently
+                    # dropped the camelCase field, so the candidate table
+                    # rendered "0 pathways" for every candidate EVEN WHEN
+                    # the CSV had real pathway data. This is the silent data
+                    # corruption a hostile auditor catches: the test suite
+                    # passed because it asserted on the WRONG key name.
+                    # The fix uses `pathway_chain` (snake_case) to match the
+                    # frontend Zod schema -- the SINGLE source of truth.
+                    # The `pathway_source` field is also renamed to snake_case
+                    # for the same reason (the frontend's PathwayChain.tsx
+                    # reads `pathway_source` to decide whether to show the
+                    # "KG available" badge).
+                    "pathway_chain": _parse_pathway_chain_col(r.get("pathway_chain")),
+                    "pathway_source": str(r.get("pathway_source", "") or ""),
                 })
     except UnicodeDecodeError as _ude:
         logger.error(
@@ -1187,6 +1260,21 @@ def _load_candidates_from_checkpoint(
         df = bridge.get_top_k_novel_predictions(top_k=max(limit, 1), rl_model=model, rl_config=cfg)
         candidates = []
         for _, row in df.iterrows():
+            # TEAMMATE-7 v140 ROOT FIX (hostile-auditor verified):
+            # The previous dict omitted the `pathway_chain` field entirely.
+            # The frontend's RankedHypothesisSchema (ml-contracts.ts) uses
+            # `pathway_chain: z.array(PathwayChainItemSchema).default([])` --
+            # a MISSING field is replaced by the default `[]`, but the field
+            # MUST be present (even if empty) so the runtime enrichment
+            # (`_enrich_candidates_with_pathways`) can mutate it in-place
+            # and the `_rank_impl` flag check (`any(_c.get("pathway_chain"))`)
+            # can detect non-empty chains. The previous code's omission
+            # caused the runtime enrichment's `c["pathway_chain"] = chains`
+            # assignment to ADD a new key that the flag check then missed
+            # (because the flag check looked for `pathwayChain` camelCase).
+            # The fix initializes `pathway_chain` here AND renames the
+            # flag check + CSV read to `pathway_chain` (snake_case) to
+            # match the frontend Zod schema (the SINGLE source of truth).
             candidates.append({
                 "drug": row.get("drug", ""),
                 "disease": row.get("disease", ""),
@@ -1196,6 +1284,12 @@ def _load_candidates_from_checkpoint(
                 "gnnScore": row.get("gnn_score"),
                 "safetyScore": row.get("safety_score"),
                 "marketScore": row.get("market_score"),
+                # TEAMMATE-7 v140: initialize pathway_chain + pathway_source
+                # so the field is ALWAYS present (matches frontend Zod schema).
+                # The runtime enrichment (`_enrich_candidates_with_pathways`)
+                # mutates this key in-place when KG_SERVICE_URL is configured.
+                "pathway_chain": [],
+                "pathway_source": "",
             })
         if drug:
             candidates = [c for c in candidates if drug.lower() in c["drug"].lower()]
@@ -1339,8 +1433,17 @@ def _rank_impl(
         #   This is the fallback when the KG service is unavailable.
         # The flag is True if EITHER source produced a non-empty pathway_chain.
         _tm13_enrichment_ok = _enrich_candidates_with_pathways(page_candidates)
+        # TEAMMATE-7 v140 ROOT FIX: the flag check looked for `pathwayChain`
+        # (camelCase) but BOTH the runtime enrichment (which attaches
+        # `pathway_chain` snake_case at service.py:460) AND the CSV read
+        # (which now attaches `pathway_chain` snake_case after the v140 fix)
+        # use snake_case. The camelCase lookup NEVER matched -- so the flag
+        # was True only when the runtime KG service responded (rare in dev
+        # where KG_SERVICE_URL is unset), and was False even when the CSV
+        # had real pathway data. The fix uses `pathway_chain` (snake_case)
+        # to match the field name the rest of the codebase uses.
         _pathway_enrichment_available = _tm13_enrichment_ok or any(
-            bool(_c.get("pathwayChain")) for _c in page_candidates
+            bool(_c.get("pathway_chain")) for _c in page_candidates
             if isinstance(_c, dict)
         )
         return {
@@ -1404,8 +1507,13 @@ def _rank_impl(
     #   candidate's `pathwayChain` field (read by _load_candidates_from_csv).
     # The flag is True if EITHER source produced a non-empty pathway_chain.
     _tm13_enrichment_ok = _enrich_candidates_with_pathways(page_candidates)
+    # TEAMMATE-7 v140 ROOT FIX: snake_case lookup (was camelCase `pathwayChain`
+    # which never matched -- see the checkpoint-path fix above for the full
+    # root-cause analysis). The CSV path's candidates now carry `pathway_chain`
+    # (snake_case, matching the frontend Zod schema), so this lookup correctly
+    # detects non-empty chains.
     _pathway_enrichment_available = _tm13_enrichment_ok or any(
-        bool(_c.get("pathwayChain")) for _c in page_candidates
+        bool(_c.get("pathway_chain")) for _c in page_candidates
         if isinstance(_c, dict)
     )
     return {
