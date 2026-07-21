@@ -120,6 +120,26 @@ biopython>=1.83,<2.0
 fastapi>=0.110,<1.0
 uvicorn[standard]>=0.27,<1.0
 
+# ─── TEAMMATE-4 ROOT FIX: backend/api/main.py dependencies ────────────────
+# httpx: async HTTP client used by the FastAPI backend to proxy requests
+#   to the Phase 1 dataset service (and future Phase 2/3/4 proxies).
+#   Without this, /datasets/stats etc. would have to use requests (sync),
+#   which blocks the asyncio event loop and breaks the V1 contract's
+#   "100 concurrent requests" target.
+httpx>=0.27,<1.0
+# slowapi: rate limiting for the FastAPI backend. The V1 launch contract
+#   (project docx §8) mandates "API handles 100 concurrent requests
+#   without timeout" — without rate limiting, a single misbehaving
+#   client can saturate the backend's connection pool. Limits are
+#   configured in backend/api/rate_limit.py: 100/min GET, 30/min POST.
+slowapi>=0.1.9,<1.0
+# PyJWT: JWT verification in the FastAPI backend's verify_jwt dependency.
+#   The backend shares the JWT_SECRET with the Next.js frontend so a
+#   token issued by NextAuth is valid at the backend. Without PyJWT,
+#   the backend's /datasets/* routes return 500 on every authenticated
+#   request.
+PyJWT>=2.8,<3.0
+
 # ─── v122 FORENSIC ROOT FIX (BUG-4/BUG-5/BUG-6): Observability deps ────────
 # IN-040: prometheus_client is used by shared/observability/__init__.py to
 # mount /metrics on every FastAPI service. Without this, Prometheus scrapes
