@@ -9913,6 +9913,83 @@ def run_full_pipeline(
         "provenance_id": provenance_id,
     }
 
+    # =========================================================================
+    # Teammate 5 (P2→P1 Integration, P0 root fix): Phase 1 contract
+    # version gate. MUST run BEFORE step1_load_data so a stale contract
+    # fails fast with a clear error instead of producing a degraded KG.
+    #
+    # The bridge (phase1_bridge.read_phase1_outputs) ALSO checks the
+    # contract version at the top of its own function — but if the
+    # contract is too old, we want the pipeline to abort HERE (before
+    # any work is done) with a clear log line, rather than letting the
+    # bridge raise mid-step1 (which would be caught by step1's generic
+    # Exception handler and reported as a step1 failure with no context
+    # about the contract version being the root cause).
+    #
+    # In DEGRADED mode (contract not importable) the version is
+    # "0.0.0-degraded" — the gate fires and the operator sees a clear
+    # error pointing them at the import fix. Production deployments
+    # MUST have the contract importable.
+    # =========================================================================
+    try:
+        from phase1.contracts.phase1_schema import (
+            __version__ as _phase1_contract_version,
+        )
+        try:
+            _p1_major = int(str(_phase1_contract_version).split(".")[0])
+        except (ValueError, TypeError) as _ver_exc:
+            logger.error(
+                "Phase 1 contract version is malformed: %r (%s). "
+                "Pipeline cannot verify schema compatibility. Aborting.",
+                _phase1_contract_version, _ver_exc,
+            )
+            results["aborted"] = True
+            results["fatal_reason"] = (
+                f"Phase 1 contract version malformed: "
+                f"{_phase1_contract_version!r}"
+            )
+            return results
+        if _p1_major < 2:
+            logger.error(
+                "Phase 1 contract version %s is too old (expected "
+                "major >= 2). Pipeline aborted — the Phase 2 bridge "
+                "requires the v2 contract surface (canonical "
+                "chembl_drugs.csv filename, chembl_id required column, "
+                "get_all_aliases() accessor). Run `git pull` in "
+                "phase1/ and reinstall.",
+                _phase1_contract_version,
+            )
+            results["aborted"] = True
+            results["fatal_reason"] = (
+                f"Phase 1 contract version {_phase1_contract_version} "
+                f"is too old (expected major >= 2)."
+            )
+            return results
+        logger.info(
+            "Phase 1 contract version: %s (Teammate 5 P0 gate passed)",
+            _phase1_contract_version,
+        )
+        results["phase1_contract_version"] = _phase1_contract_version
+    except ImportError as _p1_import_exc:
+        # Contract not importable — DEGRADED mode. The pipeline CANNOT
+        # verify schema compatibility. Abort with a clear error.
+        logger.error(
+            "phase1.contracts.phase1_schema not importable (%s: %s). "
+            "Pipeline aborted — the Phase 2 bridge requires the Phase 1 "
+            "contract as the SINGLE source of truth for source filenames, "
+            "column requirements, and source required/optional status. "
+            "Fix: ensure phase1/ is on the Python path (the repo-root "
+            "conftest.py inserts it for pytest; for production, install "
+            "phase1/ via `pip install -e phase1/` or set PYTHONPATH).",
+            type(_p1_import_exc).__name__, _p1_import_exc,
+        )
+        results["aborted"] = True
+        results["fatal_reason"] = (
+            f"phase1.contracts.phase1_schema not importable: "
+            f"{_p1_import_exc}"
+        )
+        return results
+
     # ─── Step 1: Load data (FATAL) ────────────────────────────────────────
     # v6 fix (bug #B17): default data source is now Phase 1 (via the
     # bridge). Use --data-source drkg to fall back to the DRKG download.
