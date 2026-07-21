@@ -156,6 +156,37 @@ from backend.api.rate_limit import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# TEAMMATE-11 ROOT FIX (P3-006 / P3-020): version single source of truth.
+# ---------------------------------------------------------------------------
+# The backend's FastAPI app version, /health version, and the model_version
+# field in /predict responses MUST all read from the SAME source.
+# We import graph_transformer.__version__ (the canonical package version)
+# and derive MODEL_VERSION from it. This eliminates the prior drift where
+# the service reported "2.0.0" while the package was "4.1.0".
+try:
+    from graph_transformer import __version__ as _GT_PACKAGE_VERSION
+except Exception:  # pragma: no cover — graph_transformer not installed (e.g. CI lint)
+    _GT_PACKAGE_VERSION = "0.0.0+unknown"
+    logger.warning(
+        "graph_transformer package not importable; using sentinel version %s. "
+        "Install graph_transformer (pip install -e .) for correct versioning.",
+        _GT_PACKAGE_VERSION,
+    )
+
+# Canonical version strings (single source of truth for this service).
+BACKEND_VERSION = _GT_PACKAGE_VERSION
+
+# MODEL_VERSION is the version we stamp on every GT prediction. It MUST
+# match the value used by the GT service's Neo4j writeback (P3-006 fix).
+# Format: gt_<package_version> (e.g., "gt_4.1.0").
+MODEL_VERSION = f"gt_{_GT_PACKAGE_VERSION}"
+
+# Downstream GT/RL service URLs (env-configurable, with sane dev defaults).
+GT_SERVICE_URL = os.environ.get("GT_SERVICE_URL", "http://localhost:8003")
+RL_SERVICE_URL = os.environ.get("RL_SERVICE_URL", "http://localhost:8004")
+DOWNSTREAM_TIMEOUT_SECONDS = float(os.environ.get("DOWNSTREAM_TIMEOUT_SECONDS", "30.0"))
+
+# ---------------------------------------------------------------------------
 # Pydantic models — shared with the Python ML services (no Zod hand-mirroring).
 # ---------------------------------------------------------------------------
 # These models are the CANONICAL API contract. The Next.js frontend's Zod
@@ -166,6 +197,24 @@ logger = logging.getLogger(__name__)
 #   3. Comparing field names, types, and constraints.
 # Any drift fails the CI build.
 
+class PathwayItem(BaseModel):
+    """A single drug → protein → pathway → disease chain (TEAMMATE-11 P3-005 ROOT FIX).
+
+    The chain explains the GT model's prediction in biological terms: which
+    protein the drug binds, which pathway that protein participates in, and
+    how that pathway connects to the target disease. This is the scientific
+    explainability field mandated by the project DOCX Phase 3 spec
+    ("the key biological pathways driving the prediction").
+    """
+    model_config = ConfigDict(extra="forbid")
+    pathway: str = Field(..., description="Pathway name (e.g., 'COX-mediated signaling')")
+    intermediate_protein: str = Field(..., description="Protein that bridges drug to pathway")
+    chain: List[str] = Field(
+        ...,
+        description="Ordered node sequence, e.g., ['aspirin', 'COX-1', 'arachidonic acid metabolism', 'headache']",
+    )
+
+
 class PredictRequest(BaseModel):
     """POST /predict request body — mirrors /api/predict in Next.js."""
     model_config = ConfigDict(extra="forbid")
@@ -175,14 +224,28 @@ class PredictRequest(BaseModel):
 
 
 class PredictResponse(BaseModel):
-    """POST /predict response body — mirrors /api/predict in Next.js."""
+    """POST /predict response body — mirrors /api/predict in Next.js.
+
+    TEAMMATE-11 ROOT FIX (P3-005 / P3-006):
+      - `pathways` is now a structured list (was List[str]).
+      - `model_version` field added so the caller can verify which model
+        version produced the score (matches the Neo4j writeback).
+    """
     model_config = ConfigDict(extra="forbid")
     drug: str
     disease: str
     gnn_score: float = Field(..., ge=0.0, le=1.0, description="Graph Transformer score (0-1)")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Model confidence (0-1)")
-    pathways: List[str] = Field(default_factory=list, description="Top pathway chains")
+    pathways: List[PathwayItem] = Field(
+        default_factory=list,
+        description="Top pathway chains connecting drug to disease",
+    )
     literature_supported: bool = Field(default=False, description="PubMed literature support flag")
+    model_version: str = Field(
+        ...,
+        description="GT model version that produced this score (e.g., 'gt_4.1.0'). "
+                    "Matches the model_version stamped on the Neo4j PREDICTED_TREATS edge.",
+    )
 
 
 class TopKRequest(BaseModel):
@@ -209,15 +272,41 @@ class TopKResponse(BaseModel):
     candidates: List[TopKCandidate]
     total: int
     source: str = Field(..., description="Where the results came from: 'gt_model' | 'rl_ranker' | 'cache'")
+    model_version: str = Field(
+        ...,
+        description="GT model version that produced the candidates (matches /predict).",
+    )
 
 
 class HealthResponse(BaseModel):
+    """Liveness probe response — /health (TEAMMATE-11 ROOT FIX).
+
+    Always returns 200 if the process is up. Use /ready for downstream
+    dependency checks (Kubernetes readiness probe).
+    """
     model_config = ConfigDict(extra="forbid")
     status: str = "ok"
     version: str
-    gt_model_loaded: bool
-    rl_agent_loaded: bool
-    database_connected: bool
+
+
+class ReadyCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    gt_service: bool = False
+    rl_service: bool = False
+    database: bool = False
+
+
+class ReadyResponse(BaseModel):
+    """Readiness probe response — /ready (TEAMMATE-11 ROOT FIX).
+
+    Returns 200 only when ALL downstream dependencies are reachable;
+    503 otherwise. Kubernetes should route traffic to this pod only when
+    /ready returns 200.
+    """
+    model_config = ConfigDict(extra="forbid")
+    status: str
+    checks: ReadyCheck
+    version: str
 
 
 # ---------------------------------------------------------------------------
@@ -516,7 +605,9 @@ app = FastAPI(
         "Authentication: Bearer JWT (obtained via the /auth/login endpoint on "
         "the Next.js frontend, or via /auth/api-key-exchange when using an API key)."
     ),
-    version="1.0.0",
+    # TEAMMATE-11 ROOT FIX (P3-020): use the canonical package version
+    # (was hardcoded "1.0.0"). MUST match graph_transformer.__version__.
+    version=BACKEND_VERSION,
     contact={
         "name": "DrugOS Team",
         "email": "api@drugos.ai",
@@ -568,84 +659,248 @@ PHASE1_PROXY_TIMEOUT = float(os.environ.get("PHASE1_PROXY_TIMEOUT", "10.0"))
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
 async def health() -> HealthResponse:
-    """Health check endpoint — used by load balancers and uptime monitors.
+    """Liveness probe — used by load balancers and uptime monitors.
 
-    No authentication required (returns only public status info).
+    TEAMMATE-11 ROOT FIX: /health is now a pure liveness probe. It
+    returns 200 whenever the FastAPI process is up — it does NOT probe
+    downstream services. Use /ready for dependency checks.
+
+    The previous /health inspected env vars (`GT_MODEL_PATH`,
+    `RL_CHECKPOINT_PATH`, `DATABASE_URL`) and reported booleans based on
+    presence. That was both wrong (it checked `GT_MODEL_PATH`, which is
+    not the env var the GT service reads — the GT service reads
+    `GT_CHECKPOINT_PATH`) and misleading (env var presence does not
+    imply service health). The new /health just reports the process
+    status and version.
     """
-    # Probe the GT model service, RL ranker service, and database.
-    # Each probe is best-effort — a failure sets the corresponding flag
-    # to False but doesn't fail the health check (the API is still up,
-    # just degraded).
-    gt_loaded = False
-    rl_loaded = False
-    db_connected = False
-    try:
-        # TODO: probe the GT model service via ML_SERVICE_URL.
-        # For now, assume it's loaded if the env var is set.
-        gt_loaded = bool(os.environ.get("GT_MODEL_PATH"))
-    except Exception as exc:
-        logger.debug("health: GT probe failed: %s", exc)
-    try:
-        rl_loaded = bool(os.environ.get("RL_CHECKPOINT_PATH"))
-    except Exception as exc:
-        logger.debug("health: RL probe failed: %s", exc)
-    try:
-        # TODO: probe the database via DATABASE_URL.
-        db_connected = bool(os.environ.get("DATABASE_URL"))
-    except Exception as exc:
-        logger.debug("health: DB probe failed: %s", exc)
-    return HealthResponse(
-        status="ok",
-        version="1.0.0",
-        gt_model_loaded=gt_loaded,
-        rl_agent_loaded=rl_loaded,
-        database_connected=db_connected,
+    return HealthResponse(status="ok", version=BACKEND_VERSION)
+
+
+@app.get("/ready", response_model=ReadyResponse, tags=["system"])
+async def ready() -> ReadyResponse:
+    """Readiness probe — actually probes downstream services.
+
+    TEAMMATE-11 ROOT FIX: /ready is the Kubernetes readiness probe. It
+    makes a real HTTP call to the GT service /health, RL service
+    /health, and a SELECT 1 against the configured DATABASE_URL. If any
+    of these fail, the response status is "degraded" and the FastAPI
+    process returns HTTP 503 (so the k8s readiness probe stops routing
+    traffic to this pod).
+
+    The probes are best-effort and parallel (asyncio.gather) so a single
+    slow downstream doesn't block the others.
+    """
+    checks = ReadyCheck()
+
+    async def _probe_gt() -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.get(f"{GT_SERVICE_URL}/health")
+                return response.status_code == 200
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("ready: GT probe failed: %s", exc)
+            return False
+
+    async def _probe_rl() -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.get(f"{RL_SERVICE_URL}/health")
+                return response.status_code == 200
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("ready: RL probe failed: %s", exc)
+            return False
+
+    async def _probe_db() -> bool:
+        db_url = os.environ.get("DATABASE_URL")
+        if not db_url:
+            return False
+        try:
+            from sqlalchemy import create_engine, text
+            engine = create_engine(db_url)
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("ready: DB probe failed: %s", exc)
+            return False
+
+    import asyncio
+    gt_ok, rl_ok, db_ok = await asyncio.gather(
+        _probe_gt(), _probe_rl(), _probe_db(),
     )
+    checks.gt_service = gt_ok
+    checks.rl_service = rl_ok
+    checks.database = db_ok
+
+    all_ok = gt_ok and rl_ok and db_ok
+    response = ReadyResponse(
+        status="ok" if all_ok else "degraded",
+        checks=checks,
+        version=BACKEND_VERSION,
+    )
+    if not all_ok:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=response.model_dump(),
+        )
+    return response
 
 
 @app.post("/predict", response_model=PredictResponse, tags=["prediction"])
 async def predict(
     req: PredictRequest,
     user_id: str = Depends(verify_jwt),
+    org_id: str = Depends(verify_org_id),
 ) -> PredictResponse:
     """Predict the repurposing score for a (drug, disease) pair.
 
-    Calls the Graph Transformer model to produce a 0-1 score, a confidence
-    value, and the top pathway chains connecting the drug to the disease.
+    TEAMMATE-11 ROOT FIX (P3-002 / P3-005 / P3-006):
+      The previous implementation returned hardcoded gnn_score=0.5 for
+      every (drug, disease) pair. The Phase 3 GT service was NEVER
+      invoked by the public API. Pharma partners received placeholder
+      data — the platform's value proposition (autonomous repurposing
+      predictions) was non-functional at the public API layer.
 
-    This endpoint mirrors `POST /api/predict` in the Next.js frontend.
-    The Next.js route is kept during the migration period (it proxies to
-    this FastAPI service when ML_SERVICE_URL is set). Eventually, the
-    Next.js route will be removed and pharma partners will call this
-    endpoint directly.
+      ROOT FIX: /predict now proxies to {GT_SERVICE_URL}/predict via
+      httpx.AsyncClient. The GT service produces the real GT model
+      score, confidence, pathways, and literature flag. The backend
+      maps the GT response to the PredictResponse contract and stamps
+      the canonical MODEL_VERSION (matching the Neo4j writeback).
     """
-    # TODO: call the GT model service via ML_SERVICE_URL.
-    # For now, return a placeholder that matches the response schema.
-    # The actual GT model call will be implemented in the next phase
-    # (when the GT service is deployed to a GPU node).
-    logger.info("predict: user=%s drug=%s disease=%s", user_id, req.drug, req.disease)
-    return PredictResponse(
-        drug=req.drug,
-        disease=req.disease,
-        gnn_score=0.5,  # placeholder
-        confidence=0.5,  # placeholder
-        pathways=[],
-        literature_supported=False,
+    logger.info(
+        "predict: user=%s org=%s drug=%s disease=%s",
+        user_id, org_id, req.drug, req.disease,
     )
+
+    # Build the GT service request body. The GT service /predict accepts
+    # a list of pairs; we send a single-pair list (the backend's public
+    # contract is single-pair per call to keep the API simple for
+    # pharma partners).
+    gt_request_body = {
+        "pairs": [{"drug": req.drug, "disease": req.disease}],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=DOWNSTREAM_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                f"{GT_SERVICE_URL}/predict",
+                json=gt_request_body,
+                headers={
+                    "X-Org-Id": org_id,
+                    "X-User-Id": user_id,
+                    "X-Request-Source": "drugos-backend",
+                },
+            )
+    except httpx.RequestError as exc:
+        logger.error(
+            "predict: GT service unreachable (%s): %s",
+            GT_SERVICE_URL, exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"GT service unavailable: {exc}",
+        ) from exc
+
+    if response.status_code == 503:
+        logger.warning(
+            "predict: GT service returned 503 (checkpoint not loaded): %s",
+            response.text,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"GT service unavailable: {response.text}",
+        )
+
+    if response.status_code >= 400:
+        logger.error(
+            "predict: GT service returned %d: %s",
+            response.status_code, response.text,
+        )
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"GT service error: {response.text}",
+        )
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"GT service returned non-JSON response: {exc}",
+        ) from exc
+
+    try:
+        predictions = data["predictions"]
+        if not predictions or not isinstance(predictions, list):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="GT service returned no predictions.",
+            )
+        prediction = predictions[0]
+
+        # Coerce pathways to the structured PathwayItem shape.
+        raw_pathways = prediction.get("pathways") or []
+        pathway_items: List[PathwayItem] = []
+        for raw in raw_pathways:
+            if isinstance(raw, dict) and "pathway" in raw and "chain" in raw:
+                pathway_items.append(PathwayItem(
+                    pathway=str(raw["pathway"]),
+                    intermediate_protein=str(
+                        raw.get("intermediate_protein")
+                        or (raw["chain"][1] if len(raw["chain"]) > 1 else "")
+                    ),
+                    chain=[str(c) for c in raw["chain"]],
+                ))
+            elif isinstance(raw, str):
+                pathway_items.append(PathwayItem(
+                    pathway=raw,
+                    intermediate_protein="",
+                    chain=[req.drug, raw, req.disease],
+                ))
+            else:
+                logger.warning(
+                    "predict: skipping malformed pathway entry for (%s, %s): %r",
+                    req.drug, req.disease, raw,
+                )
+
+        # Canonical model_version: prefer the GT service's modelVersion
+        # (single source of truth — derived from graph_transformer.__version__
+        # in the GT service). Fall back to our local MODEL_VERSION constant
+        # (they should always match; the fallback is defensive).
+        model_version = data.get("modelVersion") or MODEL_VERSION
+
+        return PredictResponse(
+            drug=req.drug,
+            disease=req.disease,
+            gnn_score=float(prediction["score"]),
+            confidence=float(prediction.get("confidence", 0.5)),
+            pathways=pathway_items,
+            literature_supported=bool(prediction.get("literature_supported", False)),
+            model_version=model_version,
+        )
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"GT service returned malformed response: {exc}",
+        ) from exc
 
 
 @app.post("/top-k", response_model=TopKResponse, tags=["ranking"])
 async def top_k(
     req: TopKRequest,
     user_id: str = Depends(verify_jwt),
+    org_id: str = Depends(verify_org_id),
 ) -> TopKResponse:
     """Get the top-K repurposing candidates for a drug or disease.
+
+    TEAMMATE-11 ROOT FIX: /top-k now proxies to {GT_SERVICE_URL}/top-k
+    (previously returned an empty list — placeholder). The GT service
+    returns the top-K novel (drug, disease) pairs by GT score; we map
+    them to TopKCandidate shape and stamp the canonical MODEL_VERSION.
 
     If `drug` is provided, returns the top-K diseases for that drug.
     If `disease` is provided, returns the top-K drugs for that disease.
     Exactly one of `drug` or `disease` must be provided.
-
-    This endpoint mirrors `POST /api/top-k` in the Next.js frontend.
     """
     if not req.drug and not req.disease:
         raise HTTPException(
@@ -657,9 +912,74 @@ async def top_k(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Provide EITHER 'drug' OR 'disease', not both.",
         )
-    # TODO: call the RL ranker service via RL_SERVICE_URL.
-    logger.info("top-k: user=%s drug=%s disease=%s k=%d", user_id, req.drug, req.disease, req.k)
-    return TopKResponse(candidates=[], total=0, source="rl_ranker")
+    logger.info(
+        "top-k: user=%s org=%s drug=%s disease=%s k=%d",
+        user_id, org_id, req.drug, req.disease, req.k,
+    )
+
+    # Build the GT service /top-k request.
+    params: Dict[str, Any] = {"k": req.k}
+    if req.drug:
+        params["drug"] = req.drug
+    if req.disease:
+        params["disease"] = req.disease
+
+    try:
+        async with httpx.AsyncClient(timeout=DOWNSTREAM_TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                f"{GT_SERVICE_URL}/top-k",
+                params=params,
+                headers={
+                    "X-Org-Id": org_id,
+                    "X-User-Id": user_id,
+                    "X-Request-Source": "drugos-backend",
+                },
+            )
+    except httpx.RequestError as exc:
+        logger.error(
+            "top-k: GT service unreachable (%s): %s",
+            GT_SERVICE_URL, exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"GT service unavailable: {exc}",
+        ) from exc
+
+    if response.status_code >= 400:
+        logger.error(
+            "top-k: GT service returned %d: %s",
+            response.status_code, response.text,
+        )
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"GT service error: {response.text}",
+        )
+
+    try:
+        data = response.json()
+        gt_predictions = data.get("predictions", [])
+        model_version = data.get("modelVersion") or MODEL_VERSION
+        candidates: List[TopKCandidate] = []
+        for pred in gt_predictions:
+            score = float(pred.get("score", 0.0))
+            if score < req.min_score:
+                continue
+            candidates.append(TopKCandidate(
+                drug=pred["drug"],
+                disease=pred["disease"],
+                gnn_score=score,
+            ))
+        return TopKResponse(
+            candidates=candidates[: req.k],
+            total=len(candidates),
+            source="gt_model",
+            model_version=model_version,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"GT service returned malformed response: {exc}",
+        ) from exc
 
 
 # ===========================================================================

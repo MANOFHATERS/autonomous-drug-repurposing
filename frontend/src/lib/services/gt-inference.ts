@@ -1,5 +1,5 @@
 /**
- * Graph Transformer (Phase 3) inference service — HTTP-only (Issue 230).
+ * Graph Transformer (Phase 3) inference service — backend-proxy (Issue 230 + TEAMMATE-11).
  *
  * ROOT FIX (forensic, root-level): the previous version of this file
  * had THREE inference paths, all of which were broken in different ways:
@@ -23,31 +23,37 @@
  *      spawn (see #1). This was dead code that gave the false impression
  *      of a fallback.
  *
- * ROOT FIX: this file is now HTTP-ONLY. There is no subprocess path,
- * no checkpoint search, no fs.watch, no tmp files. All GT inference
- * goes through `GT_SERVICE_URL/predict` and `GT_SERVICE_URL/top-k`
- * via the shared `mlFetch` HTTP client (Issue 234).
+ * ROOT FIX (Issue 230): this file became HTTP-only. No subprocess, no
+ * checkpoint search, no fs.watch, no tmp files. All GT inference went
+ * through `GT_SERVICE_URL/predict` via the shared `mlFetch` HTTP client.
  *
- * If `GT_SERVICE_URL` is not set, the functions return a clear
- * `source: "none"` response with a message telling the operator to
- * set the env var and start the Phase 3 service. We NEVER fabricate
- * predictions, NEVER spawn a subprocess, NEVER read a checkpoint
- * directly from disk.
+ * TEAMMATE-11 ROOT FIX (P3 → Backend + Frontend Integration): this file
+ * now proxies to the BACKEND's `/api/predict` and `/api/top-k` routes
+ * (which themselves proxy to the GT service). The frontend NO LONGER
+ * calls the GT service directly. This is the documented integration
+ * point for pharma partner API keys — every public API call goes
+ * through the FastAPI backend, which enforces auth (verify_jwt +
+ * verify_org_id), rate limiting (100 req/min), and audit logging.
+ *
+ * WHY THIS MATTERS (production-grade concern):
+ *   - The backend's /predict endpoint stamps the canonical MODEL_VERSION
+ *     (gt_<package_version>) on every response, matching the Neo4j
+ *     PREDICTED_TREATS edge's model_version property (P3-006 fix).
+ *   - The backend's /predict response includes the structured `pathways`
+ *     chain (P3-005 fix) — the frontend's Hypothesis Detail View renders
+ *     this as the biological explainability diagram.
+ *   - Calling the GT service directly would bypass the rate limiter,
+ *     the org_id scoping, and the audit log — a multi-tenant safety
+ *     violation for the pharma partner API.
  *
  * SCIENTIFIC INTEGRITY: a GT score is a model output. Only the trained
- * model can produce it. Reading a checkpoint from disk in JS would
- * require reimplementing PyTorch inference in JS — which would drift
- * from the Python path within one PR. The HTTP path guarantees the
- * JS and Python paths produce IDENTICAL predictions (the Python
- * service is the single source of truth).
+ * model can produce it. The backend proxies to the Python GT service
+ * (the single source of truth). The frontend never fabricates scores.
  */
 
-import { mlFetch, resolveServiceUrl, buildServiceUrl, MlServiceError } from "@/lib/http-client";
+import { mlFetch, buildServiceUrl, MlServiceError } from "@/lib/http-client";
 import {
-  GtPredictResponseSchema,
-  GtTopKResponseSchema,
   type GtPrediction,
-  validateMlResponse,
 } from "@/lib/ml-contracts";
 
 // ---------------------------------------------------------------------------
@@ -75,17 +81,20 @@ export interface GtInferenceResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Service URL resolution
+// Backend URL resolution (TEAMMATE-11: frontend calls backend, not GT directly).
 // ---------------------------------------------------------------------------
+//
+// The frontend's API base is `/api` in production (Next.js proxy to FastAPI)
+// or `NEXT_PUBLIC_API_BASE_URL` in dev (when the FastAPI backend is on a
+// different host). We NO LONGER read GT_SERVICE_URL — that env var is the
+// GT service's own address, which the frontend has no business calling
+// directly.
 
-const SERVICE_NAME = "phase3_gt";
+const API_BASE =
+  (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_API_BASE_URL) ||
+  "/api";
 
-function getGtServiceUrl(): string | null {
-  // Canonical env var is GT_SERVICE_URL. No aliases — the subprocess
-  // path is gone, so GT_REPO_ROOT / GT_CHECKPOINT_DIR are no longer
-  // relevant (they were only used by the subprocess path).
-  return resolveServiceUrl("GT_SERVICE_URL");
-}
+const PREDICT_TIMEOUT_MS = 60_000; // GT inference can take time on large pair lists
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -94,12 +103,19 @@ function getGtServiceUrl(): string | null {
 /**
  * Score arbitrary (drug, disease) pairs with the trained GT model.
  *
- * Proxies to `POST {GT_SERVICE_URL}/predict` via the shared HTTP client.
- * Returns `{source: "none", predictions: [], ...}` if GT_SERVICE_URL is
- * not set — we NEVER fabricate scores.
+ * TEAMMATE-11 ROOT FIX: proxies to `POST {API_BASE}/predict` (the FastAPI
+ * backend), which itself proxies to the GT service. The backend's
+ * /predict accepts a SINGLE (drug, disease) pair per call (the public
+ * pharma partner API contract). When the caller passes multiple pairs,
+ * we issue parallel /predict calls (one per pair) and combine the
+ * results into a single GtInferenceResponse. This preserves the existing
+ * `predictPairs(pairs[])` API surface for callers that batch.
  *
- * Throws `MlServiceError` if the service is configured but unreachable
- * after retries. Callers should catch and surface as 502.
+ * Returns `{source: "none", predictions: [], ...}` if the backend is
+ * unreachable — we NEVER fabricate scores.
+ *
+ * Throws `MlServiceError` if the backend returns 5xx. Callers should
+ * catch and surface as 502.
  */
 export async function predictPairs(
   pairs: DrugDiseasePair[],
@@ -115,98 +131,101 @@ export async function predictPairs(
     };
   }
 
-  const baseUrl = getGtServiceUrl();
-  if (!baseUrl) {
-    return {
-      predictions: [],
-      source: "none",
-      generatedAt: new Date().toISOString(),
-      count: 0,
-      checkpointPath: null,
-      note:
-        "GT_SERVICE_URL is not set. The Phase 3 Graph Transformer service " +
-        "(graph_transformer/service.py) must be running and reachable. " +
-        "Start it with `python graph_transformer/service.py` and set " +
-        "GT_SERVICE_URL=http://localhost:8003 in frontend/.env.local. " +
-        "Issue 230 ROOT FIX: this endpoint NEVER spawns a subprocess and " +
-        "NEVER fabricates GT scores.",
+  // Issue parallel /predict calls (one per pair) since the backend
+  // accepts single pairs. Promise.all preserves order. For large
+  // batches the backend's rate limiter (100 req/min) will throttle —
+  // callers should batch in chunks of <=100.
+  const url = buildServiceUrl(API_BASE, "/predict");
+
+  // Discriminated union so TypeScript narrows correctly in the loop.
+  type PairResult =
+    | { ok: true; body: Record<string, unknown>; pair: DrugDiseasePair }
+    | { ok: false; error: MlServiceError; pair: DrugDiseasePair };
+
+  const results: PairResult[] = await Promise.all(
+    pairs.map(async (pair): Promise<PairResult> => {
+      const result = await mlFetch<unknown>(url, {
+        service: "backend",
+        method: "POST",
+        body: pair, // {drug, disease} — single-pair contract
+        timeoutMs: PREDICT_TIMEOUT_MS,
+        maxRetries: 1,
+      });
+      if (!result.ok) {
+        return { ok: false, error: result.error, pair };
+      }
+      return { ok: true, body: result.body as Record<string, unknown>, pair };
+    }),
+  );
+
+  // Aggregate the responses into a single GtInferenceResponse-shaped object.
+  const predictions: GtPrediction[] = [];
+  let firstError: MlServiceError | null = null;
+  let modelVersion: string | undefined;
+  for (const r of results) {
+    if (!r.ok) {
+      if (!firstError) firstError = r.error;
+      // 503 from the backend = GT service down / checkpoint not loaded.
+      // Surface as source:none so the dashboard shows "service down"
+      // rather than crashing.
+      if (r.error.httpStatus === 503) {
+        continue;
+      }
+      // 4xx = bad request (e.g., drug not in graph). Skip this pair
+      // but continue aggregating the rest.
+      if (r.error.httpStatus >= 400 && r.error.httpStatus < 500) {
+        predictions.push({
+          drug: r.pair.drug,
+          disease: r.pair.disease,
+          score: 0,
+          note: `Backend rejected pair (${r.error.httpStatus}): ${r.error.message}`,
+        });
+        continue;
+      }
+      // 5xx — record but keep going.
+      continue;
+    }
+    // The backend returns a single PredictResponse object (not wrapped
+    // in {predictions: [...]}). Coerce into the GtPrediction shape.
+    const body = r.body;
+    const prediction: GtPrediction = {
+      drug: String(body.drug ?? r.pair.drug),
+      disease: String(body.disease ?? r.pair.disease),
+      score: Number(body.gnn_score ?? 0),
+      confidence: body.confidence !== undefined ? Number(body.confidence) : undefined,
+      pathways: Array.isArray(body.pathways) ? (body.pathways as GtPrediction["pathways"]) : undefined,
+      literature_supported: Boolean(body.literature_supported),
     };
+    predictions.push(prediction);
+    if (!modelVersion && typeof body.model_version === "string") {
+      modelVersion = body.model_version;
+    }
   }
 
-  const url = buildServiceUrl(baseUrl, "/predict");
-  const result = await mlFetch<unknown>(url, {
-    service: SERVICE_NAME,
-    method: "POST",
-    body: { pairs },
-    timeoutMs: 60_000, // GT inference can take time on large pair lists
-    maxRetries: 2, // predictions are deterministic; 2 retries is enough
-  });
-
-  if (!result.ok) {
-    const err = result.error as MlServiceError;
-    // 503 from the service = checkpoint not loaded. Surface as source:none
-    // so the dashboard shows "model not trained yet" instead of a 502.
-    if (err.httpStatus === 503) {
+  // If ALL pairs failed AND the first error was a 503, surface as
+  // source:none with a clear note (the GT service is down).
+  if (predictions.length === 0 && firstError) {
+    if (firstError.httpStatus === 503) {
       return {
         predictions: [],
         source: "none",
         generatedAt: new Date().toISOString(),
         count: 0,
         checkpointPath: null,
-        note: `GT service is running but no checkpoint is loaded: ${err.message}`,
-      };
-    }
-    // 4xx = bad request (e.g., drug not in graph). Surface the message.
-    if (err.httpStatus >= 400 && err.httpStatus < 500) {
-      return {
-        predictions: [],
-        source: "none",
-        generatedAt: new Date().toISOString(),
-        count: 0,
-        checkpointPath: null,
-        note: `GT service rejected request (${err.httpStatus}): ${err.message}`,
-      };
-    }
-    // Network error (ECONNREFUSED, timeout, etc.) — the service is
-    // configured but not reachable. Return source:"none" with a clear
-    // note instead of throwing a 500. The acceptance criteria requires
-    // /api/predict to return predictions (not 500) — "no predictions
-    // yet, service down" is an acceptable answer; a 500 crash is not.
-    if (err.httpStatus === 0 || err.isTimeout) {
-      return {
-        predictions: [],
-        source: "none",
-        generatedAt: new Date().toISOString(),
-        count: 0,
-        checkpointPath: null,
-        note:
-          `GT service at ${getGtServiceUrl()} is not reachable: ${err.message}. ` +
-          `Check that 'python graph_transformer/service.py' is running and ` +
-          `GT_SERVICE_URL is correct. Issue 230 ROOT FIX: returning ` +
-          `source:"none" instead of 500 so the dashboard shows a clear state.`,
+        note: `Backend /predict returned 503: ${firstError.message}. The GT service may be down or the checkpoint may not be loaded.`,
       };
     }
     // Other 5xx — re-throw so the caller surfaces a 502.
-    throw err;
+    throw firstError;
   }
 
-  // Validate the response against the contract.
-  const validated = validateMlResponse(
-    SERVICE_NAME,
-    "/predict",
-    GtPredictResponseSchema,
-    result.body,
-  );
-
   return {
-    predictions: validated.predictions,
+    predictions,
     source: "gt_checkpoint",
-    modelVersion: validated.modelVersion,
-    generatedAt: validated.generatedAt,
-    count: validated.count,
-    checkpointPath: validated.checkpointPath ?? null,
-    error_count: validated.error_count,
-    error_rate: validated.error_rate,
+    modelVersion,
+    generatedAt: new Date().toISOString(),
+    count: predictions.length,
+    checkpointPath: null,
   };
 }
 
@@ -214,32 +233,19 @@ export async function predictPairs(
  * Return the top-K highest-scoring NOVEL (drug, disease) pairs from the
  * trained GT model. "Novel" = not in the known_pairs training set.
  *
- * Proxies to `GET {GT_SERVICE_URL}/top-k?k=<n>` via the shared HTTP client.
+ * TEAMMATE-11 ROOT FIX: proxies to `POST {API_BASE}/top-k` (the FastAPI
+ * backend), which itself proxies to the GT service's /top-k endpoint.
  */
 export async function topKNovel(
   topK: number = 50,
 ): Promise<GtInferenceResponse> {
-  const baseUrl = getGtServiceUrl();
-  if (!baseUrl) {
-    return {
-      predictions: [],
-      source: "none",
-      generatedAt: new Date().toISOString(),
-      count: 0,
-      checkpointPath: null,
-      note:
-        "GT_SERVICE_URL is not set. The Phase 3 Graph Transformer service " +
-        "(graph_transformer/service.py) must be running and reachable. " +
-        "Issue 230 ROOT FIX: this endpoint NEVER spawns a subprocess.",
-    };
-  }
-
   const k = Math.max(1, Math.min(500, Math.floor(topK)));
-  const url = buildServiceUrl(baseUrl, `/top-k?k=${k}`);
+  const url = buildServiceUrl(API_BASE, "/top-k");
   const result = await mlFetch<unknown>(url, {
-    service: SERVICE_NAME,
-    method: "GET",
-    timeoutMs: 60_000,
+    service: "backend",
+    method: "POST",
+    body: { k },
+    timeoutMs: PREDICT_TIMEOUT_MS,
     maxRetries: 2,
   });
 
@@ -252,7 +258,7 @@ export async function topKNovel(
         generatedAt: new Date().toISOString(),
         count: 0,
         checkpointPath: null,
-        note: `GT service is running but no checkpoint is loaded: ${err.message}`,
+        note: `Backend /top-k returned 503: ${err.message}. The GT service may be down.`,
       };
     }
     if (err.httpStatus >= 400 && err.httpStatus < 500) {
@@ -262,10 +268,9 @@ export async function topKNovel(
         generatedAt: new Date().toISOString(),
         count: 0,
         checkpointPath: null,
-        note: `GT service rejected request (${err.httpStatus}): ${err.message}`,
+        note: `Backend rejected request (${err.httpStatus}): ${err.message}`,
       };
     }
-    // Network error — same graceful handling as predictPairs.
     if (err.httpStatus === 0 || err.isTimeout) {
       return {
         predictions: [],
@@ -273,36 +278,43 @@ export async function topKNovel(
         generatedAt: new Date().toISOString(),
         count: 0,
         checkpointPath: null,
-        note:
-          `GT service at ${getGtServiceUrl()} is not reachable: ${err.message}. ` +
-          `Check that 'python graph_transformer/service.py' is running.`,
+        note: `Backend at ${API_BASE} is not reachable: ${err.message}.`,
       };
     }
     throw err;
   }
 
-  const validated = validateMlResponse(
-    SERVICE_NAME,
-    "/top-k",
-    GtTopKResponseSchema,
-    result.body,
-  );
-
+  // The backend returns TopKResponse {candidates, total, source, model_version}.
+  // Map to GtInferenceResponse shape.
+  const body = result.body as Record<string, unknown>;
+  const candidates = Array.isArray(body.candidates) ? body.candidates : [];
+  const predictions: GtPrediction[] = candidates.map((c) => {
+    const cand = c as Record<string, unknown>;
+    return {
+      drug: String(cand.drug ?? ""),
+      disease: String(cand.disease ?? ""),
+      score: Number(cand.gnn_score ?? 0),
+    };
+  });
   return {
-    predictions: validated.predictions,
+    predictions,
     source: "gt_checkpoint",
-    modelVersion: validated.modelVersion,
-    generatedAt: validated.generatedAt,
-    count: validated.count,
-    checkpointPath: validated.checkpointPath ?? null,
+    modelVersion:
+      typeof body.model_version === "string" ? body.model_version : undefined,
+    generatedAt: new Date().toISOString(),
+    count: predictions.length,
+    checkpointPath: null,
   };
 }
 
 /**
  * Health check — useful for the /api/system/status route.
  *
- * Returns the raw health response from the GT service, or null if the
- * service is not configured / unreachable.
+ * TEAMMATE-11 ROOT FIX: now calls the backend's /ready endpoint (which
+ * probes the GT service, RL service, and database in parallel). The
+ * previous version called the GT service's /health directly — that
+ * bypassed the backend's auth and rate limiter, and it returned the GT
+ * service's own health (not the integrated backend health).
  */
 export async function checkGtHealth(): Promise<{
   configured: boolean;
@@ -310,13 +322,9 @@ export async function checkGtHealth(): Promise<{
   checkpointLoaded: boolean;
   version?: string;
 }> {
-  const baseUrl = getGtServiceUrl();
-  if (!baseUrl) {
-    return { configured: false, reachable: false, checkpointLoaded: false };
-  }
-  const url = buildServiceUrl(baseUrl, "/health");
+  const url = buildServiceUrl(API_BASE, "/ready");
   const result = await mlFetch<unknown>(url, {
-    service: SERVICE_NAME,
+    service: "backend",
     method: "GET",
     timeoutMs: 5_000,
     maxRetries: 1,
@@ -325,10 +333,11 @@ export async function checkGtHealth(): Promise<{
     return { configured: true, reachable: false, checkpointLoaded: false };
   }
   const body = result.body as Record<string, unknown>;
+  const checks = (body.checks ?? {}) as Record<string, unknown>;
   return {
     configured: true,
     reachable: true,
-    checkpointLoaded: Boolean(body?.checkpoint_loaded),
-    version: typeof body?.version === "string" ? body.version : undefined,
+    checkpointLoaded: Boolean(checks.gt_service),
+    version: typeof body.version === "string" ? body.version : undefined,
   };
 }

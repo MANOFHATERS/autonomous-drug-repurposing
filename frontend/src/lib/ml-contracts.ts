@@ -46,12 +46,28 @@ import { z } from "zod";
 // ============================================================================
 // Phase 3 — Graph Transformer Service (graph_transformer/service.py)
 // ============================================================================
+//
+// TEAMMATE-11 ROOT FIX (P3-005): added structured PathwayItem schema.
+// Each pathway is now {pathway, intermediate_protein, chain[]}, not a
+// bare string. The backend's PredictResponse.pathways is List[PathwayItem].
+//
+// TEAMMATE-11 ROOT FIX (P3-006): added `model_version` to GtPredictResponse
+// so the caller can verify which model version produced the score.
+
+export const PathwayItemSchema = z.object({
+  pathway: z.string(),
+  intermediate_protein: z.string(),
+  chain: z.array(z.string()),
+});
 
 export const GtPredictionSchema = z.object({
   drug: z.string(),
   disease: z.string(),
   score: z.number(),
   confidence: z.number().optional(),
+  // TEAMMATE-11 P3-005: structured pathway chain (replaces bare string list).
+  pathways: z.array(PathwayItemSchema).optional(),
+  literature_supported: z.boolean().optional(),
   note: z.string().optional(),
 });
 
@@ -59,6 +75,11 @@ export const GtPredictResponseSchema = z.object({
   predictions: z.array(GtPredictionSchema),
   source: z.string(),
   modelVersion: z.string().optional(),
+  // TEAMMATE-11 P3-006: snake_case mirror of modelVersion for callers
+  // that read the backend's PredictResponse directly (the backend returns
+  // `model_version` snake_case; the GT service returns `modelVersion`
+  // camelCase). The frontend tolerates either.
+  model_version: z.string().optional(),
   generatedAt: z.string(),
   count: z.number(),
   checkpointPath: z.string().nullable().optional(),
@@ -76,6 +97,7 @@ export const GtTopKResponseSchema = z.object({
   ),
   source: z.string(),
   modelVersion: z.string().optional(),
+  model_version: z.string().optional(),
   generatedAt: z.string(),
   count: z.number(),
   checkpointPath: z.string().nullable().optional(),
@@ -89,6 +111,7 @@ export const GtHealthResponseSchema = z.object({
   checkpoint_loaded: z.boolean(),
 });
 
+export type PathwayItem = z.infer<typeof PathwayItemSchema>;
 export type GtPrediction = z.infer<typeof GtPredictionSchema>;
 export type GtPredictResponse = z.infer<typeof GtPredictResponseSchema>;
 export type GtTopKResponse = z.infer<typeof GtTopKResponseSchema>;
