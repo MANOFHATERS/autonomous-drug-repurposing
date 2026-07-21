@@ -105,6 +105,24 @@ export interface DrugCandidate {
     rank?: number;
     source?: string;
   };
+  /**
+   * TM13 ROOT FIX (v132, CRITICAL — Phase 2 ↔ Phase 4 wiring):
+   * pathway_chain is the list of biological pathway chains connecting
+   * this drug to this disease. Each chain is a PathwayChainItem
+   * {pathway, intermediate_protein, chain}. The candidate table renders
+   * this as an expandable "N pathways" cell (PathwayExpander component).
+   *
+   * Empty array when:
+   *   - The Phase 2 KG service is unreachable (pathway_enrichment_available=false)
+   *   - The KG had no paths for this drug-disease pair (pathway_enrichment_available=true)
+   *   - The candidate was loaded from a source that doesn't enrich pathways
+   *
+   * This is the "biological pathway chain that explains the prediction"
+   * deliverable mandated by project docx §6 (Phase 4 output). Without
+   * this field, the dashboard showed scores with no mechanistic
+   * explanation — exactly the broken state Teammate 13's issue describes.
+   */
+  pathway_chain?: import('@/lib/ml-contracts').PathwayChainItem[];
 }
 
 export interface ClinicalTrial {

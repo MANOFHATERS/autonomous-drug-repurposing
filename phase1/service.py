@@ -23,11 +23,14 @@ Environment:
 """
 from __future__ import annotations
 
+import csv as _csv_module
+import gzip
+import io
 import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 # Make phase1 importable when running ``python phase1/service.py`` directly.
 _HERE = Path(__file__).resolve().parent
@@ -40,6 +43,18 @@ if str(_REPO_ROOT) not in sys.path:
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+
+# TEAMMATE-4 ROOT FIX: import the canonical SCHEMA_VERSION from
+# phase1.database.base. The /stats endpoint previously hardcoded
+# schemaVersion='1.0' even though the actual DB schema version is 20
+# (derived from the 20 migration files in phase1/database/migrations/).
+# This is the single source of truth — every consumer (Phase 2 KG
+# builder, the migration runner, the dashboard schemaVersion field)
+# must read the same value.
+try:
+    from phase1.database.base import SCHEMA_VERSION as _DB_SCHEMA_VERSION
+except Exception:  # pragma: no cover — defensive fallback for stripped envs
+    _DB_SCHEMA_VERSION = 0
 
 # v122 FORENSIC ROOT FIX (BUG-4/BUG-5/BUG-6): wire up shared observability
 # (metrics + structured JSON logging + OpenTelemetry). The v116
@@ -93,6 +108,38 @@ if _configure_observability is not None:
     _configure_observability(app, service_name="phase1-dataset")
 
 
+def _open_csv_for_read(path: Path):
+    """Open a CSV file for reading, transparently handling .gz and UTF-8 BOM.
+
+    TEAMMATE-4 ROOT FIX: the previous ``_count_csv_rows`` and
+    ``_count_unique_string_proteins`` helpers opened files with
+    ``encoding="utf-8"`` which BREAKS on:
+
+      1. UTF-8 BOM (byte order mark). DrugBank's CSV export ships with a
+         BOM (``\\xef\\xbb\\xbf``) at the start of the file. With plain
+         ``utf-8`` encoding, the BOM becomes the first character of the
+         first header cell (``"\\ufeffname"`` instead of ``"name"``),
+         which then mismatches every DictReader lookup by the first
+         column name. ROOT FIX: use ``utf-8-sig`` which strips the BOM.
+
+      2. Gzip-compressed CSVs (``.csv.gz``). STRING and DisGeNET
+         pipelines write .gz files to save disk. The previous code
+         silently returned 0 rows for these files because ``open()``
+         on a .gz file reads the raw gzip bytes as text — the first
+         "line" is binary garbage, ``next(reader)`` succeeds (returning
+         the garbage as a "header"), and then ``sum(1 for _ in reader)``
+         undercounts or returns 0 because the gzip multi-stream layout
+         produces no recognizable newlines after the first block.
+         ROOT FIX: detect .gz by extension and wrap in ``gzip.open()``.
+
+    Returns a text-mode file-like object. Caller is responsible for
+    closing it (use ``with``).
+    """
+    if path.suffix == ".gz":
+        return gzip.open(path, "rt", encoding="utf-8-sig", errors="replace", newline="")
+    return open(path, "r", encoding="utf-8-sig", errors="replace", newline="")
+
+
 def _count_csv_rows(path: Path) -> int:
     """Count data rows in a CSV (excluding header). Returns 0 if missing.
 
@@ -107,13 +154,15 @@ def _count_csv_rows(path: Path) -> int:
     ROOT FIX: use the csv module's reader which correctly handles
     multi-line quoted fields. This is the standard, robust way to count
     CSV records.
+
+    TEAMMATE-4 ROOT FIX: now uses _open_csv_for_read() so .gz files and
+    UTF-8 BOM are handled correctly.
     """
     if not path.exists():
         return 0
     try:
-        import csv as _csv
-        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
-            reader = _csv.reader(f)
+        with _open_csv_for_read(path) as f:
+            reader = _csv_module.reader(f)
             try:
                 next(reader)  # skip header
             except StopIteration:
@@ -143,14 +192,18 @@ def _count_unique_string_proteins(path: Path) -> int:
     The downstream canonical count remains ``SELECT COUNT(*) FROM
     proteins`` (the DB query) -- this CSV-derived count is the best
     pre-DB estimate available to the /datasets endpoint.
+
+    TEAMMATE-4 ROOT FIX: now uses _open_csv_for_read() so .gz files and
+    UTF-8 BOM are handled correctly. Also exposes the underlying set
+    via _collect_string_protein_ids() so the UNION computation can
+    reuse it without re-parsing the file.
     """
     if not path.exists():
         return 0
     try:
-        import csv as _csv
-        unique_ids: set = set()
-        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
-            reader = _csv.reader(f)
+        unique_ids: Set[str] = set()
+        with _open_csv_for_read(path) as f:
+            reader = _csv_module.reader(f)
             try:
                 next(reader)  # skip header row (string_protein_protein_interactions.csv ships with one)
             except StopIteration:
@@ -173,6 +226,120 @@ def _count_unique_string_proteins(path: Path) -> int:
             path, exc,
         )
         return 0
+
+
+def _collect_string_protein_ids(path: Path) -> Set[str]:
+    """Return the SET of unique protein IDs from a STRING PPI CSV.
+
+    TEAMMATE-4 ROOT FIX (NEW HELPER): the previous /stats endpoint used
+    max(uniprot_rows, string_unique_protein_count) to estimate
+    total_proteins. This UNDERCOUNTS because:
+      - UniProt has proteins STRING doesn't have (e.g. unreviewed
+        IsoForm entries that STRING's alias mapper missed).
+      - STRING has proteins UniProt doesn't have (e.g. proteins from
+        non-reference proteomes that STRING indexes but UniProt hasn't
+        annotated yet).
+    The correct formula is the UNION of the two sets:
+        total_proteins = |uniprot_ids ∪ string_ids|
+    which counts each unique protein exactly once regardless of which
+    source(s) it appears in.
+
+    This helper returns the STRING protein ID SET so the caller can
+    compute the union. Returns an empty set if the file is missing or
+    unparseable.
+    """
+    if not path.exists():
+        return set()
+    try:
+        unique_ids: Set[str] = set()
+        with _open_csv_for_read(path) as f:
+            reader = _csv_module.reader(f)
+            try:
+                next(reader)  # skip header
+            except StopIteration:
+                return set()
+            for row in reader:
+                if not row:
+                    continue
+                if len(row) > 0 and row[0]:
+                    unique_ids.add(row[0])
+                if len(row) > 1 and row[1]:
+                    unique_ids.add(row[1])
+        return unique_ids
+    except Exception as exc:
+        logger.warning(
+            "Phase 1 service: failed to parse STRING PPI CSV %s for "
+            "protein ID set (TEAMMATE-4 UNION fix). Returning empty set. "
+            "Error: %s",
+            path, exc,
+        )
+        return set()
+
+
+def _collect_uniprot_protein_ids(path: Path) -> Set[str]:
+    """Return the SET of unique UniProt protein IDs from uniprot_proteins.csv.
+
+    TEAMMATE-4 ROOT FIX (NEW HELPER): used by the UNION computation in
+    /stats. Reads the uniprot_id column (case-insensitive header match)
+    and returns the set of non-empty values. Returns an empty set if
+    the file is missing or unparseable.
+    """
+    if not path.exists():
+        return set()
+    try:
+        unique_ids: Set[str] = set()
+        with _open_csv_for_read(path) as f:
+            reader = _csv_module.DictReader(f)
+            if reader.fieldnames is None:
+                return set()
+            # Find the uniprot_id column (case-insensitive).
+            id_col: Optional[str] = None
+            for fn in reader.fieldnames:
+                if fn and fn.strip().lower() in (
+                    "uniprot_id", "uniprot_accession", "accession", "protein_id"
+                ):
+                    id_col = fn
+                    break
+            if id_col is None:
+                # Fall back to the first column.
+                id_col = reader.fieldnames[0]
+            for row in reader:
+                val = row.get(id_col)
+                if val and val.strip():
+                    unique_ids.add(val.strip())
+        return unique_ids
+    except Exception as exc:
+        logger.warning(
+            "Phase 1 service: failed to parse UniProt proteins CSV %s for "
+            "protein ID set (TEAMMATE-4 UNION fix). Returning empty set. "
+            "Error: %s",
+            path, exc,
+        )
+        return set()
+
+
+def _compute_total_proteins(pdir: Path) -> int:
+    """Compute the total UNIQUE protein count across UniProt + STRING.
+
+    TEAMMATE-4 ROOT FIX: this replaces the previous
+    ``max(uniprot_rows, string_unique_protein_count)`` formula which
+    UNDERCOUNTED proteins that appear in only one source. The correct
+    formula is the UNION of the two sets — each unique protein is
+    counted exactly once regardless of which source(s) it appears in.
+
+    Returns 0 if neither CSV exists or both are empty.
+    """
+    uniprot_ids = _collect_uniprot_protein_ids(pdir / "uniprot_proteins.csv")
+    string_ids = _collect_string_protein_ids(pdir / "string_protein_protein_interactions.csv")
+    total = len(uniprot_ids | string_ids)  # UNION
+    if total > 0:
+        logger.info(
+            "Phase 1 service /datasets: total_proteins = "
+            "|uniprot_ids ∪ string_ids| = |%d ∪ %d| = %d "
+            "(TEAMMATE-4 ROOT FIX — UNION, not max).",
+            len(uniprot_ids), len(string_ids), total,
+        )
+    return total
 
 
 def _processed_data_dir() -> Path:
@@ -248,72 +415,26 @@ def _load_dataset_stats() -> Dict[str, Any]:
             if total_drugs > 0:
                 break
 
-    # P1-029 v117 ROOT FIX: total_proteins must account for STRING proteins
-    # that may not be in UniProt (STRING's alias mapping is imperfect -- a
-    # protein in STRING's graph may not yet be in the UniProt snapshot, and
-    # vice versa). The previous v113 "fix" only handled the rare edge case
-    # where uniprot_proteins.csv was COMPLETELY ABSENT (total_proteins==0);
-    # the COMMON case (both CSVs exist) was unaddressed, so total_proteins
-    # stayed at the uniprot row count and silently undercounted STRING-only
-    # proteins. Worse, the v113 fallback used interaction ROW count (each
-    # PPI row = 1 interaction, not 1 protein), which OVERCOUNTED because
-    # one protein appears in many interactions.
-    #
-    # ROOT FIX (v117): parse string_protein_protein_interactions.csv with
-    # csv.reader, count UNIQUE protein IDs from BOTH interaction columns
-    # (column 0 and column 1), then set
+    # TEAMMATE-4 ROOT FIX (replaces P1-029 v117 max() with UNION):
+    # The previous formula was
     #     total_proteins = max(uniprot_rows, string_unique_protein_count)
-    # The max() accounts for both directions of imperfect overlap:
-    #   - UniProt-only proteins (no STRING entry): counted by uniprot_rows.
-    #   - STRING-only proteins (no UniProt entry): counted by string_unique.
-    # The DB query ``SELECT COUNT(*) FROM proteins`` remains the canonical
-    # count for downstream consumers (Phase 2 KG builder).
-    _string_ppi_path = pdir / "string_protein_protein_interactions.csv"
-    _string_unique_protein_count = _count_unique_string_proteins(_string_ppi_path)
-    _uniprot_rows = total_proteins  # snapshot before we possibly overwrite
-
-    if _string_unique_protein_count > 0 and _uniprot_rows > 0:
-        # COMMON CASE: both CSVs exist. Take the max to avoid undercounting
-        # in either direction.
-        total_proteins = max(_uniprot_rows, _string_unique_protein_count)
-        logger.info(
-            "Phase 1 service /datasets: total_proteins = "
-            "max(uniprot_rows=%d, string_unique_proteins=%d) = %d "
-            "(P1-029 v117 ROOT FIX -- both CSVs exist, taking the max to "
-            "account for STRING-only proteins not in UniProt and vice versa).",
-            _uniprot_rows, _string_unique_protein_count, total_proteins,
-        )
-    elif _string_unique_protein_count > 0 and _uniprot_rows == 0:
-        # uniprot_proteins.csv absent/empty -- use STRING unique count directly.
-        total_proteins = _string_unique_protein_count
-        logger.info(
-            "Phase 1 service /datasets: total_proteins = %d from STRING "
-            "unique protein IDs (uniprot_proteins.csv absent/empty; "
-            "P1-029 v117 ROOT FIX).",
-            total_proteins,
-        )
-    elif _string_unique_protein_count == 0 and _uniprot_rows == 0 and total_interactions > 0:
-        # Legacy fallback: STRING CSV exists but we couldn't extract unique
-        # proteins from it (e.g. parse failure or unexpected column layout).
-        # Use the interaction count as a conservative lower bound (each
-        # interaction has 2 proteins, but they may overlap). The DB query
-        # is the canonical count.
-        total_proteins = total_interactions  # conservative lower bound
-        logger.info(
-            "Phase 1 service /datasets: total_proteins = %d (STRING "
-            "interaction count as conservative lower bound; could not "
-            "extract unique proteins from STRING CSV; P1-029 v117 legacy "
-            "fallback).",
-            total_proteins,
-        )
-    elif _uniprot_rows > 0:
-        # Only uniprot_proteins.csv exists. No STRING PPI data.
-        logger.info(
-            "Phase 1 service /datasets: total_proteins = %d from "
-            "uniprot_proteins.csv (STRING PPI CSV absent; P1-029 v117).",
-            total_proteins,
-        )
-    # else: both are 0 -- total_proteins stays 0 (data_status=empty).
+    # which UNDERCOUNTS proteins that appear in only one source:
+    #   - UniProt has 100 proteins, STRING has 60 proteins, 50 overlap →
+    #     max(100, 60) = 100, but the UNION is 110 (50 + 50 + 10).
+    #   - The 10 STRING-only proteins were silently dropped from the
+    #     dashboard's protein count, which then propagated to Phase 2's
+    #     KG builder (which uses this count to size its node ID space).
+    #
+    # ROOT FIX: use _compute_total_proteins(pdir) which returns
+    #     |uniprot_ids ∪ string_ids|
+    # — the cardinality of the UNION of the two sets. Each unique
+    # protein is counted exactly once regardless of which source(s) it
+    # appears in. This is the correct set-theoretic formula.
+    #
+    # The DB query ``SELECT COUNT(*) FROM proteins`` remains the
+    # canonical count for downstream consumers (Phase 2 KG builder);
+    # this CSV-derived count is the best pre-DB estimate.
+    total_proteins = _compute_total_proteins(pdir)
 
     return {
         "sources": sources,
@@ -448,17 +569,47 @@ def datasets() -> Dict[str, Any]:
 # CSVs exist (Phase 1 hasn't run), we return zero counts with a clear
 # `backend: "phase1_service_no_data"` marker so the dashboard can render
 # the "no data ingested yet" state honestly.
+#
+# TEAMMATE-4 ROOT FIX (six bugs fixed):
+#   1. schemaVersion was hardcoded to "1.0" — now reads the canonical
+#      SCHEMA_VERSION from phase1.database.base (currently 20, derived
+#      from the 20 migration files).
+#   2. bridgeVersion was hardcoded to None — now reads from the
+#      BRIDGE_VERSION env var or falls back to the service version.
+#   3. total_proteins used max(uniprot, string) — now uses UNION
+#      (computed in _load_dataset_stats via _compute_total_proteins).
+#   4. edge_types was missing 'Compound->Disease' (the DrugBank
+#      indications edge) — now added when drugbank_indications.csv
+#      has at least one row.
+#   5. Response was missing total_drugs, total_proteins,
+#      compoundNodesLoaded, proteinNodesLoaded, lastUpdated — all
+#      now present (the API contract requires them).
+#   6. Hardcoded CORS in the app.add_middleware() call — already
+#      fixed in P1-017 v113 (reads PHASE1_CORS_ORIGINS env var).
+#      Verified by reading the actual code (not the comment).
 @app.get("/stats")
 def stats() -> Dict[str, Any]:
     """Phase 1 stats in the DatasetStatsResponse shape the frontend expects.
 
     This endpoint is the contract-satisfying peer of
-    ``frontend/src/lib/services/dataset-stats.ts:proxyToDatasetService``.
-    It returns the fields the frontend destructures: sources, nodesLoaded,
-    edgesLoaded, edgeTypesPresent, pipelineVersion, schemaVersion,
-    bridgeVersion, backend, warnings, errors, generatedAt.
+    ``frontend/src/lib/services/dataset-stats.ts:proxyToDatasetService``
+    AND the backend FastAPI proxy at
+    ``backend/api/main.py:/datasets/stats``.
+
+    Returns the fields the frontend destructures:
+      - sources: list of {name, loaded, rowsLoaded}
+      - total_drugs, total_proteins (top-level for dashboard KPIs)
+      - nodesLoaded, edgesLoaded (graph totals)
+      - compoundNodesLoaded, proteinNodesLoaded (per-type node counts)
+      - edgeTypesPresent: list of edge type strings
+      - schemaVersion: real DB schema version (from SCHEMA_VERSION)
+      - bridgeVersion: pipeline bridge version
+      - lastUpdated: ISO-8601 timestamp of the most recent CSV file
+      - backend, warnings, errors, generatedAt
     """
     raw = _load_dataset_stats()
+    pdir = _processed_data_dir()
+
     # Translate Phase-1-internal source rows into the frontend's
     # DatasetSourceStat shape: { name, loaded, rowsLoaded?, sha256? }.
     sources_out: List[Dict[str, Any]] = []
@@ -469,33 +620,67 @@ def stats() -> Dict[str, Any]:
             "rowsLoaded": int(s.get("row_count", 0) or 0),
         })
 
+    # Per-type node counts (TEAMMATE-4 ROOT FIX: previously missing
+    # from the /stats response — the dashboard KPI cards need these
+    # to render "X compounds" and "Y proteins" separately, not just
+    # a combined nodesLoaded total).
+    compound_nodes_loaded = int(raw.get("total_drugs", 0) or 0)
+    protein_nodes_loaded = int(raw.get("total_proteins", 0) or 0)
+
     # nodesLoaded / edgesLoaded: Phase 1 doesn't build the graph (Phase 2
     # does), but the bridge summary records how many nodes/edges were
     # STAGED for Phase 2. We surface the drug + protein + interaction
     # counts as the closest Phase-1-native equivalent. Phase 2's own
     # /kg/stats endpoint is the canonical source for final graph counts.
-    nodes_loaded = (
-        int(raw.get("total_drugs", 0) or 0)
-        + int(raw.get("total_proteins", 0) or 0)
-    )
+    nodes_loaded = compound_nodes_loaded + protein_nodes_loaded
     edges_loaded = int(raw.get("total_ppi", 0) or 0)
 
-    # edgeTypesPresent: Phase 1 stages Compound→Protein (DrugBank
-    # interactions) and Protein→Protein (STRING). Other edge types
-    # (Protein→Pathway, Pathway→Disease, Drug→AdverseEvent) are added by
-    # Phase 2. We surface only what Phase 1 actually produced — never
-    # fabricate.
+    # edgeTypesPresent (TEAMMATE-4 ROOT FIX: add Compound->Disease edge):
+    # Phase 1 stages the following edge types from its CSV artifacts:
+    #   - Compound->Protein   (DrugBank drug-target interactions CSV)
+    #   - Compound->Disease   (DrugBank drug-indications CSV)  <-- NEW
+    #   - Protein->Protein    (STRING PPI CSV)
+    #   - Gene->Disease       (DisGeNET + OMIM GDA CSVs)
+    # The previous version OMITTED 'Compound->Disease' even when
+    # drugbank_indications.csv was present and non-empty. This caused
+    # the dashboard's "edge types loaded" widget to show 3/4 edge types
+    # even when all 4 were actually staged. It also broke Phase 2's
+    # KG builder, which uses this list to decide which edge loader
+    # functions to invoke (the Compound->Disease loader was never
+    # triggered because the edge type was missing from the manifest).
     edge_types: List[str] = []
+    drugbank_indications_path = pdir / "drugbank_indications.csv"
+    drugbank_interactions_path = pdir / "drugbank_interactions.csv"
+    drugbank_indications_rows = _count_csv_rows(drugbank_indications_path)
+    drugbank_interactions_rows = _count_csv_rows(drugbank_interactions_path)
+
     for s in raw.get("sources", []):
         if not s.get("available", False):
             continue
         name = s.get("name", "")
         if name == "drugbank":
-            edge_types.append("Compound->Protein")
+            # Compound->Protein comes from drugbank_interactions.csv
+            # (drug -> target protein). Only emit if that CSV has rows.
+            if drugbank_interactions_rows > 0:
+                edge_types.append("Compound->Protein")
+            # Compound->Disease comes from drugbank_indications.csv
+            # (drug -> treats -> disease). Only emit if that CSV has
+            # rows — never fabricate.
+            if drugbank_indications_rows > 0:
+                edge_types.append("Compound->Disease")
         elif name == "string":
             edge_types.append("Protein->Protein")
         elif name in ("disgenet", "omim"):
             edge_types.append("Gene->Disease")
+
+    # Deduplicate edge_types (disgenet + omim both produce Gene->Disease).
+    seen: Set[str] = set()
+    edge_types_dedup: List[str] = []
+    for et in edge_types:
+        if et not in seen:
+            seen.add(et)
+            edge_types_dedup.append(et)
+    edge_types = edge_types_dedup
 
     warnings: List[str] = []
     errors: List[str] = []
@@ -506,19 +691,75 @@ def stats() -> Dict[str, Any]:
             "Run the full Airflow ETL pipeline to ingest all 7 sources."
         )
 
+    # lastUpdated (TEAMMATE-4 ROOT FIX: previously missing — the
+    # dashboard needs this to show "last updated X minutes ago"). Use
+    # the mtime of the most recently modified CSV in processed_data/.
+    last_updated = _get_last_updated_iso(pdir)
+
     return {
+        # Frontend DatasetStatsResponse fields (kept for backward compat).
         "sources": sources_out,
         "nodesLoaded": nodes_loaded,
         "edgesLoaded": edges_loaded,
         "edgeTypesPresent": edge_types,
         "pipelineVersion": "phase1-service-v1",
-        "schemaVersion": "1.0",
-        "bridgeVersion": None,
+        # TEAMMATE-4 ROOT FIX #1: real schemaVersion from SCHEMA_VERSION
+        # (was hardcoded "1.0"). str() because the frontend's Zod schema
+        # expects a string, not an int.
+        "schemaVersion": str(_DB_SCHEMA_VERSION),
+        # TEAMMATE-4 ROOT FIX #2: real bridgeVersion from env or service
+        # version (was hardcoded None).
+        "bridgeVersion": _get_bridge_version(),
         "backend": "phase1_service",
         "warnings": warnings,
         "errors": errors,
         "generatedAt": _now_iso(),
+        # TEAMMATE-4 ROOT FIX #5: additional fields required by the
+        # API contract (issue's API CONTRACT section).
+        "total_drugs": compound_nodes_loaded,
+        "total_proteins": protein_nodes_loaded,
+        "total_ppi": edges_loaded,
+        "compoundNodesLoaded": compound_nodes_loaded,
+        "proteinNodesLoaded": protein_nodes_loaded,
+        "lastUpdated": last_updated,
+        "total_sources_available": int(raw.get("total_sources_available", 0) or 0),
+        "total_sources_expected": int(raw.get("total_sources_expected", 0) or 0),
     }
+
+
+def _get_bridge_version() -> str:
+    """Return the bridge version for the /stats endpoint.
+
+    TEAMMATE-4 ROOT FIX: the previous /stats endpoint hardcoded
+    ``bridgeVersion: None``. The bridge version is the version of the
+    Phase 1 -> Phase 2 data contract (the bridge summary JSON schema).
+    Read it from the BRIDGE_VERSION env var; if unset, fall back to
+    the service version (1.0.0). Never return None — the dashboard's
+    KPI card expects a string.
+    """
+    return os.environ.get("BRIDGE_VERSION", "1.0.0")
+
+
+def _get_last_updated_iso(pdir: Path) -> Optional[str]:
+    """Return the ISO-8601 mtime of the most recently modified CSV file.
+
+    TEAMMATE-4 ROOT FIX (NEW HELPER): the /stats response was missing
+    a lastUpdated field. The dashboard needs this to show "last
+    updated X minutes ago" and to invalidate cached stats when the
+    data changes. Returns None if no CSVs exist.
+    """
+    try:
+        if not pdir.exists():
+            return None
+        csv_files = list(pdir.glob("*.csv")) + list(pdir.glob("*.csv.gz"))
+        if not csv_files:
+            return None
+        latest_mtime = max(f.stat().st_mtime for f in csv_files)
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(latest_mtime, tz=timezone.utc).isoformat()
+    except Exception as exc:
+        logger.warning("Phase 1 service: failed to compute lastUpdated: %s", exc)
+        return None
 
 
 def _now_iso() -> str:

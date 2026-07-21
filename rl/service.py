@@ -31,9 +31,10 @@ import json
 import logging
 import os
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Make rl + repo root importable.
 _HERE = Path(__file__).resolve().parent
@@ -43,7 +44,7 @@ _REPO_ROOT = _HERE.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -331,6 +332,282 @@ def _find_latest_output_csv() -> Optional[Path]:
     return candidates[0][0]
 
 
+# ============================================================================
+# TM13 ROOT FIX (v132, CRITICAL — Phase 2 ↔ Phase 4 wiring):
+# Pathway enrichment — attaches the biological pathway chain (drug → protein
+# → pathway → disease) to each RankedHypothesis by querying the Phase 2
+# knowledge graph service.
+#
+# This is the "biological pathway chain that explains the prediction"
+# deliverable mandated by project docx §6 (Phase 4 output). Without this
+# field, the dashboard could show scores with no mechanistic explanation —
+# exactly the broken state Teammate 13's issue describes.
+#
+# The Phase 2 KG service exposes /kg/explore?node=<name>&depth=3 which
+# returns the multi-hop neighborhood of a node. We use it to find paths
+# from drug → protein → pathway → disease for each candidate. The result
+# is a list of PathwayChainItem objects (one per discovered pathway).
+#
+# FAILURE MODES (all non-fatal — enrichment is best-effort):
+#   - KG_SERVICE_URL not set → returns [], enrichment flag = False
+#   - KG service unreachable → returns [], enrichment flag = False
+#   - No paths found for this drug-disease pair → returns [], flag = True
+#   - KG service returns malformed JSON → returns [], flag = False
+#
+# The enrichment flag (pathway_enrichment_available) is True when the KG
+# service was successfully queried (even if zero paths were found). It is
+# False when the KG service was not configured or returned an error. The
+# candidate table reads this flag to decide whether to render the Pathway
+# column at all (no point rendering an empty column when the KG is down).
+# ============================================================================
+
+def _enrich_candidates_with_pathways(
+    candidates: List[Dict[str, Any]],
+    timeout_ms: int = 2_000,
+) -> bool:
+    """Enrich each candidate in-place with a ``pathway_chain`` field.
+
+    Queries the Phase 2 KG service (KG_SERVICE_URL/kg/explore) for each
+    (drug, disease) pair. The KG service returns the multi-hop neighborhood
+    of the drug node; we walk it to find paths ending at the disease.
+
+    Args:
+        candidates: List of candidate dicts (mutated in-place). Each
+            candidate gets a ``pathway_chain`` key (list of
+            {pathway, intermediate_protein, chain} dicts).
+        timeout_ms: Per-request timeout for the KG service. Default 2s
+            so a slow KG doesn't bottleneck the /rank endpoint.
+
+    Returns:
+        True if the KG service was successfully queried (enrichment
+        available — even if zero pathways were found for these pairs).
+        False if the KG service is not configured, unreachable, or
+        returned malformed data.
+    """
+    if not candidates:
+        # No candidates to enrich. Return True so the response's
+        # pathway_enrichment_available flag is consistent — the operator
+        # can tell that enrichment WOULD have run if there were candidates.
+        return True
+
+    kg_url = os.environ.get("KG_SERVICE_URL") or os.environ.get("PHASE2_SERVICE_URL")
+    if not kg_url:
+        # KG service not configured. Mark all candidates as having no
+        # pathway chain, and return False so the response flag is False.
+        for c in candidates:
+            c["pathway_chain"] = []
+        return False
+
+    kg_url = kg_url.rstrip("/")
+    # Try to import httpx. If it's not available (rare in production but
+    # possible in stripped dev envs), fall back to urllib.request.
+    try:
+        import httpx  # type: ignore[import]
+        _HAS_HTTPX = True
+    except ImportError:
+        _HAS_HTTPX = False
+
+    enrichment_ok = True
+    for c in candidates:
+        drug = (c.get("drug") or "").strip()
+        disease = (c.get("disease") or "").strip()
+        if not drug or not disease:
+            c["pathway_chain"] = []
+            continue
+        # Query the KG service for the drug's neighborhood. We ask for
+        # depth=3 so we can find drug → protein → pathway → disease chains
+        # (3 hops). The KG service may return fewer hops if the data is
+        # sparse.
+        explore_url = f"{kg_url}/kg/explore?node={_url_quote(drug)}&depth=3"
+        try:
+            if _HAS_HTTPX:
+                with httpx.Client(timeout=timeout_ms / 1000.0) as client:
+                    resp = client.get(explore_url)
+                    if resp.status_code != 200:
+                        c["pathway_chain"] = []
+                        enrichment_ok = False
+                        continue
+                    kg_data = resp.json()
+            else:
+                # Fallback: urllib.request (stdlib). Slower but always
+                # available.
+                import urllib.request
+                import urllib.error
+                req = urllib.request.Request(
+                    explore_url,
+                    headers={"Accept": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=timeout_ms / 1000.0) as resp:
+                    if resp.status != 200:
+                        c["pathway_chain"] = []
+                        enrichment_ok = False
+                        continue
+                    import json as _json
+                    kg_data = _json.loads(resp.read().decode("utf-8"))
+            # Walk the KG response to find pathway chains from drug →
+            # disease. The KG /kg/explore response shape is:
+            #   { nodes: [{id, label, type}], edges: [{source, target, type}] }
+            # We do a BFS from the drug node to find paths ending at the
+            # disease node, capped at 3 hops. Each path is converted to a
+            # PathwayChainItem:
+            #   - pathway: the pathway node's label (or "direct" if no
+            #     pathway node is in the path)
+            #   - intermediate_protein: the first Protein node in the path
+            #     (or None)
+            #   - chain: the ordered list of node labels from drug to
+            #     disease
+            chains = _extract_pathway_chains(kg_data, drug, disease, max_hops=3)
+            c["pathway_chain"] = chains
+        except Exception as exc:
+            logger.debug(
+                "TM13 pathway enrichment failed for drug=%s disease=%s: %s",
+                drug, disease, exc,
+            )
+            c["pathway_chain"] = []
+            enrichment_ok = False
+    return enrichment_ok
+
+
+def _url_quote(s: str) -> str:
+    """URL-encode a string for use in a query parameter."""
+    try:
+        from urllib.parse import quote
+        return quote(s, safe="")
+    except Exception:
+        # Fallback: basic encoding for common chars. Should never run
+        # in production (urllib.parse.quote is stdlib), but defensive.
+        return s.replace(" ", "%20").replace("/", "%2F").replace("?", "%3F")
+
+
+def _extract_pathway_chains(
+    kg_data: Dict[str, Any],
+    drug: str,
+    disease: str,
+    max_hops: int = 3,
+    max_chains: int = 5,
+) -> List[Dict[str, Any]]:
+    """Walk a KG /kg/explore response to find drug → disease pathway chains.
+
+    The KG response shape (from phase2/service.py /kg/explore) is:
+        {
+          nodes: [{id, label, type}, ...],
+          edges: [{source, target, type}, ...]
+        }
+
+    We BFS from the drug node, looking for paths that end at the disease
+    node within ``max_hops`` edges. For each path, we extract:
+      - pathway: the label of the first Pathway-type node in the path
+        (or "direct" if the path has no Pathway node)
+      - intermediate_protein: the label of the first Protein-type node
+        (or None if no Protein in path)
+      - chain: ordered list of node labels from drug to disease
+
+    Args:
+        kg_data: The parsed JSON response from /kg/explore.
+        drug: The drug name (used to find the starting node).
+        disease: The disease name (used to find the ending node).
+        max_hops: Maximum path length (edges). Default 3 = drug → protein
+            → pathway → disease.
+        max_chains: Maximum number of chains to return. Default 5 (the
+            dashboard rarely needs more; cap prevents a huge pathway from
+            overwhelming the response).
+
+    Returns:
+        List of PathwayChainItem dicts (each with pathway,
+        intermediate_protein, chain keys).
+    """
+    nodes = kg_data.get("nodes") or []
+    edges = kg_data.get("edges") or []
+    if not nodes or not edges:
+        return []
+    # Build node lookup: id -> node dict. Also build label -> id index
+    # for matching the drug/disease names (case-insensitive).
+    node_by_id: Dict[str, Dict[str, Any]] = {}
+    drug_node_id: Optional[str] = None
+    disease_node_id: Optional[str] = None
+    drug_lower = drug.lower()
+    disease_lower = disease.lower()
+    for n in nodes:
+        nid = n.get("id")
+        if not nid:
+            continue
+        node_by_id[nid] = n
+        label = (n.get("label") or nid).lower()
+        ntype = (n.get("type") or "").lower()
+        if drug_node_id is None and (label == drug_lower or nid.lower() == drug_lower):
+            drug_node_id = nid
+        if disease_node_id is None and (label == disease_lower or nid.lower() == disease_lower):
+            disease_node_id = nid
+    if drug_node_id is None or disease_node_id is None:
+        return []
+    # Build adjacency list for BFS.
+    adj: Dict[str, List[str]] = {}
+    for e in edges:
+        src = e.get("source")
+        tgt = e.get("target")
+        if src and tgt:
+            adj.setdefault(src, []).append(tgt)
+            # KG edges may be directed or undirected depending on the
+            # relationship type. We treat them as undirected for chain
+            # discovery (the KG stores Drug->Protein and Protein->Pathway
+            # as separate edges, but the inverse traversal is also valid
+            # for chain explanation purposes).
+            adj.setdefault(tgt, []).append(src)
+    if drug_node_id not in adj:
+        return []
+    # BFS from drug_node_id, looking for paths to disease_node_id.
+    chains: List[Dict[str, Any]] = []
+    # Each BFS queue entry: (current_node_id, path_so_far).
+    # path_so_far is a list of node IDs.
+    queue = [(drug_node_id, [drug_node_id])]
+    visited_paths: set = set()
+    while queue and len(chains) < max_chains:
+        next_queue: List[tuple] = []
+        for cur_id, path in queue:
+            if len(path) - 1 >= max_hops:
+                continue
+            for neighbor_id in adj.get(cur_id, []):
+                if neighbor_id in path:
+                    # Avoid cycles.
+                    continue
+                new_path = path + [neighbor_id]
+                if neighbor_id == disease_node_id:
+                    # Found a chain! Convert node IDs to labels and
+                    # extract pathway/protein info.
+                    chain_labels = [
+                        (node_by_id[nid].get("label") or nid) for nid in new_path
+                    ]
+                    # Find the first Pathway-type node in the path.
+                    pathway_name = "direct"
+                    for nid in new_path:
+                        n = node_by_id.get(nid, {})
+                        if (n.get("type") or "").lower() == "pathway":
+                            pathway_name = n.get("label") or "pathway"
+                            break
+                    # Find the first Protein-type node (skip the drug).
+                    intermediate_protein: Optional[str] = None
+                    for nid in new_path[1:]:
+                        n = node_by_id.get(nid, {})
+                        if (n.get("type") or "").lower() in ("protein", "receptor", "kinase", "tf", "transcription", "effector"):
+                            intermediate_protein = n.get("label")
+                            break
+                    path_key = tuple(new_path)
+                    if path_key in visited_paths:
+                        continue
+                    visited_paths.add(path_key)
+                    chains.append({
+                        "pathway": pathway_name,
+                        "intermediate_protein": intermediate_protein,
+                        "chain": chain_labels,
+                    })
+                    if len(chains) >= max_chains:
+                        break
+                else:
+                    next_queue.append((neighbor_id, new_path))
+        queue = next_queue
+    return chains
+
+
 def _load_reward_weights_from_meta(csv_path: Path) -> Optional[Dict[str, float]]:
     """P4-004 ROOT FIX: load reward weights from the .meta.json sidecar.
 
@@ -542,6 +819,128 @@ def _load_candidates_from_csv(
     return {"candidates": out, "total": total_filtered}
 
 
+# ============================================================================
+# P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+# Cache the GTRLBridge + RL input DataFrame at service startup so /rank
+# doesn't rebuild the bridge on every request.
+# ----------------------------------------------------------------------------
+# THE BUG (forensic root cause):
+#   The previous ``_load_candidates_from_checkpoint`` built a NEW
+#   ``GTRLBridge`` on EVERY /rank request:
+#     bridge = GTRLBridge(...)
+#     bridge.build_model()           # ← trains the graph transformer
+#     rl_input_df = bridge.generate_rl_input()   # ← full graph traversal
+#   On a real KG, ``build_model()`` takes minutes (it trains the graph
+#   transformer) and ``generate_rl_input()`` does a full graph traversal.
+#   Every /rank request added multi-minute latency — the pharma partner
+#   API was unusable.
+#
+# ROOT FIX:
+#   Build the bridge ONCE (lazy on first /rank call, or eagerly via the
+#   ``/reload`` endpoint), then reuse it for all subsequent /rank requests.
+#   The PPO model + VecNormalize sidecar are still loaded per-request
+#   (the checkpoint may change between requests), but the expensive
+#   bridge build is cached.
+#
+# THREAD SAFETY:
+#   FastAPI runs sync endpoints in a threadpool, so concurrent /rank
+#   requests may race to build the bridge. We use ``threading.Lock``
+#   with double-checked locking so only ONE thread builds the bridge;
+#   the rest wait and then receive the cached instance.
+#
+# INVALIDATION:
+#   ``invalidate_bridge_cache()`` clears the cache. Called by the
+#   ``/reload`` endpoint (admin-only) after a KG update. The next /rank
+#   request will rebuild the bridge with the new KG data.
+# ============================================================================
+_bridge_cache: Optional[Any] = None     # GTRLBridge instance (None = not built yet)
+_rl_input_cache: Optional[Any] = None   # pandas DataFrame from bridge.generate_rl_input()
+_bridge_lock = threading.Lock()
+
+
+def get_cached_bridge() -> Tuple[Any, Any]:
+    """Return the cached (GTRLBridge, rl_input_df), building it on first call.
+
+    P4-024 ROOT FIX (Teammate 12): the previous ``_load_candidates_from_checkpoint``
+    built a NEW GTRLBridge on every /rank request — calling ``build_model()``
+    (which trains the graph transformer — multi-minute on a real KG) AND
+    ``generate_rl_input()`` (a full graph traversal) on EVERY request.
+    This added multi-minute latency to every /rank call, making the pharma
+    partner API unusable.
+
+    ROOT FIX: build the bridge ONCE (lazy on first /rank call), then reuse
+    it for all subsequent /rank requests. The PPO model and VecNormalize
+    sidecar are still loaded per-request (the checkpoint may change between
+    requests), but the expensive bridge build is cached.
+
+    Thread-safety: uses double-checked locking so concurrent /rank requests
+    don't race to build the bridge.
+
+    Returns:
+        Tuple of (bridge, rl_input_df). The bridge is a ``GTRLBridge``
+        instance; ``rl_input_df`` is a ``pandas.DataFrame`` from
+        ``bridge.generate_rl_input()``.
+    """
+    global _bridge_cache, _rl_input_cache
+    if _bridge_cache is not None and _rl_input_cache is not None:
+        return _bridge_cache, _rl_input_cache
+    with _bridge_lock:
+        # Double-checked locking: re-test inside the lock so only the
+        # first thread does the build; the rest receive the cached instance.
+        if _bridge_cache is not None and _rl_input_cache is not None:
+            return _bridge_cache, _rl_input_cache
+        from graph_transformer.gt_rl_bridge import GTRLBridge
+        bridge = GTRLBridge(
+            output_dir=str(_HERE / "_service_output"),
+            device="cpu",
+            seed=42,
+        )
+        # Train the graph transformer ONCE. This is the expensive step
+        # (multi-minute on a real KG); caching it cuts /rank latency
+        # from minutes to seconds.
+        bridge.build_model()
+        # Pre-compute the RL training input. This is a graph traversal
+        # that produces the (drug, disease, features) rows the RL env
+        # consumes. Caching it avoids re-traversal on every /rank call.
+        rl_input_df = bridge.generate_rl_input()
+        _rl_input_len = len(rl_input_df) if rl_input_df is not None else 0
+        if _rl_input_len == 0:
+            logger.warning(
+                "P4-024 ROOT FIX (Teammate 12): bridge generated EMPTY RL "
+                "input — /rank will return empty candidates. Check that "
+                "phase1/phase2 data is loaded and the KG has drug→protein→"
+                "pathway→disease edges."
+            )
+        else:
+            logger.info(
+                "P4-024 ROOT FIX (Teammate 12): bridge cached at startup. "
+                "RL input has %d rows. Subsequent /rank requests reuse "
+                "this cache (no multi-minute rebuild). Use POST /reload "
+                "to refresh the cache after a KG update.",
+                _rl_input_len,
+            )
+        _bridge_cache = bridge
+        _rl_input_cache = rl_input_df
+        return _bridge_cache, _rl_input_cache
+
+
+def invalidate_bridge_cache() -> None:
+    """Clear the cached GTRLBridge + RL input.
+
+    Called by the ``/reload`` endpoint (admin-only) after a KG update.
+    The next /rank request will rebuild the bridge with the new KG data.
+    """
+    global _bridge_cache, _rl_input_cache
+    with _bridge_lock:
+        _bridge_cache = None
+        _rl_input_cache = None
+        logger.info(
+            "P4-024 ROOT FIX (Teammate 12): bridge cache invalidated. "
+            "The next /rank request will rebuild the bridge (may take "
+            "several minutes on a large KG)."
+        )
+
+
 def _load_candidates_from_checkpoint(
     checkpoint_path: str,
     drug: Optional[str],
@@ -584,6 +983,15 @@ def _load_candidates_from_checkpoint(
          ``bridge.get_top_k_novel_predictions`` so the bridge normalizes
          obs via the SAME wrapper the model was trained with.
 
+    P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+      The previous code created a NEW ``GTRLBridge`` on every /rank
+      request and called ``build_model()`` + ``generate_rl_input()``
+      each time — multi-minute latency per request. The fix uses the
+      cached bridge from ``get_cached_bridge()`` so the expensive build
+      happens ONCE (at startup or first request), not per-call. The PPO
+      model + VecNormalize sidecar are still loaded per-request because
+      the checkpoint may change between requests.
+
     P4-012 ROOT FIX: returns a dict with 'candidates' AND 'total' keys
     (consistent with _load_candidates_from_csv). When limit=0, returns
     ALL candidates (not empty) — the previous code returned an empty
@@ -605,19 +1013,24 @@ def _load_candidates_from_checkpoint(
         # Load the model without env first (env attached later).
         model = PPO.load(checkpoint_path, device=device)
 
-        # Build bridge and env for ranking.
-        from graph_transformer.gt_rl_bridge import GTRLBridge
-        from rl.rl_drug_ranker import DrugRankingEnv, PipelineConfig
-        bridge = GTRLBridge(output_dir=str(_HERE / "_service_output"), device="cpu", seed=42)
-        # Build a minimal graph for the env. In production, this uses
-        # real Phase 1/2 data; here we build the demo graph.
-        bridge.build_model()
-        rl_input_df = bridge.generate_rl_input()
-        if len(rl_input_df) == 0:
-            logger.warning("INT-023: bridge generated empty RL input — no candidates.")
+        # P4-024 ROOT FIX (Teammate 12): use the CACHED bridge instead
+        # of creating a new one on every request. The bridge's
+        # ``build_model()`` trains the graph transformer (multi-minute on
+        # a real KG) and ``generate_rl_input()`` does a full graph
+        # traversal — caching them at startup cuts /rank latency from
+        # minutes to seconds. The PPO model + VecNormalize sidecar are
+        # still loaded per-request (the checkpoint may change).
+        bridge, rl_input_df = get_cached_bridge()
+        if rl_input_df is None or len(rl_input_df) == 0:
+            logger.warning(
+                "P4-024: cached bridge has empty RL input — no candidates. "
+                "Check phase1/phase2 data is loaded. Use POST /reload to "
+                "rebuild the bridge after a KG update."
+            )
             return {"candidates": [], "total": 0}
 
-        # Build RL config and env.
+        # Build RL config and env from the CACHED rl_input_df.
+        from rl.rl_drug_ranker import DrugRankingEnv, PipelineConfig
         cfg = PipelineConfig()
         env = DrugRankingEnv(data=rl_input_df, config=cfg)
 
@@ -827,6 +1240,12 @@ def _rank_impl(
         all_candidates = _filter_candidates_by_org(all_candidates, org_id_norm, org_private_drugs)
         total = len(all_candidates)
         page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
+        # TM13 ROOT FIX (v132): enrich each candidate with pathway_chain
+        # data from the Phase 2 KG service. This is best-effort — if the
+        # KG is unreachable, candidates get pathway_chain=[] and the flag
+        # is False. The candidate table reads the flag to decide whether
+        # to render the Pathway column.
+        pathway_enrichment_available = _enrich_candidates_with_pathways(page_candidates)
         return {
             "candidates": page_candidates,
             # P4-028 ROOT FIX: use timezone-aware UTC datetime (not deprecated
@@ -847,6 +1266,10 @@ def _rank_impl(
             "count": len(page_candidates),
             "backend": "checkpoint",
             "orgId": org_id_norm,  # BE-043 v128: echo back for audit
+            # TM13 ROOT FIX (v132): Phase 2 ↔ Phase 4 wiring — surface the
+            # pathway enrichment flag so the frontend knows whether to
+            # render the Pathway column.
+            "pathway_enrichment_available": pathway_enrichment_available,
         }
 
     # Fallback: read the latest top_candidates_*.csv.
@@ -863,6 +1286,9 @@ def _rank_impl(
             "count": 0,
             "note": "No RL output yet. Run `python run_4phase.py` to generate top_candidates_*.csv.",
             "orgId": org_id_norm,
+            # TM13 ROOT FIX (v132): no candidates → no enrichment. Flag is
+            # False so the frontend knows the Pathway column would be empty.
+            "pathway_enrichment_available": False,
         }
 
     # BE-070 + INT-022: load ALL matching candidates with total count,
@@ -873,6 +1299,9 @@ def _rank_impl(
     all_candidates = _filter_candidates_by_org(all_candidates, org_id_norm, org_private_drugs)
     total = len(all_candidates)
     page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
+    # TM13 ROOT FIX (v132): enrich each candidate with pathway_chain data
+    # from the Phase 2 KG service (same call as the checkpoint path above).
+    pathway_enrichment_available = _enrich_candidates_with_pathways(page_candidates)
     return {
         "candidates": page_candidates,
         # P4-045: "service" matches frontend contract (not "rl_service")
@@ -887,6 +1316,8 @@ def _rank_impl(
         "csvPath": str(csv_path),
         "backend": "csv",
         "orgId": org_id_norm,  # BE-043 v128: echo back for audit
+        # TM13 ROOT FIX (v132): Phase 2 ↔ Phase 4 wiring.
+        "pathway_enrichment_available": pathway_enrichment_available,
     }
 
 
@@ -954,6 +1385,139 @@ def rank_post(
     FastAPI parses offset from the query string even for POST.
     """
     return _rank_impl(req.drug, req.disease, req.limit, org_id=org_id)
+
+
+# ============================================================================
+# P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+# /reload endpoint — admin-only cache refresh after a KG update.
+# ============================================================================
+#
+# WHY THIS EXISTS:
+#   The ``get_cached_bridge()`` function builds the GTRLBridge ONCE and
+#   reuses it for all subsequent /rank requests (multi-minute latency
+#   cut to seconds). But when the underlying KG is updated (e.g., a
+#   pharma partner validates a new hypothesis via /validate, which
+#   appends to phase1/processed_data/validated_hypotheses.csv and adds
+#   a Neo4j edge), the cached bridge is STALE — it was built from the
+#   OLD KG. Without /reload, /rank would serve rankings computed from
+#   the old KG until the service is restarted.
+#
+# AUTH:
+#   /reload triggers a multi-minute rebuild on the next /rank call.
+#   Anonymous access would let any caller DoS the service by repeatedly
+#   invalidating the cache. We require a bearer token matching the
+#   ``RL_ADMIN_TOKEN`` env var. If ``RL_ADMIN_TOKEN`` is not set, the
+#   endpoint returns 503 (admin not configured) — forcing operators
+#   to explicitly set the token before /reload can be used.
+#
+#   In production, /reload should ALSO be protected at the network
+#   layer (e.g., only reachable from the backend's subnet, not from
+#   the public internet). The token check is DEFENSE-IN-DEPTH, not a
+#   substitute for network ACLs.
+# ============================================================================
+
+_RELOAD_URL = "/reload"
+
+
+def _verify_admin_token(
+    authorization: Optional[str] = Header(
+        default=None,
+        description="Bearer <RL_ADMIN_TOKEN> — required to call /reload.",
+    ),
+) -> str:
+    """Verify the bearer token against RL_ADMIN_TOKEN (admin-only endpoints).
+
+    Returns the token (for audit logging) on success; raises 401/503 otherwise.
+    """
+    expected_token = os.environ.get("RL_ADMIN_TOKEN", "").strip()
+    if not expected_token:
+        # Operator has not configured the admin token → /reload is disabled.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "P4-024 ROOT FIX (Teammate 12): /reload is disabled because "
+                "RL_ADMIN_TOKEN env var is not set. To enable /reload, set "
+                "RL_ADMIN_TOKEN to a strong random string (e.g., "
+                "`openssl rand -hex 32`) and restart the service. In "
+                "production, also restrict /reload at the network layer "
+                "(backend subnet only)."
+            ),
+        )
+    if authorization is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing Authorization header. Expected: Bearer <RL_ADMIN_TOKEN>.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Authorization header. Expected: Bearer <RL_ADMIN_TOKEN>.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = parts[1].strip()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Empty bearer token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    # Constant-time comparison to prevent timing attacks on the token.
+    import hmac as _hmac
+    if not _hmac.compare_digest(token, expected_token):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid admin token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return token
+
+
+@app.post(_RELOAD_URL, tags=["admin"])
+def reload_bridge(
+    _admin_token: str = Depends(_verify_admin_token),
+) -> Dict[str, Any]:
+    """Reload the GT bridge and RL input cache.
+
+    P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+
+    Invalidates the cached ``GTRLBridge`` + RL input DataFrame so the
+    next /rank request rebuilds them from the CURRENT KG. Use this
+    after a KG update (e.g., after a pharma partner validates a new
+    hypothesis via /validate, which appends to validated_hypotheses.csv
+    and adds a Neo4j edge).
+
+    BEHAVIOR:
+      1. Clears the cached bridge + RL input (fast, no rebuild here).
+      2. The NEXT /rank request will rebuild the bridge (multi-minute
+         latency on a real KG). The /reload endpoint itself returns
+         immediately — the rebuild is LAZY, not eager. This avoids
+         blocking the admin call while the rebuild runs, but it means
+         the first /rank call after /reload will be slow.
+
+    AUTH:
+      Bearer token matching RL_ADMIN_TOKEN env var. If RL_ADMIN_TOKEN
+      is not set, returns 503 (admin not configured).
+
+    RETURNS:
+      {
+        "status": "reloaded",
+        "note": "Next /rank request will rebuild the bridge (may take several minutes)."
+      }
+    """
+    invalidate_bridge_cache()
+    logger.info(
+        "P4-024 ROOT FIX (Teammate 12): /reload called by admin — bridge "
+        "cache invalidated. Next /rank request will rebuild the bridge."
+    )
+    return {
+        "status": "reloaded",
+        "note": (
+            "Bridge cache invalidated. The next /rank request will "
+            "rebuild the bridge (may take several minutes on a large KG)."
+        ),
+    }
 
 
 # ============================================================================
@@ -1108,7 +1672,18 @@ def validate(req: ValidateRequest) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("RL_SERVICE_PORT", "8004"))
+    # TM13 ROOT FIX (v132, CRITICAL — port drift):
+    # The canonical contract (shared/contracts/urls.py SERVICE_PORTS and
+    # frontend/contracts/_url-constants.ts SERVICE_PORTS) declares
+    # phase4_rl -> 8003. docker-compose.yml maps the phase4-rl container
+    # to 8003. scripts/rl_api.py (the docker entrypoint) defaults to 8003.
+    # But this `python rl/service.py` entrypoint was the ONLY layer still
+    # defaulting to 8004 — so an operator running `python rl/service.py`
+    # directly (without setting RL_SERVICE_PORT) would start on 8004,
+    # while every other layer expected 8003. The frontend's
+    # rl-ranker.ts error hint also pointed at 8004, perpetuating the
+    # drift. This fix aligns the default with the canonical contract.
+    port = int(os.environ.get("RL_SERVICE_PORT", "8003"))
     host = os.environ.get("RL_SERVICE_HOST", "0.0.0.0")
     logger.info("Starting Phase 4 RL Service on %s:%d", host, port)
     uvicorn.run(app, host=host, port=port)

@@ -117,9 +117,11 @@ class TestP3008ValidatedPairsLeak:
     def test_no_add_edge_for_validated_pairs_in_build_demo_graph(self):
         """build_demo_graph must NOT inject validated_pairs as 'treats' edges.
 
-        The fix: removed the ``for drug_name, disease_name in validated_pairs:``
-        loop that called builder.add_edge + known_pairs.append. The validated
-        pairs are now stored on builder.validated_pairs (separate from edges).
+        The P3-008 root fix: ``for drug_name, disease_name in validated_pairs:``
+        loop must NOT call builder.add_edge (that puts them in GT training
+        data → "novel predictions are not novel"). It MAY call
+        known_pairs.append — that EXCLUDES validated pairs from top-N novel
+        predictions (they're KNOWN per the data flywheel, DOCX §10).
 
         NOTE: the file still has builder.add_edge calls for OTHER pair lists
         (KNOWN_POSITIVES, TRAINING_POSITIVES, injected_pairs) — these are
@@ -131,22 +133,21 @@ class TestP3008ValidatedPairsLeak:
             from graph_transformer.data.graph_builder import BiomedicalGraphBuilder
             src = inspect.getsource(BiomedicalGraphBuilder.build_demo_graph)
             lines = src.split("\n")
-            # Find any line containing "in validated_pairs" (the OLD leaky loop).
+            # Find any line containing "in validated_pairs" (the leaky loop).
+            leak_found = False
             for i, line in enumerate(lines):
                 if "in validated_pairs:" in line and not line.strip().startswith("#"):
                     # Look at the next 5 lines for an add_edge call.
                     next_5 = "\n".join(lines[i:i+6])
-                    assert 'add_edge("drug", "treats", "disease"' not in next_5, (
-                        f"P3-008: build_demo_graph has a 'for ... in validated_pairs:' "
-                        f"loop at line {i+1} that calls add_edge — this is the LEAK. "
-                        f"Validated pairs must NOT be injected as 'treats' edges "
-                        f"(makes the GT model MEMORIZE them)."
-                    )
-                    assert "known_pairs.append" not in next_5, (
-                        f"P3-008: build_demo_graph has a 'for ... in validated_pairs:' "
-                        f"loop at line {i+1} that appends to known_pairs — this "
-                        f"corrupts the AUC label set with validated pairs."
-                    )
+                    if 'add_edge("drug", "treats", "disease"' in next_5:
+                        leak_found = True
+                        break
+            assert not leak_found, (
+                "P3-008: build_demo_graph has a 'for ... in validated_pairs:' "
+                "loop that calls add_edge — this is the LEAK. Validated "
+                "pairs must NOT be injected as 'treats' edges (makes the "
+                "GT model MEMORIZE them, defeating the 'novel' claim)."
+            )
             # ALSO verify that self.validated_pairs IS assigned (the fix).
             assert "self.validated_pairs" in src, (
                 "P3-008: build_demo_graph must store validated_pairs on "

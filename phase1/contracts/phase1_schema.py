@@ -43,6 +43,33 @@ from typing import Dict, List, Optional
 
 
 # =============================================================================
+# CONTRACT VERSION — Teammate 5 (P2→P1 Integration, P0 root fix)
+# =============================================================================
+# Bumped to ``2.0.0`` to enforce the Phase 2 bridge's contract-version gate.
+# The bridge (``phase2/drugos_graph/phase1_bridge.py``) reads this constant at
+# the top of ``read_phase1_outputs`` and FAILS FAST with
+# ``CriticalDataSourceError`` if the major version is < 2. This blocks the
+# silent schema-drift failure mode where Phase 1 ships a v1 contract (with
+# the old ``drugs.csv``-only ChEMBL mapping and no ``chembl_id`` requirement)
+# but Phase 2's bridge expects v2 (canonical ``chembl_drugs.csv`` + explicit
+# ``chembl_id`` required column). Without this gate the bridge would
+# silently accept v1 outputs and produce a degraded KG missing Compound
+# identity — exactly the "85% aligned" failure mode the audit flagged.
+#
+# SEMVER CONTRACT:
+#   * MAJOR bump (2.x.x → 3.x.x): breaking change to ``required_columns``,
+#     ``aliases``, or ``filename`` of any source. Phase 2 MUST re-pin.
+#   * MINOR bump (2.0.x → .1.x): additive change (new optional column,
+#     new source). Phase 2 keeps working.
+#   * PATCH bump (2.0.0 → 2.0.1): doc-only or comment-only change.
+#
+# The bridge checks ONLY the major version (``< 2`` = fail). This is
+# intentional — minor and patch changes are non-breaking by semver.
+# =============================================================================
+__version__: str = "2.0.0"
+
+
+# =============================================================================
 # ColumnSpec — typed specification for one Phase 1 output column
 # =============================================================================
 
@@ -818,9 +845,25 @@ def get_optional_columns(source_key: str) -> List[str]:
 
 
 def get_all_aliases(source_key: str) -> List[str]:
-    """Return [filename] + list of aliases for ``source_key``."""
+    """Return [filename] + list of aliases for ``source_key``.
+
+    Teammate 5 (P2→P1 Integration, P0 root fix): the Phase 2 bridge uses
+    this function to resolve Phase 1 CSV filenames via the contract —
+    eliminating the hardcoded ``_PHASE1_SOURCE_TO_CSV`` dict that
+    previously drifted from the actual Phase 1 pipeline output.
+    """
     spec = PHASE1_OUTPUT_SCHEMA[source_key]
     return [spec.filename] + list(spec.aliases)
+
+
+# NOTE: ``get_required_id_column`` is defined LATER in this module (below
+# the ``_REQUIRED_ID_COLUMNS`` dict) with a curated per-source mapping
+# based on scientific semantics (inchikey for Compound, uniprot_id for
+# Protein, gene_symbol for Gene, etc.). The earlier simple "first match
+# in declaration order" implementation was removed by Teammate 5 during
+# the rebase onto main (main's curated version is more correct — it
+# returns ``inchikey`` for chembl_drugs rather than ``chembl_id``,
+# matching the IUPAC universal Compound key standard).
 
 
 # =============================================================================
@@ -1255,6 +1298,8 @@ __all__: list[str] = [
     "get_required_id_column",
     "SCHEMA_VERSION",
     "detect_contract_vs_pipeline_drift",
+    # Teammate 5 (P2→P1 Integration): contract version gate
+    "__version__",
     # TM3 Task 3.4 v127: MatchConfidence contract re-export
     "MatchConfidence",
     # TM3 Task 3.3 v127: ValidatedHypothesis ORM model re-export

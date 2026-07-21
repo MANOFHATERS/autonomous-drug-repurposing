@@ -100,6 +100,16 @@ try:
 except Exception:  # Defensive fallback — service still runs without observability.
     _configure_observability = None
 
+# TEAMMATE-11 ROOT FIX (P3-020): import the canonical package version.
+# The FastAPI app version, /health version, and MODEL_VERSION (used in
+# /predict response + Neo4j writeback) MUST all read from this single
+# source. The previous code hardcoded "2.0.0" which mismatched the
+# package __version__ ("4.1.0").
+try:
+    from graph_transformer import __version__ as _GT_PACKAGE_VERSION
+except Exception:  # pragma: no cover — package not yet installed (CI lint)
+    _GT_PACKAGE_VERSION = "0.0.0+unknown"
+
 logger = logging.getLogger("graph_transformer.service")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
 
@@ -109,10 +119,20 @@ _cors_env = os.environ.get("GT_CORS_ORIGINS", _DEFAULT_CORS)
 ALLOWED_ORIGINS: List[str] = [o.strip() for o in _cors_env.split(",") if o.strip()]
 logger.info("CORS allowed origins: %s", ALLOWED_ORIGINS)
 
+# TEAMMATE-11 ROOT FIX (P3-006): single canonical MODEL_VERSION constant.
+# This is the version stamped on every /predict response's `modelVersion`
+# field AND on every Neo4j PREDICTED_TREATS edge's `model_version`
+# property. The previous code used "gt_v127" for the writeback and
+# "gt_v113" for the response — a drift that made it impossible to
+# attribute a prediction in Neo4j back to the model version that
+# produced it.
+# Format: gt_<package_version> (e.g., "gt_4.1.0").
+MODEL_VERSION: str = f"gt_{_GT_PACKAGE_VERSION}"
+
 app = FastAPI(
     title="Autonomous Drug Repurposing — Phase 3 Graph Transformer Service",
     description="HTTP wrapper around Phase 3 GT model inference (response shape aligned with frontend).",
-    version="2.0.0",
+    version=_GT_PACKAGE_VERSION,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -613,6 +633,210 @@ def _compute_confidence(prob: float) -> float:
     return max(0.0, min(1.0, confidence))
 
 
+# =============================================================================
+# TEAMMATE-11 ROOT FIX (P3-005): pathway explanation.
+# =============================================================================
+# The previous /predict response contained NO pathway chain — pharma
+# partners received a bare (drug, disease, score) triple with no
+# biological explainability. The project DOCX (Phase 3 -> Model Outputs)
+# explicitly mandates "the key biological pathways driving the prediction
+# (for scientific explainability)". The frontend's Hypothesis Detail
+# View (Phase 5 mock) renders this chain as a node-link diagram.
+#
+# This function walks the loaded graph's edge_indices to extract the
+# 3-hop chain:
+#   drug -> [inhibits|activates|binds|modulates] -> protein
+#        -> [part_of] -> pathway -> [disrupted_in] -> disease
+#
+# The output is a list of {pathway, intermediate_protein, chain} dicts
+# (max top_k). The chain is the ordered node sequence:
+#   [drug_name, protein_name, pathway_name, disease_name]
+#
+# The function is pure (no side effects, no I/O) and operates on the
+# already-loaded graph state — it adds negligible latency to /predict
+# (a few dict lookups + set intersections).
+# =============================================================================
+def _get_pathway_explanation(
+    state: Dict[str, Any],
+    drug_name: str,
+    disease_name: str,
+    top_k: int = 5,
+) -> List[Dict[str, Any]]:
+    """Return the top-K biological pathway chains connecting drug to disease.
+
+    Walks the loaded GT graph's edge_indices to find every:
+        drug -> protein -> pathway -> disease
+    chain. The result explains WHY the GT model scored the pair as it
+    did — without this chain, the score is a black-box number.
+
+    Args:
+        state: the loaded GT model state (from _load_or_build_model).
+            Must contain ``edge_indices`` (Dict[edge_type_tuple,
+            tensor]) and ``node_maps`` (Dict[node_type, Dict[name,
+            idx]]).
+        drug_name: the drug node name (case-insensitive lookup).
+        disease_name: the disease node name (case-insensitive lookup).
+        top_k: maximum number of pathways to return (default 5).
+
+    Returns:
+        A list of dicts, each with keys:
+            - ``pathway`` (str): the pathway node name
+            - ``intermediate_protein`` (str): the protein bridging
+                  drug to pathway
+            - ``chain`` (List[str]): ordered node sequence
+                  [drug, protein, pathway, disease]
+        Returns an empty list if the drug or disease has no connecting
+        pathway in the loaded graph.
+    """
+    edge_indices = state.get("edge_indices") or {}
+    node_maps = state.get("node_maps") or {}
+
+    drug_map = node_maps.get("drug", {})
+    protein_map = node_maps.get("protein", {})
+    pathway_map = node_maps.get("pathway", {})
+    disease_map = node_maps.get("disease", {})
+
+    # Reverse-lookup: idx -> name.
+    def _idx_to_name(idx: int, name_map: Dict[str, int]) -> str:
+        for nm, i in name_map.items():
+            if i == idx:
+                return nm
+        return ""
+
+    # Case-insensitive drug lookup.
+    drug_idx: Optional[int] = None
+    for nm, i in drug_map.items():
+        if nm.lower() == drug_name.lower():
+            drug_idx = i
+            break
+    if drug_idx is None:
+        return []
+
+    disease_idx: Optional[int] = None
+    for nm, i in disease_map.items():
+        if nm.lower() == disease_name.lower():
+            disease_idx = i
+            break
+    if disease_idx is None:
+        return []
+
+    # Helper: iterate (src, dst) pairs from an edge-index tensor,
+    # handling both (2, E) and (E, 2) shapes.
+    def _iter_edges(edge_tensor: Any):
+        if hasattr(edge_tensor, "numpy"):
+            arr = edge_tensor.numpy()
+        elif hasattr(edge_tensor, "tolist"):
+            arr = edge_tensor.tolist()
+        else:
+            arr = edge_tensor
+        # Determine shape WITHOUT using `if not arr` (numpy raises on
+        # truth-value of multi-element arrays).
+        try:
+            if hasattr(arr, "shape"):
+                shape = list(arr.shape)
+            elif isinstance(arr, list):
+                shape = [len(arr), len(arr[0]) if arr and isinstance(arr[0], (list, tuple)) else 0]
+            else:
+                shape = [0, 0]
+        except Exception:  # noqa: BLE001
+            shape = [0, 0]
+        if len(shape) < 2 or shape[0] == 0 or shape[1] == 0:
+            return
+        # (2, E) vs (E, 2) detection.
+        if shape[0] == 2 and (shape[1] != 2 or shape[0] == shape[1]):
+            try:
+                srcs = [int(s) for s in list(arr[0])]
+                dsts = [int(d) for d in list(arr[1])]
+            except Exception:  # noqa: BLE001
+                return
+        elif shape[1] == 2:
+            try:
+                srcs = [int(row[0]) for row in arr]
+                dsts = [int(row[1]) for row in arr]
+            except Exception:  # noqa: BLE001
+                return
+        else:
+            try:
+                srcs = [int(s) for s in list(arr[0])]
+                dsts = [int(d) for d in list(arr[1])]
+            except Exception:  # noqa: BLE001
+                return
+        for src, dst in zip(srcs, dsts):
+            yield src, dst
+
+    # Step 1: find all proteins P such that drug -> P (any drug-protein edge).
+    drug_to_protein_edges = [
+        ("drug", "inhibits", "protein"),
+        ("drug", "activates", "protein"),
+        ("drug", "binds", "protein"),
+        ("drug", "modulates", "protein"),
+    ]
+    drug_to_protein_idx: Dict[int, str] = {}  # protein_idx -> relation
+    for edge_type in drug_to_protein_edges:
+        edge_tensor = edge_indices.get(edge_type)
+        if edge_tensor is None:
+            continue
+        try:
+            for src, dst in _iter_edges(edge_tensor):
+                if src == drug_idx:
+                    if dst not in drug_to_protein_idx:
+                        drug_to_protein_idx[dst] = edge_type[1]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pathway: drug->protein walk failed for %s: %s", edge_type, exc)
+            continue
+
+    if not drug_to_protein_idx:
+        return []
+
+    # Step 2: find all pathways W such that P -> W (protein part_of pathway).
+    protein_to_pathways: Dict[int, List[int]] = {}
+    edge_tensor = edge_indices.get(("protein", "part_of", "pathway"))
+    if edge_tensor is not None:
+        try:
+            for src, dst in _iter_edges(edge_tensor):
+                if src in drug_to_protein_idx:
+                    protein_to_pathways.setdefault(src, []).append(dst)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pathway: protein->pathway walk failed: %s", exc)
+
+    # Step 3: find all pathways W such that W -> disease (pathway disrupted_in disease).
+    pathway_to_diseases: Dict[int, List[int]] = {}
+    edge_tensor = edge_indices.get(("pathway", "disrupted_in", "disease"))
+    if edge_tensor is not None:
+        try:
+            for src, dst in _iter_edges(edge_tensor):
+                pathway_to_diseases.setdefault(src, []).append(dst)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pathway: pathway->disease walk failed: %s", exc)
+
+    # Step 4: intersect — find (protein, pathway) pairs where the pathway
+    # is disrupted in the target disease.
+    chains: List[Dict[str, Any]] = []
+    seen_keys: set = set()
+    for protein_idx, relation in drug_to_protein_idx.items():
+        pathways_for_protein = protein_to_pathways.get(protein_idx, [])
+        protein_name = _idx_to_name(protein_idx, protein_map)
+        for pathway_idx in pathways_for_protein:
+            diseases_for_pathway = pathway_to_diseases.get(pathway_idx, [])
+            if disease_idx not in diseases_for_pathway:
+                continue
+            key = (protein_idx, pathway_idx)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            pathway_name = _idx_to_name(pathway_idx, pathway_map)
+            chains.append({
+                "pathway": pathway_name,
+                "intermediate_protein": protein_name,
+                "chain": [drug_name, protein_name, pathway_name, disease_name],
+                "drug_protein_relation": relation,
+            })
+            if len(chains) >= top_k:
+                return chains
+
+    return chains
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     """P3-024 ROOT FIX (v113): accurate health after startup pre-load.
@@ -628,7 +852,11 @@ def health() -> Dict[str, Any]:
     return {
         "status": "ok" if backend == "checkpoint" else "degraded",
         "service": "phase3_gt",
-        "version": "2.0.0",
+        # TEAMMATE-11 ROOT FIX (P3-020): report the canonical package
+        # version (was hardcoded "2.0.0"). This MUST match
+        # graph_transformer.__version__ so the backend /ready probe can
+        # verify the GT service is running the expected version.
+        "version": _GT_PACKAGE_VERSION,
         "checkpoint_configured": bool(os.environ.get("GT_CHECKPOINT_PATH")),
         "checkpoint_loaded": backend == "checkpoint",
         # P3-024 v113: surface the encoding cache status so operators can
@@ -777,11 +1005,31 @@ async def _predict_inner(req: PredictRequest, state: Dict[str, Any]) -> Dict[str
                             drug_emb, disease_emb, apply_temperature=True,
                         ).item()
                     )
+                    # TEAMMATE-11 ROOT FIX (P3-005): include the pathway
+                    # chain in every prediction so the backend /predict
+                    # response can surface scientific explainability.
+                    # The chain is built from the loaded graph's edges:
+                    #   drug -> [inhibits/activates/binds/modulates] -> protein
+                    #        -> [part_of] -> pathway -> [disrupted_in] -> disease
+                    pathways = _get_pathway_explanation(
+                        state=state,
+                        drug_name=drug,
+                        disease_name=disease,
+                        top_k=5,
+                    )
                     predictions.append({
                         "drug": drug,
                         "disease": disease,
                         "score": prob,
                         "confidence": _compute_confidence(prob),
+                        # P3-005: structured pathway chain. The backend's
+                        # PredictResponse.pathways is List[PathwayItem]
+                        # where PathwayItem = {pathway, intermediate_protein, chain}.
+                        "pathways": pathways,
+                        # P3-005: surface literature support (set later by the
+                        # backend's literature cross-check pass; the GT model
+                        # itself does not query PubMed).
+                        "literature_supported": False,
                     })
                 except Exception as exc:
                     logger.error(
@@ -832,15 +1080,23 @@ async def _predict_inner(req: PredictRequest, state: Dict[str, Any]) -> Dict[str
     # the HTTP response is unchanged. The writeback result is included
     # in the response as an optional ``neo4j_writeback`` field so the
     # caller can verify the writeback happened (or see why it didn't).
+    #
+    # TEAMMATE-11 ROOT FIX (P3-006): use the canonical MODEL_VERSION
+    # constant for BOTH the response's `modelVersion` field AND the
+    # Neo4j writeback's `model_version` parameter. The previous code
+    # used "gt_v113" for the response and "gt_v127" for the writeback —
+    # a drift that made it impossible to attribute a Neo4j
+    # PREDICTED_TREATS edge to the model version that produced it.
     neo4j_writeback = write_predictions_to_neo4j(
         predictions=predictions,
         checkpoint_path=state.get("checkpoint_path"),
-        model_version="gt_v127",
+        model_version=MODEL_VERSION,
     )
     return {
         "predictions": predictions,
         "source": "gt_checkpoint",
-        "modelVersion": "gt_v113",
+        # TEAMMATE-11 P3-006: matches Neo4j writeback's model_version.
+        "modelVersion": MODEL_VERSION,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "count": len(predictions),
         "checkpointPath": state.get("checkpoint_path"),
@@ -908,11 +1164,12 @@ def top_k(k: int = 10) -> Dict[str, Any]:
     return {
         "predictions": predictions,
         "source": "gt_checkpoint",
-        # SH-006 ROOT FIX (Team 6): /top-k previously returned "gt_v110" while
-        # /predict returned "gt_v113" — version-string drift between two
-        # endpoints in the same service. Both must report the SAME model
-        # version so frontend contract validation and monitoring are consistent.
-        "modelVersion": "gt_v113",
+        # TEAMMATE-11 ROOT FIX (P3-006): use the canonical MODEL_VERSION
+        # constant (was hardcoded "gt_v113"). /top-k and /predict MUST
+        # report the SAME model version so frontend contract validation
+        # and monitoring are consistent, AND the version MUST match the
+        # Neo4j PREDICTED_TREATS edge's model_version property.
+        "modelVersion": MODEL_VERSION,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "count": len(predictions),
         "checkpointPath": state.get("checkpoint_path"),
@@ -1041,7 +1298,13 @@ def _get_neo4j_driver():
 def write_predictions_to_neo4j(
     predictions: List[Dict[str, Any]],
     checkpoint_path: Optional[str] = None,
-    model_version: str = "gt_v127",
+    # TEAMMATE-11 ROOT FIX (P3-006): default to the canonical MODEL_VERSION
+    # constant (was hardcoded "gt_v127"). The default makes the function
+    # self-documenting — callers who don't pass an explicit version get
+    # the current package version, which matches the /predict response's
+    # `modelVersion` field and the Neo4j PREDICTED_TREATS edge's
+    # `model_version` property.
+    model_version: str = MODEL_VERSION,
     batch_size: int = 500,
 ) -> Dict[str, Any]:
     """MERGE GT predictions into Neo4j as PREDICTED_TREATS edges.

@@ -1803,40 +1803,89 @@ class BiomedicalGraphBuilder:
             # disrupted_in->disease) for KNOWN POSITIVES.
             #
 
-        # TM15 v132 ROOT FIX (P3-008 — validated pairs leak, REMOVED):
-        # The previous code (lines ~1738-1740 in pre-TM15) injected
-        # validated pairs as "treats" edges (via builder.add_edge) AND
-        # appended them to known_pairs. This made the GT model TRAIN
-        # on them. At inference, the model would MEMORIZE these pairs
-        # (gnn_score ≈ 1.0) and they'd appear at the top of the RL
-        # ranker's "novel" predictions — but they were NOT novel, they
-        # were memorized. The data flywheel was CIRCULAR.
+        # P3-008 ROOT FIX (Teammate 10 — hostile-auditor, RED TEAM):
+        # The previous code injected validated_hypotheses as 'treats' edges
+        # in the GT training graph. This made them GT TRAINING DATA → the
+        # GT model LEARNED them → gnn_score for them was inflated → they
+        # appeared as high-scoring NOVEL predictions in Phase 6 → "novel
+        # predictions are NOT novel" (the exact bug the audit flagged).
         #
-        # ROOT FIX: the validated pairs are stored on
-        # ``builder.validated_pairs`` (set in the block above), NOT in
-        # the "treats" edge set. The ``known_pairs`` list is NOT mutated.
-        # The RL env receives the validated pairs via the gt_rl_bridge's
-        # ``is_validated`` column (for the +0.1 bonus), but the GT model
-        # has NO signal that these are real pairs.
+        # The scientific contract (DOCX §5 Phase 3 outputs, §6 Phase 6
+        # V1 launch): "We take the model's top 50 NOVEL predictions and
+        # run an automated PubMed literature search." Novel means the
+        # model was NOT trained on them. If validated pairs are in the
+        # training set, they cannot be novel by definition.
         #
-        # The drug/disease names ARE still registered as nodes (done in
-        # the block above) so the RL env's cross-product generates them
-        # as candidate pairs. Without this, the RL env would never see
-        # these pairs in its input data, and the +0.1 bonus could not
-        # fire.
+        # ROOT FIX: do NOT inject validated_pairs as 'treats' edges.
+        # They are NOT GT training data. The GT model's gnn_score for
+        # them reflects the model's GENERALIZATION (does the graph
+        # topology predict them, without being trained on them?), which
+        # is the scientifically honest signal.
         #
-        # In production, validated pairs flow into the GT training set
-        # ONLY via the canonical Phase 1 CSV → Phase 2 KG → Phase 3
-        # trainer path, triggered by the Airflow DAG
-        # ``phase1/dags/retrain_on_validated_dag.py`` when 10+ new
-        # validated hypotheses accumulate. This is the data flywheel
-        # done correctly: the model RETRAINS on validated pairs at a
-        # controlled cadence (not on every /validate call), and the
-        # retraining is logged + auditable (21 CFR Part 11).
+        # The RL env's +0.1 validated_bonus (VALIDATED_HYPOTHESES in
+        # rl_drug_ranker.py) STILL fires — that mechanism is completely
+        # independent of the GT training graph. The pharma partner sees
+        # validated pairs ranked HIGH because they're validated (the
+        # +0.1 bonus), NOT because the GT model memorized them.
         #
-        # No code is emitted here — the validated_pairs list is only
-        # stored on the builder. The gt_rl_bridge reads it via
-        # ``builder.get_validated_pairs()``.
+        # We STILL add validated_pairs to known_pairs so they are
+        # EXCLUDED from get_top_k_novel_predictions (line 5119 in
+        # gt_rl_bridge.py passes known_pairs to _top_k_novel, which
+        # excludes them). This is REQUIRED: validated pairs are KNOWN
+        # (they've been validated by a pharma partner per the data
+        # flywheel, DOCX §10), so they must NOT appear in the "novel
+        # predictions" deliverable. The P3-008 acceptance test
+        # (test_validated_pairs_not_in_top_50) verifies this.
+        #
+        # CRITICAL INVARIANT: known_pairs is used for TWO purposes:
+        #   1. Excluding from novel predictions (via _top_k_novel).
+        #   2. Passing to the trainer as metadata (for checkpoint).
+        # It is NOT used to build GT training labels — those come from
+        # the ('drug','treats','disease') edge index (see
+        # _compute_training_split, gt_rl_bridge.py line 847-850). So
+        # adding to known_pairs does NOT pollute training.
+        for drug_name, disease_name in validated_pairs:
+            # P3-008: do NOT add 'treats' edge (would put them in GT
+            # training data → "novel predictions are not novel").
+            # DO add to known_pairs (excludes them from novel
+            # predictions — they are KNOWN, validated pairs).
+            known_pairs.append((drug_name, disease_name))
+        if validated_pairs:
+            logger.info(
+                f"P3-008 ROOT FIX: {len(validated_pairs)} validated "
+                f"hypothesis pairs are EXCLUDED from GT training data "
+                f"(no 'treats' edge injected) so they do NOT pollute "
+                f"the novel-predictions deliverable. They are STILL in "
+                f"known_pairs (excluded from top-50 novel predictions, "
+                f"since they are KNOWN-validated per the data flywheel) "
+                f"and the RL env's +0.1 validated_bonus still fires "
+                f"via VALIDATED_HYPOTHESES (independent of GT training). "
+                f"Pairs: {validated_pairs}."
+            )
+
+            # The previous V31 "fix" REINTRODUCED the exact label leakage
+            # that V30 had removed. The audit (v89) confirmed:
+            #   - For every KP, a GUARANTEED drug->protein->pathway->disease
+            #     path was injected.
+            #   - LABEL_LEAKING_EDGES only strips the direct "treats" edge
+            #     during training, NOT the injected 3-hop path.
+            #   - The GT model trivially learned "3-hop path exists ->
+            #     positive" -> val AUC = 1.0 (perfect, fraudulent).
+            #   - The scientific-validation gate (GT AUC > 0.85) passed
+            #     trivially because the leakage inflated the AUC.
+            #
+            # The model MUST learn from NATURAL TOPOLOGY only -- the random
+            # drug->protein, protein->pathway, pathway->disease edges created
+            # above. This is the HONEST signal. Demo AUC will be lower
+            # (the model has no leakage crutch), but this is the TRUE
+            # measure of the model's generalization ability.
+            #
+            # In production, the real Phase 1->2 pipeline injects REAL
+            # topology from DrugBank + STRING + DisGeNET (not synthetic
+            # 3-hop paths for KPs). The KP drugs have REAL biological
+            # paths in the production KG because they are REAL drugs with
+            # REAL mechanisms -- not because the demo builder synthesizes
+            # them.
 
         # ------------------------------------------------------------------
         # V31 ROOT FIX (P0-1 / Compound #3): inject CURATED TRAINING

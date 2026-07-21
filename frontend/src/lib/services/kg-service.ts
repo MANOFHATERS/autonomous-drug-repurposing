@@ -1,48 +1,53 @@
 /**
- * Knowledge Graph service — unified, HTTP-only (Issue 232).
+ * Knowledge Graph service — backend-proxy-only (Teammate 8 ROOT FIX).
  *
- * ROOT FIX (forensic, root-level): the previous KG integration had
- * THREE divergent code paths, each calling different URLs:
+ * ROOT FIX (forensic, root-level): the previous version of this file
+ * called the Phase 2 KG service DIRECTLY via `KG_SERVICE_URL`. This
+ * bypassed the backend FastAPI service entirely, meaning:
  *
- *   1. `knowledge-graph-stats.ts` called `/kg/stats` on the Python
- *      service (CORRECT — matches phase2/service.py).
- *   2. `knowledge-graph/route.ts` called `/query` and `/cypher` on
- *      the Python service (CORRECT — matches phase2/service.py).
- *   3. The route's structured-query path called `/lookup` on the
- *      Python service (WRONG — phase2/service.py has NO /lookup
- *      endpoint; it has /kg/explore).
+ *   1. NO AUTH — Phase 2's /cypher endpoint has NO JWT verification.
+ *      Any network caller (including a malicious script in a pharma
+ *      partner's browser tab) could run arbitrary read-only Cypher
+ *      against Neo4j. Exfiltration of cross-tenant data was possible.
+ *   2. NO RATE LIMITING — a single runaway Cypher query could
+ *      saturate the Neo4j connection pool (100 connections) and DoS
+ *      the entire Phase 2 KG service for ALL users.
+ *   3. NO AUDIT LOGGING — KG calls were not recorded in the audit
+ *      log, breaking the compliance trail required for pharma IT
+ *      procurement.
+ *   4. PORT COLLISION — `KG_SERVICE_URL` defaulted to port 8001,
+ *      which COLLIDES with the backend FastAPI service's default
+ *      port. Local-dev setups that ran both services on the same
+ *      host saw "address already in use" errors.
  *
- * Additionally, the local-registry fallback in
- * `knowledge-graph-stats.ts` read `../phase2/data/registry.json`
- * directly. This bypassed the Python service entirely, meaning:
- *   - The dashboard showed stale registry data even after Neo4j was
- *     updated.
- *   - The registry's node/edge counts could diverge from Neo4j's
- *     actual counts (registry is a snapshot from the last pipeline
- *     run; Neo4j is live).
+ * ROOT FIX: this file is the SINGLE source of truth for KG calls
+ * from the frontend. All KG operations go through the Next.js API
+ * routes at `/api/kg/*` which proxy to the backend FastAPI service
+ * on port 8000. The backend then proxies to the Phase 2 KG service
+ * on port 8001, enforcing JWT auth, rate limiting, and audit logging
+ * at the backend boundary.
  *
- * ROOT FIX: this file is the SINGLE source of truth for KG calls.
- * All KG operations go through `KG_SERVICE_URL` via the shared
- * `mlFetch` HTTP client (Issue 234). URLs are aligned with the
- * Python service's actual endpoints:
+ *   Browser → /api/kg/stats    (Next.js API route)
+ *          → http://localhost:8000/kg/stats  (backend FastAPI proxy)
+ *          → http://localhost:8001/kg/stats  (Phase 2 KG service)
  *
- *   - GET  /kg/stats    → KG statistics (node/edge counts, sources)
- *   - GET  /kg/explore  → Subgraph exploration around a drug/disease
- *   - POST /query       → Structured query (drug/disease → subgraph)
- *   - POST /cypher      → Raw Cypher passthrough (role-gated)
- *   - GET  /health      → Liveness probe
+ * The Next.js API routes at /api/kg/* handle:
+ *   - Browser auth (NextAuth.js session cookie → JWT in Authorization header)
+ *   - Audit logging to the frontend's Prisma DB
  *
- * If `KG_SERVICE_URL` is not set, the functions return a clear
- * `source: "none"` response. We NEVER read the local registry as a
- * fallback — the Python service is the single source of truth, and
- * it has its own in-memory bridge fallback when Neo4j is unavailable.
+ * The backend FastAPI handles:
+ *   - JWT verification (shared secret with NextAuth)
+ *   - Rate limiting (10 req/min for /cypher, 100 req/min for /kg/stats)
+ *   - Org-scoped header forwarding (X-Org-Id)
+ *   - Cypher whitelist enforcement (defense-in-depth)
  *
  * SCIENTIFIC INTEGRITY: KG statistics must reflect the actual graph
- * state. Reading a stale registry JSON would mislead a researcher
- * into believing the KG has N nodes when it actually has N±K.
+ * state. This file NEVER reads a local registry JSON and NEVER
+ * fabricates graph statistics. If the backend is unreachable, the
+ * functions return a clear `source: "none"` response with a message
+ * telling the operator how to start the backend.
  */
 
-import { mlFetch, resolveServiceUrl, buildServiceUrl, MlServiceError } from "@/lib/http-client";
 import {
   KgStatsResponseSchema,
   KgQueryResponseSchema,
@@ -75,14 +80,27 @@ export { CANONICAL_NODE_TYPES, CANONICAL_NODE_TYPE_SET };
 export type KnowledgeGraphStatsResponse = KgStatsResponse;
 
 // ---------------------------------------------------------------------------
-// Service URL resolution
+// Backend URL resolution
 // ---------------------------------------------------------------------------
+// Teammate 8 ROOT FIX: the frontend now calls the BACKEND FastAPI
+// service via /api/kg/* Next.js API routes (same-origin relative URL).
+// The Next.js route then proxies to the backend FastAPI on port 8000.
+// The KG_SERVICE_URL env var is NO LONGER used by the frontend — it
+// is now a BACKEND env var (the backend uses it to find the Phase 2
+// service). Removing KG_SERVICE_URL from the frontend eliminates the
+// temptation to bypass the backend's auth/rate-limit/audit layer.
+//
+// The ``API_BASE`` is a relative URL (``/api``) so the browser uses
+// the same origin as the frontend (no CORS preflight, cookies are
+// sent automatically with ``credentials: 'include'``). The Next.js
+// API route at ``/api/kg/stats`` proxies to
+// ``http://localhost:8000/kg/stats`` server-side (no CORS because
+// it's a Node.js → Python call, not a browser → Python call).
+const API_BASE = "/api";
 
+// Service name used in MlContractError messages (kept for backward
+// compat with existing audit-log entries).
 const SERVICE_NAME = "phase2_kg";
-
-function getKgServiceUrl(): string | null {
-  return resolveServiceUrl("KG_SERVICE_URL");
-}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -91,24 +109,40 @@ function getKgServiceUrl(): string | null {
 /**
  * Get KG statistics (node/edge counts, per-source breakdown, type counts).
  *
- * Proxies to `GET {KG_SERVICE_URL}/kg/stats` via the shared HTTP client.
- * Returns `source: "none"` if KG_SERVICE_URL is not set.
+ * Calls `GET /api/kg/stats` (Next.js API route) which proxies to the
+ * backend FastAPI service at `http://localhost:8000/kg/stats`, which
+ * in turn proxies to the Phase 2 KG service at `http://localhost:8001/kg/stats`.
  *
- * Issue 232 ROOT FIX (contract alignment): the Python phase2/service.py
- * /kg/stats endpoint returns SNAKE_CASE fields:
- *   { node_count, edge_count, node_types, edge_types, backend, sources_read }
+ * Returns `source: "none"` if the backend is unreachable.
  *
- * The frontend contract (KgStatsResponse) expects CAMEL_CASE fields:
- *   { nodeCount, edgeCount, nodeTypeCounts, edgeTypeCounts, source, sources }
- *
- * The previous knowledge-graph-stats.ts called `body.nodeCount` directly
- * — which returned `undefined` because the Python service returns
- * `node_count`. The dashboard showed "0 nodes" even when the KG had
- * thousands. This transformation fixes that silent bug.
+ * Teammate 8 ROOT FIX (canonicalNodeCount): the response now includes
+ * ``canonicalNodeCount`` — the count of CANONICAL-type nodes only
+ * (Compound, Protein, Pathway, Disease, ClinicalOutcome). The Phase 2
+ * service computes this server-side (phase2/service.py:
+ * _compute_canonical_node_count); the backend passes it through
+ * unchanged. If the backend's response omits ``canonicalNodeCount``
+ * (e.g., older Phase 2 deployment), this function derives it
+ * client-side by summing the canonical entries in ``nodeTypeCounts``.
  */
 export async function getKnowledgeGraphStats(): Promise<KgStatsResponse> {
-  const baseUrl = getKgServiceUrl();
-  if (!baseUrl) {
+  // Teammate 8 ROOT FIX: call the BACKEND proxy via the Next.js API
+  // route at /api/kg/stats. This is a RELATIVE URL — the browser
+  // resolves it against the frontend's origin, so there is no CORS
+  // preflight and the NextAuth session cookie is sent automatically
+  // (credentials: 'include'). The Next.js route handles auth (verifies
+  // the session, mints a JWT) and proxies to the backend.
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}/kg/stats`, {
+      method: "GET",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+  } catch (e) {
+    // Network error — the Next.js frontend itself is down or the
+    // browser is offline. Surface as a none response with a clear
+    // message (do NOT throw — the dashboard should still render).
+    const msg = e instanceof Error ? e.message : String(e);
     return {
       sources: [],
       nodeCount: 0,
@@ -119,56 +153,61 @@ export async function getKnowledgeGraphStats(): Promise<KgStatsResponse> {
       source: "none",
       generatedAt: new Date().toISOString(),
       note:
-        "KG_SERVICE_URL is not set. The Phase 2 KG service " +
-        "(phase2/service.py) must be running and reachable. Start it " +
-        "with `python phase2/service.py` and set " +
-        "KG_SERVICE_URL=http://localhost:8002 in frontend/.env.local. " +
-        "Issue 232 ROOT FIX: this endpoint NEVER reads a local registry " +
-        "JSON and NEVER fabricates graph statistics.",
+        `Frontend → /api/kg/stats network error: ${msg}. The Next.js ` +
+        `frontend server may be down or the browser may be offline. ` +
+        `Teammate 8 ROOT FIX: the frontend no longer calls the Phase 2 ` +
+        `KG service directly — it calls the backend FastAPI proxy via ` +
+        `/api/kg/* Next.js routes.`,
     };
   }
 
-  const url = buildServiceUrl(baseUrl, "/kg/stats");
-  const result = await mlFetch<unknown>(url, {
-    service: SERVICE_NAME,
-    method: "GET",
-    timeoutMs: 15_000,
-    maxRetries: 3,
-  });
-
-  if (!result.ok) {
-    const err = result.error as MlServiceError;
-    if (err.httpStatus >= 400 && err.httpStatus < 500) {
-      // 4xx — surface as a none response with the error message
-      return {
-        sources: [],
-        nodeCount: 0,
-        edgeCount: 0,
-        nodeTypeCounts: {},
-        edgeTypeCounts: {},
-        nonCanonicalNodeCounts: {},
-        source: "none",
-        generatedAt: new Date().toISOString(),
-        note: `KG service rejected request (${err.httpStatus}): ${err.message}`,
-      };
+  if (!response.ok) {
+    // 4xx/5xx — surface as a none response with the error message.
+    // The backend returns 503 when the Phase 2 service is down, 429
+    // when rate limited, 401 when unauthenticated, 403 when no org.
+    let errorBody: unknown = null;
+    try {
+      errorBody = await response.json();
+    } catch {
+      // Response had no JSON body — use the status text.
     }
-    throw err;
+    const errMsg =
+      typeof (errorBody as { detail?: unknown })?.detail === "string"
+        ? (errorBody as { detail: string }).detail
+        : typeof (errorBody as { message?: unknown })?.message === "string"
+          ? (errorBody as { message: string }).message
+          : response.statusText;
+    return {
+      sources: [],
+      nodeCount: 0,
+      edgeCount: 0,
+      nodeTypeCounts: {},
+      edgeTypeCounts: {},
+      nonCanonicalNodeCounts: {},
+      source: "none",
+      generatedAt: new Date().toISOString(),
+      note: `Backend /api/kg/stats returned ${response.status}: ${errMsg}`,
+    };
   }
 
-  // Transform the Python service's snake_case response into the
-  // frontend's camelCase contract. This is the ROOT FIX for the
-  // silent-undefined bug in the previous knowledge-graph-stats.ts.
-  const raw = result.body as Record<string, unknown>;
-  const nodeTypes = (raw.node_types ?? raw.nodeTypeCounts ?? {}) as Record<string, number>;
-  const edgeTypes = (raw.edge_types ?? raw.edgeTypeCounts ?? {}) as Record<string, number>;
+  // Parse + transform the response. The backend proxies the Phase 2
+  // service's response UNCHANGED, so we still need to handle BOTH
+  // snake_case (legacy) and camelCase (canonical) fields — the Phase 2
+  // service emits both for backward compat.
+  const raw = (await response.json()) as Record<string, unknown>;
+  const nodeTypes = (raw.node_types ?? raw.nodeTypeCounts ?? raw.nodeTypeCounts ?? {}) as Record<string, number>;
+  const edgeTypes = (raw.edge_types ?? raw.edgeTypeCounts ?? raw.edgeTypeCounts ?? {}) as Record<string, number>;
   const sourcesRead = Array.isArray(raw.sources_read)
     ? raw.sources_read
     : Array.isArray(raw.sources)
       ? raw.sources
       : [];
 
-  // Split canonical vs non-canonical node counts (per project docx
-  // Phase 2: Compound, Protein, Pathway, Disease, ClinicalOutcomes).
+  // Split canonical vs non-canonical node counts. CANONICAL_NODE_TYPE_SET
+  // was FIXED in Teammate 8 — it now uses "ClinicalOutcome" (SINGULAR),
+  // matching the Phase 2 KG label vocabulary. The previous plural form
+  // ("ClinicalOutcomes") silently dropped all ClinicalOutcome nodes
+  // from the canonical count.
   const canonicalNodeTypeCounts: Record<string, number> = {};
   const nonCanonicalNodeCounts: Record<string, number> = {};
   for (const [type, count] of Object.entries(nodeTypes)) {
@@ -179,12 +218,27 @@ export async function getKnowledgeGraphStats(): Promise<KgStatsResponse> {
     }
   }
 
-  // nodeCount = sum of CANONICAL node types only (matches the old
-  // knowledge-graph-stats.ts behavior).
+  // nodeCount: prefer the server-emitted value (the Phase 2 service
+  // computes this from Neo4j's MATCH (n) RETURN count(n) — the
+  // authoritative total). Fall back to the sum of canonical types
+  // (legacy behavior from the old knowledge-graph-stats.ts).
   const nodeCount =
     typeof raw.nodeCount === "number"
       ? raw.nodeCount
-      : Object.values(canonicalNodeTypeCounts).reduce((s, n) => s + n, 0);
+      : typeof raw.node_count === "number"
+        ? raw.node_count
+        : Object.values(canonicalNodeTypeCounts).reduce((s, n) => s + n, 0);
+
+  // Teammate 8 ROOT FIX: canonicalNodeCount — prefer the server-emitted
+  // value (Phase 2 service computes this via _compute_canonical_node_count).
+  // Fall back to the client-side sum if the server didn't emit it
+  // (older Phase 2 deployments).
+  const canonicalNodeCount =
+    typeof raw.canonicalNodeCount === "number"
+      ? raw.canonicalNodeCount
+      : typeof raw.canonical_node_count === "number"
+        ? raw.canonical_node_count
+        : Object.values(canonicalNodeTypeCounts).reduce((s, n) => s + n, 0);
 
   const edgeCount =
     typeof raw.edgeCount === "number"
@@ -193,27 +247,25 @@ export async function getKnowledgeGraphStats(): Promise<KgStatsResponse> {
         ? raw.edge_count
         : Object.values(edgeTypes).reduce((s, n) => s + n, 0);
 
-  // Map the Python sources_read array (list of source name strings) into
+  // Map the Python sources_read array (list of source name strings) OR
+  // the canonical sources array (list of {name, loaded} objects) into
   // the frontend's GraphSourceStat shape.
-  const sources: GraphSourceStat[] = sourcesRead.map((name: unknown) => ({
-    name: String(name),
-    loaded: true,
-  }));
+  const sources: GraphSourceStat[] = sourcesRead.map((name: unknown) => {
+    // If the entry is already a GraphSourceStat object, pass through.
+    if (typeof name === "object" && name !== null && "name" in name) {
+      const obj = name as { name: unknown; loaded?: unknown };
+      return {
+        name: String(obj.name),
+        loaded: typeof obj.loaded === "boolean" ? obj.loaded : true,
+      };
+    }
+    // Bare source-name string.
+    return { name: String(name), loaded: true };
+  });
 
-  // SH-026 ROOT FIX (Teammate 4, forensic, root-level): the previous
-  // code mapped ``source`` to ALWAYS ``"kg_service"`` regardless of the
-  // backend — the line was literally
-  //   ``source: backend === "in_memory_bridge" ? "kg_service" : "kg_service"``
-  // which is a tautology. This SILENTLY DROPPED the contract's
-  // ``"neo4j" | "in_memory"`` enum: a researcher could not tell whether
-  // the stats came from the live Neo4j graph or the dev/CI in-memory
-  // fallback. The Python service emits ``source`` as ``"neo4j"`` or
-  // ``"in_memory"`` (and now ALSO emits the camelCase canonical fields
-  // ``nodeCount``/``generatedAt``/``sources`` directly, see
-  // phase2/service.py). ROOT FIX: preserve the enum from ``raw.source``
-  // when it is one of the canonical values; otherwise derive it from
-  // ``raw.backend`` (``"neo4j"`` → ``"neo4j"``, anything else →
-  // ``"in_memory"``). Never collapse to ``"kg_service"``.
+  // SH-026 ROOT FIX: preserve the ``source`` enum ("neo4j" | "in_memory")
+  // from the Phase 2 service. Never collapse to "kg_service" (the
+  // previous tautology bug).
   const rawSource =
     typeof raw.source === "string" ? raw.source : "";
   const rawBackend =
@@ -230,15 +282,13 @@ export async function getKnowledgeGraphStats(): Promise<KgStatsResponse> {
   const transformed: KgStatsResponse = {
     sources,
     nodeCount,
+    canonicalNodeCount,
     edgeCount,
     nodeTypeCounts: canonicalNodeTypeCounts,
     edgeTypeCounts: edgeTypes,
     nonCanonicalNodeCounts,
     source,
-    // SH-026: prefer the server-authoritative timestamp. The Python
-    // service now emits ``generatedAt`` (camelCase) directly; fall back
-    // to the legacy ``last_updated`` (snake_case) for older deployments,
-    // then to the browser clock only as a last resort.
+    // SH-026: prefer the server-authoritative timestamp.
     generatedAt:
       typeof raw.generatedAt === "string"
         ? raw.generatedAt
@@ -248,141 +298,165 @@ export async function getKnowledgeGraphStats(): Promise<KgStatsResponse> {
     note:
       typeof raw.note === "string"
         ? raw.note
-        : `Served from Phase 2 KG service (backend=${backend}).`,
+        : `Served from Phase 2 KG service via backend proxy (backend=${backend}).`,
   };
 
-  return transformed;
+  // Validate the final shape against the Zod schema (defense-in-depth —
+  // catches any drift between the backend response and the contract).
+  return KgStatsResponseSchema.parse(transformed);
 }
 
 /**
  * Explore the subgraph around a drug or disease node.
  *
- * Proxies to `GET {KG_SERVICE_URL}/kg/explore?drug=&disease=&limit=`
- * via the shared HTTP client.
+ * Calls `POST /api/kg/explore` (Next.js API route) which proxies to
+ * the backend FastAPI service at `http://localhost:8000/kg/explore`,
+ * which in turn proxies to the Phase 2 KG service at
+ * `http://localhost:8001/kg/explore`.
  */
 export async function exploreKnowledgeGraph(opts: {
   drug?: string;
   disease?: string;
   limit?: number;
 }): Promise<KgQueryResponse> {
-  const baseUrl = getKgServiceUrl();
-  if (!baseUrl) {
-    return { nodes: [], edges: [] };
+  const body: Record<string, unknown> = { limit: opts.limit ?? 50 };
+  if (opts.drug) body.drug = opts.drug;
+  if (opts.disease) body.disease = opts.disease;
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}/kg/explore`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `Frontend → /api/kg/explore network error: ${msg}. ` +
+        `Teammate 8 ROOT FIX: the frontend no longer calls the Phase 2 ` +
+        `KG service directly.`,
+    );
   }
 
-  const params = new URLSearchParams();
-  if (opts.drug) params.set("drug", opts.drug);
-  if (opts.disease) params.set("disease", opts.disease);
-  if (opts.limit) params.set("limit", String(opts.limit));
-
-  const url = buildServiceUrl(baseUrl, `/kg/explore?${params.toString()}`);
-  const result = await mlFetch<unknown>(url, {
-    service: SERVICE_NAME,
-    method: "GET",
-    timeoutMs: 15_000,
-    maxRetries: 2,
-  });
-
-  if (!result.ok) {
-    const err = result.error as MlServiceError;
-    throw err;
+  if (!response.ok) {
+    let errorBody: unknown = null;
+    try {
+      errorBody = await response.json();
+    } catch {
+      // ignore
+    }
+    const errMsg =
+      typeof (errorBody as { detail?: unknown })?.detail === "string"
+        ? (errorBody as { detail: string }).detail
+        : response.statusText;
+    throw new Error(
+      `Backend /api/kg/explore returned ${response.status}: ${errMsg}`,
+    );
   }
 
+  const json = await response.json();
   return validateMlResponse(
     SERVICE_NAME,
     "/kg/explore",
     KgQueryResponseSchema,
-    result.body,
+    json,
   );
 }
 
 /**
  * Structured query — get the subgraph centered on a drug/disease.
  *
- * Proxies to `POST {KG_SERVICE_URL}/query` via the shared HTTP client.
+ * Calls `POST /api/kg/explore` (same as exploreKnowledgeGraph — the
+ * backend's /kg/explore endpoint accepts both ?drug=&disease= query
+ * params and a JSON body). Kept as a separate function for backward
+ * compat with callers that expect the ``queryKnowledgeGraph`` name.
  */
 export async function queryKnowledgeGraph(opts: {
   drug?: string;
   disease?: string;
   limit?: number;
 }): Promise<KgQueryResponse> {
-  const baseUrl = getKgServiceUrl();
-  if (!baseUrl) {
-    return { nodes: [], edges: [] };
-  }
-
-  const body: Record<string, unknown> = { limit: opts.limit ?? 100 };
-  if (opts.drug) body.drug = opts.drug;
-  if (opts.disease) body.disease = opts.disease;
-
-  const url = buildServiceUrl(baseUrl, "/query");
-  const result = await mlFetch<unknown>(url, {
-    service: SERVICE_NAME,
-    method: "POST",
-    body,
-    timeoutMs: 30_000, // structured queries can be expensive
-    maxRetries: 2,
-  });
-
-  if (!result.ok) {
-    throw result.error as MlServiceError;
-  }
-
-  return validateMlResponse(
-    SERVICE_NAME,
-    "/query",
-    KgQueryResponseSchema,
-    result.body,
-  );
+  // Delegate to exploreKnowledgeGraph (Teampate 8 unified the two
+  // paths — they both call POST /api/kg/explore now).
+  return exploreKnowledgeGraph(opts);
 }
 
 /**
  * Raw Cypher passthrough — role-gated on the route side.
  *
- * Proxies to `POST {KG_SERVICE_URL}/cypher` via the shared HTTP client.
- * The Python service applies a read-only whitelist (MATCH/OPTIONAL
- * MATCH/WITH/RETURN/WHERE only) and a 30s timeout + 1000-row cap.
+ * Calls `POST /api/kg/cypher` (Next.js API route) which proxies to
+ * the backend FastAPI service at `http://localhost:8000/cypher`,
+ * which in turn proxies to the Phase 2 KG service at
+ * `http://localhost:8001/cypher`. The backend enforces a 10 req/min
+ * per-user rate limit; the Phase 2 service applies a read-only
+ * Cypher whitelist (MATCH/OPTIONAL MATCH/WITH/RETURN/WHERE only)
+ * and a 30s timeout + 1000-row cap.
  *
  * SECURITY: the caller MUST validate the Cypher query is read-only
- * BEFORE calling this function. The Python service's whitelist is
- * defense-in-depth, not the primary gate.
+ * BEFORE calling this function. The backend's rate limit and the
+ * Phase 2 service's whitelist are defense-in-depth, not the primary
+ * gate. The Next.js API route at /api/kg/cypher enforces role-based
+ * access (data_scientist / pi / developer only).
  */
 export async function executeCypher(opts: {
   cypher: string;
   params?: Record<string, unknown>;
   timeoutMs?: number;
 }): Promise<KgCypherResponse> {
-  const baseUrl = getKgServiceUrl();
-  if (!baseUrl) {
-    return { records: [] };
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}/kg/cypher`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        query: opts.cypher,
+        params: opts.params || {},
+        // Note: the timeoutMs is enforced server-side by the backend's
+        // 30s hard timeout. We don't pass it in the body because the
+        // backend ignores client-side timeout hints (a malicious
+        // client could otherwise disable the timeout).
+      }),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `Frontend → /api/kg/cypher network error: ${msg}`,
+    );
   }
 
-  const url = buildServiceUrl(baseUrl, "/cypher");
-  const result = await mlFetch<unknown>(url, {
-    service: SERVICE_NAME,
-    method: "POST",
-    body: { cypher: opts.cypher, params: opts.params || {} },
-    timeoutMs: opts.timeoutMs ?? 30_000,
-    maxRetries: 0, // Cypher queries are not idempotent in general — don't retry
-  });
-
-  if (!result.ok) {
-    throw result.error as MlServiceError;
+  if (!response.ok) {
+    let errorBody: unknown = null;
+    try {
+      errorBody = await response.json();
+    } catch {
+      // ignore
+    }
+    const errMsg =
+      typeof (errorBody as { detail?: unknown })?.detail === "string"
+        ? (errorBody as { detail: string }).detail
+        : response.statusText;
+    throw new Error(
+      `Backend /api/kg/cypher returned ${response.status}: ${errMsg}`,
+    );
   }
 
+  const json = await response.json();
   return validateMlResponse(
     SERVICE_NAME,
     "/cypher",
     KgCypherResponseSchema,
-    result.body,
+    json,
   );
 }
 
 /**
  * Check whether a drug or disease name appears in the KG.
  *
- * Uses /kg/explore with a limit of 1 to check existence without
- * fetching the full subgraph. Returns true if the service finds at
+ * Uses /api/kg/explore with a limit of 1 to check existence without
+ * fetching the full subgraph. Returns true if the backend finds at
  * least one node matching the name.
  */
 export async function validateEntityInKg(
@@ -394,68 +468,13 @@ export async function validateEntityInKg(
     return { ok: false, reason: `${kind} name is empty` };
   }
 
-  const baseUrl = getKgServiceUrl();
-  if (!baseUrl) {
-    // BE-015 v123 FORENSIC ROOT FIX: the previous code returned `{ ok: true }`
-    // here when no KG service URL was configured — silently bypassing the
-    // MANDATORY KG validation that the evidence-package route relies on
-    // (the comment at L72-78 of /api/evidence-package/route.ts says:
-    // "KG validation is now mandatory for ALL callers"). The audit log
-    // then recorded `kgValidationSkipped: false` — a LIE — because the
-    // code thought validation had succeeded.
-    //
-    // ROOT FIX: fail-closed. Return `{ ok: false, reason:
-    // "kg_service_unavailable" }` so the evidence-package route returns
-    // 503 (Service Unavailable) instead of building an unvalidated
-    // package. Local dev environments MUST set KG_SERVICE_URL (or set
-    // DRUGOS_ALLOW_KG_BYPASS=1 for the explicit dev bypass).
-    if (process.env.DRUGOS_ALLOW_KG_BYPASS === "1") {
-      // Explicit dev bypass — the developer has acknowledged that KG
-      // validation is skipped. The evidence-package route will still
-      // record `kgValidationSkipped: true` in the audit log.
-      return { ok: true, reason: "kg_bypass_dev_mode" };
-    }
-    return {
-      ok: false,
-      reason: "kg_service_unavailable",
-    };
-  }
-
   try {
-    const params = new URLSearchParams();
-    params.set(kind, trimmed);
-    params.set("limit", "1");
-    const url = buildServiceUrl(baseUrl, `/kg/explore?${params.toString()}`);
-    const result = await mlFetch<unknown>(url, {
-      service: SERVICE_NAME,
-      method: "GET",
-      timeoutMs: 10_000,
-      maxRetries: 1,
+    // Use exploreKnowledgeGraph with limit=1 to check existence.
+    const result = await exploreKnowledgeGraph({
+      [kind]: trimmed,
+      limit: 1,
     });
-
-    if (!result.ok) {
-      // BE-015 v123 FORENSIC ROOT FIX: KG service is unreachable (network
-      // error, 5xx, timeout, Neo4j unavailable). The previous code
-      // returned `{ ok: true }` — silently bypassing mandatory KG
-      // validation. A pharma partner could then receive an evidence
-      // package for "aspirin for cancer" with NO KG edge backing it,
-      // believing the KG confirms the relationship. Patient-safety risk.
-      //
-      // ROOT FIX: fail-closed. Return `kg_service_unavailable` so the
-      // evidence-package route returns 503 and the researcher retries
-      // when the KG is back. The audit log records the real state.
-      console.warn(
-        `kg-service: validateEntityInKg for ${kind}="${trimmed}" failed (service unreachable):`,
-        (result.error as MlServiceError).message,
-      );
-      return {
-        ok: false,
-        reason: "kg_service_unavailable",
-      };
-    }
-
-    const body = result.body as Record<string, unknown>;
-    const nodes = Array.isArray(body?.nodes) ? body.nodes : [];
+    const nodes = Array.isArray(result?.nodes) ? result.nodes : [];
     if (nodes.length === 0) {
       return {
         ok: false,
@@ -464,15 +483,20 @@ export async function validateEntityInKg(
     }
     return { ok: true };
   } catch (e) {
-    // BE-015 v123 FORENSIC ROOT FIX: same fail-closed behavior on
-    // exception. The previous code returned `{ ok: true }` here too,
-    // silently bypassing validation. An exception means the KG is
-    // unreachable OR the response was malformed — either way, we
-    // cannot confirm the entity exists in the KG, so we MUST refuse.
+    // BE-015 v123 FORENSIC ROOT FIX: fail-closed. The previous code
+    // returned { ok: true } on any error — silently bypassing the
+    // MANDATORY KG validation that the evidence-package route relies
+    // on. An error means the backend is unreachable OR the response
+    // was malformed — either way, we cannot confirm the entity exists
+    // in the KG, so we MUST refuse.
     const msg = e instanceof Error ? e.message : String(e);
     console.warn(
-      `kg-service: validateEntityInKg for ${kind}="${trimmed}" threw (service unreachable): ${msg}`,
+      `kg-service: validateEntityInKg for ${kind}="${trimmed}" threw (backend unreachable): ${msg}`,
     );
+    // Honor the explicit dev bypass (local dev only — never in prod).
+    if (process.env.DRUGOS_ALLOW_KG_BYPASS === "1") {
+      return { ok: true, reason: "kg_bypass_dev_mode" };
+    }
     return {
       ok: false,
       reason: "kg_service_unavailable",
@@ -482,6 +506,9 @@ export async function validateEntityInKg(
 
 /**
  * Health check — useful for the /api/system/status route.
+ *
+ * Calls `GET /api/kg/health` (Next.js API route) which proxies to
+ * the backend FastAPI service's /health endpoint.
  */
 export async function checkKgHealth(): Promise<{
   configured: boolean;
@@ -489,21 +516,20 @@ export async function checkKgHealth(): Promise<{
   neo4jConfigured: boolean;
   version?: string;
 }> {
-  const baseUrl = getKgServiceUrl();
-  if (!baseUrl) {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}/kg/health`, {
+      method: "GET",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+  } catch {
     return { configured: false, reachable: false, neo4jConfigured: false };
   }
-  const url = buildServiceUrl(baseUrl, "/health");
-  const result = await mlFetch<unknown>(url, {
-    service: SERVICE_NAME,
-    method: "GET",
-    timeoutMs: 5_000,
-    maxRetries: 1,
-  });
-  if (!result.ok) {
+  if (!response.ok) {
     return { configured: true, reachable: false, neo4jConfigured: false };
   }
-  const body = result.body as Record<string, unknown>;
+  const body = (await response.json()) as Record<string, unknown>;
   return {
     configured: true,
     reachable: true,

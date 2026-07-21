@@ -180,8 +180,8 @@ class DrugRepurposingGraphTransformer(nn.Module):
     """Graph Transformer for autonomous drug repurposing.
 
     Processes a heterogeneous biomedical knowledge graph with five node types
-    and 18 edge types (9 forward + 9 reverse, the canonical Phase 2 schema)
-    to predict drug-disease therapeutic interaction scores.
+    and 19 edge types (9 forward + 9 reverse + 1 PPI, the canonical Phase 2
+    schema) to predict drug-disease therapeutic interaction scores.
 
     Args:
         feature_dims: Dict mapping node type to raw feature dimension.
@@ -262,7 +262,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         #
         # The audit (P3-032) found that the shared out_proj forces ALL
         # edge types to share the same output projection. For the V1
-        # production graph (18 edge types), this limits the model's
+        # production graph (19 edge types: 9 forward + 9 reverse + 1 PPI), this limits the model's
         # expressiveness. Production deployments targeting the V1 AUC
         # 0.85 target SHOULD set this to True and retrain from scratch.
         # Demo / CI runs may leave it False.
@@ -373,7 +373,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # P3-001 ROOT FIX (Team Member 9, v104 — STALE SCHEMA CHECK):
         # The previous check ``if len(self.edge_types) < 14`` was STALE.
         # The canonical Phase 2 schema (graph_transformer/data/__init__.py)
-        # has 18 edge types (9 forward + 9 reverse), not 14. The original
+        # has 19 edge types (9 forward + 9 reverse + 1 PPI), not 14. The original
         # 14-type schema omitted the 4 neutral binding/modulation edge
         # types added by the P3-001/P3-002 root fix: ('drug','binds','protein'),
         # ('drug','modulates','protein'), ('protein','bound_by','drug'),

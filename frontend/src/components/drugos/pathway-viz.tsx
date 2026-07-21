@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ChevronLeft, ChevronRight, AlertTriangle } from 'lucide-react';
 import type { PathwayData, PathwayNode, PathwayEdge } from '@/lib/types';
+import type { PathwayChainItem } from '@/lib/ml-contracts';
 
 /**
  * FE-032 ROOT FIX: Canvas-based pathway rendering with node cap + pagination.
@@ -40,11 +41,42 @@ import type { PathwayData, PathwayNode, PathwayEdge } from '@/lib/types';
  *
  * Arrow markers (activation →, inhibition ⊣, binding ⋯) are drawn directly
  * on the canvas via path commands — no SVG <marker> defs needed.
+ *
+ * TM13 ROOT FIX (v132, CRITICAL — Phase 4 pathway chain rendering):
+ *   The component now ALSO accepts a `pathwayChain` prop (a single
+ *   PathwayChainItem from the RL candidate's pathway_chain array). When
+ *   provided, the component renders the chain as a horizontal flow:
+ *     drug → protein → pathway → disease
+ *   with arrow connectors between each node. This is the format the
+ *   PathwayExpander passes when the candidate table's Pathway column is
+ *   expanded.
+ *
+ *   The two render modes are mutually exclusive:
+ *     - If `pathwayChain` is provided → render the chain (compact
+ *       horizontal flow). The `pathwayData` prop is ignored.
+ *     - If `pathwayData` is provided (and `pathwayChain` is not) →
+ *       render the full canvas visualization (existing behavior).
+ *     - If neither is provided → render the empty state.
+ *
+ *   This dual-mode design lets the same component serve both use cases:
+ *     - The Knowledge Graph Explorer screen passes `pathwayData` (full
+ *       graph from /api/knowledge-graph) for interactive exploration.
+ *     - The candidate table's PathwayExpander passes `pathwayChain`
+ *       (a single chain from the RL candidate's pathway_chain field)
+ *       for compact inline display.
  */
 
 interface PathwayVizProps {
   /** Real pathway data fetched from /api/knowledge-graph by the caller. */
   pathwayData?: PathwayData;
+  /**
+   * TM13 ROOT FIX (v132): a single pathway chain from a RL candidate's
+   * pathway_chain array. When provided, the component renders the chain
+   * as a compact horizontal flow (drug → protein → pathway → disease)
+   * instead of the full canvas visualization. This is the format used
+   * by the PathwayExpander component in the candidate table.
+   */
+  pathwayChain?: PathwayChainItem;
   className?: string;
 }
 
@@ -94,7 +126,115 @@ function assignDefaultPositions(nodes: PathwayNode[], width: number, height: num
   return result;
 }
 
-export function PathwayViz({ pathwayData: inputPathwayData, className = '' }: PathwayVizProps) {
+/**
+ * TM13 ROOT FIX (v132): PathwayViz is now a ROUTER component. It inspects
+ * the props and delegates to one of two sub-components:
+ *   - PathwayChainView: renders a single PathwayChainItem as a compact
+ *     horizontal flow (drug → protein → pathway → disease). Used by the
+ *     PathwayExpander component in the candidate table.
+ *   - PathwayCanvasView: the original canvas-based visualization for the
+ *     full PathwayData prop (nodes + edges). Used by the Knowledge Graph
+ *     Explorer screen.
+ *
+ * This split avoids a React Hooks violation: the original PathwayViz
+ * tried to call useState/useMemo AFTER an early return when pathwayChain
+ * was provided. React requires hooks to be called in the same order on
+ * every render — the early return violated this. The router pattern
+ * (this function calls NO hooks) is the canonical fix.
+ */
+export function PathwayViz(props: PathwayVizProps) {
+  if (props.pathwayChain) {
+    return <PathwayChainView pathwayChain={props.pathwayChain} className={props.className ?? ''} />;
+  }
+  return <PathwayCanvasView pathwayData={props.pathwayData} className={props.className ?? ''} />;
+}
+
+/**
+ * TM13 ROOT FIX (v132): PathwayChainView renders a single PathwayChainItem
+ * as a compact horizontal flow. This is the format the Python rl/service.py
+ * attaches to each RankedHypothesis after the v132 pathway enrichment fix.
+ *
+ * Layout:
+ *   [drug] → [protein] → [pathway] → [disease]
+ *
+ * Each node is a small bordered pill. The arrows are lucide-react icons.
+ * The pathway name is shown bold above the chain; the intermediate
+ * protein is shown as a gray subtitle.
+ */
+function PathwayChainView({
+  pathwayChain,
+  className = '',
+}: {
+  pathwayChain: PathwayChainItem;
+  className?: string;
+}) {
+  const chain = pathwayChain.chain ?? [];
+  if (chain.length === 0) {
+    // Defensive: shouldn't happen (the Zod schema requires chain to be a
+    // non-empty array), but if it does, render the empty state.
+    return (
+      <div className={`p-2 border rounded bg-muted/30 ${className}`}>
+        <div className="text-xs text-muted-foreground">Empty pathway chain</div>
+      </div>
+    );
+  }
+  return (
+    <div className={`p-2 border rounded bg-muted/30 ${className}`}>
+      <div className="text-sm font-semibold text-foreground">
+        {pathwayChain.pathway}
+      </div>
+      {pathwayChain.intermediate_protein && (
+        <div className="text-xs text-muted-foreground mb-1">
+          via {pathwayChain.intermediate_protein}
+        </div>
+      )}
+      <div className="mt-1 flex flex-wrap items-center gap-1 text-xs">
+        {chain.map((node, i) => (
+          <span key={`${node}-${i}`} className="flex items-center gap-1">
+            <span
+              className={
+                'px-1.5 py-0.5 bg-background border rounded text-foreground ' +
+                (i === 0
+                  ? 'border-red-300 dark:border-red-700 font-medium'
+                  : i === chain.length - 1
+                    ? 'border-blue-300 dark:border-blue-700 font-medium'
+                    : 'border-border')
+              }
+              title={
+                i === 0
+                  ? 'Drug'
+                  : i === chain.length - 1
+                    ? 'Disease'
+                    : 'Intermediate node'
+              }
+            >
+              {node}
+            </span>
+            {i < chain.length - 1 && (
+              <span className="text-muted-foreground" aria-hidden="true">
+                →
+              </span>
+            )}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * PathwayCanvasView — the original canvas-based visualization. Renamed
+ * from `PathwayViz` to make the router pattern explicit. The behavior
+ * is unchanged: it renders the full PathwayData prop (nodes + edges)
+ * on an HTML5 <canvas> with pagination for large graphs.
+ */
+function PathwayCanvasView({
+  pathwayData: inputPathwayData,
+  className = '',
+}: {
+  pathwayData?: PathwayData;
+  className?: string;
+}) {
   // FE-032: pathwayData is now a prop. Default to empty so the component
   // renders an honest empty state when the caller hasn't fetched data yet.
   const pathwayData: PathwayData = inputPathwayData ?? { nodes: [], edges: [] };
