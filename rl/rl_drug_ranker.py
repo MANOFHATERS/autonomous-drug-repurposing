@@ -3390,11 +3390,31 @@ def _check_withdrawn(row, drug_name: str, reward_fn: Optional["RewardFunction"])
         treat_unknown_as_withdrawn = True
 
     # Check the row-level is_withdrawn flag.
+    #
+    # ROOT FIX (FORENSIC v133, hostile-auditor pass): the previous code used
+    # ``if _rw is True:`` which is an IDENTITY check. When pandas reads a
+    # CSV with a bool-dtype column, ``row.get("is_withdrawn")`` returns a
+    # ``numpy.bool_`` instance (displayed as ``np.True_`` / ``np.False_``),
+    # NOT a Python ``bool``. The identity check ``numpy.bool_(True) is True``
+    # returns ``False`` because they are different types — so a row with
+    # ``is_withdrawn=True`` (read from a real DrugBank CSV) was NOT
+    # detected as withdrawn by this helper. This is a P0 patient-safety
+    # hazard: a newly-withdrawn drug that Phase 1 correctly flagged
+    # ``is_withdrawn=True`` would still be ranked HIGH by the RL agent
+    # unless its name happened to be in the ``_withdrawn_drugs`` frozenset.
+    #
+    # The fix uses ``isinstance(_rw, (bool, np.bool_))`` which correctly
+    # matches BOTH Python ``bool`` AND ``numpy.bool_``, then uses
+    # ``bool(_rw)`` for the truthiness check (works for both types).
     has_index = hasattr(row, "index")
     if has_index and "is_withdrawn" in row.index:
         _rw = row.get("is_withdrawn")
-        if _rw is True:
-            row_is_withdrawn = True
+        # Handle Python bool AND numpy.bool_ (returned by pandas when
+        # reading a CSV with a bool-dtype column).
+        if isinstance(_rw, (bool, np.bool_)):
+            if bool(_rw):
+                row_is_withdrawn = True
+            # else: explicitly False → row_is_withdrawn stays False.
         elif isinstance(_rw, str):
             _rw_lower = _rw.strip().lower()
             if _rw_lower in ("true", "1", "yes", "y", "t"):
@@ -3841,9 +3861,15 @@ class RewardFunction:
         row_is_withdrawn = False
         if "is_withdrawn" in row.index:
             _rw = row.get("is_withdrawn")
-            if _rw is True or (
-                isinstance(_rw, str) and _rw.strip().lower() in ("true", "1", "yes", "y")
-            ):
+            # ROOT FIX (FORENSIC v133): handle numpy.bool_ (returned by
+            # pandas when reading a CSV with a bool-dtype column). The
+            # previous ``_rw is True`` identity check failed for
+            # numpy.bool_, causing rows with is_withdrawn=True to be
+            # treated as SAFE — a P0 patient-safety hazard.
+            if isinstance(_rw, (bool, np.bool_)):
+                if bool(_rw):
+                    row_is_withdrawn = True
+            elif isinstance(_rw, str) and _rw.strip().lower() in ("true", "1", "yes", "y"):
                 row_is_withdrawn = True
         # TEAMMATE-3 ROOT FIX (v131, P0 patient-safety): replace the
         # fail-OPEN ``is_withdrawn=None → SAFE`` check with the
@@ -6427,7 +6453,13 @@ class DrugRankingEnv(gym.Env):
             _row_is_withdrawn = False
             if "is_withdrawn" in row.index:
                 _rw = row.get("is_withdrawn")
-                if _rw is True or (
+                # ROOT FIX (FORENSIC v133): handle numpy.bool_ (pandas
+                # bool-dtype column). The previous ``_rw is True`` check
+                # failed for numpy.bool_, missing withdrawn drugs.
+                if isinstance(_rw, (bool, np.bool_)):
+                    if bool(_rw):
+                        _row_is_withdrawn = True
+                elif (
                     isinstance(_rw, str)
                     and _rw.strip().lower() in ("true", "1", "yes", "y")
                 ):

@@ -60,6 +60,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, Optional, Set, Tuple
 
+import numpy as np
+
 # P4-021: import CONSTANTS from rl/constants.py (self-contained, no monolith dep).
 from .constants import FEATURE_COLS, REQUIRED_COLUMNS
 
@@ -136,13 +138,25 @@ PHASE1_WITHDRAWN_YEAR_COLUMN: str = "withdrawn_year"
 def _is_withdrawn_truthy(value: Any) -> bool:
     """Return True iff ``value`` represents an affirmative withdrawal flag.
 
-    Handles bool, string "True"/"False"/"1"/"yes"/"y", int 0/1, and NaN/None
-    (returns False for NaN/None — the unknown case is handled separately by
-    the caller, NOT by this helper).
+    Handles Python bool, ``numpy.bool_`` (returned by pandas when reading
+    a CSV with a bool-dtype column), string "True"/"False"/"1"/"yes"/"y",
+    int 0/1, and NaN/None (returns False for NaN/None — the unknown case
+    is handled separately by the caller, NOT by this helper).
+
+    ROOT FIX (FORENSIC v133, hostile-auditor pass): the previous code used
+    ``if value is True:`` which is an IDENTITY check. When pandas reads a
+    CSV with a bool-dtype column, ``row.get("is_withdrawn")`` returns a
+    ``numpy.bool_`` instance, NOT a Python ``bool``. The identity check
+    ``numpy.bool_(True) is True`` returns ``False`` because they are
+    different types — so a row with ``is_withdrawn=True`` (read from a
+    real DrugBank CSV) was NOT detected as withdrawn. This is a P0
+    patient-safety hazard. The fix uses ``isinstance(value, (bool, np.bool_))``
+    which correctly matches BOTH types.
     """
-    if value is True:
-        return True
-    if value is False or value is None:
+    # Handle Python bool AND numpy.bool_ (pandas bool-dtype column).
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if value is None:
         return False
     if isinstance(value, str):
         v = value.strip().lower()
@@ -164,9 +178,17 @@ def _is_withdrawn_unknown(value: Any) -> bool:
     UNKNOWN means: the column is present but the value is None, empty string,
     or the literal strings 'none'/'null'/'nan'. The conservative default
     (fail-CLOSED) treats unknown as WITHDRAWN.
+
+    ROOT FIX (FORENSIC v133): also handle ``numpy.bool_`` — though
+    ``numpy.bool_`` is never "unknown" (it's either True or False), we
+    include it here for completeness so the helper doesn't fall through
+    to ``return False`` for a valid bool.
     """
     if value is None:
         return True
+    # numpy.bool_ and Python bool are NEVER "unknown" — they're definitive.
+    if isinstance(value, (bool, np.bool_)):
+        return False
     if isinstance(value, str):
         v = value.strip().lower()
         return v in ("", "none", "null", "nan", "na", "n/a")
