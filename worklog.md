@@ -1752,3 +1752,47 @@ Stage Summary:
 - 21 CFR Part 11 audit compliance: backend audit_log_middleware logs every mutation to the shared AuditLog table (same one the frontend writes to). A compliance auditor sees entries from both layers in a single timeline.
 - Production readiness: rate limiting (slowapi), /ready vs /health separation, port conflict resolved.
 - Next: install dependencies and run real code (tsc --noEmit, npm run build, npm run lint, pytest) to verify no breaking changes. Then push branch, merge to main, re-clone to verify.
+
+---
+Task ID: TM11-v141
+Agent: hostile-auditor (Teammate 11 — P3 to Backend + Frontend Integration)
+Task: Wire GT /predict Endpoint into Backend and Frontend (P0 — pharma partner API). Forensic audit revealed the /predict endpoint STILL returned hardcoded gnn_score=0.5 despite extensive comments claiming otherwise. Apply root-level fix, write tests, run real code, push branch, merge to main.
+
+Work Log:
+- Read project docx (Cosmic_Build_Process_Updated.docx) to understand 6-phase architecture (Phase 1 data ingestion -> Phase 2 Neo4j KG -> Phase 3 GT model -> Phase 4 RL ranker -> Phase 5 API + dashboard -> Phase 6 V1 launch).
+- Cloned repo with PAT auth (manoj.c@atraiuniversity.edu.in).
+- Read ACTUAL CODE line-by-line (not comments) of:
+  * backend/api/main.py (1041 lines) — found /predict at lines 793-828 returning hardcoded gnn_score=0.5; PredictResponse schema missing model_version field; pathways typed as List[str] instead of structured List[PathwayItem]; /health and /ready returning version="1.0.0" instead of package version; httpx imported only inside functions (broke test mocking); missing BACKEND_VERSION, MODEL_VERSION, create_test_jwt module-level symbols that tests import.
+  * graph_transformer/service.py (1627 lines) — VERIFIED ALREADY FIXED: MODEL_VERSION = gt_4.1.0 single source; /health returns _GT_PACKAGE_VERSION; /predict includes pathways; FastAPI app version = _GT_PACKAGE_VERSION; modelVersion in response == model_version in Neo4j writeback.
+  * frontend/src/lib/services/gt-inference.ts (343 lines) — VERIFIED ALREADY FIXED: calls /api/predict (not GT_SERVICE_URL directly); handles model_version field; handles structured pathways.
+  * backend/api/rate_limit.py (378 lines) — VERIFIED ALREADY FIXED: slowapi + in-memory limiters.
+  * frontend/.env.example — VERIFIED ALREADY FIXED: GT_SERVICE_URL documented as backend-only.
+- Ran BASELINE tests before any fix: 6/7 backend tests in test_p3_to_be_fe_predict.py FAILED (confirming the audit was right — code was broken despite all "ROOT FIX" comments). 7/7 GT service tests PASSED (graph_transformer/service.py was genuinely fixed).
+- Applied SURGICAL fix to backend/api/main.py ONLY (the only file with real bugs):
+  1. Added module-level `import httpx` (was inside functions, broke test mocking).
+  2. Added `BACKEND_VERSION` constant derived from `graph_transformer.__version__` (= "4.1.0") with defensive fallback.
+  3. Added `MODEL_VERSION` constant = `f"gt_{BACKEND_VERSION}"` (= "gt_4.1.0") — matches GT service's MODEL_VERSION constant.
+  4. Added `PathwayItem` Pydantic model with {pathway, intermediate_protein, chain} structured shape (was flat List[str]).
+  5. Updated `PredictResponse` schema: pathways is now List[PathwayItem], added model_version field.
+  6. Updated FastAPI app version=BACKEND_VERSION (was "1.0.0").
+  7. Updated /health to return version=BACKEND_VERSION (was "1.0.0").
+  8. Updated /ready to return version=BACKEND_VERSION (was "1.0.0") AND raise HTTPException with detail dict on degraded (was JSONResponse — broke test contract).
+  9. Replaced /predict hardcoded 0.5 placeholder with REAL httpx.AsyncClient proxy to GT_SERVICE_URL/predict. Maps GT service response to PredictResponse. Forwards X-Org-Id + X-User-Id headers. Returns 503 on RequestError, forwards status on HTTPStatusError, 502 on malformed response. NEVER fabricates a score.
+  10. Used default GT_SERVICE_URL=http://localhost:8002 and RL_SERVICE_URL=http://localhost:8003 (matches shared/contracts/urls.py SERVICE_PORTS) so /ready actually probes rather than silently skipping.
+  11. Added `create_test_jwt(user_id, org_id, org_role, expires_in_seconds)` helper for integration tests.
+  12. Used manual status_code check instead of `raise_for_status()` (the latter raises RuntimeError on mocked responses without an attached request).
+- Ran REAL CODE verification: started REAL uvicorn backend on port 8004 + REAL mock GT service on port 8002 (separate processes, real sockets, real HTTP). Issued real POST /predict with real JWT. Verified: gnn_score=0.78 (NOT 0.5), confidence=0.74, pathways=[{pathway, intermediate_protein, chain}], model_version="gt_4.1.0", literature_supported=true. The proxy genuinely works end-to-end.
+- Ran ALL 14 TM11 acceptance tests (7 backend + 7 GT service): ALL PASS.
+- Verified 29 OTHER test failures (in test_p1_to_be_fe_datasets, test_p2_to_be_fe_kg, test_p4_to_be_top_k, test_p3_to_p4_bridge) were PRE-EXISTING (caused by other teammates' placeholder endpoints like /top-k, /datasets/stats, /cypher) — NOT caused by my fix. Confirmed by git stash + re-run baseline.
+
+Stage Summary:
+- Files modified: backend/api/main.py (1 file, +423/-45 lines).
+- Files NOT modified (verified already fixed by prior teammates): graph_transformer/service.py, frontend/src/lib/services/gt-inference.ts, frontend/.env.example, backend/api/rate_limit.py.
+- Tests passing: 14/14 TM11 acceptance tests (was 1/7 backend + 7/7 GT = 8/14 baseline).
+- Real code verified: uvicorn backend + mock GT service, real HTTP POST /predict, real gnn_score=0.78 (not 0.5), real pathways chain, real model_version.
+- P3-002 (hardcoded 0.5): FIXED
+- P3-005 (pathways field): FIXED (structured PathwayItem)
+- P3-006 (model_version drift): FIXED (single MODEL_VERSION constant)
+- P3-020 (service version drift): FIXED (BACKEND_VERSION from graph_transformer.__version__)
+- /ready HTTPException contract: FIXED (was JSONResponse, broke test)
+- Scientific integrity: NEVER fabricate a score — /predict returns 503 if GT service unreachable.
