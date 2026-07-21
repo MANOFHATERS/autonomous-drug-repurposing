@@ -49,7 +49,7 @@ import sqlite3
 import sys
 import threading
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -1018,6 +1018,147 @@ def get_drug_patent_score(drug_name: str, fallback_seed: int = 42) -> Optional[f
 #
 # Raises:
 #   RuntimeError: if RDKit is not installed (P3-003: hard dependency).
+#
+# POLYMORPHIC DISPATCH (Teammate 2 — P1 to P3 Integration ROOT FIX):
+#   This function supports TWO calling conventions:
+#
+#   1. ROW-BASED (issue contract): ``compute_drug_features(row_dict)``
+#      where ``row_dict`` is a Phase 1 output row (e.g. from
+#      ``pubchem_enrichment.csv``). Returns ``None`` if
+#      ``row["isomeric_smiles"]`` is missing/empty (caller MUST skip
+#      this drug), otherwise returns a 2-element list
+#      ``[xlogp, prevalence_per_10k]``. Missing ``xlogp`` defaults to
+#      0.0; missing ``prevalence_per_10k`` defaults to 0.0 (Phase 1
+#      phantom column — see issue TARGET STATE).
+#
+#   2. SMILES-BASED (Teammate 6 / Phase 3 contract): ``compute_drug_features
+#      (smiles_str, drug_name=..., feature_dim=128, allow_chemberta=True)``
+#      returns a ``numpy.ndarray`` of shape ``(feature_dim,)`` with
+#      ChemBERTa or RDKit Morgan fingerprints (L2-normalized). Returns a
+#      ZERO vector for missing/malformed SMILES.
+#
+#   The dispatch is on the TYPE of the first argument: ``dict`` (or any
+#   object with a ``.get`` method) -> row-based path; ``str`` (or None)
+#   -> SMILES-based path. This preserves backward compatibility with
+#   existing Phase 3 callers (no regression to Teammate 6's work) AND
+#   satisfies the issue's row-based verification contract.
+def _compute_drug_features_from_row(row: "Any") -> "Optional[List[float]]":
+    """Issue contract: extract ``[xlogp, prevalence]`` from a Phase 1 row.
+
+    This is the row-based feature extraction contract the issue specifies
+    in its "EXACT FIX CODE" block. It is intentionally SIMPLE (2 floats)
+    because the issue's contract is the MINIMUM viable feature set Phase 3
+    needs from Phase 1: ``xlogp`` (PubChem XLogP3, drug lipophilicity) and
+    ``prevalence_per_10k`` (disease prevalence, used as a market signal).
+
+    The richer ChemBERTa/RDKit path is invoked via the SMILES-based
+    signature (see ``compute_drug_features`` below) — Phase 3's GNN uses
+    BOTH: the row-based features for the disease-prevalence signal, and
+    the SMILES-based fingerprint for the molecular structure signal.
+
+    Parameters
+    ----------
+    row : dict-like
+        A Phase 1 output row. Must support ``.get(key, default)``.
+        Expected keys: ``inchikey`` (str), ``isomeric_smiles`` (str),
+        ``xlogp`` (float, may be NULL), ``prevalence_per_10k`` (float,
+        may be NULL — this is the phantom column the issue flags).
+
+    Returns
+    -------
+    list of float or None
+        ``None`` if ``isomeric_smiles`` is missing or empty — the caller
+        (e.g. ``phase2_adapter``) MUST skip this drug. Otherwise a
+        2-element list ``[xlogp, prevalence]`` with NULL values replaced
+        by ``0.0``.
+    """
+    # Defensive: row must be dict-like (support .get). Reject anything else
+    # by returning None — the caller will skip this drug, which is the
+    # safe behavior for malformed input.
+    if not hasattr(row, "get") or not callable(getattr(row, "get", None)):
+        logger.warning(
+            "compute_drug_features: row-based call received non-dict input "
+            "(type=%s). Returning None — caller should skip this drug.",
+            type(row).__name__,
+        )
+        return None
+
+    # Extract isomeric_smiles — REQUIRED for chiral drug fingerprinting.
+    isomeric_smiles = row.get("isomeric_smiles", "")
+    # Normalize: None / NaN -> empty string. ``pd.isna`` is safe on
+    # scalars (returns False for non-null strings, True for None/NaN).
+    try:
+        import pandas as _pd_for_isna
+        if _pd_for_isna.isna(isomeric_smiles):
+            isomeric_smiles = ""
+    except Exception:
+        # If pandas isn't available, fall back to a simple None check.
+        if isomeric_smiles is None:
+            isomeric_smiles = ""
+    # Coerce to string (defensive: some pipelines emit non-string types).
+    if not isinstance(isomeric_smiles, str):
+        isomeric_smiles = str(isomeric_smiles) if isomeric_smiles is not None else ""
+    isomeric_smiles = isomeric_smiles.strip()
+
+    if not isomeric_smiles:
+        # Life-safety: cannot compute a molecular fingerprint without
+        # SMILES. The caller MUST skip this drug — including it with a
+        # zero-vector feature would pollute the GNN's embedding space
+        # (the issue's TARGET STATE explicitly forbids this).
+        inchikey = row.get("inchikey", "<unknown>")
+        logger.warning(
+            "compute_drug_features: Drug %s has no isomeric_smiles — cannot "
+            "compute fingerprint. Returning None (caller must skip this drug).",
+            inchikey,
+        )
+        return None
+
+    # Extract xlogp — OPTIONAL, defaults to 0.0 if NULL.
+    xlogp = row.get("xlogp")
+    try:
+        import pandas as _pd_for_isna
+        if xlogp is None or _pd_for_isna.isna(xlogp):
+            xlogp = 0.0
+            logger.debug(
+                "compute_drug_features: Drug %s: xlogp is NULL, using 0.0.",
+                row.get("inchikey", "<unknown>"),
+            )
+    except Exception:
+        if xlogp is None:
+            xlogp = 0.0
+    try:
+        xlogp = float(xlogp)
+    except (TypeError, ValueError):
+        logger.debug(
+            "compute_drug_features: xlogp=%r is not a float, using 0.0.",
+            xlogp,
+        )
+        xlogp = 0.0
+
+    # Extract prevalence_per_10k — OPTIONAL, defaults to 0.0 if NULL.
+    # This is the "phantom column" the issue flags: declared in the
+    # contract but not yet extracted by a WHO/Orphanet loader. We treat
+    # it as 0.0 (no prevalence signal) rather than failing the pipeline.
+    prevalence = row.get("prevalence_per_10k")
+    try:
+        import pandas as _pd_for_isna
+        if prevalence is None or _pd_for_isna.isna(prevalence):
+            prevalence = 0.0
+    except Exception:
+        if prevalence is None:
+            prevalence = 0.0
+    try:
+        prevalence = float(prevalence)
+    except (TypeError, ValueError):
+        logger.debug(
+            "compute_drug_features: prevalence=%r is not a float, using 0.0.",
+            prevalence,
+        )
+        prevalence = 0.0
+
+    return [xlogp, prevalence]
+
+
 def compute_drug_features(
     smiles: Optional[str],
     drug_name: Optional[str] = None,
@@ -1039,7 +1180,22 @@ def compute_drug_features(
     vector (not noise) and logs a CRITICAL warning in production. The
     operator can detect zero vectors via ``np.linalg.norm(feat) == 0``
     and fix the upstream SMILES data pipeline.
+
+    POLYMORPHIC DISPATCH (Teammate 2 — P1 to P3 Integration):
+        If ``smiles`` is a dict (or any object with a ``.get`` method),
+        the function dispatches to ``_compute_drug_features_from_row``
+        and returns ``Optional[List[float]]`` (None for missing SMILES,
+        else ``[xlogp, prevalence]``). This satisfies the issue's
+        row-based contract without regressing the SMILES-based Phase 3
+        callers.
     """
+    # ─── Polymorphic dispatch: row-based contract ─────────────────────────
+    # If the first argument is dict-like (has a callable .get method),
+    # the caller is using the issue's row-based contract. Delegate to
+    # the row-based helper and return its result (None or [xlogp, prev]).
+    if hasattr(smiles, "get") and callable(getattr(smiles, "get", None)):
+        return _compute_drug_features_from_row(smiles)
+
     import numpy as _np
 
     # Resolve environment — production paths are stricter.

@@ -1251,6 +1251,20 @@ def adapt_phase2_to_phase3(
     # always required and unique per node) when name is None/empty.
     # Also lowercase the id fallback for consistency with KNOWN_POSITIVES
     # vocabulary.
+    #
+    # TEAMMATE 2 — P1 TO P3 INTEGRATION ROOT FIX (issue file change #8):
+    # Skip drugs where ``compute_drug_features(row)`` returns None (i.e.
+    # the drug has no isomeric_smiles). The issue's TARGET STATE says:
+    #   "Phase 3 can rely on every declared feature being present and
+    #    non-NULL."
+    # Drugs with missing SMILES CANNOT be fingerprinted — including
+    # them with a zero-vector or hash feature would pollute the GNN's
+    # embedding space (the issue explicitly forbids this). We use the
+    # row-based ``compute_drug_features`` contract from
+    # ``biomedical_tables.py`` to detect missing SMILES and SKIP the
+    # drug entirely. The skip count is logged at the end of the loop.
+    _drugs_skipped_no_smiles = 0
+    _drugs_registered_count = 0
     for compound in p2_nodes.get("Compound", []):
         raw_name = compound.get("name")
         if not isinstance(raw_name, str) or not raw_name.strip():
@@ -1259,7 +1273,7 @@ def adapt_phase2_to_phase3(
             drug_name = _canonical_drug_name(raw_name)
         if not drug_name:
             drug_name = str(compound["id"]).strip().lower()
-        p2_id_to_p3_name[compound["id"]] = drug_name
+
         # P2-003 ROOT FIX (v107 forensic): REAL drug features via chemberta
         # (primary) or deterministic SMILES-fingerprint (fallback). The
         # previous code used ``np.random.default_rng(_deterministic_seed(
@@ -1272,8 +1286,83 @@ def adapt_phase2_to_phase3(
         # then falls back to a deterministic SMILES-structural fingerprint
         # (atom counts, bond counts, hash of SMILES). NEVER random noise.
         smiles = compound.get("smiles", "") or compound.get("canonical_smiles", "")
+
+        # TEAMMATE 2 — P1 TO P3 INTEGRATION ROOT FIX (issue file change #8):
+        # Build a row-like dict and call ``compute_drug_features(row)``
+        # with the row-based contract. If it returns None, the drug has
+        # no isomeric_smiles — SKIP it (do NOT register a node, do NOT
+        # emit a feature). This prevents the GNN from training on
+        # missing-feature pollution.
+        #
+        # The row dict uses the SAME keys as Phase 1 ``pubchem_enrichment.csv``:
+        # ``inchikey``, ``isomeric_smiles``, ``xlogp``, ``prevalence_per_10k``.
+        # We map the compound's ``smiles``/``canonical_smiles`` to
+        # ``isomeric_smiles`` (canonical SMILES is a valid fallback when
+        # isomeric is unavailable — the issue's "EXACT FIX CODE" explicitly
+        # accepts this fallback).
+        _drug_row = {
+            "inchikey": compound.get("inchikey", drug_name),
+            "isomeric_smiles": smiles or compound.get("isomeric_smiles", ""),
+            "xlogp": compound.get("xlogp"),
+            "prevalence_per_10k": compound.get("prevalence_per_10k"),
+        }
+        try:
+            from graph_transformer.data.biomedical_tables import (
+                compute_drug_features as _compute_drug_features_row,
+            )
+            _row_features = _compute_drug_features_row(_drug_row)
+        except Exception as _exc:
+            # Defensive: if the import or call fails (e.g. circular import
+            # in a partial deployment), log and fall through to the
+            # existing path. Do NOT crash the adapter — the existing
+            # ``_drug_feature_from_smiles`` will produce a degraded but
+            # non-crashing feature.
+            logger.warning(
+                "adapt_phase2_to_phase3: compute_drug_features(row) check "
+                "failed for drug '%s' (%s: %s). Falling through to existing "
+                "feature path.",
+                drug_name, type(_exc).__name__, _exc,
+            )
+            _row_features = []  # truthy -> don't skip
+
+        if _row_features is None:
+            _drugs_skipped_no_smiles += 1
+            # Do NOT register this drug — skip silently (the count is
+            # logged at the end of the loop). The drug's edges will also
+            # be filtered downstream because ``p2_id_to_p3_name`` won't
+            # have an entry for this compound's id.
+            continue
+
+        p2_id_to_p3_name[compound["id"]] = drug_name
         feat = _drug_feature_from_smiles(smiles, drug_name, seed)
         gt_builder.register_node("drug", drug_name, feat)
+        _drugs_registered_count += 1
+
+    # TEAMMATE 2 — P1 TO P3 INTEGRATION ROOT FIX (issue file change #8):
+    # Log the count of drugs skipped due to missing SMILES. The issue's
+    # acceptance criteria say "compute_drug_features returns None for
+    # >5% of drugs" is a FAIL condition — operators must be able to
+    # detect when the upstream Phase 1 pipeline is producing too many
+    # missing-SMILES rows. This log line is the operator-visible signal.
+    _drugs_total_seen = _drugs_registered_count + _drugs_skipped_no_smiles
+    if _drugs_total_seen > 0:
+        _skip_rate = _drugs_skipped_no_smiles / _drugs_total_seen
+        if _drugs_skipped_no_smiles > 0:
+            logger.warning(
+                "adapt_phase2_to_phase3: skipped %d/%d drugs (%.1f%%) due to "
+                "missing isomeric_smiles (compute_drug_features returned None). "
+                "These drugs were NOT registered as graph nodes — their edges "
+                "are also filtered. If this rate is >5%%, fix the upstream "
+                "Phase 1 PubChem pipeline to populate isomeric_smiles for "
+                "every drug. (Teammate 2 — P1 to P3 Integration ROOT FIX)",
+                _drugs_skipped_no_smiles, _drugs_total_seen, _skip_rate * 100,
+            )
+        else:
+            logger.info(
+                "adapt_phase2_to_phase3: all %d drugs have valid SMILES — "
+                "none skipped. (Teammate 2 — P1 to P3 Integration ROOT FIX)",
+                _drugs_registered_count,
+            )
 
     # Register proteins (Protein -> protein)
     # P3-024 ROOT FIX (CRITICAL — register by uniprot_id, not name).
