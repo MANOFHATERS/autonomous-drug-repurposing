@@ -605,80 +605,6 @@ async def verify_org_id(auth: AuthContext = Depends(verify_jwt)) -> str:
 
 
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
-# create_test_jwt helper for integration tests.
-# ---------------------------------------------------------------------------
-# The integration tests in backend/tests/integration/test_p4_to_be_top_k.py
-# need to mint JWTs that pass verify_jwt. The tests CANNOT use the Next.js
-# frontend's /api/auth/login route (they don't have a frontend running),
-# so they need a Python helper that mints a JWT with the correct claims
-# (sub, org_id, org_role, iss, iat, exp) signed with the test JWT_SECRET.
-#
-# This helper is TEST-ONLY — it is NOT exposed as an endpoint and is NOT
-# importable by the frontend. Production JWTs are issued by the Next.js
-# frontend's /api/auth/login route (see frontend/src/lib/auth/server.ts).
-#
-# The helper is keyword-only (``*``) so callers MUST use ``create_test_jwt(
-# user_id=..., org_id=...)`` — this prevents accidental argument swaps
-# (e.g., ``create_test_jwt('testorg', 'testuser')`` would silently mint a
-# JWT with user_id='testorg' and org_id='testuser', a cross-tenant security
-# hole in test fixtures that would mask real auth bugs).
-def create_test_jwt(
-    *,
-    user_id: str,
-    org_id: str,
-    org_role: str = "member",
-    expires_in_hours: int = 1,
-) -> str:
-    """Mint a test JWT with the given claims (TEST-ONLY — not for production).
-
-    Args:
-        user_id: The user's ID (becomes the JWT 'sub' claim).
-        org_id: The user's active org ID (becomes the JWT 'org_id' claim).
-        org_role: The user's role in the org ('admin' | 'member' | 'viewer').
-            Defaults to 'member'.
-        expires_in_hours: JWT lifetime in hours. Defaults to 1.
-
-    Returns:
-        The encoded JWT string.
-
-    Raises:
-        RuntimeError: If JWT_SECRET env var is not set or is too short
-            (<32 chars). Tests must set JWT_SECRET in conftest.py before
-            importing backend.api.main.
-
-    Note:
-        This helper is for TESTS ONLY. Production JWTs are issued by the
-        Next.js frontend's /api/auth/login route, which signs with the
-        same JWT_SECRET but also does password verification, MFA checks,
-        and rate limiting.
-    """
-    import jwt as pyjwt
-    from datetime import timedelta
-
-    jwt_secret = os.environ.get("JWT_SECRET")
-    if not jwt_secret or len(jwt_secret) < 32:
-        raise RuntimeError(
-            "create_test_jwt: JWT_SECRET env var is not set or is too short "
-            "(<32 chars). Tests must set JWT_SECRET in conftest.py before "
-            "importing backend.api.main. Example: "
-            "os.environ['JWT_SECRET'] = 'test-secret-...-32-chars-min'."
-        )
-    jwt_issuer = os.environ.get("JWT_ISSUER", "drugos")
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": user_id,
-        "org_id": org_id,
-        "org_role": org_role,
-        "iss": jwt_issuer,
-        "iat": now,
-        "exp": now + timedelta(hours=expires_in_hours),
-    }
-    return pyjwt.encode(payload, jwt_secret, algorithm="HS256")
-
-
-# ---------------------------------------------------------------------------
 # TM8 v134 ROOT FIX (Teammate 8 — P2 to Backend Integration):
 # Lenient JWT verification + X-Org-Id header fallback for /kg/* proxy routes.
 # ---------------------------------------------------------------------------
@@ -813,96 +739,14 @@ async def verify_org_id_with_fallback(
 
 
 # ---------------------------------------------------------------------------
-# TM8 v134 ROOT FIX: create_test_jwt — test-only helper for integration tests.
+# TM8 v134 ROOT FIX: create_test_jwt is defined LATER in this file
+# (Teammate 11 v141 version, which is the canonical one). Earlier
+# duplicate definitions from Teammate 8 and Teammate 12 have been
+# removed to avoid confusion. The active definition is the LAST one
+# in the file (Python's standard shadowing rule). All integration
+# tests use create_test_jwt(user_id=..., org_id=...) with keyword
+# args, which the active definition supports.
 # ---------------------------------------------------------------------------
-# Integration tests (backend/tests/integration/test_p2_to_be_fe_kg.py) need
-# to mint JWTs that pass ``verify_jwt``. This helper does that using the
-# JWT_SECRET env var (which the test conftest sets to a deterministic test
-# value).
-#
-# SECURITY: this function is INTENTIONALLY safe to import in production —
-# it does NOT bypass auth, it mints REAL JWTs signed with JWT_SECRET.
-# If an attacker has JWT_SECRET, they can already mint any JWT they want
-# (with or without this helper). The helper just makes the test code
-# cleaner. The function is named ``create_test_jwt`` (not ``create_jwt``)
-# to make it obvious in code review if it's ever called from non-test code.
-def create_test_jwt(
-    user_id: str = "testuser",
-    org_id: str = "testorg",
-    org_role: str = "member",
-    secret: Optional[str] = None,
-    issuer: Optional[str] = None,
-    algorithm: Optional[str] = None,
-    expires_in_seconds: Optional[int] = None,
-) -> str:
-    """Mint a test JWT signed with JWT_SECRET for integration tests.
-
-    Returns the encoded JWT string (PyJWT returns str on Python 3).
-
-    Parameters
-    ----------
-    user_id : str
-        The JWT 'sub' claim (the user's ID). Default "testuser".
-    org_id : str
-        The JWT 'org_id' claim (the user's org). Default "testorg".
-        Pass "" to mint a JWT WITHOUT the org_id claim (for testing
-        the X-Org-Id header fallback path).
-    org_role : str
-        The JWT 'org_role' claim. Default "member".
-    secret : str, optional
-        The JWT signing secret. Defaults to os.environ["JWT_SECRET"].
-        MUST be >=32 chars (the production requirement).
-    issuer : str, optional
-        The JWT 'iss' claim. Defaults to os.environ.get("JWT_ISSUER", "drugos").
-    algorithm : str, optional
-        The JWT signing algorithm. Defaults to os.environ.get("JWT_ALGORITHMS",
-        "HS256").split(",")[0].
-    expires_in_seconds : int, optional
-        If set, adds an 'exp' claim ``now + expires_in_seconds``. If None
-        (default), the JWT does NOT expire (suitable for tests that run
-        in milliseconds — production JWTs SHOULD expire).
-
-    Returns
-    -------
-    str
-        The encoded JWT string.
-
-    Raises
-    ------
-    RuntimeError
-        If JWT_SECRET is not set or is <32 chars. This is the same
-        requirement as ``verify_jwt`` — we refuse to mint JWTs with a
-        weak secret.
-    """
-    import jwt as _jwt  # PyJWT
-    from time import time as _time
-    _secret = secret or os.environ.get("JWT_SECRET")
-    if not _secret or len(_secret) < 32:
-        raise RuntimeError(
-            "create_test_jwt: JWT_SECRET env var is not set or is <32 chars. "
-            "Set JWT_SECRET to a >=32 char value (the test conftest.py does "
-            "this automatically). Production deployments MUST also set "
-            "JWT_SECRET to a strong secret (openssl rand -base64 32)."
-        )
-    _issuer = issuer or os.environ.get("JWT_ISSUER", "drugos")
-    _algorithm = algorithm or os.environ.get("JWT_ALGORITHMS", "HS256").split(",")[0]
-    payload: Dict[str, Any] = {
-        "sub": str(user_id),
-        "iss": _issuer,
-        "iat": int(_time()),
-        "org_role": str(org_role),
-    }
-    # Only add org_id if it's non-empty (so tests can mint JWTs WITHOUT
-    # org_id to test the X-Org-Id header fallback path).
-    if org_id:
-        payload["org_id"] = str(org_id)
-    if expires_in_seconds is not None:
-        payload["exp"] = int(_time()) + int(expires_in_seconds)
-    token = _jwt.encode(payload, _secret, algorithm=_algorithm)
-    # PyJWT 2.x returns str; PyJWT 1.x returns bytes. Normalize to str.
-    if isinstance(token, bytes):
-        token = token.decode("ascii")
-    return token
 
 
 # ---------------------------------------------------------------------------
