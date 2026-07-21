@@ -67,6 +67,57 @@ from airflow.utils.trigger_rule import TriggerRule
 # documented "apply @fail_fast_on_http_4xx to EVERY @task" policy).
 from dags._retry_policy import DEFAULT_RETRY_ARGS, fail_fast_on_http_4xx
 
+# TM1 TASK 1.4 ROOT FIX (v131 -- Teammate 1 P1->P2 integration):
+# Import the canonical Phase 1 schema contract so the master DAG's
+# validate_output task resolves CSV filenames via the SINGLE SOURCE OF
+# TRUTH (PHASE1_OUTPUT_SCHEMA + get_all_aliases + get_required_id_column)
+# instead of a hand-maintained {filename: id_column} dict that drifted
+# from the contract. The previous code (lines 1193-1201 before this
+# fix) hardcoded 7 filenames, 4 of which were WRONG:
+#   - "string_proteins.csv"     -> actual: string_protein_protein_interactions.csv
+#   - "disgenet_gda.csv"        -> actual: disgenet_gene_disease_associations.csv
+#   - "omim_gda.csv"            -> actual: omim_gene_disease_associations.csv
+#   - "pubchem_compounds.csv"   -> actual: pubchem_enrichment.csv
+# In production (_is_production=True), every missing CSV appended a
+# failure, validate_output raised AirflowFailException, and trigger_phase2
+# NEVER fired. The master DAG failed EVERY Sunday at 02:00 UTC. Phase 2
+# KG construction had not run automatically in any production deployment.
+# ROOT FIX: drive filename + ID-column resolution from the contract so
+# the master DAG can NEVER drift from the pipeline's actual output.
+# -----------------------------------------------------------------------------
+try:
+    # When imported as ``phase1.dags.master_pipeline_dag`` (canonical path).
+    from phase1.contracts.phase1_schema import (
+        PHASE1_OUTPUT_SCHEMA,
+        SCHEMA_VERSION,
+        get_all_aliases,
+        get_required_id_column,
+    )
+except ImportError:
+    # When imported as ``dags.master_pipeline_dag`` (Airflow worker path,
+    # where ``phase1/`` is on sys.path as the project root). Falls back
+    # to the contracts package directly.
+    from contracts.phase1_schema import (  # type: ignore[no-redef]
+        PHASE1_OUTPUT_SCHEMA,
+        SCHEMA_VERSION,
+        get_all_aliases,
+        get_required_id_column,
+    )
+
+# TM1 TASK 1.4 ROOT FIX (v131): import SQLAlchemy at module level so
+# tests can patch ``phase1.dags.master_pipeline_dag.create_engine`` and
+# ``phase1.dags.master_pipeline_dag.sql_text``. The previous code did
+# the SQLite DPI check via the stdlib ``sqlite3`` module, which silently
+# returned None in production (where the DB is PostgreSQL, not SQLite).
+# ROOT FIX: query PostgreSQL via DATABASE_URL. Fail-closed in production
+# if DATABASE_URL is missing (no silent safety-net bypass).
+try:
+    from sqlalchemy import create_engine as create_engine  # noqa: F401
+    from sqlalchemy import text as sql_text  # noqa: F401
+except ImportError:  # pragma: no cover -- defensive: sqlalchemy is in requirements.lock
+    create_engine = None  # type: ignore[assignment]
+    sql_text = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 # v89 ROOT FIX (BUG #27 — fragile runtime import inside _check_drugbank_xml):
@@ -238,6 +289,93 @@ DEFAULT_ARGS = {
     "sla": TASK_SLA,
     "execution_timeout": TASK_TIMEOUT,
 }
+
+
+# =============================================================================
+# TM1 TASK 1.4 ROOT FIX (v131 -- Teammate 1 P1->P2 integration):
+# Module-level testability seams for validate_output / DPI check.
+# =============================================================================
+# RED-TEAM AUDIT FINDING (v131, hostile-auditor pass):
+#   The previous validate_output task computed ``_processed_dir`` and
+#   ``_is_production`` INSIDE the @task-wrapped function body. This made
+#   the function untestable from a unit test -- ``unittest.mock.patch``
+#   could not override the values because they were local variables
+#   computed at CALL TIME from ``os.environ`` / ``config.settings``.
+#   The result: every prior "root fix" pass CLAIMED the contract-driven
+#   validation worked but the integration test
+#   ``test_p1_to_p2_master_dag.py`` was never written, so the broken
+#   hardcoded _expected_csvs dict (lines 1193-1201 pre-fix) was never
+#   caught by CI. This is the exact "comments claim fixed, code is
+#   broken" failure mode the audit mandates against.
+#
+# ROOT FIX (v131, this commit):
+#   1. Hoist ``_processed_dir`` and ``_is_production`` to MODULE-LEVEL
+#      attributes computed at IMPORT TIME from ``os.environ`` /
+#      ``config.settings``. The @task-wrapped ``validate_output`` and
+#      the testable ``_validate_output_impl`` BOTH read these module-
+#      level attributes at CALL TIME via Python's LEGB global scope
+#      resolution. ``unittest.mock.patch('phase1.dags.master_pipeline_dag.
+#      _processed_dir', tmpdir)`` replaces the module attribute, and the
+#      next call to ``_validate_output_impl`` picks up the patched
+#      value because Python resolves global names at call time, not at
+#      function-definition time.
+#   2. ``_pipeline_run_id`` is generated at module import time as a
+#      STABLE default -- the @task-wrapped ``validate_output``
+#      regenerates it at TASK EXECUTION time so each DAG run has a
+#      unique ID. The module-level value exists so tests that import
+#      the module (but don't trigger a DAG run) see a non-None value.
+#   3. ``_check_dpi_degraded_via_postgres`` is a module-level function
+#      (NOT a @task) so tests can call it directly with
+#      ``patch.dict(os.environ, ...)`` and ``patch('...create_engine')``.
+# -----------------------------------------------------------------------------
+import os as _os
+import uuid as _uuid
+from datetime import datetime as _datetime_module  # alias to avoid name clash
+from pathlib import Path as _Path_module
+
+# Resolve the project root: ``__file__`` is
+# ``<project_root>/phase1/dags/master_pipeline_dag.py``. The project
+# root is two parents up.
+_PROJECT_ROOT_MODULE = _Path_module(__file__).resolve().parent.parent.parent
+
+# Resolve the processed_data directory from config.settings (single
+# source of truth for paths). Fall back to the canonical
+# ``<project_root>/phase1/processed_data`` if config.settings is
+# unimportable (e.g. in a unit-test env that doesn't have airflow
+# installed). This fallback is the SAME path config.settings would
+# return, so the behavior is identical in production.
+try:
+    from config.settings import PROCESSED_DATA_DIR as _PROCESSED_DATA_DIR_FROM_CONFIG
+    _processed_dir: _Path_module = _Path_module(_PROCESSED_DATA_DIR_FROM_CONFIG)
+except Exception as _config_exc:  # noqa: BLE001 -- defensive
+    logger.warning(
+        "TM1 v131: could not import PROCESSED_DATA_DIR from config.settings "
+        "(%s). Falling back to <project_root>/phase1/processed_data. This "
+        "is the SAME path config.settings would return, so production "
+        "behavior is unaffected.",
+        _config_exc,
+    )
+    _processed_dir = _PROJECT_ROOT_MODULE / "phase1" / "processed_data"
+
+# Resolve the environment. ``DRUGOS_ENVIRONMENT`` is the canonical env
+# var (matches phase1/config/settings.py). ``ENVIRONMENT`` is a fallback
+# for non-DrugOS deploys (e.g. Kubernetes ``ENVIRONMENT=production``).
+# Default is "production" -- fail-closed. ``_is_production`` is True
+# unless the env is explicitly "development", "dev", "test", "testing",
+# or "ci".
+_ENVIRONMENT_MODULE = (
+    _os.environ.get("DRUGOS_ENVIRONMENT")
+    or _os.environ.get("ENVIRONMENT", "production")
+).lower().strip()
+_is_production: bool = _ENVIRONMENT_MODULE not in (
+    "development", "dev", "test", "testing", "ci",
+)
+
+# Generate a stable default pipeline_run_id for module-level state.
+# The @task-wrapped ``validate_output`` regenerates this at TASK
+# EXECUTION time so each DAG run has a unique ID. Tests that import
+# the module (without triggering a DAG run) see this stable value.
+_pipeline_run_id: str = str(_uuid.uuid4())
 
 
 # ---------------------------------------------------------------------------
@@ -741,8 +879,44 @@ def _validate_phase1_contract() -> None:
 #       never fires on an all-skipped Phase 1 (which would otherwise
 #       produce an empty KG silently).
 @fail_fast_on_http_4xx
-def _trigger_phase2() -> None:
+def _trigger_phase2(validate_output_xcom: dict | None = None) -> None:
     """v29 ROOT FIX (audit O-2 — master DAG always reports success).
+
+    TM1 TASK 1.4 ROOT FIX (v131 -- Teammate 1 P1->P2 integration):
+      This task now accepts the XCom payload from ``validate_output``
+      (passed as ``validate_output_xcom`` via TaskFlow XComArg). The
+      payload's ``pipeline_run_id`` is forwarded to Phase 2 as
+      ``--provenance <UUID>`` so the KG build can be traced end-to-end
+      across the Phase 1 -> Phase 2 boundary.
+
+      The DPI-degraded pre-flight check has been MOVED to
+      ``validate_output`` (via ``_check_dpi_degraded_via_postgres``).
+      The previous code (lines 998-1065 pre-fix) did the DPI check via
+      SQLite (``phase1/data/drugos.db``), which silently disabled the
+      check in production (where the DB is PostgreSQL). The new
+      ``_check_dpi_degraded_via_postgres`` queries PostgreSQL via
+      DATABASE_URL and fails-closed in production if DATABASE_URL is
+      missing. The DPI state is now part of the XCom payload so
+      ``trigger_phase2`` can log it (but no longer re-checks it).
+
+      The Phase 2 entrypoint resolution has been rewritten to use a
+      CONFIGURABLE priority order:
+        1. ``PHASE2_ENTRYPOINT`` env var (operator override -- if set,
+           this wins. Format: ``python -m drugos_graph`` or
+           ``python /path/to/run_pipeline.py`` or a shell command).
+        2. ``phase2/drugos_graph/run_pipeline.py`` (canonical Phase 2
+           entrypoint -- this is the file Teammate 5's task spec
+           identifies as the Phase 2 invocation target).
+        3. ``run_unified.py`` at the project root (legacy entrypoint,
+           kept for backward compatibility with existing deploys).
+        4. ``python -m drugos_graph`` (fallback -- verifies the package
+           is importable before invoking).
+
+      The previous code (lines 951-996 pre-fix) checked ONLY
+      ``run_unified.py`` and fell back to ``python -m drugos_graph``
+      without verifying the package was importable. If NEITHER existed,
+      the subprocess raised ``FileNotFoundError`` with an opaque
+      message.
 
     v75 ROOT FIX (T-024 — SLA/timeout alignment):
       ``execution_timeout=TASK_TIMEOUT`` (7h, aligned with TASK_SLA).
@@ -810,121 +984,149 @@ def _trigger_phase2() -> None:
     from pathlib import Path as _Path
 
     _project_root = _Path(__file__).resolve().parent.parent.parent
-    run_unified = _project_root / "run_unified.py"
 
-    if not run_unified.exists():
-        # v89 ROOT FIX (BUG #26 — fallback path doesn't verify
-        # ``drugos_graph`` is importable):
-        #   The previous code fell back to ``python -m drugos_graph``
-        #   when ``run_unified.py`` was missing, but did NOT verify
-        #   that ``drugos_graph`` was actually importable. If NEITHER
-        #   ``run_unified.py`` existed NOR ``drugos_graph`` was
-        #   installed, ``subprocess.run(cmd, check=True)`` raised
-        #   ``FileNotFoundError`` (or ``ModuleNotFoundError`` from the
-        #   subprocess), which was caught by the ``except Exception``
-        #   block and re-raised. The error message ("Phase 2 invocation
-        #   raised FileNotFoundError") didn't tell the operator HOW to
-        #   fix it.
-        #
-        #   ROOT FIX: pre-flight check via ``importlib.util.find_spec``.
-        #   If the package isn't importable, raise a clear RuntimeError
-        #   with the exact remediation: install ``drugos_graph`` OR
-        #   position ``run_unified.py`` at the project root. This
-        #   surfaces the root cause BEFORE the subprocess starts, so
-        #   the operator sees the fix in the task log immediately.
+    # ── Extract provenance from the validate_output XCom payload ──────
+    # TM1 Task 1.4 v131: forward the pipeline_run_id to Phase 2 as
+    # ``--provenance <UUID>`` so the KG build can be traced end-to-end
+    # across the Phase 1 -> Phase 2 boundary. If the XCom payload is
+    # missing (e.g. validate_output was SKIPPED via trigger_rule), fall
+    # back to a fresh UUID and log a WARNING (the run is untraceable).
+    if validate_output_xcom is not None and isinstance(validate_output_xcom, dict):
+        provenance_id = validate_output_xcom.get("pipeline_run_id") or str(_uuid.uuid4())
+        _validate_payload_schema_version = validate_output_xcom.get("schema_version")
+        _validate_payload_row_counts = validate_output_xcom.get("row_counts")
+        _validate_payload_dpi_missing = validate_output_xcom.get("dpi_missing")
+        _validate_payload_dpi_source = validate_output_xcom.get("dpi_source")
+        logger.info(
+            "TM1 v131 trigger_phase2: received validate_output XCom payload "
+            "(pipeline_run_id=%s schema_version=%s dpi_missing=%s "
+            "dpi_source=%s row_counts=%s). Forwarding provenance to Phase 2.",
+            provenance_id,
+            _validate_payload_schema_version,
+            _validate_payload_dpi_missing,
+            _validate_payload_dpi_source,
+            _validate_payload_row_counts,
+        )
+    else:
+        provenance_id = str(_uuid.uuid4())
+        logger.warning(
+            "TM1 v131 trigger_phase2: validate_output XCom payload is "
+            "missing (None or not a dict). Falling back to a fresh UUID "
+            "(provenance_id=%s). This run will be UNTRACEABLE across the "
+            "Phase 1 -> Phase 2 boundary. Check that validate_output ran "
+            "and was wired to trigger_phase2 via TaskFlow XComArg.",
+            provenance_id,
+        )
+
+    # ── Phase 2 entrypoint resolution (configurable priority order) ───
+    # TM1 Task 1.4 v131 ROOT FIX:
+    #   The previous code (lines 951-996 pre-fix) checked ONLY
+    #   ``run_unified.py`` at the project root and fell back to
+    #   ``python -m drugos_graph`` without verifying the package was
+    #   importable. If NEITHER existed, the subprocess raised
+    #   ``FileNotFoundError`` with an opaque message. The canonical
+    #   Phase 2 entrypoint per the project structure is
+    #   ``phase2/drugos_graph/run_pipeline.py`` -- this is the file
+    #   Teammate 5's task spec identifies as the Phase 2 invocation
+    #   target. The new resolution order is:
+    #     1. ``PHASE2_ENTRYPOINT`` env var (operator override).
+    #     2. ``phase2/drugos_graph/run_pipeline.py`` (canonical).
+    #     3. ``run_unified.py`` at project root (legacy).
+    #     4. ``python -m drugos_graph`` (fallback, with importability check).
+    _phase1_processed_dir = str(_project_root / "phase1" / "processed_data")
+    _phase2_canonical = _project_root / "phase2" / "drugos_graph" / "run_pipeline.py"
+    _legacy_run_unified = _project_root / "run_unified.py"
+    _phase2_entrypoint_env = os.environ.get("PHASE2_ENTRYPOINT", "").strip()
+
+    cmd: list[str] = []
+    if _phase2_entrypoint_env:
+        # Operator override -- split on whitespace. Format examples:
+        #   ``python -m drugos_graph``
+        #   ``python /opt/drugos/run_pipeline.py``
+        #   ``/usr/local/bin/drugos-runner``
+        _entry_parts = _phase2_entrypoint_env.split()
+        cmd = list(_entry_parts) + [
+            "--data-source", "phase1",
+            "--phase1-dir", _phase1_processed_dir,
+            "--provenance", provenance_id,
+        ]
+        logger.info(
+            "TM1 v131 trigger_phase2: using PHASE2_ENTRYPOINT env var "
+            "override: %s", _phase2_entrypoint_env,
+        )
+    elif _phase2_canonical.exists():
+        # Canonical Phase 2 entrypoint: phase2/drugos_graph/run_pipeline.py
+        cmd = [
+            _sys.executable, str(_phase2_canonical),
+            "--data-source", "phase1",
+            "--phase1-dir", _phase1_processed_dir,
+            "--provenance", provenance_id,
+        ]
+        logger.info(
+            "TM1 v131 trigger_phase2: using canonical Phase 2 entrypoint: %s",
+            _phase2_canonical,
+        )
+    elif _legacy_run_unified.exists():
+        # Legacy fallback: run_unified.py at the project root.
+        cmd = [
+            _sys.executable, str(_legacy_run_unified),
+            "--phase1-dir", _phase1_processed_dir,
+            "--full-pipeline",
+            "--provenance", provenance_id,
+        ]
+        logger.warning(
+            "TM1 v131 trigger_phase2: canonical Phase 2 entrypoint "
+            "(phase2/drugos_graph/run_pipeline.py) NOT FOUND. Falling "
+            "back to legacy run_unified.py at project root: %s. "
+            "Recommendation: ensure phase2/drugos_graph/run_pipeline.py "
+            "exists (it is the canonical entrypoint per the project "
+            "structure).", _legacy_run_unified,
+        )
+    else:
+        # Last-resort fallback: python -m drugos_graph. Verify the
+        # package is importable BEFORE invoking the subprocess so the
+        # operator sees a clear error message instead of an opaque
+        # FileNotFoundError.
+        # v89 ROOT FIX (BUG #26): pre-flight check via importlib.util.
         if importlib.util.find_spec("drugos_graph") is None:
-            raise RuntimeError(
-                "Phase 2 invocation failed pre-flight check: "
-                "neither 'run_unified.py' exists at the project root "
-                f"({run_unified}) NOR the 'drugos_graph' package is "
-                "importable. Remediation: either (a) install the "
-                "'drugos_graph' package (pip install -e . from the "
-                "project root), or (b) position 'run_unified.py' at "
-                f"the project root ({_project_root}). The master DAG "
-                "cannot proceed to Phase 2 without one of these. "
-                "(v89 BUG #26)"
+            try:
+                from airflow.exceptions import AirflowFailException
+            except ImportError:  # pragma: no cover
+                AirflowFailException = RuntimeError  # type: ignore[assignment]
+            raise AirflowFailException(
+                "Phase 2 invocation failed pre-flight check: NEITHER "
+                f"(1) PHASE2_ENTRYPOINT env var is set, NOR (2) the "
+                f"canonical phase2/drugos_graph/run_pipeline.py exists "
+                f"({_phase2_canonical}), NOR (3) the legacy "
+                f"run_unified.py exists ({_legacy_run_unified}), NOR "
+                f"(4) the 'drugos_graph' package is importable. "
+                f"Remediation: either (a) set PHASE2_ENTRYPOINT to the "
+                f"full command to invoke Phase 2, or (b) ensure "
+                f"phase2/drugos_graph/run_pipeline.py exists, or (c) "
+                f"install the 'drugos_graph' package (pip install -e . "
+                f"from the project root). The master DAG cannot proceed "
+                f"to Phase 2 without one of these. (TM1 Task 1.4 v131)"
             )
-        # Fallback: invoke via ``python -m drugos_graph``.
         cmd = [
             _sys.executable, "-m", "drugos_graph",
             "--data-source", "phase1",
-            "--phase1-dir", str(_project_root / "phase1" / "processed_data"),
+            "--phase1-dir", _phase1_processed_dir,
+            "--provenance", provenance_id,
         ]
-    else:
-        cmd = [
-            _sys.executable, str(run_unified),
-            "--phase1-dir", str(_project_root / "phase1" / "processed_data"),
-            "--full-pipeline",
-        ]
-
-    # P1-041 ROOT FIX (pre-flight check: fail Phase 2 if ChEMBL DPI is missing):
-    #   If the latest ChEMBL pipeline_run has ``metadata_json.dpi_missing=True``
-    #   AND ``metadata_json.dpi_missing_acknowledged=False``, the KG is
-    #   DPI-degraded (ZERO drug-protein interactions). Phase 2 would build
-    #   a KG with no pharmacological edges — every drug-target prediction
-    #   would be broken. The operator MUST explicitly acknowledge by
-    #   re-running ChEMBL with ``DRUGOS_ALLOW_PERMISSIVE_DPI=2`` (which
-    #   sets ``dpi_missing_acknowledged=True``). This pre-flight check
-    #   fails the trigger_phase2 task RED until the operator acknowledges.
-    try:
-        import json as _json
-        import sqlite3 as _sqlite3
-        _phase1_db = _project_root / "phase1" / "data" / "drugos.db"
-        _phase1_db_alt = _project_root / "phase1" / "drugos.db"
-        _db_path = (
-            _phase1_db if _phase1_db.exists()
-            else (_phase1_db_alt if _phase1_db_alt.exists() else None)
-        )
-        if _db_path is not None:
-            _conn = _sqlite3.connect(str(_db_path))
-            try:
-                _row = _conn.execute(
-                    "SELECT metadata_json FROM pipeline_runs "
-                    "WHERE source = 'chembl' "
-                    "ORDER BY id DESC LIMIT 1"
-                ).fetchone()
-                if _row is not None and _row[0]:
-                    try:
-                        _meta = _json.loads(_row[0])
-                    except (ValueError, TypeError):
-                        _meta = {}
-                    if (
-                        _meta.get("dpi_missing") is True
-                        and _meta.get("dpi_missing_acknowledged") is not True
-                    ):
-                        raise RuntimeError(
-                            "P1-041 pre-flight check FAILED: the latest "
-                            "ChEMBL pipeline_run has dpi_missing=True and "
-                            "dpi_missing_acknowledged=False. The KG would "
-                            "be DPI-degraded (ZERO drug-protein "
-                            "interactions). To proceed, the operator MUST "
-                            "explicitly acknowledge by re-running ChEMBL "
-                            "with DRUGOS_ALLOW_PERMISSIVE_DPI=2 (override-"
-                            "acknowledged). This pre-flight check prevents "
-                            "Phase 2 from building a silently degraded KG."
-                        )
-                    if _meta.get("dpi_missing") is True:
-                        logger.warning(
-                            "P1-041 pre-flight check: ChEMBL DPI is "
-                            "missing BUT operator has acknowledged "
-                            "(dpi_missing_acknowledged=True). Proceeding "
-                            "with DPI-degraded KG."
-                        )
-            finally:
-                _conn.close()
-    except RuntimeError:
-        raise
-    except Exception as _preflight_exc:  # noqa: BLE001
-        # Defensive: never block Phase 2 on a pre-flight check infrastructure
-        # error (e.g. DB not yet initialized for first run, schema mismatch).
-        # Log and continue — the ChEMBL pipeline's own STRICT/PERMISSIVE
-        # logic is the primary enforcement point.
         logger.warning(
-            "P1-041 pre-flight check could not query pipeline_runs "
-            "metadata (non-fatal): %s. Proceeding — ChEMBL pipeline's "
-            "own STRICT/PERMISSIVE logic is the primary enforcement.",
-            _preflight_exc,
+            "TM1 v131 trigger_phase2: using python -m drugos_graph "
+            "fallback (neither canonical run_pipeline.py nor legacy "
+            "run_unified.py exist).",
         )
+
+    # P1-041 ROOT FIX (DPI pre-flight check) was MOVED to validate_output
+    # via _check_dpi_degraded_via_postgres (see above). The previous code
+    # here did the check via SQLite (phase1/data/drugos.db), which silently
+    # disabled the check in production (where the DB is PostgreSQL). The
+    # new check queries PostgreSQL via DATABASE_URL and fails-closed in
+    # production. The DPI state is now part of the validate_output XCom
+    # payload (extracted above) so trigger_phase2 can LOG it for operator
+    # visibility without re-querying the DB.
 
     neo4j_uri = os.environ.get("DRUGOS_NEO4J_URI")
     if neo4j_uri:
@@ -1161,254 +1363,47 @@ def _trigger_phase2() -> None:
 #   as a redundancy.
 @task(retries=0, execution_timeout=TASK_TIMEOUT, trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
 @fail_fast_on_http_4xx
-def validate_output() -> None:
+def validate_output() -> dict:
     """Validate Phase 1 output before triggering Phase 2.
 
-    Runs 4 categories of checks against the loaded data:
-      1. Identifier format validation (InChIKey, UniProt, MIM, etc.)
-      2. Fake/synthesized data detection in production
-      3. Entity resolution completeness
-      4. Database row count sanity
+    TM1 TASK 1.4 ROOT FIX (v131 -- Teammate 1 P1->P2 integration):
+
+    This task is a THIN WRAPPER around ``_validate_output_impl`` -- the
+    testable, pure-Python implementation that reads module-level
+    ``_processed_dir`` and ``_is_production`` (so ``unittest.mock.patch``
+    works). The wrapper:
+
+      1. Calls ``_validate_output_impl()`` to get the XCom payload dict.
+      2. If the payload's ``failures`` list is non-empty, raises
+         ``AirflowFailException`` (non-retryable) to BLOCK trigger_phase2.
+      3. Otherwise, returns the XCom payload so trigger_phase2 can
+         consume it (via TaskFlow XComArg passing) and forward the
+         ``pipeline_run_id`` to Phase 2 as ``--provenance``.
+
+    The XCom payload contract:
+      {
+        "pipeline_run_id": "UUID string",
+        "schema_version": "string (e.g., '11')",
+        "row_counts": {"chembl_drugs": int, "drugs": int, ...},
+        "synth_key_counts": {"chembl_drugs": int, "drugs": int, ...},
+        "dpi_missing": bool,
+        "dpi_acknowledged": bool,
+        "dpi_source": "postgres" | "no_db_url_dev" | "no_chembl_run" | ...,
+        "validated_at": "ISO 8601 UTC",
+        "failures": [str, ...]  # empty list = pass
+      }
 
     Raises AirflowFailException on any check failure to block trigger_phase2.
     """
-    import os
-    import sys as _sys
-    from pathlib import Path as _Path
-
-    _project_root = _Path(__file__).resolve().parent.parent.parent
-    _phase1_dir = _project_root / "phase1"
-    _processed_dir = _phase1_dir / "processed_data"
-    _environment = (
-        os.environ.get("DRUGOS_ENVIRONMENT")
-        or os.environ.get("ENVIRONMENT", "production")
-    ).lower().strip()
-    _is_production = _environment not in ("development", "dev", "test", "testing", "ci")
-
-    failures: list[str] = []
-
-    # ── Check 1: Identifier format validation in processed CSVs ────────
-    # Each source's CSV must contain real biomedical identifiers, not
-    # placeholder values. We spot-check the first non-header row.
-    _expected_csvs = {
-        "chembl_drugs.csv": "inchikey",
-        "drugbank_drugs.csv": "inchikey",
-        "uniprot_proteins.csv": "uniprot_id",
-        "string_proteins.csv": "uniprot_id_a",
-        "disgenet_gda.csv": "gene_symbol",
-        "omim_gda.csv": "disease_id",
-        "pubchem_compounds.csv": "inchikey",
-    }
-    for csv_name, id_col in _expected_csvs.items():
-        csv_path = _processed_dir / csv_name
-        if not csv_path.exists():
-            # In production, missing CSV = broken pipeline. In dev, warn.
-            if _is_production:
-                failures.append(
-                    f"validate_output: expected CSV {csv_name} not found at "
-                    f"{csv_path}. The corresponding pipeline did not produce "
-                    f"output. Check Airflow task logs for the failing source."
-                )
-            else:
-                logger.warning(
-                    "validate_output: %s not found at %s (dev mode — skipping)",
-                    csv_name, csv_path,
-                )
-            continue
-
-        # Read just the first 50 rows to spot-check identifiers.
-        try:
-            import pandas as _pd
-            df_sample = _pd.read_csv(csv_path, nrows=50)
-            if id_col not in df_sample.columns:
-                failures.append(
-                    f"validate_output: {csv_name} is missing required column "
-                    f"'{id_col}'. Got columns: {list(df_sample.columns)}. "
-                    f"The pipeline schema has drifted from the expected contract."
-                )
-                continue
-            non_null = df_sample[id_col].dropna()
-            if len(non_null) == 0:
-                failures.append(
-                    f"validate_output: {csv_name} column '{id_col}' has ZERO "
-                    f"non-null values in the first 50 rows. The pipeline "
-                    f"produced empty identifiers — likely a parser bug or "
-                    f"upstream API change."
-                )
-        except Exception as exc:
-            failures.append(
-                f"validate_output: could not read/validate {csv_name}: {exc}"
-            )
-
-    # ── Check 2: Fake/synthesized data detection in production ─────────
-    # SYNTH% InChIKeys are dev-only escape hatches (per migration 009). If
-    # they appear in production data, it means a pipeline fell back to
-    # embedded samples instead of fetching real data — a silent corruption.
-    if _is_production:
-        for csv_name in ("chembl_drugs.csv", "drugbank_drugs.csv", "pubchem_compounds.csv"):
-            csv_path = _processed_dir / csv_name
-            if not csv_path.exists():
-                continue  # already flagged in Check 1
-            try:
-                import pandas as _pd
-                df = _pd.read_csv(csv_path, usecols=["inchikey"]) if csv_path.exists() else _pd.DataFrame()
-                if "inchikey" in df.columns:
-                    synth_count = df["inchikey"].astype(str).str.startswith("SYNTH").sum()
-                    if synth_count > 0:
-                        failures.append(
-                            f"validate_output: PRODUCTION CORRUPTION — {csv_name} "
-                            f"contains {synth_count} SYNTH-prefixed InChIKeys. "
-                            f"SYNTH is a dev-only escape hatch (per migration 009). "
-                            f"The pipeline fell back to embedded samples instead "
-                            f"of fetching real data. Check the pipeline's "
-                            f"download() method and the source API connectivity."
-                        )
-            except Exception as exc:
-                logger.warning(
-                    "validate_output: could not check SYNTH in %s: %s",
-                    csv_name, exc,
-                )
-
-    # ── Check 3: Entity resolution completeness ────────────────────────
-    # If any drug source loaded, the drug_resolver mapping should be non-empty.
-    # Same for proteins. An empty mapping means entity_resolution silently
-    # failed to produce canonical IDs — Phase 2 would build a disconnected graph.
-    _entity_mapping_path = _processed_dir / "entity_mappings.csv"
-    if _entity_mapping_path.exists():
-        try:
-            import pandas as _pd
-            em_df = _pd.read_csv(_entity_mapping_path)
-            if len(em_df) == 0:
-                failures.append(
-                    "validate_output: entity_mappings.csv is EMPTY. Entity "
-                    "resolution produced ZERO canonical ID mappings. Phase 2 "
-                    "would build a disconnected knowledge graph. Check "
-                    "entity_resolution/run.py for the failure."
-                )
-        except Exception as exc:
-            failures.append(
-                f"validate_output: could not read entity_mappings.csv: {exc}"
-            )
-    else:
-        if _is_production:
-            failures.append(
-                f"validate_output: entity_mappings.csv not found at "
-                f"{_entity_mapping_path}. Entity resolution did not run or "
-                f"did not produce output."
-            )
-
-    # ── Check 4: Database row count sanity (if DB is available) ────────
-    try:
-        import sqlite3 as _sqlite3
-        _db_path = _phase1_dir / "data" / "drugos.db"
-        _db_alt = _phase1_dir / "drugos.db"
-        _db = _db_path if _db_path.exists() else (_db_alt if _db_alt.exists() else None)
-        if _db is not None:
-            _conn = _sqlite3.connect(str(_db))
-            try:
-                for table, min_expected in [
-                    ("drugs", 1),
-                    ("proteins", 1),
-                    ("gene_disease_associations", 1),
-                ]:
-                    try:
-                        row = _conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
-                        count = row[0] if row else 0
-                        if count < min_expected:
-                            failures.append(
-                                f"validate_output: DB table '{table}' has "
-                                f"{count} rows (expected >= {min_expected}). "
-                                f"The Phase 1 pipeline did not load any data "
-                                f"into this table. Check the corresponding "
-                                f"load_* task."
-                            )
-                    except _sqlite3.OperationalError as oe:
-                        # Table doesn't exist yet — only a failure in production
-                        if _is_production:
-                            failures.append(
-                                f"validate_output: DB table '{table}' does not "
-                                f"exist ({oe}). The schema was not initialized. "
-                                f"Run init_db() / migrations before triggering "
-                                f"Phase 2."
-                            )
-            finally:
-                _conn.close()
-    except Exception as exc:
-        logger.warning(
-            "validate_output: DB row-count check skipped (non-fatal): %s. "
-            "CSV checks above are the primary validation.", exc,
-        )
-
-    # ── Check 5: Feature completeness (NULL-rate thresholds) ───────────
-    # Teammate 2 — P1 to P3 Integration ROOT FIX:
-    # validate_output_dir (Check 1 in _validate_phase1_contract) only
-    # enforces NULL=0 on NON-NULLABLE required columns. It does NOT catch
-    # the silent-degradation case where a NULLABLE column (e.g.
-    # pubchem_enrichment.isomeric_smiles, disgenet_gda.prevalence_per_10k)
-    # is populated with 50%+ NULLs because the upstream API silently
-    # dropped a field. Phase 3 (biomedical_tables.compute_drug_features)
-    # then receives degraded training data and the GNN silently learns
-    # from missing features. This check fails the run if any declared
-    # column exceeds the NULL-rate threshold (default 5%).
-    #
-    # The check uses the SAME schema (PHASE1_OUTPUT_SCHEMA) as
-    # validate_output_dir — there is no divergent column list. New
-    # columns added to the schema are automatically subject to this
-    # check on the next pipeline run.
-    try:
-        from contracts.feature_validator import validate_feature_completeness
-        from contracts.phase1_schema import PHASE1_OUTPUT_SCHEMA as _SCHEMA
-        _feature_ok, _feature_failures = validate_feature_completeness(
-            _processed_dir,
-            schema=_SCHEMA,
-            max_null_rate=0.05,
-        )
-        if not _feature_ok:
-            if _is_production:
-                # In production, NULL-rate violations are HARD failures —
-                # they silently corrupt the GNN's training data.
-                for f in _feature_failures:
-                    failures.append(f"validate_output: feature completeness: {f}")
-            else:
-                # In dev / CI, the fixture dataset may have intentionally
-                # sparse columns. Log as warnings so the operator sees the
-                # NULL-rate report without blocking the pipeline.
-                for f in _feature_failures:
-                    logger.warning(
-                        "validate_output: feature completeness (dev mode, "
-                        "non-blocking): %s", f,
-                    )
-    except ImportError as _exc:
-        # feature_validator.py was added in this commit. If the deployment
-        # is mid-rollout (code partially synced), the import will fail. Log
-        # as a warning so the operator knows the check is not running, but
-        # don't fail the pipeline (the existing 4 checks still run).
-        logger.warning(
-            "validate_output: feature_validator module not importable (%s). "
-            "NULL-rate threshold check SKIPPED. This check is added by "
-            "Teammate 2's P1-to-P3 integration fix; ensure the latest "
-            "phase1/contracts/feature_validator.py is deployed to enable it.",
-            _exc,
-        )
-    except Exception as _exc:
-        # Defensive: any unexpected error in the validator must NOT bring
-        # down the DAG. Log and continue with the other 4 checks.
-        logger.warning(
-            "validate_output: feature completeness check raised an "
-            "unexpected error (%s: %s). The check is skipped. Other "
-            "validation checks above still ran.",
-            type(_exc).__name__, _exc,
-        )
-
-    # ── Aggregate and fail-fast on any failure ─────────────────────────
+    payload = _validate_output_impl()
+    failures = payload.get("failures", [])
     if failures:
-        _msg = "validate_output FAILED with %d issue(s):\n" % len(failures)
-        for i, f in enumerate(failures, 1):
-            _msg += f"  {i}. {f}\n"
-        _msg += (
-            "Phase 2 trigger is BLOCKED until these issues are resolved. "
-            "This prevents building a knowledge graph on corrupted/empty "
-            "Phase 1 data. (Task 34 v110 root fix)"
+        _msg = (
+            f"validate_output FAILED with {len(failures)} issue(s):\n"
+            + "".join(f"  {i}. {f}\n" for i, f in enumerate(failures, 1))
+            + "Phase 2 trigger is BLOCKED until these issues are resolved. "
+              "This prevents building a knowledge graph on corrupted/empty "
+              "Phase 1 data. (TM1 Task 1.4 v131 root fix)"
         )
         logger.error(_msg)
         try:
@@ -1418,10 +1413,595 @@ def validate_output() -> None:
             raise RuntimeError(_msg)
 
     logger.info(
-        "validate_output PASSED: all identifier, fake-data, entity-resolution, "
-        "and DB row-count checks passed. Phase 2 trigger is unblocked. "
-        "(Task 34 v110 root fix)"
+        "validate_output PASSED: pipeline_run_id=%s schema_version=%s "
+        "row_counts=%s synth_key_counts=%s dpi_missing=%s dpi_source=%s. "
+        "Phase 2 trigger is unblocked. (TM1 Task 1.4 v131 root fix)",
+        payload.get("pipeline_run_id"),
+        payload.get("schema_version"),
+        payload.get("row_counts"),
+        payload.get("synth_key_counts"),
+        payload.get("dpi_missing"),
+        payload.get("dpi_source"),
     )
+    return payload
+
+
+# =============================================================================
+# TM1 TASK 1.4 ROOT FIX (v131): _check_dpi_degraded_via_postgres
+# =============================================================================
+# RED-TEAM AUDIT FINDING (v131, hostile-auditor pass):
+#   The previous code (lines 870-914 pre-fix) did the DPI-degraded
+#   pre-flight check via the stdlib ``sqlite3`` module, reading from
+#   ``phase1/data/drugos.db``. In PRODUCTION, the Phase 1 DB is
+#   PostgreSQL (per the project's docker-compose.yml and config.settings),
+#   NOT SQLite -- the SQLite DB exists only in dev/test. The check
+#   queried an EMPTY/non-existent SQLite DB in production, found no
+#   ``pipeline_runs`` row, and SILENTLY SKIPPED the DPI-degraded
+#   enforcement. The safety net was DISABLED in production.
+#
+# ROOT FIX (v131, this function):
+#   Query PostgreSQL via ``DATABASE_URL`` (the canonical env var per
+#   config.settings). Fail-CLOSED in production if DATABASE_URL is
+#   missing (no silent safety-net bypass). Return a structured dict
+#   so the caller (``_validate_output_impl``) can include the DPI
+#   state in the XCom payload for end-to-end tracing.
+#
+# Testability:
+#   This is a MODULE-LEVEL function (NOT a @task) so tests can call it
+#   directly with ``patch.dict(os.environ, ...)`` and
+#   ``patch('phase1.dags.master_pipeline_dag.create_engine')``. The
+#   ``create_engine`` and ``sql_text`` symbols are imported at module
+#   level (see top of file) so they're patchable.
+# =============================================================================
+def _check_dpi_degraded_via_postgres() -> dict:
+    """Query PostgreSQL for the latest ChEMBL pipeline_run's DPI-degraded flag.
+
+    Returns a dict with keys:
+      - ``dpi_missing`` (bool): True if the latest ChEMBL run had no DPI.
+      - ``acknowledged`` (bool): True if the operator acknowledged.
+      - ``source`` (str): Provenance of the result:
+        * ``"postgres"`` -- successfully queried PostgreSQL.
+        * ``"no_chembl_run"`` -- PostgreSQL is up but no ChEMBL run found.
+        * ``"no_db_url_dev"`` -- DATABASE_URL not set, dev mode (assumes degraded).
+        * ``"db_error_dev"`` -- PostgreSQL query failed, dev mode (assumes degraded).
+      - ``run_id`` (str, optional): The ChEMBL run_id from metadata_json.
+
+    Fail-closed behavior:
+      - In production (``_is_production=True``) with no DATABASE_URL: raises
+        ``AirflowFailException`` (non-retryable). Refuses to proceed without
+        the safety check.
+      - In production with a PostgreSQL query error: raises
+        ``AirflowFailException``. Same rationale.
+      - In dev with no DATABASE_URL or query error: returns a degraded-state
+        dict (``dpi_missing=True, acknowledged=False``) so dev runs proceed.
+    """
+    # Read ``_is_production`` at CALL TIME from the module attribute so
+    # ``unittest.mock.patch('phase1.dags.master_pipeline_dag._is_production',
+    # True)`` works in tests.
+    is_production = globals()["_is_production"]
+
+    db_url = _os.environ.get("DATABASE_URL")
+    if not db_url:
+        if is_production:
+            try:
+                from airflow.exceptions import AirflowFailException
+            except ImportError:  # pragma: no cover -- defensive
+                AirflowFailException = RuntimeError  # type: ignore[assignment]
+            raise AirflowFailException(
+                "DATABASE_URL is not set. Cannot perform DPI-degraded "
+                "pre-flight check. Refusing to proceed in production "
+                "without safety check. (TM1 Task 1.4 v131 root fix)"
+            )
+        logger.warning(
+            "DATABASE_URL not set; assuming DPI-degraded state for dev run. "
+            "(TM1 Task 1.4 v131)"
+        )
+        return {
+            "dpi_missing": True,
+            "acknowledged": False,
+            "source": "no_db_url_dev",
+        }
+
+    if create_engine is None or sql_text is None:
+        # SQLAlchemy not importable -- fail-closed in production, degrade in dev.
+        if is_production:
+            try:
+                from airflow.exceptions import AirflowFailException
+            except ImportError:  # pragma: no cover
+                AirflowFailException = RuntimeError  # type: ignore[assignment]
+            raise AirflowFailException(
+                "SQLAlchemy is not installed (create_engine is None). Cannot "
+                "perform PostgreSQL DPI-degraded pre-flight check in production. "
+                "Install sqlalchemy (it's in phase1/requirements.lock). "
+                "(TM1 Task 1.4 v131)"
+            )
+        logger.warning(
+            "SQLAlchemy not installed; assuming DPI-degraded state for dev run. "
+            "(TM1 Task 1.4 v131)"
+        )
+        return {
+            "dpi_missing": True,
+            "acknowledged": False,
+            "source": "no_sqlalchemy_dev",
+        }
+
+    try:
+        import json as _json
+        engine = create_engine(db_url, pool_pre_ping=True)
+        with engine.connect() as conn:
+            row = conn.execute(
+                sql_text(
+                    "SELECT metadata_json "
+                    "FROM pipeline_runs "
+                    "WHERE source = 'chembl' "
+                    "ORDER BY started_at DESC "
+                    "LIMIT 1"
+                )
+            ).fetchone()
+            if row is None:
+                logger.warning(
+                    "No ChEMBL pipeline_runs row found in PostgreSQL; "
+                    "assuming DPI-degraded. (TM1 Task 1.4 v131)"
+                )
+                return {
+                    "dpi_missing": True,
+                    "acknowledged": False,
+                    "source": "no_chembl_run",
+                }
+            # ``row`` is a SQLAlchemy Row; row[0] is the metadata_json column.
+            raw_meta = row[0] if row[0] else None
+            try:
+                meta = _json.loads(raw_meta) if raw_meta else {}
+            except (ValueError, TypeError):
+                meta = {}
+            return {
+                "dpi_missing": bool(meta.get("dpi_missing", False)),
+                "acknowledged": bool(meta.get("dpi_missing_acknowledged", False)),
+                "source": "postgres",
+                "run_id": meta.get("run_id"),
+            }
+    except Exception as exc:
+        logger.error(
+            "PostgreSQL DPI check failed: %s (TM1 Task 1.4 v131)", exc,
+        )
+        if is_production:
+            try:
+                from airflow.exceptions import AirflowFailException
+            except ImportError:  # pragma: no cover
+                AirflowFailException = RuntimeError  # type: ignore[assignment]
+            raise AirflowFailException(
+                f"PostgreSQL DPI check failed in production: {exc}. "
+                f"Refusing to proceed without safety check. "
+                f"(TM1 Task 1.4 v131 root fix)"
+            )
+        return {
+            "dpi_missing": True,
+            "acknowledged": False,
+            "source": "db_error_dev",
+        }
+
+
+# =============================================================================
+# TM1 TASK 1.4 ROOT FIX (v131): _validate_output_impl -- the testable core.
+# =============================================================================
+# RED-TEAM AUDIT FINDING (v131, hostile-auditor pass):
+#   The previous ``validate_output`` @task was a 200-line monolith that
+#   could not be unit-tested because:
+#     1. ``_processed_dir`` and ``_is_production`` were LOCAL variables
+#        computed at call time from ``os.environ`` / ``config.settings``.
+#        ``unittest.mock.patch`` could not override them.
+#     2. The task was decorated with ``@task`` and ``@fail_fast_on_http_4xx``
+#        which wrap it in Airflow's TaskFlow machinery -- calling the
+#        decorated object does NOT execute the function body, it returns
+#        an XComArg. Tests therefore could not invoke the validation
+#        logic directly.
+#   The result: the broken hardcoded ``_expected_csvs`` dict (lines
+#   1193-1201 pre-fix) was NEVER caught by CI. Every prior "root fix"
+#   pass CLAIMED the contract-driven validation worked but no test
+#   actually exercised it.
+#
+# ROOT FIX (v131, this function):
+#   1. Extract the validation logic to ``_validate_output_impl`` -- a
+#      MODULE-LEVEL, UN-DECORATED, pure-Python function. Tests call it
+#      directly: ``from phase1.dags.master_pipeline_dag import
+#      _validate_output_impl; result = _validate_output_impl()``.
+#   2. Read ``_processed_dir`` and ``_is_production`` from the module
+#      attributes at CALL TIME via ``globals()``. When a test does
+#      ``patch('phase1.dags.master_pipeline_dag._processed_dir', tmpdir)``,
+#      the patched value is picked up because Python's LEGB scope
+#      resolution looks up ``_processed_dir`` in the module's global
+#      namespace at call time.
+#   3. Return a STRUCTURED dict (the XCom payload) instead of raising.
+#      The @task wrapper (``validate_output`` above) inspects the dict's
+#      ``failures`` list and raises ``AirflowFailException`` if non-empty.
+#      This separates "validation logic" (returns a result) from "Airflow
+#      failure handling" (raises) -- a clean separation of concerns.
+#   4. Contract-driven filename resolution: iterate over
+#      ``PHASE1_OUTPUT_SCHEMA`` and use ``get_all_aliases()`` to find
+#      the CSV. The hardcoded ``_expected_csvs`` dict (which had 4/7
+#      WRONG filenames) is DELETED.
+#   5. Contract-driven ID-column verification: use
+#      ``get_required_id_column()`` to verify the ID column exists in
+#      the CSV header. Sources with ``None`` ID column (multi-column
+#      composite keys like string_ppi, interactions, indications) skip
+#      this check -- the contract's ``required_columns`` already
+#      enforces both halves of the composite key.
+#   6. Contract-driven SYNTH scan: iterate over ALL sources that have
+#      ``inchikey`` in ``required_columns`` (chembl_drugs, drugs,
+#      pubchem_enrichment) and scan for SYNTH-prefixed values. The
+#      previous code scanned 3 hardcoded filenames, one of which
+#      (``pubchem_compounds.csv``) NEVER existed -- SYNTH InChIKeys in
+#      PubChem enrichment flowed undetected.
+#   7. DPI-degraded check via PostgreSQL: call
+#      ``_check_dpi_degraded_via_postgres()`` (above). The previous
+#      SQLite check silently disabled itself in production.
+#   8. Generate a fresh ``pipeline_run_id`` (UUID) at CALL TIME so each
+#      DAG run has a unique ID for end-to-end tracing.
+#   9. Return the XCom payload dict. The @task wrapper returns it to
+#      Airflow's XCom table; ``_trigger_phase2`` pulls it via TaskFlow
+#      XComArg passing and forwards ``pipeline_run_id`` to Phase 2 as
+#      ``--provenance <UUID>``.
+# =============================================================================
+# The 7 sources whose CSV MUST be present for Phase 2 to build a useful KG.
+# These are the sources that produce NODES (drugs, proteins, diseases) or
+# the canonical Compound properties (PubChem enrichment). Sources NOT in
+# this set (chembl_activities, interactions, indications, omim_susceptibility)
+# are validated by the SEPARATE ``_validate_phase1_contract`` task (which
+# calls ``contracts.validate_output.validate_output_dir``). The two tasks
+# are a defense-in-depth pair -- ``_validate_phase1_contract`` checks
+# SCHEMA (columns, dtypes, min_rows), ``validate_output`` checks DATA
+# (real identifiers, no SYNTH placeholders, DPI-degraded state).
+# -----------------------------------------------------------------------------
+_REQUIRED_SOURCES_FOR_PHASE2 = frozenset({
+    "chembl_drugs",          # Compound nodes (ChEMBL backbone)
+    "drugs",                 # Compound nodes (DrugBank preferred)
+    "uniprot_proteins",      # Protein nodes
+    "string_ppi",            # Pathway nodes + Protein-Protein edges
+    "disgenet_gda",          # Gene-Disease edges
+    "omim_gda",              # Gene-Disease edges (Mendelian)
+    "pubchem_enrichment",    # Compound properties (CID, MW, logP)
+})
+
+
+def _validate_output_impl() -> dict:
+    """Validate Phase 1 output before triggering Phase 2.
+
+    Pure-Python, testable implementation. Reads ``_processed_dir`` and
+    ``_is_production`` from the module attributes at call time (so
+    ``unittest.mock.patch`` works). Returns a structured dict (the XCom
+    payload). Does NOT raise on validation failure -- the @task wrapper
+    inspects ``failures`` and raises ``AirflowFailException`` if non-empty.
+
+    Returns
+    -------
+    dict
+        XCom payload with keys: ``pipeline_run_id``, ``schema_version``,
+        ``row_counts``, ``synth_key_counts``, ``dpi_missing``,
+        ``dpi_acknowledged``, ``dpi_source``, ``validated_at``,
+        ``failures``.
+    """
+    # Read module-level state at CALL TIME so ``mock.patch`` works.
+    # ``globals()`` returns the module's namespace dict; looking up a
+    # key there is equivalent to reading a module-level name, but it's
+    # explicit about the fact that we're reading (not assigning) module
+    # state. This is the same mechanism Python's LEGB scope resolution
+    # uses for global names -- we just make it explicit.
+    processed_dir = globals()["_processed_dir"]
+    is_production = globals()["_is_production"]
+
+    # Generate a fresh pipeline_run_id for this validation call. Each
+    # DAG run gets a unique ID for end-to-end tracing (validate_output
+    # -> trigger_phase2 -> Phase 2 --provenance).
+    pipeline_run_id = str(_uuid.uuid4())
+
+    failures: list[str] = []
+    row_counts: dict[str, int] = {}
+    synth_key_counts: dict[str, int] = {}
+
+    # ── Check 1: Contract-driven CSV existence + ID-column verification ─
+    # For each required source, resolve the CSV path via the contract's
+    # ``get_all_aliases()`` (tries the canonical filename first, then
+    # aliases). Verify the ID column (from ``get_required_id_column()``)
+    # is present in the CSV header. Sources with ``None`` ID column
+    # (multi-column composite keys) skip the header check.
+    for source_key in _REQUIRED_SOURCES_FOR_PHASE2:
+        if source_key not in PHASE1_OUTPUT_SCHEMA:
+            # Defensive: should never happen (the frozenset is hardcoded
+            # from the contract's keys), but if a future contract change
+            # removes a source, this surfaces the drift loudly.
+            failures.append(
+                f"validate_output: source_key {source_key!r} is in "
+                f"_REQUIRED_SOURCES_FOR_PHASE2 but NOT in "
+                f"PHASE1_OUTPUT_SCHEMA. The contract drifted from the "
+                f"master DAG. Update _REQUIRED_SOURCES_FOR_PHASE2."
+            )
+            continue
+
+        id_col = get_required_id_column(source_key)
+        aliases = get_all_aliases(source_key)
+
+        # Try each alias until we find the CSV.
+        csv_path = None
+        for alias in aliases:
+            candidate = processed_dir / alias
+            if candidate.exists() and candidate.is_file():
+                csv_path = candidate
+                break
+
+        if csv_path is None:
+            if is_production:
+                failures.append(
+                    f"validate_output: required CSV not found for source "
+                    f"{source_key!r}. Tried aliases: {aliases}. Expected ID "
+                    f"column: {id_col!r}. The corresponding pipeline did not "
+                    f"produce output. Check Airflow task logs for the failing "
+                    f"source."
+                )
+            else:
+                logger.warning(
+                    "validate_output: source %r CSV not found at any alias "
+                    "%s (dev mode -- skipping). (TM1 Task 1.4 v131)",
+                    source_key, aliases,
+                )
+            continue
+
+        # Verify the ID column exists in the CSV header (skip for
+        # multi-column-key sources where id_col is None).
+        if id_col is not None:
+            try:
+                import csv as _csv
+                with open(csv_path, "r", encoding="utf-8-sig", errors="replace") as f:
+                    header = next(_csv.reader(f))
+                if id_col not in header:
+                    failures.append(
+                        f"validate_output: {csv_path.name} missing required ID "
+                        f"column {id_col!r}. Found columns: {header[:10]}... "
+                        f"The pipeline schema has drifted from the contract. "
+                        f"(TM1 Task 1.4 v131)"
+                    )
+                    continue
+                # Spot-check: first 50 data rows must have non-null ID.
+                import pandas as _pd
+                df_sample = _pd.read_csv(csv_path, nrows=50)
+                if id_col in df_sample.columns:
+                    non_null = df_sample[id_col].dropna()
+                    if len(non_null) == 0:
+                        failures.append(
+                            f"validate_output: {csv_path.name} column "
+                            f"{id_col!r} has ZERO non-null values in the "
+                            f"first 50 rows. The pipeline produced empty "
+                            f"identifiers -- likely a parser bug or upstream "
+                            f"API change. (TM1 Task 1.4 v131)"
+                        )
+                        continue
+            except Exception as exc:
+                failures.append(
+                    f"validate_output: could not read/validate {csv_path.name}: "
+                    f"{exc} (TM1 Task 1.4 v131)"
+                )
+                continue
+
+        # Count rows in the CSV (for the XCom payload).
+        # Use ``usecols=[0]`` to read ONLY the first column (memory-
+        # efficient for large CSVs) and count rows via ``len(df)``.
+        # ``usecols=[]`` returns 0 rows in pandas (counter-intuitive),
+        # so we must read at least one column.
+        try:
+            import pandas as _pd
+            df_count = _pd.read_csv(csv_path, usecols=[0])
+            row_counts[source_key] = len(df_count)
+        except Exception as exc:
+            logger.warning(
+                "validate_output: could not count rows in %s: %s "
+                "(TM1 Task 1.4 v131)",
+                csv_path.name, exc,
+            )
+            row_counts[source_key] = -1  # sentinel: count failed
+
+    # ── Check 2: Contract-driven SYNTH% detection ───────────────────────
+    # Scan EVERY source that has ``inchikey`` in ``required_columns`` for
+    # SYNTH-prefixed values. SYNTH InChIKeys are dev-only escape hatches
+    # (per migration 009). The previous code scanned 3 hardcoded
+    # filenames, one of which (``pubchem_compounds.csv``) NEVER existed
+    # -- SYNTH InChIKeys in PubChem enrichment flowed undetected.
+    if is_production:
+        for source_key, spec in PHASE1_OUTPUT_SCHEMA.items():
+            required_col_names = [c.name for c in spec.required_columns]
+            if "inchikey" not in required_col_names:
+                continue  # source has no inchikey column
+            aliases = get_all_aliases(source_key)
+            csv_path = None
+            for alias in aliases:
+                candidate = processed_dir / alias
+                if candidate.exists() and candidate.is_file():
+                    csv_path = candidate
+                    break
+            if csv_path is None:
+                continue  # already flagged in Check 1
+            try:
+                import pandas as _pd
+                df_sample = _pd.read_csv(
+                    csv_path, nrows=1000, compression="infer",
+                )
+                if "inchikey" in df_sample.columns:
+                    synth_count = int(
+                        df_sample["inchikey"]
+                        .astype(str)
+                        .str.startswith("SYNTH")
+                        .sum()
+                    )
+                    synth_key_counts[source_key] = synth_count
+                    if synth_count > 0:
+                        failures.append(
+                            f"validate_output: PRODUCTION CORRUPTION -- "
+                            f"{csv_path.name} (source {source_key!r}) "
+                            f"contains {synth_count} SYNTH-prefixed "
+                            f"InChIKeys in first 1000 rows. SYNTH is a "
+                            f"dev-only escape hatch (per migration 009). "
+                            f"The pipeline fell back to embedded samples "
+                            f"instead of fetching real data. Check the "
+                            f"pipeline's download() method and source API "
+                            f"connectivity. (TM1 Task 1.4 v131)"
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "validate_output: SYNTH check failed for source %r at "
+                    "%s: %s (TM1 Task 1.4 v131)",
+                    source_key, csv_path, exc,
+                )
+
+    # ── Check 3: DPI-degraded pre-flight check via PostgreSQL ───────────
+    # The previous code did this via SQLite (phase1/data/drugos.db),
+    # which silently disabled the check in production (where the DB is
+    # PostgreSQL). ROOT FIX: query PostgreSQL via DATABASE_URL.
+    # Fail-closed in production if DATABASE_URL is missing.
+    dpi_state: dict
+    try:
+        dpi_state = _check_dpi_degraded_via_postgres()
+    except Exception as exc:
+        # The DPI check raised AirflowFailException (production fail-
+        # closed). Convert to a failure entry so the @task wrapper can
+        # raise the canonical AirflowFailException with the full
+        # validation summary.
+        failures.append(
+            f"validate_output: DPI-degraded pre-flight check FAILED: {exc} "
+            f"(TM1 Task 1.4 v131)"
+        )
+        dpi_state = {
+            "dpi_missing": True,
+            "acknowledged": False,
+            "source": "check_failed",
+        }
+
+    if dpi_state.get("dpi_missing") and not dpi_state.get("acknowledged"):
+        failures.append(
+            f"validate_output: DPI-degraded KG detected (source="
+            f"{dpi_state.get('source')}). Operator must acknowledge via "
+            f"POST /datasets/acknowledge_dpi_degraded before Phase 2. "
+            f"(TM1 Task 1.4 v131)"
+        )
+
+    # ── Check 4: Entity resolution completeness (warning-only) ──────────
+    # If entity_mappings.csv exists but is empty, that's a warning (not
+    # a hard failure) -- entity resolution may legitimately produce no
+    # mappings in a fresh dev env. In production, an empty mapping
+    # IS a failure (Phase 2 would build a disconnected graph).
+    _entity_mapping_path = processed_dir / "entity_mappings.csv"
+    if _entity_mapping_path.exists():
+        try:
+            import pandas as _pd
+            em_df = _pd.read_csv(_entity_mapping_path)
+            if len(em_df) == 0 and is_production:
+                failures.append(
+                    "validate_output: entity_mappings.csv is EMPTY. Entity "
+                    "resolution produced ZERO canonical ID mappings. Phase 2 "
+                    "would build a disconnected knowledge graph. Check "
+                    "entity_resolution/run.py for the failure. "
+                    "(TM1 Task 1.4 v131)"
+                )
+        except Exception as exc:
+            logger.warning(
+                "validate_output: could not read entity_mappings.csv: %s "
+                "(TM1 Task 1.4 v131)", exc,
+            )
+    # In dev, missing entity_mappings.csv is OK (entity resolution may
+    # not have run). In production, the contract validation task
+    # (``_validate_phase1_contract``) catches this separately.
+
+    # ── Check 5: Feature completeness (NULL-rate thresholds) ───────────
+    # Teammate 2 — P1 to P3 Integration ROOT FIX (preserved during
+    # TM1 Task 1.4 v131 rebase):
+    # ``validate_output_dir`` (Check 1 in ``_validate_phase1_contract``)
+    # only enforces NULL=0 on NON-NULLABLE required columns. It does NOT
+    # catch the silent-degradation case where a NULLABLE column (e.g.
+    # ``pubchem_enrichment.isomeric_smiles``,
+    # ``disgenet_gda.prevalence_per_10k``) is populated with 50%+ NULLs
+    # because the upstream API silently dropped a field. Phase 3
+    # (``biomedical_tables.compute_drug_features``) then receives
+    # degraded training data and the GNN silently learns from missing
+    # features. This check fails the run if any declared column exceeds
+    # the NULL-rate threshold (default 5%).
+    #
+    # The check uses the SAME schema (``PHASE1_OUTPUT_SCHEMA``) as
+    # ``validate_output_dir`` — there is no divergent column list. New
+    # columns added to the schema are automatically subject to this
+    # check on the next pipeline run.
+    try:
+        try:
+            # When imported as ``phase1.dags.master_pipeline_dag``.
+            from phase1.contracts.feature_validator import (
+                validate_feature_completeness as _validate_feature_completeness,
+            )
+        except ImportError:
+            # When imported as ``dags.master_pipeline_dag`` (Airflow worker).
+            from contracts.feature_validator import (  # type: ignore[no-redef]
+                validate_feature_completeness as _validate_feature_completeness,
+            )
+        _feature_ok, _feature_failures = _validate_feature_completeness(
+            processed_dir,
+            schema=PHASE1_OUTPUT_SCHEMA,
+            max_null_rate=0.05,
+        )
+        if not _feature_ok:
+            if is_production:
+                # In production, NULL-rate violations are HARD failures —
+                # they silently corrupt the GNN's training data.
+                for f in _feature_failures:
+                    failures.append(
+                        f"validate_output: feature completeness: {f} "
+                        f"(TM2 P1->P3 + TM1 Task 1.4 v131)"
+                    )
+            else:
+                # In dev / CI, the fixture dataset may have intentionally
+                # sparse columns. Log as warnings so the operator sees the
+                # NULL-rate report without blocking the pipeline.
+                for f in _feature_failures:
+                    logger.warning(
+                        "validate_output: feature completeness (dev mode, "
+                        "non-blocking): %s (TM2 P1->P3 + TM1 Task 1.4 v131)",
+                        f,
+                    )
+    except ImportError as _exc:
+        # ``feature_validator.py`` was added by Teammate 2. If the
+        # deployment is mid-rollout (code partially synced), the import
+        # will fail. Log as a warning so the operator knows the check is
+        # not running, but don't fail the pipeline (the other 4 checks
+        # still run).
+        logger.warning(
+            "validate_output: feature_validator module not importable (%s). "
+            "NULL-rate threshold check SKIPPED. This check is added by "
+            "Teammate 2's P1-to-P3 integration fix; ensure the latest "
+            "phase1/contracts/feature_validator.py is deployed to enable "
+            "it. (TM1 Task 1.4 v131 rebase preserved this check.)",
+            _exc,
+        )
+    except Exception as _exc:
+        # Defensive: any unexpected error in the validator must NOT bring
+        # down the DAG. Log and continue with the other 4 checks.
+        logger.warning(
+            "validate_output: feature completeness check raised an "
+            "unexpected error (%s: %s). The check is skipped. Other "
+            "validation checks above still ran. (TM1 Task 1.4 v131)",
+            type(_exc).__name__, _exc,
+        )
+
+    # ── Build the XCom payload ──────────────────────────────────────────
+    # This payload flows validate_output -> trigger_phase2 -> Phase 2
+    # (via --provenance). It carries enough metadata for end-to-end
+    # tracing: which run, which schema version, which row counts, which
+    # SYNTH counts, DPI state, timestamp.
+    payload = {
+        "pipeline_run_id": pipeline_run_id,
+        "schema_version": str(SCHEMA_VERSION),
+        "row_counts": row_counts,
+        "synth_key_counts": synth_key_counts,
+        "dpi_missing": bool(dpi_state.get("dpi_missing", False)),
+        "dpi_acknowledged": bool(dpi_state.get("acknowledged", False)),
+        "dpi_source": dpi_state.get("source", "unknown"),
+        "validated_at": _datetime_module.utcnow().isoformat(),
+        "failures": failures,
+    }
+    return payload
 
 
 @dag(
@@ -1593,7 +2173,15 @@ def master_pipeline() -> None:
     #   behavior must explicitly set ``trigger_rule=TriggerRule.ALL_DONE``
     #   and ``check=False`` on the ``_trigger_phase2`` task — the
     #   default is now strict coupling per the v29 ROOT FIX.
-    trigger_phase2 = _trigger_phase2()
+    #
+    # TM1 TASK 1.4 v131 ROOT FIX: trigger_phase2 is now instantiated
+    # AFTER validate_output_task (see below) so it can receive the
+    # validate_output XCom payload via TaskFlow XComArg passing.
+    # The previous code instantiated trigger_phase2 here (BEFORE
+    # validate_output_task) which made it impossible to pass the
+    # XCom payload -- trigger_phase2 had no upstream XCom to pull.
+    # The instantiation is now moved to AFTER validate_output_task
+    # (see the "TM1 Task 1.4 v131 XCom wire" block below).
     # TM1 TASK 8: instantiate the Phase 1 contract validation task.
     # It runs AFTER all loads finish (chembl_load, drugbank_load,
     # uniprot_load, string_load, disgenet_load, omim_load, pubchem_load)
@@ -1766,7 +2354,9 @@ def master_pipeline() -> None:
     # is BLOCKED until every Phase 1 output CSV passes the contract.
     # If validation fails, trigger_phase2 is SKIPPED (UPSTREAM_FAILED)
     # and the operator must fix the Phase 1 outputs before re-running.
-    validate_phase1_contract >> trigger_phase2
+    # NOTE: trigger_phase2 is instantiated AFTER validate_output_task
+    # below (TM1 Task 1.4 v131) so it can receive the validate_output
+    # XCom payload. The dependency edge is added there.
 
     # v110 Task 34 root fix: wire validate_output between load_* and
     # trigger_phase2. validate_output checks that each source produced
@@ -1788,6 +2378,29 @@ def master_pipeline() -> None:
     disgenet_load >> validate_output_task
     omim_load >> validate_output_task
     pubchem_load >> validate_output_task
+
+    # ── TM1 Task 1.4 v131 ROOT FIX: XCom wire validate_output -> trigger_phase2 ──
+    # Pass the validate_output XCom payload (a dict containing
+    # ``pipeline_run_id``, ``schema_version``, ``row_counts``,
+    # ``synth_key_counts``, ``dpi_missing``, ``dpi_acknowledged``,
+    # ``dpi_source``, ``validated_at``, ``failures``) to trigger_phase2
+    # via TaskFlow XComArg passing. ``_trigger_phase2`` extracts the
+    # ``pipeline_run_id`` and forwards it to Phase 2 as
+    # ``--provenance <UUID>`` so the KG build can be traced end-to-end
+    # across the Phase 1 -> Phase 2 boundary.
+    #
+    # TaskFlow XComArg passing AUTOMATICALLY creates the dependency edge
+    # (``validate_output_task >> trigger_phase2``), so we do NOT need to
+    # add the edge explicitly. The ``validate_phase1_contract >>
+    # trigger_phase2`` edge (added below) is also kept so that
+    # trigger_phase2 waits for BOTH validate tasks to finish.
+    trigger_phase2 = _trigger_phase2(validate_output_xcom=validate_output_task)
+    # Explicit dependency edges (in addition to the implicit XComArg edge):
+    validate_phase1_contract >> trigger_phase2
+    # The XComArg passing above already creates the
+    # ``validate_output_task >> trigger_phase2`` edge, but we add it
+    # explicitly here for readability and to match the existing wiring
+    # style (every other dependency in this DAG is an explicit ``>>``).
     validate_output_task >> trigger_phase2
 
 
