@@ -480,18 +480,42 @@ def test_p3_014_attention_scale_documented():
 
 
 # ============================================================================
-# Schema-level test: 18 edge types (was 14)
+# Schema-level test: 19 edge types (9 forward + 9 reverse + 1 PPI, was 14)
 # ============================================================================
 
-def test_schema_has_18_edge_types():
-    """P3-001/P3-002 schema fix: EDGE_TYPES must have 18 entries
-    (9 forward + 9 reverse), including binds/modulates + reverses."""
-    from graph_transformer.data import EDGE_TYPES, self_check
-    assert len(EDGE_TYPES) == 18, f"Expected 18 edge types, got {len(EDGE_TYPES)}"
+def test_schema_has_19_edge_types():
+    """P3-001/P3-002/P3-003 schema fix: EDGE_TYPES must have 19 entries
+    (9 forward + 9 reverse + 1 PPI), including binds/modulates + reverses
+    and the symmetric PPI edge.
+
+    P3-003 ROOT FIX (Teammate 9): the previous test asserted 18, which
+    was WRONG — the actual list has 19 entries (the PPI edge
+    (\"protein\", \"interacts_with\", \"protein\") is a 19th entry that
+    is NEITHER a forward drug/protein/pathway/disease edge NOR its
+    reverse — PPI is symmetric and stands alone). The previous
+    self_check() asserted len(EDGE_TYPES) == 18 which was ALWAYS False,
+    silently masking every real schema regression. This test now
+    asserts the correct count (19) and verifies the FORWARD/REVERSE/PPI
+    slicing matches the corrected boundaries in __init__.py.
+    """
+    from graph_transformer.data import (
+        EDGE_TYPES,
+        FORWARD_EDGE_TYPES,
+        REVERSE_EDGE_TYPES,
+        PPI_EDGE_TYPES,
+        self_check,
+    )
+    assert len(EDGE_TYPES) == 19, f"Expected 19 edge types, got {len(EDGE_TYPES)}"
+    assert len(FORWARD_EDGE_TYPES) == 9, f"Expected 9 forward, got {len(FORWARD_EDGE_TYPES)}"
+    assert len(REVERSE_EDGE_TYPES) == 9, f"Expected 9 reverse, got {len(REVERSE_EDGE_TYPES)}"
+    assert len(PPI_EDGE_TYPES) == 1, f"Expected 1 PPI, got {len(PPI_EDGE_TYPES)}"
     assert ("drug", "binds", "protein") in EDGE_TYPES
     assert ("drug", "modulates", "protein") in EDGE_TYPES
     assert ("protein", "bound_by", "drug") in EDGE_TYPES
     assert ("protein", "modulated_by", "drug") in EDGE_TYPES
+    assert ("protein", "interacts_with", "protein") in PPI_EDGE_TYPES
+    # FORWARD and REVERSE must NOT overlap.
+    assert not (set(FORWARD_EDGE_TYPES) & set(REVERSE_EDGE_TYPES))
     checks = self_check()
     assert all(checks.values()), f"self_check failed: {checks}"
 

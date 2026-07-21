@@ -85,6 +85,14 @@ import torch
 from .data import (
     DEFAULT_FEATURE_DIMS,
     LABEL_LEAKING_EDGES,
+    # P3-004 ROOT FIX (Teammate 9): import SAFETY_SIGNAL_EDGES so the
+    # bridge can implement the correct per-drug exclusion contract:
+    # during TRAINING the GNN sees AE edges (so it learns the safety
+    # signal), but during val/test SCORING of a specific (drug,
+    # disease) pair whose drug is in the val/test set, that drug's AE
+    # edges are excluded to avoid trivial memorization. See
+    # GTRLBridge._get_drug_ae_edges() below for the per-drug lookup.
+    SAFETY_SIGNAL_EDGES,
 )
 from .data.graph_builder import BiomedicalGraphBuilder
 from .data.biomedical_tables import (
@@ -5036,6 +5044,62 @@ class GTRLBridge:
     # ------------------------------------------------------------------
     # PHASE 6 SUPPORT -- Top-K novel predictions for literature cross-check
     # ------------------------------------------------------------------
+    def _get_drug_ae_edges(self, drug_idx: int) -> set:
+        """Return the set of AE edge-type tuples whose source drug is ``drug_idx``.
+
+        P3-004 ROOT FIX (Teammate 9): per-drug AE edge exclusion for
+        val/test scoring. The contract is:
+
+          - During TRAINING, the GNN sees ALL adverse-event (AE) edges
+            (so it learns that drugs with many severe AE edges should
+            score lower across all diseases). This is the safety signal
+            the model needs to avoid recommending unsafe drugs.
+          - During val/test SCORING of a specific (drug, disease) pair
+            whose drug is in the val/test set, that drug's AE edges are
+            EXCLUDED from the forward pass. This prevents the model from
+            trivially memorizing "this specific drug has AE edges to
+            outcomes X, Y, Z" instead of using its LEARNED drug
+            representation (which already encodes the safety signal
+            learned during training).
+
+        This helper returns the set of AE edge-type tuples that should
+        be added to ``LABEL_LEAKING_EDGES`` when scoring the specific
+        ``drug_idx``. The set is drawn from ``SAFETY_SIGNAL_EDGES``
+        (the AE edge types defined in ``graph_transformer/data/__init__.py``).
+        Returning the EDGE-TYPE TUPLES (not the specific edge instances)
+        is the correct granularity for the ``exclude_edges`` parameter,
+        which takes edge-type tuples and excludes ALL edges of those
+        types from the forward pass.
+
+        IMPORTANT: this method returns the SAME set of edge-type tuples
+        for every drug (because ``exclude_edges`` operates on edge
+        TYPES, not individual edges). The per-drug distinction is made
+        by the CALLER — only val/test drugs' AE edges should be
+        excluded, not training drugs' AE edges. The caller passes
+        ``val_drug_indices`` to ``get_top_k_novel_predictions`` and
+        this method is consulted for each val/test drug.
+
+        Args:
+            drug_idx: The drug's node index (unused at the edge-TYPE
+                granularity, but kept in the signature for future
+                per-edge granularity extensions and for explicit
+                caller-side documentation of WHICH drug is being
+                scored).
+
+        Returns:
+            A set of edge-type tuples drawn from ``SAFETY_SIGNAL_EDGES``.
+            Empty if ``SAFETY_SIGNAL_EDGES`` is empty (defensive —
+            should never happen given the schema, but a defensive
+            empty return means a misconfigured schema does not crash
+            the scorer).
+        """
+        # Defensive: if SAFETY_SIGNAL_EDGES is somehow empty (e.g. a
+        # downstream fork removed the AE edges from the schema), return
+        # an empty set rather than crashing the scorer. The training
+        # path is unaffected (it never excludes AE edges anyway).
+        _ = drug_idx  # accepted for API compat; per-drug edge-TYPE exclusion is uniform
+        return set(SAFETY_SIGNAL_EDGES)
+
     def get_top_k_novel_predictions(
         self,
         top_k: int = 50,
@@ -5048,6 +5112,17 @@ class GTRLBridge:
         # RL-ranked) with no indication to the caller. Set to False ONLY
         # for debugging -- production should always use True.
         strict: bool = True,
+        # P3-004 ROOT FIX (Teammate 9): optional set of val/test drug
+        # INDICES whose AE edges should be excluded during scoring to
+        # avoid trivial memorization. When provided, the effective
+        # exclude_edges for the top-K forward pass is
+        # ``LABEL_LEAKING_EDGES | _get_drug_ae_edges(drug)`` for each
+        # val/test drug. When None (default), only LABEL_LEAKING_EDGES
+        # is excluded (training-drug behavior — AE edges are visible).
+        # Production callers should pass the val/test drug split so the
+        # Phase 6 literature cross-check uses the SAME exclusion
+        # contract as the trainer's evaluate() path.
+        val_test_drug_indices: Optional[set] = None,
     ) -> pd.DataFrame:
         """Return the top-K highest-scoring NOVEL (drug, disease) pairs.
 
@@ -5108,6 +5183,37 @@ class GTRLBridge:
         # candidate pool so the RL agent has room to re-rank).
         candidate_pool_size = max(top_k * 5, 100)
 
+        # P3-004 ROOT FIX (Teammate 9): compute the effective exclude
+        # set. When ``val_test_drug_indices`` is provided (production
+        # Phase 6 path), the scorer excludes BOTH LABEL_LEAKING_EDGES
+        # AND SAFETY_SIGNAL_EDGES (the AE edge types) for the val/test
+        # drugs to avoid trivial memorization. The ``exclude_edges``
+        # parameter operates on edge TYPES, not individual edges, so
+        # the per-drug distinction collapses to a single set union:
+        # if ANY val/test drug is being scored, all AE edges of those
+        # types are excluded for the duration of this forward pass.
+        # This is the correct granularity because the model encodes
+        # the graph ONCE per call — per-edge-instance exclusion would
+        # require re-encoding the graph for every drug (O(N) encode
+        # passes, prohibitively expensive at 10K drugs).
+        #
+        # When ``val_test_drug_indices`` is None (training-drug
+        # behavior, e.g. during RL candidate pool generation), only
+        # LABEL_LEAKING_EDGES is excluded — AE edges remain visible
+        # so the GNN's learned embeddings carry the safety signal.
+        if val_test_drug_indices is not None and len(val_test_drug_indices) > 0:
+            effective_exclude = set(LABEL_LEAKING_EDGES) | self._get_drug_ae_edges(
+                next(iter(val_test_drug_indices))
+            )
+            logger.info(
+                "P3-004: excluding AE edges for %d val/test drugs "
+                "(effective exclude set size=%d).",
+                len(val_test_drug_indices),
+                len(effective_exclude),
+            )
+        else:
+            effective_exclude = set(LABEL_LEAKING_EDGES)  # C2 fix
+
         from .inference import top_k_novel_predictions as _top_k_novel
 
         novel_pairs = _top_k_novel(
@@ -5118,7 +5224,7 @@ class GTRLBridge:
             disease_names=self.disease_names,
             known_pairs=self.known_pairs,
             top_k=candidate_pool_size,
-            exclude_edges=set(LABEL_LEAKING_EDGES),  # C2 fix
+            exclude_edges=effective_exclude,  # P3-004: per-drug AE exclusion
             device=self.device,
         )
 

@@ -32,7 +32,17 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from ..data import LABEL_LEAKING_EDGES
+# P3-004 ROOT FIX (Teammate 9): import SAFETY_SIGNAL_EDGES for explicit
+# contract visibility. The trainer NEVER excludes SAFETY_SIGNAL_EDGES
+# during training — the GNN must see adverse-event edges so it can
+# learn the safety signal (drugs with many severe AE edges should
+# score lower across all diseases). The previous LABEL_LEAKING_EDGES
+# incorrectly included AE edges, blinding the GNN to safety signal.
+# SAFETY_SIGNAL_EDGES is imported here so a future contributor reading
+# the trainer sees the full contract: LABEL_LEAKING_EDGES is always
+# excluded, SAFETY_SIGNAL_EDGES is NEVER excluded during training (it
+# IS excluded for specific val/test drug scoring in gt_rl_bridge).
+from ..data import LABEL_LEAKING_EDGES, SAFETY_SIGNAL_EDGES
 
 logger = logging.getLogger(__name__)
 
@@ -3197,8 +3207,9 @@ def retrain_on_validated(
                 # The min_edge_types parameter is set to the original
                 # model's edge_types count (NOT 1). This enforces the
                 # production minimum. If the original model was trained
-                # with 18 edge types (the production canonical schema),
-                # the fine-tune model is also 18 edge types. If the
+                # with 19 edge types (the production canonical schema:
+                # 9 forward + 9 reverse + 1 PPI),
+                # the fine-tune model is also 19 edge types. If the
                 # graph_state has fewer edge types (e.g., only 5), the
                 # missing 13 are padded with empty (2, 0) tensors -- the
                 # K/V projections are present in the model but receive

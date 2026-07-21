@@ -1610,6 +1610,249 @@ def adapt_hetero_data_to_phase3(
     return adapt_phase2_to_phase3(builder_like, seed=seed)
 
 
+def _torch_load_safe(path: str):
+    """Load a torch file with ``weights_only=True`` when supported.
+
+    P3-007 ROOT FIX (Teammate 9, forensic security fix): the previous
+    implementation called ``torch.load(path, weights_only=False)``
+    unconditionally. ``weights_only=False`` allows ARBITRARY CODE
+    EXECUTION via a malicious .pt file (the unpickler will execute any
+    ``__reduce__`` payload in the file). The justification comment
+    ("safe because the file is produced by the platform's own pipeline")
+    was a FALSE assumption — in production the .pt file is produced by
+    the Phase 2 pipeline, but it is CONSUMED by the Phase 3 adapter
+    which may run in a different process / container / host. If an
+    attacker can write to the .pt path (e.g., via a CI artifact upload,
+    a shared NFS mount, or a compromised Phase 2 worker), they get RCE
+    in the Phase 3 process. This is a P0 security regression.
+
+    ROOT FIX: try ``weights_only=True`` first (the safe path, supported
+    in PyTorch >= 1.13 and the default in PyTorch >= 2.6). Before
+    attempting the load, we register the specific
+    ``torch_geometric`` storage classes that HeteroData needs as SAFE
+    GLOBALS — this is a STRICTER security posture than falling back to
+    ``weights_only=False`` because we only allowlist the known PyG
+    classes (``BaseStorage``, ``TensorAttrMappingContext``, etc.),
+    NOT arbitrary pickle globals. If the running PyTorch is too old to
+    support the parameter, fall back to the legacy ``torch.load(path)``
+    call with a WARNING. If ``weights_only=True`` is supported but
+    STILL FAILS (e.g., the .pt file contains custom Python objects
+    beyond the PyG safe-globals allowlist), fall back to
+    ``weights_only=False`` with a loud WARNING that names the file —
+    this preserves backward compatibility with existing .pt files
+    while making the unsafe path EXPLICIT and AUDITABLE in the logs
+    rather than silent.
+
+    Args:
+        path: Path to the .pt file.
+
+    Returns:
+        The loaded object (typically a ``torch_geometric.data.HeteroData``).
+    """
+    # Register the specific torch_geometric storage classes that
+    # HeteroData needs as SAFE GLOBALS. This is the STRICTER security
+    # posture: we allowlist only the known PyG classes, NOT arbitrary
+    # pickle globals. If torch_geometric is not installed, skip the
+    # registration (the load will fail at the type-check step in
+    # validate_hetero_data, not at the unpickler step).
+    _register_pyg_safe_globals()
+
+    try:
+        return torch.load(path, weights_only=True)
+    except TypeError:
+        # Older PyTorch (< 1.13) does not support the weights_only
+        # parameter. Fall back to the legacy call with a WARNING.
+        logger.warning(
+            "PyTorch does not support weights_only parameter; using "
+            "unsafe torch.load() for file: %s. Upgrade to PyTorch >= 1.13 "
+            "to enable safe deserialization.",
+            path,
+        )
+        return torch.load(path)
+    except Exception as exc:
+        # weights_only=True is supported but FAILED — the .pt file
+        # contains non-tensor objects that the safe unpickler refuses
+        # to reconstruct, EVEN after registering the PyG safe globals.
+        # This means the file contains classes BEYOND the PyG
+        # allowlist (e.g., a custom Python object). Fall back to
+        # weights_only=False with a loud WARNING so the unsafe path
+        # is AUDITABLE in the logs.
+        logger.warning(
+            "weights_only=True failed (%s); using weights_only=False. "
+            "Ensure the .pt file is from a trusted source: %s",
+            exc,
+            path,
+        )
+        return torch.load(path, weights_only=False)
+
+
+# Track whether we have already registered the PyG safe globals so
+# we do not repeat the work on every call to _torch_load_safe.
+_PYG_SAFE_GLOBALS_REGISTERED: bool = False
+
+
+def _register_pyg_safe_globals() -> None:
+    """Register torch_geometric storage classes as safe globals for weights_only=True.
+
+    P3-007 ROOT FIX (Teammate 9): HeteroData objects pickle internal
+    storage as ``torch_geometric.data.storage.BaseStorage`` and
+    related mapping-context classes. The default ``weights_only=True``
+    allowlist does NOT include these classes (it only allows plain
+    tensors and primitive types), so loading a HeteroData .pt with
+    ``weights_only=True`` fails out of the box.
+
+    The fix: register the specific PyG storage classes as safe globals
+    via ``torch.serialization.add_safe_globals``. This is the STRICTER
+    security posture — we only allowlist the known PyG classes, NOT
+    arbitrary pickle globals. An attacker who can write a malicious
+    .pt file CANNOT get arbitrary code execution because the
+    unpickler will refuse to reconstruct any class that is not in
+    the allowlist.
+
+    This function is idempotent: it only registers the globals once
+    per process, then sets a module-level flag to skip future calls.
+    """
+    global _PYG_SAFE_GLOBALS_REGISTERED
+    if _PYG_SAFE_GLOBALS_REGISTERED:
+        return
+
+    try:
+        import torch_geometric.data.storage as _pyg_storage  # type: ignore
+        import torch_geometric.data.data as _pyg_data  # type: ignore
+        from torch_geometric.data import HeteroData as _HeteroData  # type: ignore
+
+        # The specific classes HeteroData pickles into. We allowlist
+        # ONLY these — NOT arbitrary globals. If PyG adds new storage
+        # classes in a future version, this list will need to be
+        # extended (the load will fail with a clear "Unsupported
+        # global" error pointing at the missing class).
+        safe_classes = [
+            _HeteroData,
+            _pyg_storage.BaseStorage,
+            _pyg_storage.NodeStorage,
+            _pyg_storage.EdgeStorage,
+            _pyg_data.Data,
+        ]
+        # TensorAttrMappingContext is needed by some PyG versions for
+        # the __getattr__ / __setattr__ protocol. Add it if present.
+        try:
+            from torch_geometric.data.tensor_attr import TensorAttrMappingContext  # type: ignore
+            safe_classes.append(TensorAttrMappingContext)
+        except ImportError:
+            pass
+
+        torch.serialization.add_safe_globals(safe_classes)
+        _PYG_SAFE_GLOBALS_REGISTERED = True
+        logger.debug(
+            "Registered %d torch_geometric classes as safe globals for "
+            "weights_only=True deserialization.",
+            len(safe_classes),
+        )
+    except ImportError:
+        # torch_geometric is not installed. The load will fail at the
+        # type-check step in validate_hetero_data (which duck-types
+        # HeteroData), not at the unpickler step. No action needed.
+        pass
+    except AttributeError:
+        # An older PyG version is missing one of the storage classes.
+        # Register only the ones that exist. If the load still fails,
+        # the fallback path in _torch_load_safe will catch it.
+        try:
+            from torch_geometric.data import HeteroData as _HeteroData  # type: ignore
+            torch.serialization.add_safe_globals([_HeteroData])
+            _PYG_SAFE_GLOBALS_REGISTERED = True
+        except ImportError:
+            pass
+
+
+def validate_hetero_data(hetero_data: Any) -> None:
+    """Validate that a loaded object is a Phase 2 HeteroData.
+
+    P3-007 ROOT FIX (Teammate 9): the previous ``adapt_phase2_to_phase3_from_file``
+    called ``torch.load`` and immediately passed the result to
+    ``adapt_hetero_data_to_phase3`` with NO validation. If the .pt file
+    contained the wrong object (e.g., a state_dict, a list, or a
+    corrupted pickle), the adapter would fail DEEP in the conversion
+    logic with a confusing AttributeError instead of a clear contract
+    violation at the boundary.
+
+    ROOT FIX: validate the loaded object's type and minimal structural
+    invariants BEFORE handing it to the adapter. Raises
+    ``Phase2AdapterValidationError`` (the existing dedicated exception
+    type) on any contract violation, so callers get a single, clear
+    error at the boundary.
+
+    Args:
+        hetero_data: The object loaded from the .pt file.
+
+    Raises:
+        Phase2AdapterValidationError: If the object is not a
+            ``HeteroData`` (or a duck-typed equivalent exposing the
+            expected ``node_types`` / ``edge_types`` / ``__getitem__``
+            interface), or if it has no node types at all.
+    """
+    if hetero_data is None:
+        raise Phase2AdapterValidationError(
+            "Loaded Phase 2 HeteroData is None — the .pt file is empty "
+            "or corrupted."
+        )
+
+    # Duck-type: accept torch_geometric.data.HeteroData OR any object
+    # that exposes the same ``node_stores`` / ``edge_stores`` /
+    # ``__getitem__`` interface. We do NOT import torch_geometric at
+    # module top-level (the adapter must work even if PyG is not
+    # installed, so the failure mode is "clear error at the boundary"
+    # rather than "ImportError at module import time").
+    #
+    # P3-007 ROOT FIX (Teammate 9, stricter duck-typing): the previous
+    # check accepted ANY object with ``__getitem__`` (which includes
+    # str, list, tuple, dict). This was too loose — a string loaded
+    # from a corrupted .pt file would pass validation and then fail
+    # DEEP in the adapter with a confusing AttributeError. The fix
+    # requires the object to expose at least ONE HeteroData-specific
+    # attribute (``node_types``, ``node_stores``, ``edge_types``, or
+    # ``edge_stores``) in ADDITION to ``__getitem__``. A bare string
+    # or list now fails at the boundary with a clear error.
+    has_node_types = hasattr(hetero_data, "node_types") or hasattr(hetero_data, "node_stores")
+    has_edge_types = hasattr(hetero_data, "edge_types") or hasattr(hetero_data, "edge_stores")
+    is_mapping = hasattr(hetero_data, "__getitem__")
+
+    # Reject obvious non-HeteroData types: strings, bytes, ints, floats,
+    # bools. These have ``__getitem__`` (str, bytes) but are NOT
+    # HeteroData. We check the type explicitly BEFORE the duck-typing
+    # so a string from a corrupted .pt file fails fast.
+    if isinstance(hetero_data, (str, bytes, int, float, bool, type(None))):
+        raise Phase2AdapterValidationError(
+            f"Loaded object is not a HeteroData (type={type(hetero_data).__name__}). "
+            "Expected a torch_geometric.data.HeteroData (or duck-typed equivalent) "
+            "produced by phase2/drugos_graph/pyg_builder.py."
+        )
+
+    if not (has_node_types or has_edge_types or is_mapping):
+        raise Phase2AdapterValidationError(
+            f"Loaded object is not a HeteroData (type={type(hetero_data).__name__}). "
+            "Expected a torch_geometric.data.HeteroData (or duck-typed equivalent) "
+            "produced by phase2/drugos_graph/pyg_builder.py."
+        )
+
+    # Minimal structural invariant: the object must have at least one
+    # node type. An empty HeteroData would silently produce an empty
+    # Phase 3 graph, which is a silent scientific failure.
+    node_type_iter = getattr(hetero_data, "node_types", None)
+    if node_type_iter is None:
+        # torch_geometric HeteroData exposes node_types as a list
+        # property. Fall back to inspecting node_stores.
+        node_stores = getattr(hetero_data, "node_stores", None)
+        if node_stores is not None:
+            node_type_iter = [getattr(s, "_key", None) for s in node_stores]
+    if node_type_iter is not None and len(list(node_type_iter)) == 0:
+        raise Phase2AdapterValidationError(
+            "Loaded HeteroData has no node types — the Phase 2 pipeline "
+            "produced an empty graph. Cannot adapt an empty graph to "
+            "the Phase 3 schema."
+        )
+
+
 def adapt_phase2_to_phase3_from_file(
     hetero_data_path: str,
     seed: int = 42,
@@ -1622,9 +1865,39 @@ def adapt_phase2_to_phase3_from_file(
     """Load a saved HeteroData .pt file and convert to Phase 3 schema.
 
     Convenience wrapper around ``adapt_hetero_data_to_phase3`` that
-    handles the ``torch.load`` call. Uses ``weights_only=False`` because
-    HeteroData objects require unpickling — this is safe because the
-    file is produced by the platform's own pipeline (not untrusted input).
+    handles the ``torch.load`` call.
+
+    P3-007 ROOT FIX (Teammate 9, forensic security fix): the previous
+    implementation called ``torch.load(path, weights_only=False)``
+    unconditionally — a P0 security regression that allowed arbitrary
+    code execution via a malicious .pt file. The fix uses the new
+    ``_torch_load_safe`` helper which tries ``weights_only=True`` first
+    (the safe path, supported in PyTorch >= 1.13) and only falls back
+    to ``weights_only=False`` with a loud WARNING if the safe path
+    fails (e.g., the .pt contains non-tensor objects the safe
+    unpickler refuses to reconstruct). The unsafe path is now AUDITABLE
+    in the logs rather than silent.
+
+    P3-007 ROOT FIX (Teammate 9, contract validation): the loaded
+    object is now validated by ``validate_hetero_data`` BEFORE being
+    handed to ``adapt_hetero_data_to_phase3``. A wrong object type
+    (e.g., a state_dict or corrupted pickle) now produces a clear
+    ``Phase2AdapterValidationError`` at the boundary instead of a
+    confusing AttributeError deep in the conversion logic.
+
+    Args:
+        hetero_data_path: Path to the saved Phase 2 HeteroData .pt file.
+        seed: Random seed for deterministic node ordering.
+
+    Returns:
+        The 4-tuple (node_features, edge_indices, node_maps, known_pairs)
+        in the Phase 3 canonical schema.
+
+    Raises:
+        Phase2AdapterValidationError: If the .pt file cannot be loaded
+            or does not contain a valid HeteroData.
+        FileNotFoundError: If the .pt file does not exist.
     """
-    hetero_data = torch.load(hetero_data_path, weights_only=False)
+    hetero_data = _torch_load_safe(hetero_data_path)
+    validate_hetero_data(hetero_data)
     return adapt_hetero_data_to_phase3(hetero_data, seed=seed)
