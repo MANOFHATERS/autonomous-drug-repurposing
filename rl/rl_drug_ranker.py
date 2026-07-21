@@ -3400,15 +3400,57 @@ class RewardFunction:
         return dict(self._effective_reward_weights)
 
     def _compute_effective_weights(self) -> Dict[str, float]:
-        """Compute effective reward weights after gnn_score cap."""
+        """Compute effective reward weights after gnn_score cap.
+
+        P4-009 ROOT FIX (Teammate 10 — hostile-auditor, RED TEAM):
+        The previous code capped ONLY ``gnn_score`` weight at 0.04 (the
+        v89 P0 fix to prevent the RL agent from becoming a circular
+        distillation of the GT model). But ``gnn_score_calibrated`` —
+        which is the TEMPERATURE-CALIBRATED version of gnn_score (Guo
+        et al. 2017), and is ALSO in the RL observation space via
+        ``_bridge_feature_cols`` (see line ~5556) — had NO similar cap.
+        This undermined the v89 P0 cap: the RL agent could give
+        disproportionate weight to ``gnn_score_calibrated`` (which is
+        essentially the same signal as ``gnn_score``, just
+        monotonic-transformed), achieving the EXACT circular
+        distillation the v89 P0 cap was designed to prevent. The audit
+        called this a "circular distillation risk".
+
+        ROOT FIX: cap ``gnn_score_calibrated`` weight at the SAME 0.04
+        threshold as ``gnn_score``. Both are GT-model-derived signals;
+        both must be capped to keep the RL agent an INDEPENDENT ranker
+        (per the v89 P0 rationale). The excess weight is redistributed
+        proportionally to the OTHER features (safety, market, pathway,
+        etc.) — same redistribution logic as the gnn_score cap.
+
+        If a future consumer wants to remove ``gnn_score_calibrated``
+        from the obs space entirely (it's redundant with ``gnn_score``
+        post-P3-004, which made ``gnn_score`` IS the calibrated value),
+        they can set its weight to 0.0 in the config. This fix keeps
+        the column in the obs space (for backward compatibility with
+        existing trained checkpoints) but caps its INFLUENCE on the
+        reward.
+        """
         effective_weights = dict(self.config.reward_weights)
+        # v89 P0 cap on gnn_score (unchanged).
         GNN_SCORE_MAX_WEIGHT = 0.04
+        # P4-009: same cap on gnn_score_calibrated (NEW).
+        GNN_SCORE_CALIBRATED_MAX_WEIGHT = 0.04
+
+        # --- gnn_score cap (v89 P0, unchanged) ---
+        # P4-009: exclude BOTH gnn_score AND gnn_score_calibrated from
+        # the redistribution pool. Both are GT-derived signals; adding
+        # gnn_score_calibrated's excess to gnn_score (or vice versa)
+        # would push the other above the 0.04 cap, defeating the
+        # circular-distillation prevention. The excess is distributed
+        # ONLY to the non-GT features (safety, market, pathway, etc.).
+        _GT_DERIVED_COLS = {GNN_SCORE_COL, GNN_SCORE_CALIBRATED_COL}
         if effective_weights.get(GNN_SCORE_COL, 0) > GNN_SCORE_MAX_WEIGHT:
             old_weight = effective_weights[GNN_SCORE_COL]
             effective_weights[GNN_SCORE_COL] = GNN_SCORE_MAX_WEIGHT
             other_sum = sum(
                 w for c, w in effective_weights.items()
-                if c != GNN_SCORE_COL
+                if c not in _GT_DERIVED_COLS
             )
             # P4-020 ROOT FIX (LOW — Team Cosmic / Phase 4): log a WARNING
             # when the cap fires so the user knows their YAML config was
@@ -3423,15 +3465,47 @@ class RewardFunction:
                 f"the 0.04 cap (set to prevent the RL agent from becoming a "
                 f"circular distillation of the GT model). Capped to 0.04; "
                 f"the excess {old_weight - 0.04:.4f} was redistributed "
-                f"proportionally to the other features. Update your YAML "
-                f"config to use gnn_score <= 0.04 to avoid this override."
+                f"proportionally to the NON-GT features (safety, market, "
+                f"pathway, etc.). Update your YAML config to use "
+                f"gnn_score <= 0.04 to avoid this override."
             )
             if other_sum > 0:
                 excess = old_weight - GNN_SCORE_MAX_WEIGHT
                 for c in effective_weights:
-                    if c != GNN_SCORE_COL:
+                    if c not in _GT_DERIVED_COLS:
                         effective_weights[c] += excess * (
                             effective_weights[c] / other_sum
+                        )
+
+        # --- gnn_score_calibrated cap (P4-009, NEW) ---
+        # Same logic as the gnn_score cap above. Both are GT-derived
+        # signals; both must be capped to prevent circular distillation.
+        # The excess is distributed ONLY to non-GT features (see above).
+        if effective_weights.get(GNN_SCORE_CALIBRATED_COL, 0) > GNN_SCORE_CALIBRATED_MAX_WEIGHT:
+            old_weight_cal = effective_weights[GNN_SCORE_CALIBRATED_COL]
+            effective_weights[GNN_SCORE_CALIBRATED_COL] = GNN_SCORE_CALIBRATED_MAX_WEIGHT
+            other_sum_cal = sum(
+                w for c, w in effective_weights.items()
+                if c not in _GT_DERIVED_COLS
+            )
+            logger.warning(
+                f"P4-009 ROOT FIX: gnn_score_calibrated weight "
+                f"{old_weight_cal:.4f} exceeded the 0.04 cap (same cap "
+                f"as gnn_score — both are GT-model-derived signals that "
+                f"must be capped to prevent the RL agent from becoming "
+                f"a circular distillation of the GT model, per the v89 "
+                f"P0 rationale). Capped to 0.04; the excess "
+                f"{old_weight_cal - 0.04:.4f} was redistributed "
+                f"proportionally to the NON-GT features (safety, market, "
+                f"pathway, etc.). Update your YAML config to use "
+                f"gnn_score_calibrated <= 0.04 to avoid this override."
+            )
+            if other_sum_cal > 0:
+                excess_cal = old_weight_cal - GNN_SCORE_CALIBRATED_MAX_WEIGHT
+                for c in effective_weights:
+                    if c not in _GT_DERIVED_COLS:
+                        effective_weights[c] += excess_cal * (
+                            effective_weights[c] / other_sum_cal
                         )
         return effective_weights
 
