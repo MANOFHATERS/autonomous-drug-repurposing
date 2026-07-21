@@ -73,6 +73,7 @@ FIX vs original codebase:
 from __future__ import annotations
 
 import hashlib
+import json  # P3-005: for pathways column JSON serialization
 import logging
 import os
 import time  # P4-017: used for checkpoint freshness comparison and log formatting
@@ -1561,21 +1562,107 @@ class GTRLBridge:
                 "checkpoint_path": checkpoint_path,
             }
         else:
-            results = trainer.fit(
-                train_d, train_ds, train_l,
-                val_d, val_ds, val_l,
-                epochs=epochs,
-                batch_size=batch_size,
-                patience=patience,
-                # exclude_edges defaults to LABEL_LEAKING_EDGES inside trainer
-            )
+            # P3-011 ROOT FIX (Teammate 10 — hostile-auditor, RED TEAM):
+            # Split the test set 50/50 into cal + test halves BEFORE
+            # calling trainer.fit(). Pass the cal half as the EXPLICIT
+            # cal set (the production path per Guo et al. 2017). The
+            # test half is used for the final AUC evaluation (below).
+            # The previous code passed NO cal set, so trainer.fit()
+            # fell back to splitting the VAL set 50/50 — scientifically
+            # invalid (val is used for early stopping → temperature
+            # overfits to val data).
+            #
+            # We use a deterministic, seeded split (NOT sklearn's
+            # train_test_split with stratify — stratification fails on
+            # tiny test sets with 1-2 positives, which is common on the
+            # demo graph). A seeded randperm is robust to all class
+            # distributions.
+            _cal_split_gen = torch.Generator()
+            _cal_split_gen.manual_seed(int(self.seed) + 11)
+            _n_test = len(test_l)
+            _cal_perm = torch.randperm(_n_test, generator=_cal_split_gen)
+            _n_cal = _n_test // 2
+            _cal_idx = _cal_perm[:_n_cal]
+            _test_idx = _cal_perm[_n_cal:]
+            _cal_d = test_d[_cal_idx]
+            _cal_ds = test_ds[_cal_idx]
+            _cal_l = test_l[_cal_idx]
+            _final_test_d = test_d[_test_idx]
+            _final_test_ds = test_ds[_test_idx]
+            _final_test_l = test_l[_test_idx]
+            if _n_cal >= 2 and len(torch.unique(_cal_l)) >= 2:
+                logger.info(
+                    f"P3-011 ROOT FIX: split test set 50/50 into "
+                    f"cal (n={_n_cal}) + final-test (n={len(_final_test_l)}) "
+                    f"halves. Passing cal half as EXPLICIT cal set to "
+                    f"trainer.fit() (production path per Guo et al. 2017). "
+                    f"Final AUC will be evaluated on the test half "
+                    f"(n={len(_final_test_l)}). The previous code passed "
+                    f"NO cal set, so trainer.fit() fell back to splitting "
+                    f"the VAL set 50/50 — scientifically invalid."
+                )
+                results = trainer.fit(
+                    train_d, train_ds, train_l,
+                    val_d, val_ds, val_l,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    patience=patience,
+                    # exclude_edges defaults to LABEL_LEAKING_EDGES inside trainer
+                    cal_drug_idx=_cal_d,
+                    cal_disease_idx=_cal_ds,
+                    cal_labels=_cal_l,
+                )
+            else:
+                # Degenerate case: test set too small or single-class
+                # to split. Fall back to passing the test set via the
+                # test_* params so trainer.fit() can handle it (it will
+                # raise TemperatureCalibrationError if neither cal nor
+                # test can be used, which is the scientifically honest
+                # behavior).
+                logger.warning(
+                    f"P3-011 ROOT FIX: test set too small or single-class "
+                    f"to split 50/50 (n_test={_n_test}, n_cal={_n_cal}, "
+                    f"unique_cal_labels={torch.unique(_cal_l).tolist() if _n_cal > 0 else []}). "
+                    f"Passing the full test set to trainer.fit() via the "
+                    f"test_* params; trainer.fit() will split it 50/50 "
+                    f"internally or raise TemperatureCalibrationError if "
+                    f"it cannot. Increase the test set size for a proper "
+                    f"cal/test split."
+                )
+                results = trainer.fit(
+                    train_d, train_ds, train_l,
+                    val_d, val_ds, val_l,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    patience=patience,
+                    # No explicit cal set — trainer.fit() will split
+                    # the test set 50/50 (P3-011 fallback path).
+                    test_drug_idx=test_d,
+                    test_disease_idx=test_ds,
+                    test_labels=test_l,
+                )
 
         # C5 fix: evaluate on held-out TEST set
         # V90 COMPOUND #3: this runs for BOTH fresh training AND resume.
         # On resume, this is the critical fix -- without it, the results
         # dict lacks test_auc, and the scientific_validation gate fails.
+        # P3-011: when we split the test set 50/50 above (fresh training
+        # path), evaluate on the FINAL-TEST half (the half NOT used for
+        # calibration). This avoids the temperature-calibration leakage
+        # (evaluating on the same data used to fit the temperature would
+        # produce an optimistic AUC). On resume, _final_test_l is not
+        # defined — use the full test set (resume doesn't re-fit the
+        # temperature, so leakage is not a concern).
+        if not resumed_from_checkpoint and _n_cal >= 2 and len(torch.unique(_cal_l)) >= 2:
+            _eval_test_d = _final_test_d
+            _eval_test_ds = _final_test_ds
+            _eval_test_l = _final_test_l
+        else:
+            _eval_test_d = test_d
+            _eval_test_ds = test_ds
+            _eval_test_l = test_l
         self._test_metrics = trainer.evaluate(
-            test_d, test_ds, test_l,
+            _eval_test_d, _eval_test_ds, _eval_test_l,
             batch_size=batch_size,
         )
         results["test_auc"] = self._test_metrics["auc"]
@@ -2127,6 +2214,12 @@ class GTRLBridge:
             # expects. The env's groupby re-derives these at runtime, but the
             # CSV column count must match the audit's 15-column expectation.
             "disease_pair_count", "disease_avg_gnn", "disease_avg_safety",
+            # P3-005 ROOT FIX (Teammate 10): pathways column — JSON string of
+            # up to 5 REAL pathway chains (drug->protein->pathway->disease).
+            # This is the "key biological pathways" DOCX deliverable that was
+            # MISSING from the bridge output. Consumed by the RL env's
+            # candidate table display and the /hypothesis/export endpoint.
+            "pathways",
         ]
 
         with open(output_path, "w", newline="", encoding="utf-8") as f:
@@ -2513,8 +2606,25 @@ class GTRLBridge:
         from .utils import compute_graph_degrees
         inh_ei = self.edge_indices.get(("drug", "inhibits", "protein"))
         act_ei = self.edge_indices.get(("drug", "activates", "protein"))
+        # P3-016 ROOT FIX (Teammate 10 — hostile-auditor, RED TEAM):
+        # The previous code computed target_count_per_drug from ONLY
+        # 'inhibits' and 'activates' edges. Drugs whose ONLY targets
+        # were 'binds' or 'modulates' got target_count = 0 → the
+        # td_component (the primary efficacy signal) gave them the
+        # BASELINE 0.30 (the "0 known targets" bucket). This is the
+        # SAME bias as P3-009 (pathway_score): it systematically
+        # underrates drugs whose mechanism is "binds" or "modulates".
+        #
+        # ROOT FIX: use ALL 4 forward drug->protein edge types. This
+        # matches the pathway_score fix (P3-009) and the
+        # drug_to_proteins adjacency built later in this same function
+        # (which already correctly uses all 4 — see line ~2549 in the
+        # pathway_reach block). The target_count_per_drug and
+        # drug_to_proteins must use the SAME edge set for consistency.
+        bnd_ei = self.edge_indices.get(("drug", "binds", "protein"))
+        mod_ei = self.edge_indices.get(("drug", "modulates", "protein"))
         target_count_per_drug: Dict[int, int] = {}
-        for ei in [inh_ei, act_ei]:
+        for ei in [inh_ei, act_ei, bnd_ei, mod_ei]:  # P3-016: all 4 edge types
             if ei is None or ei.numel() == 0:
                 continue
             for d_idx, p_idx in zip(ei[0].tolist(), ei[1].tolist()):
@@ -2551,8 +2661,8 @@ class GTRLBridge:
         max_total_edges = max(total_out_edges_per_drug.values()) if total_out_edges_per_drug else 1
 
         # Build pathway reachability: drug -> protein -> pathway (2-hop).
-        bnd_ei = self.edge_indices.get(("drug", "binds", "protein"))
-        mod_ei = self.edge_indices.get(("drug", "modulates", "protein"))
+        # P3-016: bnd_ei and mod_ei are now declared above (with the
+        # target_count_per_drug fix). Reusing them here for consistency.
         drug_to_proteins: Dict[int, List[int]] = {}
         for ei in [inh_ei, act_ei, bnd_ei, mod_ei]:
             if ei is None or ei.numel() == 0:
@@ -2839,9 +2949,37 @@ class GTRLBridge:
         # Then for each pair, the multi-hop path count is a set
         # intersection -- O(min_degree) per pair, with no redundant
         # edge-tensor scans.
+        # P3-009 ROOT FIX (Teammate 10 — hostile-auditor, RED TEAM):
+        # The previous code used ONLY 2 of the 4 forward drug->protein
+        # edge types ('inhibits', 'activates') for the drug_to_proteins
+        # adjacency map. Drugs whose ONLY targets were 'binds' or
+        # 'modulates' (e.g., a drug that binds a receptor but doesn't
+        # inhibit/activate it in the curated edge set) got an EMPTY
+        # drug_to_proteins set → EMPTY drug_to_pathways → pathway_score
+        # = 0 for ALL their disease pairs. This is a BIASED pathway
+        # score: it systematically underrates drugs whose mechanism is
+        # "binds" or "modulates" (which is the majority of receptor
+        # drugs, antibodies, etc.).
+        #
+        # ROOT FIX: use ALL 4 forward drug->protein edge types per the
+        # DOCX §4 Phase 2 graph structure contract:
+        #   "Drug → inhibits/activates → Protein"
+        # The DOCX lists inhibits/activates as the EXAMPLE, but the
+        # graph builder (graph_builder.py) injects all 4 types
+        # (inhibits, activates, binds, modulates) — see the
+        # FORWARD_DRUG_PROTEIN_EDGE_TYPES constant in
+        # graph_transformer/data/graph_builder.py. The pathway_score
+        # must use all 4 to be scientifically correct.
+        #
+        # The same fix applies to efficacy_score's target_count (P3-016,
+        # fixed separately in _compute_drug_level_features).
         drug_to_proteins: Dict[int, Set[int]] = {}
-        for src_rel_tgt in [("drug", "inhibits", "protein"),
-                            ("drug", "activates", "protein")]:
+        for src_rel_tgt in [
+            ("drug", "inhibits", "protein"),
+            ("drug", "activates", "protein"),
+            ("drug", "binds", "protein"),      # P3-009: was missing
+            ("drug", "modulates", "protein"),  # P3-009: was missing
+        ]:
             ei = self.edge_indices.get(src_rel_tgt)
             if ei is None or ei.numel() == 0:
                 continue
@@ -3037,49 +3175,54 @@ class GTRLBridge:
             # pathway data. In that case, we have NO real pathway
             # evidence, so the SCIENTIFICALLY correct value is 0.0 for
             # all rows (no pathway connectivity = no pathway_score).
-            # However, to avoid the constant-column problem, we add a
-            # TINY per-pair deterministic noise (±0.005, derived from
-            # SHA-256 of the drug+disease names) so the column has
-            # minimal but non-zero variance. This makes the RL feature
-            # validation pass while clearly indicating "no real pathway
-            # signal" via the near-zero values.
             #
-            # We also log a CRITICAL warning so the user knows the
-            # pathway_score column is essentially missing -- this is a
-            # data-quality issue (the graph has no pathways) that should
-            # be fixed upstream, not silently worked around.
+            # P3-005/P3-009 ROOT FIX (Teammate 10 — hostile-auditor, RED TEAM):
+            # The previous "fix" added TINY per-pair deterministic noise
+            # (±0.005, derived from SHA-256 of the drug+disease names)
+            # "so the column has minimal but non-zero variance" and
+            # "passes the RL feature-validation". This was FABRICATED
+            # DATA — the noise has ZERO biological meaning. The audit
+            # (hostile-auditor mode) flagged this as scientific fraud:
+            # the pathway_score column was carrying NO real signal but
+            # was disguised as a real feature by the noise. A pharma
+            # partner inspecting the feature distribution would see
+            # "variance" and assume the column encodes real pathway
+            # connectivity — when in reality it encodes a hash of the
+            # drug+disease names.
+            #
+            # ROOT FIX: use 0.0 constant when no pathways exist. This
+            # is the SCIENTIFICALLY HONEST value (no pathway evidence =
+            # zero pathway_score). The RL feature-validation warning
+            # for constant columns is the CORRECT behavior — it signals
+            # a DATA-QUALITY ISSUE (the graph is missing pathways) that
+            # must be fixed UPSTREAM (Phase 2 graph builder), not
+            # papered over with fabricated noise. The operator who sees
+            # the warning must investigate why the graph has no pathways
+            # (likely a Phase 1→2 pipeline bug or a degenerate demo
+            # graph configuration).
+            #
+            # The RL env's VecNormalize handles constant features
+            # gracefully (z-score normalization of a constant produces
+            # 0.0, which is the neutral value for the policy network).
+            # The feature does not contribute to the policy gradient
+            # (its gradient is always 0), which is the correct behavior
+            # for a feature with no signal.
             logger.critical(
-                f"P3-024 ROOT FIX: graph has num_pathways={num_pathways}, "
-                f"num_diseases_total={num_diseases_total}. The "
-                f"pathway_score column will be near-zero (no real "
-                f"pathway evidence). This is a DATA-QUALITY issue -- "
-                f"the graph is missing pathway nodes or pathway->disease "
-                f"edges. Investigate the Phase 2 adapter / graph "
-                f"builder to ensure pathways are properly injected. "
-                f"A tiny per-pair deterministic noise (±0.005) is added "
-                f"so the RL feature-validation does not flag a "
-                f"constant column, but the column carries NO real "
-                f"signal."
+                f"P3-024/P3-005 ROOT FIX: graph has num_pathways="
+                f"{num_pathways}, num_diseases_total="
+                f"{num_diseases_total}. The pathway_score column will "
+                f"be 0.0 for ALL rows (no real pathway evidence). This "
+                f"is a DATA-QUALITY issue -- the graph is missing "
+                f"pathway nodes or pathway->disease edges. Investigate "
+                f"the Phase 2 adapter / graph builder to ensure "
+                f"pathways are properly injected. The previous code "
+                f"FABRICATED ±0.005 SHA-256 noise to disguise the "
+                f"missing data -- this was scientific fraud (the noise "
+                f"has no biological meaning). The honest 0.0 value "
+                f"correctly signals 'no pathway evidence' to the RL "
+                f"agent and to the operator."
             )
-            # Per-pair deterministic noise via SHA-256 of (drug, disease).
-            # Uses the same _deterministic_name_seed helper as the
-            # patent/adme/efficacy features for consistency.
-            pathway_scores_arr = np.zeros(len(df), dtype=np.float32)
-            for i, (drug_name, disease_name) in enumerate(
-                zip(df["drug"].tolist(), df["disease"].tolist())
-            ):
-                # Noise in [-0.005, +0.005] centered at 0.0.
-                seed_i = _deterministic_name_seed(
-                    self.seed, f"{drug_name}|{disease_name}", 99
-                )
-                rng_i = np.random.default_rng(seed_i)
-                pathway_scores_arr[i] = float(rng_i.uniform(-0.005, 0.005))
-            # Clip to [0.0, 1.0] (negative noise becomes 0.0, positive
-            # noise stays as a tiny signal). The result is a column of
-            # mostly-zero values with a few tiny positive values -- enough
-            # variance to pass feature validation, but clearly not a
-            # meaningful pathway signal.
-            df["pathway_score"] = np.clip(pathway_scores_arr, 0.0, 1.0)
+            df["pathway_score"] = 0.0
 
         # --- Patent score, ADME score, Efficacy score (DRUG-LEVEL) ---
         # ROOT FIX (C-2): these three features are DRUG properties, not
@@ -3391,6 +3534,74 @@ class GTRLBridge:
             df["disease_pair_count"] = 0.0
             df["disease_avg_gnn"] = 0.0
             df["disease_avg_safety"] = 0.0
+
+        # ─── P3-005 ROOT FIX: ADD PATHWAYS COLUMN (the MISSING deliverable) ───
+        # DOCX §5 Phase 3 outputs: "The key biological pathways driving
+        # the prediction (for scientific explainability)".
+        # DOCX §6 Phase 4 outputs: "the biological pathway chain that
+        # explains the prediction".
+        #
+        # The previous code produced NO pathway explanations — the
+        # "key biological pathways" deliverable was MISSING. The audit
+        # (P3-005) flagged this: "the bridge produces NO pathway
+        # explanations — the 'key biological pathways' DOCX deliverable
+        # is missing."
+        #
+        # ROOT FIX: for each (drug, disease) pair, extract up to 5 REAL
+        # pathway chains via _get_pathway_explanation (which walks the
+        # 3-hop path drug->protein->pathway->disease using ALL 4 forward
+        # drug->protein edge types per the P3-009 fix). Serialize each
+        # chain list to a JSON STRING column (per the Phase 3 bridge
+        # output API contract: pathways is a JSON string column).
+        #
+        # The RL env (DrugRankingEnv) reads this column for the candidate
+        # table display and for the pharma partner's hypothesis export
+        # package (DOCX §7 Endpoint 3: /hypothesis/export). Phase 4
+        # consumes the CSV with ZERO transformation — the pathways column
+        # is self-contained.
+        #
+        # PERFORMANCE NOTE: _get_pathway_explanation walks the graph per
+        # pair. For the demo graph (300 pairs) this is fast (<1s). For
+        # production scale (10K x 10K = 100M pairs), this would be slow
+        # if called naively per pair. The streaming path
+        # (save_rl_input_streaming) processes batches, so the per-batch
+        # overhead is bounded. A future optimization can precompute the
+        # drug->pathway->disease reachability matrix ONCE and do O(1)
+        # lookups per pair — but for now, correctness > speed (the
+        # pathways column MUST be REAL graph paths, not fabricated).
+        try:
+            pathway_jsons: List[str] = []
+            n_pairs_with_pathways = 0
+            for drug_name, disease_name in zip(
+                df["drug"].tolist(), df["disease"].tolist()
+            ):
+                chains = self._get_pathway_explanation(
+                    drug_name, disease_name, top_k=5
+                )
+                if chains:
+                    n_pairs_with_pathways += 1
+                pathway_jsons.append(json.dumps(chains, ensure_ascii=False))
+            df["pathways"] = pathway_jsons
+            logger.info(
+                f"P3-005 ROOT FIX: added 'pathways' column (JSON string). "
+                f"{n_pairs_with_pathways}/{len(df)} pairs "
+                f"({100.0 * n_pairs_with_pathways / max(len(df), 1):.1f}%) "
+                f"have non-empty pathway chains. Each chain is a REAL "
+                f"3-hop graph path (drug->protein->pathway->disease) "
+                f"extracted via _get_pathway_explanation using ALL 4 "
+                f"forward drug->protein edge types (P3-009). The column "
+                f"is consumed by the RL env's candidate table display "
+                f"and the /hypothesis/export endpoint (DOCX §7)."
+            )
+        except Exception as exc:
+            logger.error(
+                f"P3-005 ROOT FIX: failed to compute pathways column: "
+                f"{exc}. Filling with empty JSON '[]' so the CSV column "
+                f"exists but carries no pathway data. This is a "
+                f"DATA-QUALITY issue — investigate _get_pathway_explanation.",
+                exc_info=True,
+            )
+            df["pathways"] = "[]"
 
         return df
 
@@ -5100,6 +5311,135 @@ class GTRLBridge:
         _ = drug_idx  # accepted for API compat; per-drug edge-TYPE exclusion is uniform
         return set(SAFETY_SIGNAL_EDGES)
 
+    # ------------------------------------------------------------------
+    # P3-005 ROOT FIX (Teammate 10 — hostile-auditor, RED TEAM):
+    # Pathway explanation extractor. The DOCX §5 Phase 3 outputs and
+    # §6 Phase 4 outputs EXPLICITLY require "the key biological pathways
+    # driving the prediction (for scientific explainability)" and "the
+    # biological pathway chain that explains the prediction". The
+    # previous code had NO such method — the "key biological pathways"
+    # deliverable was MISSING from the bridge output. The audit flagged
+    # this as P3-005: "the bridge produces NO pathway explanations —
+    # the 'key biological pathways' DOCX deliverable is missing."
+    #
+    # ROOT FIX: extract REAL pathway chains from the graph topology.
+    # For each (drug, disease) pair, walk the 3-hop path:
+    #   drug --(inhibits|activates|binds|modulates)--> protein
+    #   protein --(part_of)--> pathway
+    #   pathway --(disrupted_in)--> disease
+    # Each chain is a REAL graph path (not fabricated). The method
+    # returns up to top_k chains, sorted by edge-type priority
+    # (inhibits/activates are "stronger" mechanisms than binds/modulates).
+    # ------------------------------------------------------------------
+    def _get_pathway_explanation(
+        self,
+        drug_name: str,
+        disease_name: str,
+        top_k: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Extract up to top_k REAL pathway chains connecting drug to disease.
+
+        Each chain is a 4-node path:
+            drug -> protein -> pathway -> disease
+        where:
+            drug -> protein via one of {inhibits, activates, binds, modulates}
+            protein -> pathway via part_of
+            pathway -> disease via disrupted_in
+
+        P3-009: uses ALL 4 forward drug->protein edge types (not just
+        inhibits/activates) so drugs whose only mechanism is "binds" or
+        "modulates" still get pathway explanations.
+
+        Args:
+            drug_name: Name of the drug node.
+            disease_name: Name of the disease node.
+            top_k: Maximum number of pathway chains to return.
+
+        Returns:
+            List of dicts, each with keys:
+                - 'pathway': str (pathway name)
+                - 'intermediate_protein': str (protein name)
+                - 'edge_type': str ('inhibits'|'activates'|'binds'|'modulates')
+                - 'chain': List[str] ([drug_name, protein_name, pathway_name, disease_name])
+            Empty list if drug/disease not in graph or no path exists.
+        """
+        drug_map = self.node_maps.get("drug", {})
+        disease_map = self.node_maps.get("disease", {})
+        pathway_map = self.node_maps.get("pathway", {})
+        protein_map = self.node_maps.get("protein", {})
+
+        drug_idx = drug_map.get(drug_name)
+        disease_idx = disease_map.get(disease_name)
+        if drug_idx is None or disease_idx is None:
+            return []
+
+        # Reverse maps: idx -> name
+        idx_to_protein = {idx: name for name, idx in protein_map.items()}
+        idx_to_pathway = {idx: name for name, idx in pathway_map.items()}
+
+        # P3-009: ALL 4 forward drug->protein edge types, in priority
+        # order (inhibits/activates are "stronger" mechanisms — list
+        # them first so they appear earlier in the top_k results).
+        forward_edge_types = [
+            ("drug", "inhibits", "protein"),
+            ("drug", "activates", "protein"),
+            ("drug", "binds", "protein"),
+            ("drug", "modulates", "protein"),
+        ]
+
+        # Build protein -> pathways adjacency (once).
+        protein_to_pathways: Dict[int, Set[int]] = {}
+        pp_ei = self.edge_indices.get(("protein", "part_of", "pathway"))
+        if pp_ei is not None and pp_ei.numel() > 0:
+            for p_idx, pw_idx in zip(pp_ei[0].tolist(), pp_ei[1].tolist()):
+                protein_to_pathways.setdefault(p_idx, set()).add(pw_idx)
+
+        # Build pathway -> diseases adjacency (once).
+        pathway_to_diseases: Dict[int, Set[int]] = {}
+        pd_ei = self.edge_indices.get(("pathway", "disrupted_in", "disease"))
+        if pd_ei is not None and pd_ei.numel() > 0:
+            for pw_idx, ds_idx in zip(pd_ei[0].tolist(), pd_ei[1].tolist()):
+                pathway_to_diseases.setdefault(pw_idx, set()).add(ds_idx)
+
+        pathways: List[Dict[str, Any]] = []
+
+        # Walk the 3-hop path for each forward edge type.
+        for edge_type in forward_edge_types:
+            ei = self.edge_indices.get(edge_type)
+            if ei is None or ei.numel() == 0:
+                continue
+            rel_name = edge_type[1]  # 'inhibits'|'activates'|'binds'|'modulates'
+            for src, tgt in zip(ei[0].tolist(), ei[1].tolist()):
+                if src != drug_idx:
+                    continue
+                protein_idx = tgt
+                protein_name = idx_to_protein.get(
+                    protein_idx, f"Protein_{protein_idx}"
+                )
+                # protein -> pathway
+                for pathway_idx in protein_to_pathways.get(protein_idx, set()):
+                    pathway_name = idx_to_pathway.get(
+                        pathway_idx, f"Pathway_{pathway_idx}"
+                    )
+                    # pathway -> disease
+                    if disease_idx not in pathway_to_diseases.get(pathway_idx, set()):
+                        continue
+                    pathways.append({
+                        "pathway": pathway_name,
+                        "intermediate_protein": protein_name,
+                        "edge_type": rel_name,
+                        "chain": [
+                            drug_name,
+                            protein_name,
+                            pathway_name,
+                            disease_name,
+                        ],
+                    })
+                    if len(pathways) >= top_k:
+                        return pathways
+
+        return pathways
+
     def get_top_k_novel_predictions(
         self,
         top_k: int = 50,
@@ -5593,13 +5933,36 @@ class GTRLBridge:
 
                 records = []
                 for i, (_, row) in enumerate(pool_df.iterrows()):
+                    drug_name = row["drug"]
+                    disease_name = row["disease"]
+                    # P3-005 ROOT FIX: extract REAL pathway chains for
+                    # this top-K pair. This is the "key biological
+                    # pathways" DOCX deliverable. The pool_df may already
+                    # have a 'pathways' column (if it was built from the
+                    # full RL input CSV), but we re-extract here to ensure
+                    # the pathways are FRESH (the pool_df's pathways may
+                    # have been computed from a stale CSV).
+                    try:
+                        pathways = self._get_pathway_explanation(
+                            drug_name, disease_name, top_k=5
+                        )
+                    except Exception as pw_err:
+                        logger.warning(
+                            f"P3-005: _get_pathway_explanation failed for "
+                            f"({drug_name}, {disease_name}): {pw_err}. "
+                            f"Returning empty pathways list."
+                        )
+                        pathways = []
                     records.append({
-                        "drug": row["drug"],
-                        "disease": row["disease"],
+                        "drug": drug_name,
+                        "disease": disease_name,
                         "gnn_score": float(row.get("gnn_score_calibrated", row.get("gnn_score", 0.0))),
                         "rl_policy_prob": float(row.get("rl_policy_prob", 0.0)),
                         "rl_action": int(row.get("rl_action", 0)),
                         "rank": i + 1,
+                        # P3-005: the MISSING deliverable — key biological
+                        # pathways driving the prediction (DOCX §5, §6).
+                        "pathways": pathways,
                     })
                 return pd.DataFrame(records)
 
@@ -5658,15 +6021,21 @@ class GTRLBridge:
                 )
 
         # Fallback: GT-only ranking (only reached in non-strict mode)
-        records = [
-            {
+        # P3-005: include pathways in the fallback too (the deliverable
+        # must be present regardless of which ranking path was taken).
+        records = []
+        for i, (d, v, s) in enumerate(novel_pairs[:top_k]):
+            try:
+                pathways = self._get_pathway_explanation(d, v, top_k=5)
+            except Exception:
+                pathways = []
+            records.append({
                 "drug": d,
                 "disease": v,
                 "gnn_score": float(s),
                 "rank": i + 1,
-            }
-            for i, (d, v, s) in enumerate(novel_pairs[:top_k])
-        ]
+                "pathways": pathways,
+            })
         return pd.DataFrame(records)
 
 
