@@ -1669,3 +1669,86 @@ Stage Summary:
 - 5/5 smoke tests PASS.
 - Zero merge conflicts (surgical rebase avoided the messy auto-merge that produced duplicate verify_org_id definitions).
 - Clean integration with Teammate 4/8/9's parallel work (rate limiting, /kg/* proxy, /datasets/* proxy, P3→P2 integration all preserved).
+
+# --- merged from teammate-13-14-forensic-root-fix-v132 ---
+
+---
+Task ID: TM13+TM14-v132
+Agent: Main (Claude / Super Z)
+Task: Forensic root-cause fix for Teammate 13 (P4 → Frontend Integration) and Teammate 14 (Backend ↔ Frontend Authentication) issues in the autonomous-drug-repurposing repo. Branch: fix/teammate-13-14-forensic-root-fix-v132.
+
+Work Log:
+- Read project docx (Cosmic_Build_Process_Updated.docx) to understand: 6-phase build (Data Ingestion → KG → GT → RL → API/Dashboard → Launch), FastAPI+React+Neo4j+PyTorch+Stable-Baselines3 stack.
+- Read issues document (Pasted Content_1784608761514.txt) covering Teammate 13 + Teammate 14 issue specs.
+- Cloned repo and switched to fix branch.
+- Hostile-auditor reading of REAL CODE (not comments, not tests) for:
+  * frontend/src/lib/services/rl-ranker.ts (396 lines)
+  * frontend/src/lib/ml-contracts.ts (full file)
+  * frontend/contracts/_url-constants.ts (canonical SERVICE_PORTS)
+  * shared/contracts/urls.py (canonical Python SERVICE_PORTS)
+  * rl/service.py (1114 lines, all 3 return paths of _rank_impl)
+  * scripts/rl_api.py (Docker entrypoint)
+  * frontend/src/components/drugos/candidate-table.tsx (552 lines)
+  * frontend/src/components/drugos/pathway-viz.tsx (413 lines)
+  * frontend/src/lib/api-client.ts (720 lines)
+  * frontend/src/app/api/rl/route.ts (728 lines)
+  * backend/api/main.py (394 lines — original)
+  * frontend/src/lib/http-client.ts (428 lines)
+  * frontend/.env.example
+
+Forensic findings (CONFIRMED bugs in real code, not just comments):
+1. rl/service.py:1111 defaulted to port 8004 — but canonical contract says phase4_rl=8003. The scripts/rl_api.py (Docker entrypoint) correctly used 8003, but `python rl/service.py` used 8004.
+2. frontend/src/lib/services/rl-ranker.ts:238 error hint said port 8004 — wrong.
+3. frontend/.env.example had THREE wrong port mappings: KG=8002 (should be 8001), GT=8003 (should be 8002), RL=8004 (should be 8003). Off-by-one misled operators for 30 days.
+4. rl-ranker.ts:357 HARDCODED source: "rl_service" — overriding whatever the Python service actually returned. The Python service returns source: "service" (P4-045 fix), so every successful response was mislabeled.
+5. rl-ranker.ts:72 RlRankerResponse type restricted source to "rl_service" | "none" — didn't match Python contract.
+6. ml-contracts.ts RlRankResponseSchema did NOT validate orgId, pathway_chain, or pathway_enrichment_available — fields the Python service returns or should return.
+7. candidate-table.tsx had NO Pathway column — pathway_chain data was invisible to researchers.
+8. pathway-viz.tsx accepted only PathwayData prop (nodes+edges) — could not render PathwayChainItem format from RL candidates.
+9. backend/api/main.py:171 verify_jwt returned ONLY user_id (no org_id, no org_role) — multi-tenant isolation impossible.
+10. backend/api/main.py had NO rate limiting, NO audit log middleware, NO /ready vs /health separation.
+11. backend/api/main.py:386 defaulted to port 8001 — CONFLICTED with phase2_kg canonical port 8001.
+
+ROOT FIXES APPLIED (manually, no scripts):
+TM13 (P4 → Frontend Integration):
+- rl/service.py: Changed default port from 8004 → 8003 (line 1122).
+- rl-ranker.ts: Updated RlRankerResponse type: source union now "service" | "csv" | "none" | "rl_ranker" | "rl_service"; added orgId and pathwayEnrichmentAvailable fields.
+- rl-ranker.ts: Fixed port hint in error message from 8004 → 8003.
+- rl-ranker.ts: Replaced hardcoded source: "rl_service" with `(validated.source as ...) ?? "service"` — passes through the actual Python service value.
+- rl-ranker.ts: Forward orgId and pathwayEnrichmentAvailable from validated response.
+- ml-contracts.ts: Added PathwayChainItemSchema ({pathway, intermediate_protein, chain}).
+- ml-contracts.ts: Added pathway_chain field to RankedHypothesisSchema (default []).
+- ml-contracts.ts: Added orgId and pathway_enrichment_available fields to RlRankResponseSchema.
+- ml-contracts.ts: Exported PathwayChainItem type.
+- rl/service.py: Added _enrich_candidates_with_pathways() function — queries Phase 2 KG service (KG_SERVICE_URL/kg/explore) for each candidate's drug-disease pair, does BFS to find drug→protein→pathway→disease chains (max 3 hops, max 5 chains per candidate). Best-effort: returns False when KG unavailable.
+- rl/service.py: Added _extract_pathway_chains() helper — BFS walker that converts KG /kg/explore response into PathwayChainItem list.
+- rl/service.py: Wired _enrich_candidates_with_pathways() into all 3 return paths of _rank_impl (checkpoint path, no-CSV path, CSV-fallback path). Each response now includes pathway_enrichment_available flag.
+- Created frontend/src/components/drugos/pathway-expander.tsx — new component that renders pathway_chain as expandable "N pathways" cell, with empty state "No pathway data".
+- pathway-viz.tsx: Refactored into ROUTER pattern (PathwayViz delegates to PathwayChainView or PathwayCanvasView). Avoids React Hooks violation. PathwayChainView renders compact horizontal flow (drug → protein → pathway → disease). PathwayCanvasView is the original canvas visualization.
+- candidate-table.tsx: Added Pathway column header between Safety and Mechanism. Added Pathway cell with PathwayExpander. Bumped empty-state colSpan from 10/9 → 11/10.
+- types.ts: Added pathway_chain field to DrugCandidate interface.
+- core-screens.tsx: Updated realCandidates mapping to forward pathway_chain from RL API response.
+- /api/rl/route.ts: Updated GET and POST responses to forward pathwayEnrichmentAvailable and orgId.
+- .env.example: Fixed 3 wrong port mappings (KG 8002→8001, GT 8003→8002, RL 8004→8003). Added BACKEND_URL=http://localhost:8004 section.
+
+TM14 (Backend ↔ Frontend Authentication):
+- Complete rewrite of backend/api/main.py:
+  * Added AuthContext model (user_id + org_id + org_role).
+  * verify_jwt now returns AuthContext instead of bare user_id. JWTs without org_id claim are REJECTED (401, fail-closed). Reads JWT_ALGORITHMS and JWT_ISSUER from env vars (was hardcoded).
+  * Added verify_org_id convenience dependency.
+  * Added AuditLog SQLAlchemy model matching frontend Prisma AuditLog schema (userId, organizationId, actorName, action, resource, ip, userAgent, metadata, createdAt) — both layers write to SAME table.
+  * Added audit_log_middleware — logs every POST/PUT/PATCH/DELETE to AuditLog table. FAIL-SAFE: DB write failure logs to stderr but does NOT block response. Reads body ONCE and re-injects for endpoint. Backend entries use action="backend_<METHOD>_<ENDPOINT>" and store method/endpoint/status_code/body_summary in metadata JSON.
+  * Added slowapi rate limiting: 100/min for /predict + /top-k, 1000/min for /datasets/stats. 429 + Retry-After on exceed. No-op limiter when slowapi not installed (dev envs).
+  * Split /health (liveness, always 200) from /ready (readiness, probes GT+RL+DB, returns 503 if any down). ReadyResponse model with checks dict.
+  * Updated /predict, /top-k, /datasets/stats to use AuthContext instead of bare user_id. /top-k response now echoes org_id.
+  * Changed default port from 8001 → 8004 (avoids conflict with phase2_kg port 8001).
+
+Stage Summary:
+- Branch: fix/teammate-13-14-forensic-root-fix-v132 (off main)
+- Files modified: 11 (rl/service.py, frontend/src/lib/services/rl-ranker.ts, frontend/src/lib/ml-contracts.ts, frontend/src/components/drugos/candidate-table.tsx, frontend/src/components/drugos/pathway-viz.tsx, frontend/src/lib/types.ts, frontend/src/components/drugos/core-screens.tsx, frontend/src/app/api/rl/route.ts, frontend/.env.example, backend/api/main.py)
+- Files created: 1 (frontend/src/components/drugos/pathway-expander.tsx)
+- Phase 1 ↔ Phase 2 ↔ Phase 4 wiring: Python rl/service.py now queries Phase 2 KG service for pathway chains and attaches them to Phase 4 candidates. Frontend candidate table renders the pathway chain as an expandable cell. This is the "biological pathway chain that explains the prediction" deliverable mandated by project docx §6.
+- Multi-tenant security: backend verify_jwt now requires org_id claim. JWTs without org_id are rejected. All endpoints receive AuthContext and can scope queries to auth.org_id.
+- 21 CFR Part 11 audit compliance: backend audit_log_middleware logs every mutation to the shared AuditLog table (same one the frontend writes to). A compliance auditor sees entries from both layers in a single timeline.
+- Production readiness: rate limiting (slowapi), /ready vs /health separation, port conflict resolved.
+- Next: install dependencies and run real code (tsc --noEmit, npm run build, npm run lint, pytest) to verify no breaking changes. Then push branch, merge to main, re-clone to verify.

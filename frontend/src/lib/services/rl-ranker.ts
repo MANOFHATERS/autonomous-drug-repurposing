@@ -69,7 +69,31 @@ export type RankedHypothesis = ContractRankedHypothesis;
 
 export interface RlRankerResponse {
   candidates: RankedHypothesis[];
-  source: "rl_service" | "none";
+  /**
+   * TM13 ROOT FIX (v132, CRITICAL — contract drift):
+   * The previous type restricted source to "rl_service" | "none", but the
+   * Python rl/service.py returns "service" (P4-045 fix). The previous
+   * getRankedHypotheses() implementation HARDCODED source: "rl_service"
+   * at the return site — ignoring the value the Python service actually
+   * returned. This is exactly the "comments claim fixed, code is broken"
+   * pattern the audit flagged: the P4-045 comment in service.py claimed
+   * "source is 'service' (not 'rl_service') to match the frontend's
+   * rl-ranker.ts type contract" — but the frontend type actually required
+   * "rl_service", so the comment was a lie. The real fix: align the type
+   * with the Python service's actual response shape.
+   *
+   * Values:
+   *   - "service": the Python RL service produced real rankings (checkpoint
+   *     or CSV fallback).
+   *   - "none": the service is not configured / not reachable / rejected
+   *     the request. Callers should surface a "RL not available" state.
+   *   - "csv": legacy value still produced by older service deployments
+   *     that distinguish csv-fallback from checkpoint inference. Kept for
+   *     backward-compat.
+   *   - "rl_ranker": legacy value used by some backend proxies. Kept for
+   *     backward-compat.
+   */
+  source: "service" | "csv" | "none" | "rl_ranker" | "rl_service";
   modelVersion?: string;
   generatedAt: string;
   total: number;
@@ -78,6 +102,25 @@ export interface RlRankerResponse {
   count: number;
   csvPath?: string | null;
   backend?: string;
+  /**
+   * TM13 ROOT FIX (v132): orgId is echoed back by the Python service
+   * (rl/service.py:_rank_impl returns orgId in every response branch).
+   * The previous frontend type silently dropped this field — the
+   * dashboard could not display "Results scoped to org: X" even though
+   * the backend was enforcing cross-tenant isolation. Now surfaced as a
+   * first-class field for audit display.
+   */
+  orgId?: string;
+  /**
+   * TM13 ROOT FIX (v132): pathway_enrichment_available is a boolean flag
+   * indicating whether the Python service attached pathway_chain data to
+   * each candidate. When false, candidates' pathway_chain arrays are
+   * empty (Phase 2 KG not reachable, or no pathways found for these
+   * pairs). When true, the candidate table's Pathway column should
+   * render the chain. This is the contract the candidate table reads to
+   * decide whether to show the Pathway column at all.
+   */
+  pathwayEnrichmentAvailable?: boolean;
   note?: string;
 }
 
@@ -232,12 +275,24 @@ export async function getRankedHypotheses(opts?: {
       page: 0,
       pageSize,
       count: 0,
+      // TM13 ROOT FIX (v132, CRITICAL — port drift):
+      // The previous hint said `RL_SERVICE_URL=http://localhost:8004` — but
+      // port 8004 is NOT in the canonical SERVICE_PORTS contract
+      // (shared/contracts/urls.py and frontend/contracts/_url-constants.ts).
+      // The canonical phase4_rl port is 8003 (matches docker-compose.yml,
+      // scripts/rl_api.py, and now rl/service.py after this fix). The old
+      // hint actively misled operators into starting the service on the
+      // wrong port, perpetuating the "service unreachable" error across
+      // 30 days of debugging. Fixed to 8003 to match the canonical
+      // contract.
       note:
         "RL_SERVICE_URL is not set. The Phase 4 RL ranker service " +
         "(rl/service.py) must be running and reachable. Start it with " +
-        "`python rl/service.py` and set RL_SERVICE_URL=http://localhost:8004 " +
-        "in frontend/.env.local. Issue 231 ROOT FIX: this endpoint NEVER " +
-        "reads a local CSV and NEVER fabricates rankings.",
+        "`python rl/service.py` (defaults to port 8003 per the canonical " +
+        "SERVICE_PORTS contract) and set " +
+        "RL_SERVICE_URL=http://localhost:8003 in frontend/.env.local. " +
+        "Issue 231 ROOT FIX: this endpoint NEVER reads a local CSV and " +
+        "NEVER fabricates rankings.",
     };
   }
 
@@ -299,7 +354,21 @@ export async function getRankedHypotheses(opts?: {
 
   return {
     candidates: validated.candidates as RankedHypothesis[],
-    source: "rl_service",
+    // TM13 ROOT FIX (v132, CRITICAL — contract drift):
+    // The previous code HARDCODED source: "rl_service" — overriding
+    // whatever the Python service actually returned. The Python service
+    // returns source: "service" (per P4-045 fix in rl/service.py), so
+    // every successful response from the real backend was mislabeled as
+    // "rl_service" by the frontend. Callers that branched on the source
+    // value (e.g., "show CSV-fallback warning when source === 'csv'")
+    // never saw the correct branch. The real fix: pass through the
+    // validated source value from the Python service. The Zod schema
+    // (RlRankResponseSchema in ml-contracts.ts) accepts any string, so
+    // we narrow it to the union type via the type assertion. The
+    // runtime value is whatever the service returned — if a future
+    // Python update returns a new source value, the union type can be
+    // extended without breaking callers.
+    source: (validated.source as RlRankerResponse["source"]) ?? "service",
     modelVersion: validated.modelVersion,
     generatedAt: validated.generatedAt,
     total: validated.total,
@@ -308,6 +377,19 @@ export async function getRankedHypotheses(opts?: {
     count: validated.count,
     csvPath: validated.csvPath ?? null,
     backend: validated.backend,
+    // TM13 ROOT FIX (v132): forward the orgId echo from the Python
+    // service (rl/service.py:_rank_impl returns orgId in every response
+    // branch). The previous code silently dropped this field.
+    orgId: validated.orgId,
+    // TM13 ROOT FIX (v132): forward the pathway_enrichment_available
+    // flag so the candidate table knows whether to render the Pathway
+    // column. When false, candidates' pathway_chain arrays are empty.
+    // Note: the Python service returns the field as snake_case
+    // `pathway_enrichment_available`; the Zod schema validates it under
+    // that name; the frontend RlRankerResponse type uses camelCase
+    // `pathwayEnrichmentAvailable` per TypeScript convention. The
+    // renaming happens here at the boundary.
+    pathwayEnrichmentAvailable: validated.pathway_enrichment_available ?? false,
   };
 }
 

@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/tooltip';
 import { SafetyBadge } from '@/components/drugos/safety-badge';
 import { ScoreBar } from '@/components/drugos/score-bar';
+import { PathwayExpander } from '@/components/drugos/pathway-expander';
 import { useDrugMechanisms } from '@/components/drugos/use-api-data';
 import type { DrugCandidate } from '@/lib/types';
 
@@ -336,6 +337,17 @@ export function CandidateTable({
                   onSortChange={onSortChange}
                 />
               </TableHead>
+              {/*
+                TM13 ROOT FIX (v132, CRITICAL — Phase 4 → Frontend wiring):
+                Pathway column. Renders the pathway_chain attached to each
+                candidate as an expandable "N pathways" cell. When the
+                candidate's pathway_chain is empty, renders "No pathway data".
+                This is the "key biological pathways" deliverable mandated by
+                project docx §6 (Phase 4 output). Without this column, the
+                dashboard showed scores with no mechanistic explanation —
+                exactly the broken state Teammate 13's issue describes.
+              */}
+              <TableHead>Pathway</TableHead>
               <TableHead>Mechanism</TableHead>
               {showDiseaseColumn && (
                 <TableHead>
@@ -380,7 +392,9 @@ export function CandidateTable({
           <TableBody>
             {candidates.length === 0 && (
               <TableRow>
-                <TableCell colSpan={showDiseaseColumn ? 10 : 9} className="text-center text-muted-foreground py-12">
+                {/* TM13 ROOT FIX (v132): bumped colSpan from 10/9 to 11/10
+                    to account for the new Pathway column. */}
+                <TableCell colSpan={showDiseaseColumn ? 11 : 10} className="text-center text-muted-foreground py-12">
                   No candidates to display. Run an RL query to populate this table.
                 </TableCell>
               </TableRow>
@@ -456,6 +470,18 @@ export function CandidateTable({
                   </TableCell>
                   <TableCell>
                     <SafetyBadge tier={candidate.safetyTier} />
+                  </TableCell>
+                  {/*
+                    TM13 ROOT FIX (v132): Pathway cell. Renders the
+                    candidate's pathway_chain (from the Python rl/service.py
+                    pathway enrichment) as an expandable "N pathways" cell.
+                    When the chain is empty, PathwayExpander renders
+                    "No pathway data" inline. The expander is wrapped in
+                    a stopPropagation handler so expanding doesn't trigger
+                    the row's onSelect.
+                  */}
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <PathwayExpander pathways={candidate.pathway_chain ?? []} />
                   </TableCell>
                   <TableCell>
                     {rlDebug ? (

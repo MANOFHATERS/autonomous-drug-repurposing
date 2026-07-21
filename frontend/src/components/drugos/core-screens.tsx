@@ -599,6 +599,17 @@ function SearchResultsScreen() {
       rank: typeof rc.rank === 'number' ? rc.rank : undefined,
       source: rlData?.source,
     },
+    // TM13 ROOT FIX (v132, CRITICAL — Phase 2 ↔ Phase 4 wiring):
+    // Forward the pathway_chain from the RL candidate. The Python
+    // rl/service.py attaches this field after querying the Phase 2 KG
+    // (KG_SERVICE_URL/kg/explore) for each (drug, disease) pair. The
+    // candidate table's Pathway column renders it as an expandable
+    // "N pathways" cell via the PathwayExpander component.
+    //
+    // When the Python service's pathway_enrichment_available flag is
+    // false (KG unreachable / not configured), this field is an empty
+    // array — PathwayExpander renders "No pathway data" inline.
+    pathway_chain: Array.isArray(rc.pathway_chain) ? rc.pathway_chain : [],
   }));
 
   // FE-001 ROOT FIX (v2): NEVER fall back to mock drug candidates in a

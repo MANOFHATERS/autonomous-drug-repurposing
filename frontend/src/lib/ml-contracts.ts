@@ -139,6 +139,37 @@ export type GtPredictRequest = z.infer<typeof GtPredictRequestSchema>;
 // Phase 4 — RL Hypothesis Ranker Service (rl/service.py)
 // ============================================================================
 
+/**
+ * TM13 ROOT FIX (v132, CRITICAL — Phase 2 ↔ Phase 4 wiring):
+ * PathwayChainItemSchema describes ONE pathway chain connecting a drug to
+ * a disease. The chain is an ordered list of biological entities, e.g.:
+ *   ["metformin", "mTOR", "mTOR signaling", "cancer"]
+ *   ["aspirin", "COX-2", "prostaglandin synthesis", "inflammation"]
+ *
+ * The Python rl/service.py attaches pathway_chain to each RankedHypothesis
+ * by querying the Phase 2 Neo4j knowledge graph (phase2/service.py /kg/explore).
+ * This is the "biological pathway chain that explains the prediction"
+ * deliverable mandated by project docx §6 (Phase 4 output). Without this
+ * field, the dashboard could show scores with no mechanistic explanation —
+ * exactly the broken state Teammate 13's issue describes.
+ *
+ * Fields:
+ *   - pathway: the canonical pathway name (e.g., "mTOR signaling").
+ *   - intermediate_protein: the drug target protein that links the drug
+ *     to the pathway (e.g., "mTOR" for metformin). May be omitted when
+ *     the chain is drug → pathway directly (no intermediate).
+ *   - chain: the ordered list of biological entities from drug to disease.
+ *     chain[0] is the drug, chain[chain.length-1] is the disease. Middle
+ *     elements are proteins/pathways.
+ */
+export const PathwayChainItemSchema = z.object({
+  pathway: z.string(),
+  intermediate_protein: z.string().optional(),
+  chain: z.array(z.string()),
+});
+
+export type PathwayChainItem = z.infer<typeof PathwayChainItemSchema>;
+
 export const RankedHypothesisSchema = z.object({
   drug: z.string(),
   disease: z.string(),
@@ -157,10 +188,29 @@ export const RankedHypothesisSchema = z.object({
   admeScore: z.number().nullable().optional(),
   literatureSupport: z.number().nullable().optional(),
   isKnownPositive: z.boolean().optional(),
+  /**
+   * TM13 ROOT FIX (v132): pathway_chain is the list of biological
+   * pathways connecting this drug to this disease. Empty array when
+   * the Phase 2 KG has no pathway data for this pair, or when the KG
+   * service is unreachable. The candidate table renders this as an
+   * expandable "N pathways" cell.
+   */
+  pathway_chain: z.array(PathwayChainItemSchema).default([]),
 });
 
 export const RlRankResponseSchema = z.object({
   candidates: z.array(RankedHypothesisSchema),
+  /**
+   * TM13 ROOT FIX (v132): the Python service returns source: "service"
+   * (per P4-045 fix). The previous Zod schema accepted any string, which
+   * was permissive enough — but the frontend's RlRankerResponse type
+   * restricted source to "rl_service" | "none", causing the hardcoded
+   * source override in rl-ranker.ts. The Zod schema here stays permissive
+   * (accepts any string); the narrowing happens at the rl-ranker.ts
+   * type level. This keeps the runtime validation lenient (so a future
+   * Python update adding a new source value doesn't break the frontend)
+   * while the TypeScript type forces callers to handle the known set.
+   */
   source: z.string(),
   modelVersion: z.string().optional(),
   generatedAt: z.string(),
@@ -171,6 +221,25 @@ export const RlRankResponseSchema = z.object({
   csvPath: z.string().optional(),
   backend: z.string().optional(),
   note: z.string().optional(),
+  /**
+   * TM13 ROOT FIX (v132): orgId is echoed back by the Python service
+   * for audit attribution (21 CFR Part 11). The previous schema silently
+   * dropped this field. Now validated as an optional string (the service
+   * returns "anonymous" when RL_REQUIRE_AUTH=false, so it's always
+   * present in practice, but kept optional for dev/CI environments
+   * that may not set it).
+   */
+  orgId: z.string().optional(),
+  /**
+   * TM13 ROOT FIX (v132): pathway_enrichment_available is a boolean
+   * flag indicating whether the Python service successfully queried the
+   * Phase 2 KG for pathway chains. When true, candidates' pathway_chain
+   * arrays may be non-empty. When false, all pathway_chain arrays are
+   * empty (KG unreachable, no pathways found, or pathway enrichment
+   * disabled in config). The candidate table reads this flag to decide
+   * whether to render the Pathway column at all.
+   */
+  pathway_enrichment_available: z.boolean().optional().default(false),
 });
 
 export const RlHealthResponseSchema = z.object({
