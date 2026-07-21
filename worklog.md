@@ -1557,3 +1557,41 @@ Stage Summary:
   (c) created a divergent schema with bare strings (the existing schema uses rich ColumnSpec/SourceSpec dataclasses)
 - The genuine gap (NULL-rate validator on nullable columns) is now closed with the new feature_validator.py + DAG wiring.
 - Branch: fix/teammate2-p1-p3-feature-completeness (will push, merge to main, re-clone to verify).
+
+---
+Task ID: teammate-3-v131-p1-to-p4-safety-wiring
+Agent: Teammate-3 (P1→P4 Integration, hostile-auditor pass)
+Task: Wire Phase 1 DrugBank withdrawal data into Phase 4 RL Safety Reward (P0 patient-safety). Issue: load_phase1_safety_signals and build_reward_function_with_phase1_safety were DEFINED but NEVER CALLED from run_pipeline. The RewardFunction.__init__ did NOT accept extra_withdrawn_drugs, so build_reward_function_with_phase1_safety silently raised TypeError and fell back to plain RewardFunction WITHOUT Phase 1 data. is_withdrawn=None was treated as SAFE (fail-OPEN). .csv.gz files not handled. withdrawn_reason/country/year loaded but not used in safety_score.
+
+Work Log:
+- Read project docx (Cosmic_Build_Process_Updated.docx) to understand the 6-phase build (Phase 1 = Data ingestion from 7 biomedical sources; Phase 2 = Neo4j KG; Phase 3 = PyTorch+PyG Graph Transformer; Phase 4 = RL agent ranking by plausibility + safety + market opportunity).
+- Cloned repo at /home/z/my-project/repos/autonomous-drug-repurposing (main branch, clean).
+- Forensic audit (RED-TEAM, hostile): read ACTUAL line-by-line code in:
+  * rl/reward.py (471 lines): load_phase1_safety_signals (lines 103-238) and build_reward_function_with_phase1_safety (lines 357-442) defined.
+  * rl/rl_drug_ranker.py (12,887 lines): WITHDRAWN_DRUGS frozenset (line 593, 41 entries — NO duplicates found, P1-059 already fixed). RewardFunction.__init__ (line 3342) — does NOT accept extra_withdrawn_drugs (smoking gun). run_pipeline (line 10002) line 10207 uses plain RewardFunction(config.reward). Lines 3602-3610: is_withdrawn=None treated as SAFE (fail-OPEN).
+  * phase1/pipelines/drugbank_pipeline.py (4,659 lines): VERIFIED already emits is_withdrawn, withdrawn_reason, withdrawn_country, withdrawn_year columns (lines 2448-2456, 3250-3252).
+- Grep confirmed: build_reward_function_with_phase1_safety is NEVER CALLED from production code — only from rl/tests/test_reward_withdrawn_drugs.py.
+- ROOT FIX applied:
+  1. rl/reward.py: rewrote load_phase1_safety_signals to return 4 values (withdrawn_names, withdrawn_reasons, withdrawn_countries, withdrawn_years), handle .csv.gz files, raise FileNotFoundError on missing CSV (was silently returning empty sets). Rewrote build_reward_function_with_phase1_safety to return single RewardFunction (was 3-tuple), accept treat_unknown_as_withdrawn=True (conservative default), set all 6 safety attributes (_withdrawn_drugs, _withdrawn_reasons, _withdrawn_countries, _withdrawn_years, _treat_unknown_as_withdrawn, _safety_source).
+  2. rl/rl_drug_ranker.py: added extra_withdrawn_drugs parameter to RewardFunction.__init__ (sets _withdrawn_drugs as merged union of WITHDRAWN_DRUGS + extra_withdrawn_drugs; sets _safety_source to 'merged' or 'hardcoded'). Added module-level _check_withdrawn helper implementing fail-CLOSED semantics (is_withdrawn=None → WITHDRAWN when _treat_unknown_as_withdrawn=True). Replaced broken lines 3602-3610 in RewardFunction.compute with _check_withdrawn call (kept old check as defense-in-depth backstop). Wired build_reward_function_with_phase1_safety into run_pipeline at line 10207 (reads PHASE1_PROCESSED_DIR env var; falls back to hardcoded with CRITICAL warning when dir missing). Also wired same path into validation gate at line 12091 for consistency.
+  3. rl/tests/test_reward_withdrawn_drugs.py: updated all 14 tests to match new 4-value API and single-return build_reward_function_with_phase1_safety.
+  4. rl/tests/integration/test_p1_to_p4_safety_integration.py: NEW file with 8 integration tests per issue spec (CSV read, .gz read, fail-CLOSED default, fail-OPEN when disabled, end-to-end Phase 1 withdrawn drug gets reward=-1.0, etc.).
+- Verification (RED-TEAM):
+  * python3 -m pytest rl/tests/integration/test_p1_to_p4_safety_integration.py -v → 8/8 PASS.
+  * python3 -m pytest rl/tests/test_reward_withdrawn_drugs.py -v → 14/14 PASS.
+  * 9 standalone root-fix verification tests (extra_withdrawn_drugs, .gz handling, fail-CLOSED, fail-OPEN, end-to-end reward=-1.0) → all PASS.
+  * Real-world wiring test (simulated run_pipeline reward_fn construction with PHASE1_PROCESSED_DIR set) → logs show 'Loaded 2 withdrawn drugs from drugbank_drugs.csv (reasons: 2, countries: 2, years: 2)' and 'Merged safety signals: 2 from Phase 1 + 41 hardcoded = 43 total (union). treat_unknown_as_withdrawn=True.' and safety_source='merged'.
+  * Stashed changes and ran same test suite on origin/main → SAME 12 failures + 6 errors (all pre-existing, due to missing torch/stable_baselines3 deps and pre-existing test bugs like 'faketoixdrug' typo and outdated expectations about substring matching). Confirmed my changes introduced ZERO new failures.
+  * 176 tests PASS with my changes (was 176 before).
+
+Stage Summary:
+- ROOT FIX applied: Phase 1 DrugBank withdrawal data is now WIRED into Phase 4 RL Safety Reward via build_reward_function_with_phase1_safety, called from run_pipeline when PHASE1_PROCESSED_DIR is set.
+- Patient-safety guardrail: is_withdrawn=None is now treated as WITHDRAWN (fail-CLOSED, conservative default) — was previously treated as SAFE (fail-OPEN, patient-safety hazard).
+- .csv.gz files now handled transparently.
+- withdrawn_reason, withdrawn_country, withdrawn_year are now loaded AND surfaced as _withdrawn_reasons, _withdrawn_countries, _withdrawn_years attributes on RewardFunction for structured safety scoring.
+- _safety_source attribute ('phase1' | 'hardcoded' | 'merged') on RewardFunction for audit metadata.
+- Hardcoded WITHDRAWN_DRUGS frozenset verified to have NO duplicates (41 entries, 41 unique — P1-059 already fixed by prior agent).
+- phase1/pipelines/drugbank_pipeline.py verified to already emit all 4 required columns (is_withdrawn, withdrawn_reason, withdrawn_country, withdrawn_year).
+- Files modified: rl/reward.py, rl/rl_drug_ranker.py, rl/tests/test_reward_withdrawn_drugs.py.
+- Files added: rl/tests/integration/__init__.py, rl/tests/integration/test_p1_to_p4_safety_integration.py.
+- All 22 new/updated tests PASS. Zero new test failures introduced.

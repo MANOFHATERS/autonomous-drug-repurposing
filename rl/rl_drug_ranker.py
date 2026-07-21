@@ -138,7 +138,7 @@ import warnings
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from getpass import getuser
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -3324,6 +3324,124 @@ class RankedCandidate:
 # ============================================================================
 # SECTION 4: REWARD FUNCTION
 # ============================================================================
+
+# ---------------------------------------------------------------------------
+# TEAMMATE-3 ROOT FIX (v131, P0 patient-safety): _check_withdrawn helper.
+# ---------------------------------------------------------------------------
+# This module-level helper implements fail-CLOSED semantics for the
+# ``is_withdrawn`` row flag. The previous code (lines 3602-3610 of
+# ``RewardFunction.compute``) treated ``is_withdrawn=None`` as SAFE
+# (fail-OPEN) — meaning a drug with an UNKNOWN withdrawal status could
+# be ranked HIGH by the RL agent and recommended to pharma partners.
+# This is a P0 patient-safety hazard.
+#
+# The fix:
+#   - If ``is_withdrawn`` is True (or stringified True) → WITHDRAWN.
+#   - If ``is_withdrawn`` is None / NaN / empty / 'none' / 'null' → UNKNOWN.
+#     When ``reward_fn._treat_unknown_as_withdrawn`` is True (the
+#     conservative default), UNKNOWN is treated as WITHDRAWN (fail-CLOSED).
+#     When False (dev/debug only), UNKNOWN is treated as SAFE (fail-OPEN).
+#   - If ``is_withdrawn`` is False (or stringified False) → SAFE (unless
+#     the drug name is in the withdrawn_drugs set).
+#
+# The helper ALSO checks the merged ``_withdrawn_drugs`` frozenset on
+# the reward_fn (which is the union of Phase 1 + hardcoded). If the drug
+# name is in EITHER the row's ``is_withdrawn=True`` flag OR the merged
+# set, the helper returns ``(True, is_unknown)``.
+#
+# Returns:
+#   (is_withdrawn: bool, is_unknown: bool)
+#     - is_withdrawn: True if the drug should be hard-rejected.
+#     - is_unknown: True if the row's is_withdrawn was None/NaN/unknown
+#       (regardless of whether it was treated as withdrawn or safe).
+#       This flag is logged for audit purposes.
+# ---------------------------------------------------------------------------
+def _check_withdrawn(row, drug_name: str, reward_fn: Optional["RewardFunction"]) -> Tuple[bool, bool]:
+    """Check if a drug should be hard-rejected as withdrawn (fail-CLOSED).
+
+    Args:
+        row: pandas Series (or dict-like) containing the ``is_withdrawn``
+            column (may be absent).
+        drug_name: Lowercased drug name from the row (used for set lookup).
+        reward_fn: RewardFunction instance (or None — when None, only the
+            module-level ``WITHDRAWN_DRUGS`` frozenset is consulted).
+
+    Returns:
+        Tuple of (is_withdrawn, is_unknown):
+            - is_withdrawn: True → hard-reject (reward = -1.0).
+            - is_unknown: True → row's is_withdrawn was None/NaN/unknown.
+    """
+    row_is_withdrawn = False
+    is_unknown = False
+
+    # Read the effective merged withdrawn set + conservative flag from the
+    # reward_fn. When reward_fn is None (e.g., called from a context without
+    # a reward_fn), fall back to the module-level WITHDRAWN_DRUGS frozenset
+    # and the conservative default (treat unknown as withdrawn).
+    if reward_fn is not None:
+        effective_withdrawn = getattr(reward_fn, "_withdrawn_drugs", None)
+        if effective_withdrawn is None:
+            effective_withdrawn = frozenset(WITHDRAWN_DRUGS)
+        treat_unknown_as_withdrawn = getattr(
+            reward_fn, "_treat_unknown_as_withdrawn", True
+        )
+    else:
+        effective_withdrawn = frozenset(WITHDRAWN_DRUGS)
+        treat_unknown_as_withdrawn = True
+
+    # Check the row-level is_withdrawn flag.
+    has_index = hasattr(row, "index")
+    if has_index and "is_withdrawn" in row.index:
+        _rw = row.get("is_withdrawn")
+        if _rw is True:
+            row_is_withdrawn = True
+        elif isinstance(_rw, str):
+            _rw_lower = _rw.strip().lower()
+            if _rw_lower in ("true", "1", "yes", "y", "t"):
+                row_is_withdrawn = True
+            elif _rw_lower in ("", "none", "null", "nan", "na", "n/a"):
+                is_unknown = True
+                if treat_unknown_as_withdrawn:
+                    row_is_withdrawn = True  # CONSERVATIVE (fail-CLOSED)
+                    logger.warning(
+                        "TEAMMATE-3: Drug %s has is_withdrawn=%r (unknown). "
+                        "Treating as WITHDRAWN (conservative / fail-CLOSED). "
+                        "Set _treat_unknown_as_withdrawn=False to disable "
+                        "(NOT recommended for production).",
+                        drug_name, _rw,
+                    )
+            # Explicit False / 0 / no → row_is_withdrawn stays False.
+        elif _rw is None:
+            is_unknown = True
+            if treat_unknown_as_withdrawn:
+                row_is_withdrawn = True  # CONSERVATIVE (fail-CLOSED)
+                logger.warning(
+                    "TEAMMATE-3: Drug %s has is_withdrawn=None (unknown). "
+                    "Treating as WITHDRAWN (conservative / fail-CLOSED). "
+                    "Set _treat_unknown_as_withdrawn=False to disable "
+                    "(NOT recommended for production).",
+                    drug_name,
+                )
+        # NaN check (float NaN).
+        elif isinstance(_rw, float) and _rw != _rw:
+            is_unknown = True
+            if treat_unknown_as_withdrawn:
+                row_is_withdrawn = True  # CONSERVATIVE (fail-CLOSED)
+                logger.warning(
+                    "TEAMMATE-3: Drug %s has is_withdrawn=NaN (unknown). "
+                    "Treating as WITHDRAWN (conservative / fail-CLOSED).",
+                    drug_name,
+                )
+    # else: row has no is_withdrawn column — skip the row-level check
+    # and rely solely on the effective_withdrawn set lookup below.
+
+    # Check the effective merged withdrawn set (Phase 1 + hardcoded).
+    hardcoded_withdrawn = drug_name in effective_withdrawn
+    if row_is_withdrawn or hardcoded_withdrawn:
+        return True, is_unknown
+    return False, is_unknown
+
+
 class RewardFunction:
     """Configurable reward function for drug-disease hypothesis ranking.
 
@@ -3339,7 +3457,11 @@ class RewardFunction:
     distribution via ``set_adaptive_threshold``.
     """
 
-    def __init__(self, config: Optional[RewardConfig] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[RewardConfig] = None,
+        extra_withdrawn_drugs: Optional[Set[str]] = None,
+    ) -> None:
         self.config: RewardConfig = config or DEFAULT_CONFIG.reward
         # V30 ROOT FIX (10.25 / Compound #1): initialize _validated_hypotheses
         # from the module-level VALIDATED_HYPOTHESES constant (loaded from
@@ -3376,6 +3498,49 @@ class RewardFunction:
         # flags set) — the first compute() call will populate it.
         self._last_flags: Dict[str, bool] = {}
         self._effective_reward_weights: Dict[str, float] = self._compute_effective_weights()
+
+        # TEAMMATE-3 ROOT FIX (v131, P0 patient-safety): accept the
+        # ``extra_withdrawn_drugs`` parameter so ``build_reward_function_
+        # with_phase1_safety`` (rl/reward.py) can inject the LIVE Phase 1
+        # DrugBank withdrawn-drug set into the reward function. The
+        # previous __init__ did NOT accept this parameter, so the
+        # ``build_reward_function_with_phase1_safety`` call raised
+        # ``TypeError`` and silently fell back to a plain RewardFunction
+        # WITHOUT the Phase 1 data — meaning newly-withdrawn drugs that
+        # Phase 1 had correctly flagged were NOT caught by the safety
+        # guardrail. This was a P0 patient-safety hazard.
+        #
+        # The ``extra_withdrawn_drugs`` set is MERGED with the module-
+        # level ``WITHDRAWN_DRUGS`` frozenset (the hardcoded fallback) to
+        # form the effective ``_withdrawn_drugs`` guardrail. Drugs in
+        # EITHER set are hard-rejected (reward = -1.0).
+        #
+        # ``_treat_unknown_as_withdrawn`` defaults to True (conservative /
+        # fail-CLOSED). When True, a drug with ``is_withdrawn=None`` in
+        # the input row is treated as WITHDRAWN (hard-reject). When False,
+        # ``is_withdrawn=None`` is treated as SAFE (fail-OPEN — use only
+        # for dev/debug, NEVER in production).
+        #
+        # ``_safety_source`` records where the safety data came from, for
+        # pipeline metadata / audit. Values: 'hardcoded' (default, no
+        # Phase 1 data injected), 'phase1' (Phase 1 data only),
+        # 'merged' (Phase 1 + hardcoded union).
+        if extra_withdrawn_drugs:
+            self._withdrawn_drugs: FrozenSet[str] = frozenset(
+                set(WITHDRAWN_DRUGS) | set(extra_withdrawn_drugs)
+            )
+            self._safety_source: str = "merged"
+        else:
+            self._withdrawn_drugs = frozenset(WITHDRAWN_DRUGS)
+            self._safety_source = "hardcoded"
+        # Structured withdrawal metadata (populated by
+        # ``build_reward_function_with_phase1_safety`` when Phase 1 data
+        # is available; empty by default).
+        self._withdrawn_reasons: Dict[str, str] = {}
+        self._withdrawn_countries: Dict[str, str] = {}
+        self._withdrawn_years: Dict[str, Optional[int]] = {}
+        # Conservative default: unknown withdrawal status → WITHDRAWN.
+        self._treat_unknown_as_withdrawn: bool = True
 
     def set_validated_hypotheses(self, validated: Set[Tuple[str, str]]) -> None:
         """Inject validated hypothesis set for the data flywheel."""
@@ -3606,6 +3771,24 @@ class RewardFunction:
                 isinstance(_rw, str) and _rw.strip().lower() in ("true", "1", "yes", "y")
             ):
                 row_is_withdrawn = True
+        # TEAMMATE-3 ROOT FIX (v131, P0 patient-safety): replace the
+        # fail-OPEN ``is_withdrawn=None → SAFE`` check with the
+        # ``_check_withdrawn`` helper, which implements fail-CLOSED
+        # semantics (``is_withdrawn=None → WITHDRAWN`` by default).
+        # The helper ALSO consults ``self._withdrawn_drugs`` (the merged
+        # Phase 1 + hardcoded set) instead of ONLY the hardcoded
+        # ``WITHDRAWN_DRUGS`` frozenset — so newly-withdrawn drugs that
+        # Phase 1 correctly flagged are caught even if the hardcoded
+        # frozenset hasn't been updated yet.
+        _is_withdrawn, _is_unknown = _check_withdrawn(row, drug_name, self)
+        if _is_withdrawn:
+            return -1.0
+        # Preserve backward-compat: the original code also returned -1.0
+        # when ``drug_name in WITHDRAWN_DRUGS``. The ``_check_withdrawn``
+        # helper already checks ``self._withdrawn_drugs`` (which is the
+        # union of WITHDRAWN_DRUGS + Phase 1 data), so this redundant
+        # check is only kept as a defense-in-depth backstop for the
+        # case where ``_withdrawn_drugs`` was somehow not populated.
         if row_is_withdrawn or drug_name in WITHDRAWN_DRUGS:
             return -1.0
         # P4-014 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): the previous
@@ -10204,7 +10387,82 @@ def run_pipeline(
 
     validated_set = load_validated_hypotheses()
 
-    reward_fn = RewardFunction(config.reward)
+    # TEAMMATE-3 ROOT FIX (v131, P0 patient-safety): wire Phase 1 DrugBank
+    # withdrawal data into the Phase 4 RL safety reward.
+    #
+    # The previous code unconditionally used ``RewardFunction(config.reward)``,
+    # which uses ONLY the hardcoded ``WITHDRAWN_DRUGS`` frozenset (~41 drugs)
+    # as the patient-safety guardrail. This meant newly-withdrawn drugs that
+    # Phase 1 had correctly flagged ``is_withdrawn=True`` (from the live
+    # DrugBank <withdrawn-notice> element) were NOT caught by the RL ranker
+    # unless their names happened to be in the hardcoded frozenset. A pharma
+    # partner could be given a HIGH-ranked hypothesis for a withdrawn drug.
+    #
+    # The fix:
+    #   - When ``PHASE1_PROCESSED_DIR`` env var points to a valid Phase 1
+    #     output directory, build the reward function via
+    #     ``build_reward_function_with_phase1_safety`` — this loads the
+    #     LIVE Phase 1 DrugBank withdrawn-drug set, merges it with the
+    #     hardcoded frozenset (the union is the guardrail), and sets the
+    #     ``_safety_source`` attribute on the reward_fn to 'merged' or
+    #     'phase1' for audit metadata.
+    #   - When ``PHASE1_PROCESSED_DIR`` is unset or points to a non-existent
+    #     directory, fall back to the plain ``RewardFunction(config.reward)``
+    #     (hardcoded frozenset only) and log a CRITICAL warning so the
+    #     operator knows the patient-safety guardrail is in DEGRADED mode.
+    #
+    # The ``treat_unknown_as_withdrawn=True`` default means a drug with
+    # ``is_withdrawn=None`` in the input row is treated as WITHDRAWN
+    # (fail-CLOSED) — the conservative patient-safety default.
+    _phase1_dir = os.environ.get("PHASE1_PROCESSED_DIR", "phase1/processed_data")
+    _phase1_dir_resolved = (
+        _phase1_dir
+        if os.path.isabs(_phase1_dir)
+        else os.path.abspath(_phase1_dir)
+    )
+    if os.path.isdir(_phase1_dir_resolved):
+        try:
+            from rl.reward import build_reward_function_with_phase1_safety
+            reward_fn = build_reward_function_with_phase1_safety(
+                phase1_dir=_phase1_dir_resolved,
+                config=config.reward,
+                treat_unknown_as_withdrawn=True,  # CONSERVATIVE (fail-CLOSED)
+            )
+            logger.info(
+                "TEAMMATE-3: Built reward function with Phase 1 safety "
+                "signals from %s. safety_source=%s, withdrawn_drugs=%d.",
+                _phase1_dir_resolved,
+                getattr(reward_fn, "_safety_source", "unknown"),
+                len(getattr(reward_fn, "_withdrawn_drugs", WITHDRAWN_DRUGS)),
+            )
+        except FileNotFoundError as _p1_exc:
+            logger.warning(
+                "TEAMMATE-3: Phase 1 dir %s exists but DrugBank CSV is "
+                "missing (%s). Falling back to hardcoded WITHDRAWN_DRUGS "
+                "frozenset (%d drugs). Patient-safety guardrail is in "
+                "DEGRADED mode.",
+                _phase1_dir_resolved, _p1_exc, len(WITHDRAWN_DRUGS),
+            )
+            reward_fn = RewardFunction(config.reward)
+        except Exception as _p1_exc:
+            logger.exception(
+                "TEAMMATE-3: Failed to build reward function with Phase 1 "
+                "safety signals from %s: %s. Falling back to hardcoded "
+                "WITHDRAWN_DRUGS frozenset (%d drugs). Patient-safety "
+                "guardrail is in DEGRADED mode.",
+                _phase1_dir_resolved, _p1_exc, len(WITHDRAWN_DRUGS),
+            )
+            reward_fn = RewardFunction(config.reward)
+    else:
+        logger.warning(
+            "TEAMMATE-3: Phase 1 processed dir %s not found. Falling back "
+            "to hardcoded WITHDRAWN_DRUGS frozenset (%d drugs). The "
+            "patient-safety guardrail is running in DEGRADED mode — Phase 1 "
+            "live data is NOT being used. Set PHASE1_PROCESSED_DIR to the "
+            "Phase 1 output directory to enable live safety signals.",
+            _phase1_dir_resolved, len(WITHDRAWN_DRUGS),
+        )
+        reward_fn = RewardFunction(config.reward)
     reward_fn.set_validated_hypotheses(validated_set)
 
     # ROOT FIX (FORENSIC-AUDIT-I20): removed the dead ``data[REWARD_COL] = data.apply(...)``
@@ -11830,7 +12088,32 @@ def run_scientific_validation_gate(
     # computes disease_context_stats from the test_data, and propagates
     # BOTH to produce_evaluation_report.
     try:
-        _vh_reward_fn = RewardFunction(config.reward)
+        # TEAMMATE-3 ROOT FIX (v131): use the SAME Phase 1 safety wiring
+        # as the training reward_fn (above) so the validation gate's AUC
+        # computation is consistent with training. When the validation
+        # gate uses a plain RewardFunction (hardcoded WITHDRAWN_DRUGS
+        # only) but training used the merged Phase 1 + hardcoded set,
+        # a withdrawn drug that training correctly hard-rejected could
+        # get a non-negative reward at validation time, producing
+        # inconsistent AUC numbers.
+        _vh_phase1_dir = os.environ.get("PHASE1_PROCESSED_DIR", "phase1/processed_data")
+        _vh_phase1_dir_resolved = (
+            _vh_phase1_dir
+            if os.path.isabs(_vh_phase1_dir)
+            else os.path.abspath(_vh_phase1_dir)
+        )
+        if os.path.isdir(_vh_phase1_dir_resolved):
+            try:
+                from rl.reward import build_reward_function_with_phase1_safety
+                _vh_reward_fn = build_reward_function_with_phase1_safety(
+                    phase1_dir=_vh_phase1_dir_resolved,
+                    config=config.reward,
+                    treat_unknown_as_withdrawn=True,
+                )
+            except Exception:
+                _vh_reward_fn = RewardFunction(config.reward)
+        else:
+            _vh_reward_fn = RewardFunction(config.reward)
         if (
             getattr(config.reward, 'gnn_hard_reject_adaptive', False)
             and GNN_SCORE_COL in test_data.columns
