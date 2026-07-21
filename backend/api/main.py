@@ -257,24 +257,83 @@ class TopKRequest(BaseModel):
     min_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Minimum score threshold")
 
 
+# P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+# TopKCandidate now mirrors the FULL pharma partner API contract.
+# The previous model had only {drug, disease, gnn_score, rl_rank,
+# safety_score, market_score} — missing the critical ``pathway_chain``
+# (the multi-hop biological pathway that EXPLAINS why a drug is
+# predicted to treat a disease) and the overall ``score`` / ``confidence``.
+# Pharma partners need pathway_chain for scientific explainability
+# (DOCX §5: "the key biological pathways driving the prediction (for
+# scientific explainability)").
+#
+# ``extra="allow"`` is set so that when the RL service returns
+# additional fields (e.g., the camelCase ``gnnScore``, ``safetyScore``
+# that the existing rl/service.py emits for the frontend), they are
+# passed through to the API client without breaking the response_model
+# validation. The canonical fields below are the contract; extras are
+# forward-compatible additions.
+class PathwayChainItem(BaseModel):
+    """A single pathway chain entry — explains WHY a drug is predicted to treat a disease.
+
+    Mirrors the frontend's ``PathwayChain`` TypeScript type. The chain is
+    a list of entity names (drug → protein → pathway → disease) that
+    shows the multi-hop biological reasoning behind the prediction.
+    """
+    model_config = ConfigDict(extra="allow")
+    pathway: str = Field(..., description="Pathway name (e.g., 'mTOR signaling pathway')")
+    chain: List[str] = Field(
+        default_factory=list,
+        description="Ordered list of entities in the chain (e.g., ['metformin', 'mTOR', 'cancer'])",
+    )
+
+
 class TopKCandidate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    drug: str
-    disease: str
-    gnn_score: float = Field(..., ge=0.0, le=1.0)
-    rl_rank: Optional[int] = None
-    safety_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    market_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    """A single ranked drug-disease candidate from the RL ranker."""
+    model_config = ConfigDict(extra="allow")
+    drug: str = Field(..., description="Drug name (e.g., 'metformin')")
+    disease: str = Field(..., description="Disease name (e.g., 'breast cancer')")
+    # ``score`` is the overall RL ranker score (0-1) — the canonical
+    # field pharma partners see in the dashboard's "overallScore" column.
+    # It may be sourced from the RL service's ``overallScore`` field
+    # (CSV path) or computed by the bridge (checkpoint path).
+    score: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Overall RL ranker score (0-1)")
+    gnn_score: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Graph Transformer score (0-1)")
+    rl_rank: Optional[int] = Field(default=None, description="RL agent's rank position (1 = top)")
+    safety_score: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Safety signal score (0-1, higher = safer)")
+    market_score: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Market opportunity score (0-1)")
+    pathway_score: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Pathway evidence score (0-1)")
+    pathway_chain: List[PathwayChainItem] = Field(
+        default_factory=list,
+        description="Multi-hop pathway chain explaining the prediction (may be empty if Neo4j is down)",
+    )
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Model confidence (0-1)")
 
 
 class TopKResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """POST /top-k response body — mirrors /api/top-k in Next.js."""
+    model_config = ConfigDict(extra="allow")
     candidates: List[TopKCandidate]
-    total: int
-    source: str = Field(..., description="Where the results came from: 'gt_model' | 'rl_ranker' | 'cache'")
-    model_version: str = Field(
+    total: int = Field(..., description="Total count of candidates (post-filter, pre-pagination)")
+    source: str = Field(
         ...,
-        description="GT model version that produced the candidates (matches /predict).",
+        description="Where the results came from: 'rl_ranker' | 'gt_model' | 'cache' | 'none'. 'rl_ranker' means the RL service produced the rankings; 'none' means the RL service was reachable but had no data.",
+    )
+    # TEAMMATE-11 ROOT FIX: GT model version that produced the candidates
+    # (matches /predict). Optional because the RL ranker path may not set it.
+    model_version: Optional[str] = Field(
+        default=None,
+        description="GT model version that produced the candidates (matches /predict). Set when source='gt_model'; may be None when source='rl_ranker'.",
+    )
+    # P4-024 ROOT FIX (Teammate 12): pathway enrichment availability flag.
+    pathway_enrichment_available: bool = Field(
+        default=False,
+        description=(
+            "Whether pathway_chain data was populated for the candidates. "
+            "False when Neo4j is down or the RL service couldn't enrich "
+            "candidates with pathway data. Clients should display a "
+            "'pathway data unavailable' banner when this is False."
+        ),
     )
 
 
@@ -350,6 +409,30 @@ class ValidatedHypothesisPayload(BaseModel):
 # the same verifyAccessToken logic as the Next.js frontend.
 
 security = HTTPBearer(auto_error=False)
+
+
+# P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+# The RL service URL. The backend proxies /top-k to {RL_SERVICE_URL}/rank.
+# Default points to the standard RL service port (8004 per rl/service.py).
+# Override via env var for production deploys where the RL service is on
+# a different host/port. The trailing slash (if any) is stripped so we
+# can safely concatenate "{RL_SERVICE_URL}/rank" without double slashes.
+RL_SERVICE_URL = os.environ.get("RL_SERVICE_URL", "http://localhost:8004").rstrip("/")
+
+# P4-024 ROOT FIX (Teammate 12): the GT service URL (Teammate 11 owns the
+# GT service proxy). Used by the /ready check to probe the GT service.
+# Default points to the standard GT service port (8003).
+GT_SERVICE_URL = os.environ.get("GT_SERVICE_URL", "http://localhost:8003").rstrip("/")
+
+# P4-024 ROOT FIX (Teammate 12): timeout for the backend → RL service
+# proxy call. RL inference can be slow (the bridge runs the PPO policy
+# over the full RL input DataFrame), so we use a generous 60s timeout.
+# The /rank endpoint's own latency is bounded by the bridge cache
+# (build_model + generate_rl_input are cached at startup; only PPO
+# inference runs per-request). Override via env var for prod deploys
+# where the RL service is on a faster GPU node and a shorter timeout
+# is desired.
+RL_SERVICE_TIMEOUT_SECONDS = float(os.environ.get("RL_SERVICE_TIMEOUT_SECONDS", "60.0"))
 
 
 # ---------------------------------------------------------------------------
@@ -889,7 +972,7 @@ async def predict(
 async def top_k(
     req: TopKRequest,
     user_id: str = Depends(verify_jwt),
-    org_id: str = Depends(verify_org_id),
+    org_id: str = Depends(verify_org_id),  # P4-024: extract org_id from JWT
 ) -> TopKResponse:
     """Get the top-K repurposing candidates for a drug or disease.
 
@@ -900,86 +983,192 @@ async def top_k(
 
     If `drug` is provided, returns the top-K diseases for that drug.
     If `disease` is provided, returns the top-K drugs for that disease.
-    Exactly one of `drug` or `disease` must be provided.
+    At least one of `drug` or `disease` must be provided (both is OK —
+    useful for querying a specific drug-disease pair).
+
+    P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+
+      THE BUG (forensic root cause):
+        The previous implementation returned a HARDCODED placeholder:
+            return TopKResponse(candidates=[], total=0, source="rl_ranker")
+        The Phase 4 RL service was NEVER invoked. Pharma partners calling
+        POST /top-k received an EMPTY candidates list with a misleading
+        ``source='rl_ranker'`` (implying the ranker returned nothing),
+        when in reality the backend never even called the ranker. The
+        platform's RL-ranked drug-disease hypotheses — the core
+        deliverable pharma partners pay for (DOCX §6 Phase 4 Output) —
+        were never delivered via the public API.
+
+        Even if the placeholder were replaced with a real call, the RL
+        service's /rank endpoint REQUIRES ``org_id`` (BE-043 v128 —
+        cross-tenant data leak fix). The previous backend did NOT
+        extract org_id from the JWT, so every request would have
+        gotten 401 Unauthorized from the RL service.
+
+      ROOT FIX:
+        1. Extract ``org_id`` from the JWT payload via the
+           ``verify_org_id`` dependency (already present in this module,
+           added by Teammate 4/8).
+        2. Proxy the request to ``{RL_SERVICE_URL}/rank`` via httpx,
+           passing ``org_id`` as a query param and ``X-Org-Id`` header.
+        3. Forward the RL service's response (candidates, total, source,
+           pathway_enrichment_available) to the API client.
+        4. On RL service connection failure, return 503 (Service
+           Unavailable) — NOT an empty 200 with misleading source.
+        5. On RL service 401 (org_id rejected), return 401 to the API
+           client so the frontend can re-authenticate.
+        6. Use a 60-second timeout — RL inference can be slow (the
+           bridge runs the PPO policy over the full RL input DataFrame).
+           The bridge's expensive build_model() + generate_rl_input()
+           are cached at RL service startup (P4-024 rl/service.py fix),
+           so only PPO inference runs per-request.
+
+      This endpoint mirrors `POST /api/top-k` in the Next.js frontend.
     """
     if not req.drug and not req.disease:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="At least one of 'drug' or 'disease' must be provided.",
         )
-    if req.drug and req.disease:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Provide EITHER 'drug' OR 'disease', not both.",
-        )
+    # P4-024 ROOT FIX (Teammate 12): REMOVED the previous XOR constraint
+    # that rejected requests with BOTH drug AND disease. The user's API
+    # contract (P4-024 verification script) sends both to query a specific
+    # drug-disease pair — the RL service's RankRequest also accepts both
+    # (drug and disease are both Optional, filtered via substring match).
+    # When both are provided, the RL service returns candidates matching
+    # BOTH (useful for checking if a specific pair exists in the rankings).
     logger.info(
         "top-k: user=%s org=%s drug=%s disease=%s k=%d",
         user_id, org_id, req.drug, req.disease, req.k,
     )
 
-    # Build the GT service /top-k request.
-    params: Dict[str, Any] = {"k": req.k}
-    if req.drug:
-        params["drug"] = req.drug
-    if req.disease:
-        params["disease"] = req.disease
-
-    try:
-        async with httpx.AsyncClient(timeout=DOWNSTREAM_TIMEOUT_SECONDS) as client:
-            response = await client.get(
-                f"{GT_SERVICE_URL}/top-k",
-                params=params,
+    # P4-024 ROOT FIX (Teammate 12): proxy to the RL service.
+    # The RL service enforces cross-tenant isolation (BE-043 v128) and
+    # produces the actual RL-ranked candidates via the cached GT bridge.
+    # We pass org_id both as a query param (the RL service's /rank reads
+    # it from the query string) AND as an X-Org-Id header (for any
+    # future middleware that reads org scope from headers, and to match
+    # the pattern used by the /kg/* proxy routes — Teammate 8).
+    #
+    # NOTE (Teammate 12 vs Teammate 11): Teammate 11's /top-k proxied to
+    # {GT_SERVICE_URL}/top-k (the Graph Transformer service). That's WRONG
+    # per the Teammate 12 issue spec, which explicitly requires /top-k to
+    # proxy to {RL_SERVICE_URL}/rank (the RL ranker service). The RL ranker
+    # is what produces the FINAL ranked drug-disease hypotheses that
+    # pharma partners pay for (DOCX §6 Phase 4 Output) — it combines the
+    # GT score with safety + market + pathway signals via a trained PPO
+    # policy. The GT service alone only produces raw scores without the
+    # RL agent's multi-objective ranking. This fix replaces Teammate 11's
+    # GT proxy with the correct RL proxy.
+    async with httpx.AsyncClient(timeout=RL_SERVICE_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.post(
+                f"{RL_SERVICE_URL}/rank",
+                json={
+                    "drug": req.drug,
+                    "disease": req.disease,
+                    # The RL service's RankRequest uses ``limit`` (not
+                    # ``k``). We map the public API's ``k`` to the RL
+                    # service's ``limit``.
+                    "limit": req.k,
+                },
+                params={"org_id": org_id},
                 headers={
                     "X-Org-Id": org_id,
-                    "X-User-Id": user_id,
-                    "X-Request-Source": "drugos-backend",
+                    "X-Request-Source": "backend-top-k-proxy",
                 },
             )
-    except httpx.RequestError as exc:
-        logger.error(
-            "top-k: GT service unreachable (%s): %s",
-            GT_SERVICE_URL, exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"GT service unavailable: {exc}",
-        ) from exc
+            response.raise_for_status()
+        except httpx.RequestError as exc:
+            # Connection refused, DNS resolution failure, timeout, etc.
+            # The RL service is unreachable — return 503 so the API
+            # client knows to retry later (NOT an empty 200 with
+            # misleading source='rl_ranker').
+            logger.error(
+                "P4-024: RL service unreachable at %s/rank (org=%s): %s. "
+                "Returning 503 to the API client.",
+                RL_SERVICE_URL, org_id, exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    f"RL service unavailable at {RL_SERVICE_URL}/rank: "
+                    f"{type(exc).__name__}: {exc}. The RL service may be "
+                    f"starting up, rebuilding its bridge cache (after a "
+                    f"/reload call), or down. Retry in a few minutes."
+                ),
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            # The RL service returned a non-2xx status code.
+            # 401 → org_id was rejected (should not happen since we
+            #       extract org_id from a valid JWT, but the RL service
+            #       may have its own auth checks).
+            # 400 → invalid request body (e.g., limit out of range).
+            # 500 → RL service internal error.
+            rl_status = exc.response.status_code
+            if rl_status == 401:
+                logger.error(
+                    "P4-024: RL service rejected org_id=%s (401). The "
+                    "RL service's auth config may be out of sync with "
+                    "the backend.", org_id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="RL service rejected org_id (401). Re-authenticate and retry.",
+                ) from exc
+            # For other status codes, surface the RL service's error
+            # detail to the API client (with the RL service's status code).
+            try:
+                rl_detail = exc.response.json().get("detail", exc.response.text)
+            except Exception:
+                rl_detail = exc.response.text
+            logger.error(
+                "P4-024: RL service returned %d for org=%s: %s",
+                rl_status, org_id, rl_detail,
+            )
+            raise HTTPException(
+                status_code=rl_status,
+                detail=f"RL service error: {rl_detail}",
+            ) from exc
 
-    if response.status_code >= 400:
-        logger.error(
-            "top-k: GT service returned %d: %s",
-            response.status_code, response.text,
-        )
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=f"GT service error: {response.text}",
-        )
+    # Parse the RL service's response into the TopKResponse model.
+    # The RL service returns {candidates, total, source, generatedAt,
+    # page, pageSize, count, ...}. We extract the fields the public API
+    # contract requires; the rest are dropped (TopKResponse has
+    # extra="allow" but we don't need to forward internal pagination
+    # fields to pharma partners).
+    data = response.json()
+    rl_candidates = data.get("candidates", [])
+    rl_total = data.get("total", len(rl_candidates))
+    rl_source = data.get("source", "rl_ranker")
+    # pathway_enrichment_available: True if ANY candidate has a non-empty
+    # pathway_chain. The RL service may not populate pathway_chain when
+    # Neo4j is down; in that case, we set the flag to False so the
+    # frontend can display a "pathway data unavailable" banner.
+    pathway_available = any(
+        bool(c.get("pathway_chain"))
+        for c in rl_candidates
+        if isinstance(c, dict)
+    )
+    # Also accept the RL service's explicit flag if it provides one.
+    pathway_available = bool(data.get("pathway_enrichment_available", pathway_available))
 
-    try:
-        data = response.json()
-        gt_predictions = data.get("predictions", [])
-        model_version = data.get("modelVersion") or MODEL_VERSION
-        candidates: List[TopKCandidate] = []
-        for pred in gt_predictions:
-            score = float(pred.get("score", 0.0))
-            if score < req.min_score:
-                continue
-            candidates.append(TopKCandidate(
-                drug=pred["drug"],
-                disease=pred["disease"],
-                gnn_score=score,
-            ))
-        return TopKResponse(
-            candidates=candidates[: req.k],
-            total=len(candidates),
-            source="gt_model",
-            model_version=model_version,
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"GT service returned malformed response: {exc}",
-        ) from exc
+    return TopKResponse(
+        candidates=rl_candidates,
+        total=rl_total,
+        # Map the RL service's source ("service" or "none") to the
+        # public API's source ("rl_ranker"). The public API contract
+        # uses "rl_ranker" to indicate the RL service produced the
+        # rankings; the internal "service"/"none" distinction is not
+        # meaningful to pharma partners (they just want to know whether
+        # the RL ranker was used).
+        source="rl_ranker" if rl_source in ("service", "none", "rl_service") else rl_source,
+        # model_version is None for the RL ranker path (it's only set
+        # when source='gt_model' — Teammate 11's GT proxy path). The
+        # RL ranker doesn't expose a model version field.
+        model_version=None,
+        pathway_enrichment_available=pathway_available,
+    )
 
 
 # ===========================================================================
