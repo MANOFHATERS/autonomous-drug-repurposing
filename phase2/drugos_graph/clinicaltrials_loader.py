@@ -3928,69 +3928,77 @@ def _build_edge_record_from_dict(
     #   - "failed_for"  = tested, proven INEFFECTIVE (negative label)
     # "failed_for" is added to CORE_EDGE_TYPES in config.py.
     rel_type: str = "tested_for"
-    # P2-016 ROOT FIX (rel_type="treats" too strict on primary_outcome_met):
-    # The previous condition ``primary_outcome_met is True`` was too
-    # strict. The ClinicalTrials.gov AACT schema does NOT have a
-    # first-class ``primary_outcome_met`` column — it's a derived
-    # field computed from the results database. Most completed trials
-    # do NOT post results, so ``primary_outcome_met`` is None for
-    # ~70% of completed trials. The ``is True`` check fails for None,
-    # so 70% of completed trials got rel_type="tested_for" instead
-    # of "treats". The Compound-treats-Disease edge set was severely
-    # understated (only ~30% of completed trials contributed),
-    # TransE training had fewer positive treats triples, AUC dropped,
-    # and the V1 launch criterion (>0.85 AUC) was harder to meet.
-    # The clinical-trial evidence — which should be the STRONGEST
-    # positive signal in the KG — was silently downgraded to
-    # "tested_for".
+    # Teammate 6 ROOT FIX (P2-002 — 'None is not False' trap):
+    # The previous code used ``primary_outcome_met is not False`` as the
+    # gate for assigning rel_type='treats'. In Python, ``None is not False``
+    # evaluates to True — so a completed trial with primary_outcome_met=None
+    # (no posted results, ~70% of completed trials) was assigned
+    # rel_type='treats' (positive signal). This is scientifically wrong:
+    # a trial that COMPLETED but did NOT post results is NOT evidence of
+    # efficacy — it's evidence of NOTHING (we don't know the outcome).
+    # The Compound-treats-Disease edge set was inflated with unknown-
+    # outcome trials, the TransE training learned "treats" includes
+    # unknown-outcome pairs, and the AUC metric was corrupted (the model
+    # appeared to learn efficacy when it was actually learning "trial
+    # completed" — a much weaker signal).
     #
-    # ROOT FIX: treat ``None`` (outcome unknown / unreported) as
-    # "possibly positive". A completed trial with no posted results
-    # is still evidence that the drug was investigated for the
-    # disease — and the trial COMPLETED (was not terminated for
-    # efficacy failure), which is weakly positive evidence. Only
-    # ``primary_outcome_met is False`` (trial explicitly reported
-    # the primary endpoint was NOT met) downgrades to "failed_for"
-    # (v102 P2-042 — was "tested_for" before P2-042, which was a weak
-    # POSITIVE signal despite the drug being proven INEFFECTIVE).
-    # The assumption fires for ~70% of completed trials; we log a
-    # WARNING so operators can audit the assumption per study phase.
+    # ROOT FIX: use STRICT tri-state logic.
+    #   - primary_outcome_met is True  -> 'treats'      (positive evidence)
+    #   - primary_outcome_met is False -> 'failed_for'  (negative evidence)
+    #   - primary_outcome_met is None  -> 'tested_for'  (neutral / unknown)
+    # None (unknown) NO LONGER auto-promotes to 'treats'. The default
+    # rel_type='tested_for' (set above) is preserved when
+    # primary_outcome_met is None.
+    #
+    # The P2-016 "ROOT FIX" comment that was here previously was a
+    # LIE — it claimed that treating None as 'treats' was correct
+    # because "trial COMPLETED is weakly positive evidence". That's
+    # scientifically wrong: trials complete for many reasons unrelated
+    # to efficacy (sponsor decision, enrollment targets met, regulatory
+    # milestones). The ONLY rigorous signal is the explicit
+    # primary_outcome_met=True. (Audit comment: "comments are fakes
+    # they have fixed when i manually check code its 100 percent
+    # broken" — this was exactly such a case.)
     if (
         overall_status_str is not None
         and _normalise_trial_status(overall_status_str) == "completed"
-        and primary_outcome_met is not False
     ):
-        rel_type = "treats"
-        if primary_outcome_met is None:
-            # P2-016: log when the "treats" assignment is based on
-            # completion alone (no posted results). Operators can
-            # audit by NCT ID if a specific trial's "treats" edge
-            # is questionable.
-            logger.warning(
-                "P2-016: NCT=%s rel_type='treats' assigned based on "
-                "trial completion alone (primary_outcome_met is "
-                "None — no posted results). The trial COMPLETED "
-                "(was not terminated for efficacy failure) which "
-                "is weakly positive evidence. Audit by NCT ID if "
-                "the 'treats' edge is questionable.",
+        if primary_outcome_met is True:
+            # Completed AND primary endpoint explicitly MET — strong
+            # positive evidence of efficacy.
+            rel_type = "treats"
+        elif primary_outcome_met is False:
+            # Completed BUT primary endpoint explicitly NOT MET —
+            # negative evidence (drug proven INEFFECTIVE for this
+            # disease in this trial). v102 P2-042: emit as 'failed_for'.
+            rel_type = "failed_for"
+        else:
+            # primary_outcome_met is None — outcome UNKNOWN. The trial
+            # completed but did not post results (or the results
+            # database doesn't have a primary_outcome_met field for
+            # this trial). This is NEUTRAL evidence, NOT positive.
+            # Keep the default rel_type='tested_for'.
+            rel_type = "tested_for"
+            logger.info(
+                "P2-002 ROOT FIX: NCT=%s completed trial with "
+                "primary_outcome_met=None — assigning rel_type="
+                "'tested_for' (NEUTRAL, not 'treats'). The trial "
+                "completed but did not post primary outcome results, "
+                "so we have NO evidence of efficacy or failure. The "
+                "previous 'None is not False' trap would have "
+                "auto-promoted this to 'treats' (positive signal), "
+                "inflating the Compound-treats-Disease edge set with "
+                "unknown-outcome trials and corrupting AUC.",
                 nct_id,
                 extra={
                     "stage": "rel_type_inference",
                     "source": SOURCE_KEY,
                     "nct_id": nct_id,
                     "primary_outcome_met": None,
-                    "assumption": "completed_no_results_is_weakly_positive",
+                    "rel_type": "tested_for",
+                    "fix": "P2-002_none_is_not_false_trap_closed",
                 },
             )
-    elif (
-        overall_status_str is not None
-        and _normalise_trial_status(overall_status_str) == "completed"
-        and primary_outcome_met is False
-    ):
-        # v102 P2-042: completed but FAILED primary endpoint.
-        # Drug proven INEFFECTIVE — emit as negative signal, not
-        # positive "tested_for" or neutral "tested_for".
-        rel_type = "failed_for"
 
     # Issue 2.3 / 7.1 -- deterministic edge_id.
     edge_id: str = _build_edge_id(

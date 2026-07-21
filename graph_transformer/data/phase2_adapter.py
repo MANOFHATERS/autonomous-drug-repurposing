@@ -1852,6 +1852,133 @@ def validate_hetero_data(hetero_data: Any) -> None:
             "the Phase 3 schema."
         )
 
+    # ─── Check 1: HeteroData has node_types and edge_types ──────────────
+    if not hasattr(hetero_data, "node_types") or not hasattr(hetero_data, "edge_types"):
+        raise Phase2AdapterValidationError(
+            f"Expected a torch_geometric.data.HeteroData object with "
+            f"'node_types' and 'edge_types' attributes. Got: "
+            f"{type(hetero_data).__name__}. Did you pass a plain dict "
+            f"or a tensor instead of a HeteroData?"
+        )
+
+    # ─── Check 2: All 5 canonical node types present ────────────────────
+    # Accept BOTH the capitalized Phase 2 form (Compound, Protein, ...)
+    # AND the lowercase Phase 3 form (drug, protein, ...). The adapter
+    # handles the mapping; the validator just needs to confirm both
+    # forms aren't simultaneously absent.
+    expected_pairs = [
+        ("drug", "Compound"),
+        ("protein", "Protein"),
+        ("pathway", "Pathway"),
+        ("disease", "Disease"),
+        ("clinical_outcome", "ClinicalOutcome"),
+    ]
+    present_node_types = set(hetero_data.node_types)
+    missing_node_types: List[str] = []
+    zero_count_node_types: List[str] = []
+
+    for lower, cap in expected_pairs:
+        if lower in present_node_types:
+            nt_key = lower
+        elif cap in present_node_types:
+            nt_key = cap
+        else:
+            missing_node_types.append(
+                f"{lower!r} (or capitalized {cap!r})"
+            )
+            continue
+        # Check non-zero node count (warning, not error — a graph with
+        # 0 Pathway nodes is technically valid if STRING PPI data was
+        # not loaded, but it indicates a data gap).
+        try:
+            n_nodes = hetero_data[nt_key].num_nodes
+        except (AttributeError, KeyError):
+            n_nodes = 0
+        if not n_nodes:
+            zero_count_node_types.append(nt_key)
+
+    if missing_node_types:
+        raise Phase2AdapterValidationError(
+            f"HeteroData is missing required node types: "
+            f"{missing_node_types}. Present node types: "
+            f"{sorted(present_node_types)}. The Phase 3 GT model "
+            f"requires all 5 canonical node types to train. If "
+            f"clinical_outcome is missing, ensure the Phase 2 "
+            f"fold_meddra_to_clinical_outcome ran (check the bridge "
+            f"log for 'folded N MedDRA_Term nodes into ClinicalOutcome "
+            f"nodes'). (P2-001 root fix)"
+        )
+
+    for nt in zero_count_node_types:
+        logger.warning(
+            "validate_hetero_data: node type %r has 0 nodes. The GT "
+            "model will have no signal for this type — check upstream "
+            "loaders. (P2-001 root fix)",
+            nt,
+        )
+
+    # ─── Check 3: edge_index shape is [2, E] ────────────────────────────
+    for edge_type in hetero_data.edge_types:
+        ei = hetero_data[edge_type].edge_index
+        if ei is None:
+            raise Phase2AdapterValidationError(
+                f"Edge type {edge_type}: edge_index is None. Every edge "
+                f"type must have a non-None edge_index (use "
+                f"torch.zeros((2, 0), dtype=torch.long) for empty edge "
+                f"types)."
+            )
+        if ei.dim() != 2 or ei.size(0) != 2:
+            raise Phase2AdapterValidationError(
+                f"Edge type {edge_type}: edge_index shape "
+                f"{list(ei.shape)} is not [2, E]. PyG expects dim=2 "
+                f"and size(0)=2 (row 0 = source, row 1 = destination). "
+                f"A common cause is transposing with .t() on a "
+                f"[E, 2] tensor without .contiguous() — use "
+                f"torch.tensor(data, dtype=torch.long).t().contiguous() "
+                f"instead. (P2→P3 contract)"
+            )
+
+        # ─── Check 4: edge_attr matches edge_index ─────────────────────
+        # Phase 2's pyg_builder now ALWAYS sets edge_attr (Teammate 6
+        # ROOT FIX). If edge_attr is missing, the Phase 2 build is
+        # either old (pre-fix) or someone bypassed the builder. Either
+        # way, warn — but don't raise, because Phase 3 can technically
+        # train without edge_attr (it just loses confidence signal).
+        try:
+            ea = hetero_data[edge_type].edge_attr
+        except AttributeError:
+            ea = None
+        if ea is not None:
+            if ea.dim() != 2:
+                raise Phase2AdapterValidationError(
+                    f"Edge type {edge_type}: edge_attr shape "
+                    f"{list(ea.shape)} is not 2D. Expected [E, D]."
+                )
+            if ea.size(0) != ei.size(1):
+                raise Phase2AdapterValidationError(
+                    f"Edge type {edge_type}: edge_attr has {ea.size(0)} "
+                    f"rows but edge_index has {ei.size(1)} edges. They "
+                    f"must match (edge_attr[i] describes edge_index[:, i])."
+                )
+
+    # ─── Log summary ────────────────────────────────────────────────────
+    total_nodes = sum(
+        hetero_data[nt].num_nodes for nt in hetero_data.node_types
+    )
+    total_edges = 0
+    for et in hetero_data.edge_types:
+        ei = hetero_data[et].edge_index
+        if ei is not None and ei.dim() == 2 and ei.size(0) == 2:
+            total_edges += int(ei.size(1))
+    logger.info(
+        "validate_hetero_data: PASSED. %d node types, %d edge types, "
+        "%d total nodes, %d total edges. (P2-001 root fix)",
+        len(hetero_data.node_types),
+        len(hetero_data.edge_types),
+        total_nodes, total_edges,
+    )
+
+
 
 def adapt_phase2_to_phase3_from_file(
     hetero_data_path: str,

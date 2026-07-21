@@ -172,6 +172,19 @@ CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
     ("Gene", "susceptible_to", "Disease"),
     # ── FIX-F / C-16: ClinicalOutcome node + edge ──
     ("Compound", "has_clinical_outcome", "ClinicalOutcome"),
+    # Teammate 6 ROOT FIX (P2-001): fold_meddra_to_clinical_outcome emits
+    # ("Compound", "causes", "ClinicalOutcome") edges when folding SIDER
+    # MedDRA_Term nodes into ClinicalOutcome nodes. The previous whitelist
+    # had ONLY "has_clinical_outcome" — the fold's "causes" edges would be
+    # dead-lettered by RecordingGraphBuilder.load_edges_batch (which checks
+    # CORE_EDGE_TYPES_SET). ROOT FIX: add the "causes" edge type to the
+    # whitelist so the fold function's edges are accepted. Both
+    # "has_clinical_outcome" and "causes" map to the SAME Phase 3 edge
+    # type ("drug", "causes", "clinical_outcome") via the
+    # PHASE2_TO_PHASE3_EDGE mapping in phase2_schema.py — keeping both
+    # preserves backward compat with existing callers that use
+    # "has_clinical_outcome" while enabling the new fold path.
+    ("Compound", "causes", "ClinicalOutcome"),
     # v107 ROOT FIX (ISSUE-P2-040): "validated_treats" was missing from
     # CORE_EDGE_TYPES — the data flywheel creates these edges.
     # TM15 v132 ROOT FIX (P2-consistency): corrected "Drug" -> "Compound"

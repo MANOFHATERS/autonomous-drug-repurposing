@@ -1267,6 +1267,90 @@ class PyGBuilder(GraphBuilderProtocol):
                         torch.zeros(0, dtype=torch.long)
                     )
 
+                # ─── Teammate 6 ROOT FIX (P2→P3 edge_attr): add edge features ──
+                # The previous code set edge_index but NEVER set edge_attr.
+                # Phase 3's EDGE_FEATURE_SCHEMAS (phase2/contracts/phase2_schema.py)
+                # declares per-edge features (pchembl_value, confidence,
+                # evidence_strength, source_count, etc.) — but the Phase 2
+                # HeteroData never populated them. The Phase 3 GT model
+                # could not differentiate high-confidence edges (e.g. ChEMBL
+                # pChEMBL=9 potent inhibitor) from low-confidence ones
+                # (e.g. text-mined DRKG edges with no assay data).
+                #
+                # ROOT FIX: build a [num_edges, 3] edge_attr tensor with
+                # (confidence, evidence_strength, source_count) per edge.
+                # These three features are the MINIMUM set Phase 3's
+                # EDGE_FEATURE_SCHEMAS declares across ALL edge types
+                # (every edge type has at least a "confidence" column).
+                #
+                # When ``edge_provenance`` is provided (per-edge dict list
+                # keyed by (src_type, rel_name, dst_type)), extract the
+                # actual per-edge values. Otherwise default to [1.0, 1.0, 1]
+                # (max-confidence sentinel — better than 0.0 which would
+                # zero-out the edge in attention weighting).
+                #
+                # The edge_attr shape is ALWAYS [num_edges, 3] (even when
+                # num_edges=0) so downstream code can rely on the shape
+                # contract: ``edge_attr.size(0) == edge_index.size(1)``.
+                _n_edges_ea = int(edge_index.size(1))
+                if _n_edges_ea > 0:
+                    _prov_list_ea = None
+                    if edge_provenance is not None:
+                        _prov_list_ea = edge_provenance.get(
+                            (src_type, rel_name, dst_type)
+                        )
+                    if (
+                        _prov_list_ea is not None
+                        and len(_prov_list_ea) == _n_edges_ea
+                    ):
+                        # Extract per-edge features from provenance dicts.
+                        # Defensive: each value is clamped to a finite
+                        # float (NaN/Inf → default) — a corrupt provenance
+                        # entry must NOT poison the GNN with NaN edge
+                        # features (would propagate to NaN loss).
+                        _edge_attr_ea = torch.zeros(
+                            _n_edges_ea, 3, dtype=torch.float32,
+                        )
+                        for _i_ea, _prov_ea in enumerate(_prov_list_ea):
+                            try:
+                                _conf_ea = float(
+                                    _prov_ea.get("confidence", 1.0) or 1.0
+                                )
+                                _evi_ea = float(
+                                    _prov_ea.get("evidence_strength", 1.0) or 1.0
+                                )
+                                _sc_ea = float(
+                                    _prov_ea.get("source_count", 1) or 1
+                                )
+                            except (TypeError, ValueError):
+                                _conf_ea = 1.0
+                                _evi_ea = 1.0
+                                _sc_ea = 1.0
+                            # NaN/Inf guard
+                            if not (_conf_ea == _conf_ea and -1e30 < _conf_ea < 1e30):
+                                _conf_ea = 1.0
+                            if not (_evi_ea == _evi_ea and -1e30 < _evi_ea < 1e30):
+                                _evi_ea = 1.0
+                            if not (_sc_ea == _sc_ea and -1e30 < _sc_ea < 1e30):
+                                _sc_ea = 1.0
+                            _edge_attr_ea[_i_ea, 0] = _conf_ea
+                            _edge_attr_ea[_i_ea, 1] = _evi_ea
+                            _edge_attr_ea[_i_ea, 2] = _sc_ea
+                        data[src_type, rel_name, dst_type].edge_attr = _edge_attr_ea
+                    else:
+                        # No provenance — default to [1.0, 1.0, 1] per edge.
+                        data[src_type, rel_name, dst_type].edge_attr = (
+                            torch.ones(_n_edges_ea, 3, dtype=torch.float32)
+                        )
+                else:
+                    # Empty edge type — set empty edge_attr for shape
+                    # consistency. Phase 3's validate_hetero_data checks
+                    # that edge_attr.size(0) == edge_index.size(1) — both
+                    # are 0 here, so the validation passes.
+                    data[src_type, rel_name, dst_type].edge_attr = (
+                        torch.zeros(0, 3, dtype=torch.float32)
+                    )
+
                 # v100 ROOT FIX (BUG P2-053 — PyG / Aliasing / Dead
                 # Code): the v88 "ROOT FIX" block that previously
                 # lived here was DEAD CODE — it re-assigned

@@ -1128,6 +1128,235 @@ class RecordingGraphBuilder:
                 out.extend(load["edges"])
         return out
 
+    # -- Teammate 6 ROOT FIX: fold/convenience API for graph manipulation --
+    # The clinical_outcome_folder.fold_meddra_to_clinical_outcome function
+    # needs a uniform API to add nodes/edges, query by type, and remove
+    # edges. The load_nodes_batch/load_edges_batch API requires constructing
+    # list-of-dicts which is awkward for single-node/edge operations.
+    # These convenience methods wrap the batch API for single-item use,
+    # and add query/remove operations that the batch API lacks.
+    #
+    # All methods respect the same validation (ID_PATTERNS, CORE_EDGE_TYPES
+    # whitelist, referential integrity) as the batch API — they are NOT a
+    # bypass. They exist so the fold function can be expressed cleanly.
+
+    def add_node(
+        self,
+        label: str,
+        node_id: str,
+        properties: Optional[Dict[str, Any]] = None,
+        source: str = "manual",
+    ) -> int:
+        """Add a single node (convenience wrapper over load_nodes_batch).
+
+        Parameters
+        ----------
+        label : str
+            Node label (e.g. 'Compound', 'ClinicalOutcome').
+        node_id : str
+            Node ID (must match ID_PATTERNS[label]).
+        properties : dict, optional
+            Node properties. The 'id' and 'entity_type' fields are set
+            automatically. If 'name' is not in properties, node_id is
+            used as the name. All other keys are FLATTENED into the
+            top-level record dict (NOT nested under 'props') so they
+            pass through _apply_node_whitelist individually.
+        source : str
+            Source label for the load record (default 'manual').
+
+        Returns
+        -------
+        int
+            1 if accepted, 0 if dead-lettered or duplicate.
+        """
+        properties = dict(properties) if properties else {}
+        # FLATTEN properties into the top-level record. The whitelist
+        # (_apply_node_whitelist) checks each top-level key against
+        # NODE_PROPERTY_WHITELIST[label] individually. If we nested
+        # them under 'props', the entire 'props' sub-dict would be
+        # stripped (because 'props' is not in the whitelist).
+        node_record: Dict[str, Any] = {
+            "id": node_id,
+            "name": properties.pop("name", node_id),
+            "entity_type": label,
+            "source": properties.pop("source", source),
+        }
+        # Merge remaining properties at the top level (whitelist will
+        # drop any that are not allowed).
+        for k, v in properties.items():
+            node_record[k] = v
+        return self.load_nodes_batch(
+            label=label, nodes=[node_record], source=source,
+        )
+
+    def add_edge(
+        self,
+        src_label: str,
+        rel_type: str,
+        dst_label: str,
+        src_id: str,
+        dst_id: str,
+        properties: Optional[Dict[str, Any]] = None,
+        source: str = "manual",
+    ) -> int:
+        """Add a single edge (convenience wrapper over load_edges_batch).
+
+        Parameters
+        ----------
+        src_label, rel_type, dst_label : str
+            Edge type triple (must be in CORE_EDGE_TYPES whitelist).
+        src_id, dst_id : str
+            Endpoint node IDs (must already exist as nodes).
+        properties : dict, optional
+            Edge properties (confidence, evidence_strength, source_count, etc.).
+            The 'src_id' and 'dst_id' keys are set automatically. All other
+            keys are FLATTENED into the top-level record dict (NOT nested
+            under 'props') so they pass through _apply_edge_whitelist
+            individually.
+        source : str
+            Source label for the load record.
+
+        Returns
+        -------
+        int
+            1 if accepted, 0 if dead-lettered or duplicate.
+        """
+        properties = dict(properties) if properties else {}
+        # FLATTEN properties into the top-level record (same rationale
+        # as add_node — the whitelist checks each key individually).
+        edge_record: Dict[str, Any] = {
+            "src_id": src_id,
+            "dst_id": dst_id,
+            "source": properties.pop("source", source),
+        }
+        for k, v in properties.items():
+            edge_record[k] = v
+        return self.load_edges_batch(
+            src_label=src_label, rel_type=rel_type, dst_label=dst_label,
+            edges=[edge_record], source=source,
+        )
+
+    def get_nodes_by_type(self, label: str) -> Dict[str, Dict[str, Any]]:
+        """Return all nodes of a given label as {node_id: merged_properties}.
+
+        Merges 'props' sub-dict with top-level fields (id, name, source,
+        entity_type) so callers can access meddra_id, meddra_name, etc.
+        directly without digging into 'props'.
+
+        Parameters
+        ----------
+        label : str
+            Node label (e.g. 'MedDRA_Term', 'ClinicalOutcome').
+
+        Returns
+        -------
+        dict
+            {node_id: properties_dict}. Empty dict if no nodes of this label.
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        for load in self.node_loads:
+            if load["label"] != label:
+                continue
+            for node in load["nodes"]:
+                nid = node.get("id")
+                if nid is None:
+                    continue
+                # Merge top-level fields with props sub-dict
+                merged = dict(node.get("props", {}))
+                for k, v in node.items():
+                    if k == "props":
+                        continue
+                    merged.setdefault(k, v)
+                # First-write-wins: if a node was loaded multiple times
+                # (e.g. via different sources), keep the first occurrence
+                # to match the load_nodes_batch dedup semantics.
+                if nid not in out:
+                    out[nid] = merged
+        return out
+
+    def get_edges_by_type(self, rel_type: str) -> List[Tuple[str, str, str, str, str, Dict[str, Any]]]:
+        """Return all edges matching a relation type.
+
+        Searches across ALL (src_label, rel_type, dst_label) combinations
+        where rel_type matches. Returns 6-tuples of
+        (src_label, rel_type, dst_label, src_id, dst_id, merged_properties).
+
+        Parameters
+        ----------
+        rel_type : str
+            Relation type to match (e.g. 'causes_adverse_event', 'causes').
+
+        Returns
+        -------
+        list of (src_label, rel_type, dst_label, src_id, dst_id, props) tuples
+        """
+        out: List[Tuple[str, str, str, str, str, Dict[str, Any]]] = []
+        for load in self.edge_loads:
+            if load["rel_type"] != rel_type:
+                continue
+            src_label = load["src_label"]
+            dst_label = load["dst_label"]
+            for edge in load["edges"]:
+                src_id = edge.get("src_id")
+                dst_id = edge.get("dst_id")
+                if src_id is None or dst_id is None:
+                    continue
+                # Merge top-level fields with props sub-dict
+                merged = dict(edge.get("props", {}))
+                for k, v in edge.items():
+                    if k == "props":
+                        continue
+                    merged.setdefault(k, v)
+                out.append((src_label, rel_type, dst_label, src_id, dst_id, merged))
+        return out
+
+    def remove_edge(
+        self,
+        src_label: str,
+        rel_type: str,
+        dst_label: str,
+        src_id: str,
+        dst_id: str,
+    ) -> int:
+        """Remove all recorded edges matching the given (src, rel, dst, src_id, dst_id).
+
+        This modifies self.edge_loads in place. Only EXACT matches are
+        removed (both endpoints and the type triple). Returns the count
+        of edges removed.
+
+        Parameters
+        ----------
+        src_label, rel_type, dst_label : str
+            Edge type triple.
+        src_id, dst_id : str
+            Endpoint node IDs.
+
+        Returns
+        -------
+        int
+            Number of edges removed.
+        """
+        removed = 0
+        for load in self.edge_loads:
+            if (
+                load["src_label"] != src_label
+                or load["rel_type"] != rel_type
+                or load["dst_label"] != dst_label
+            ):
+                continue
+            kept: List[Dict[str, Any]] = []
+            for edge in load["edges"]:
+                if (
+                    edge.get("src_id") == src_id
+                    and edge.get("dst_id") == dst_id
+                ):
+                    removed += 1
+                    continue
+                kept.append(edge)
+            load["edges"] = kept
+            load["accepted"] = len(kept)
+        return removed
+
     # -- INT-008 ROOT FIX: Serialization ---------------------------------
     def save(self, path: "Path | str", *, format: "str | None" = None) -> None:
         """Serialize builder state to disk so Phase 3 can load it later.
@@ -8617,6 +8846,71 @@ def load_into_graph(
             )
             report["errors"].append(f"{src}/{rel}/{dst}: {exc}")
             report["by_edge_type"][f"({src}, {rel}, {dst})"] = 0
+
+    # ─── Teammate 6 ROOT FIX (P2-001): fold MedDRA_Term → ClinicalOutcome ────
+    # After ALL nodes + edges are loaded (including SIDER MedDRA_Term nodes
+    # and causes_adverse_event edges), fold MedDRA_Term into ClinicalOutcome
+    # so the Phase 3 GT model has a "clinical_outcome" node type to train on.
+    #
+    # WHY HERE: load_into_graph is the SINGLE entry point that pushes staged
+    # Phase 1+2 data into a graph builder. Running the fold here means ANY
+    # caller of load_into_graph (the bridge in step1, the test path, the
+    # dev --dry-run path) automatically gets the fold — no caller-specific
+    # wiring needed. The fold function is a no-op if no MedDRA_Term nodes
+    # are present (e.g. when SIDER data was not loaded), so it is safe to
+    # call unconditionally.
+    #
+    # WHY ON RECORDINGGRAPHBUILDER ONLY: the fold uses the
+    # add_node/add_edge/get_nodes_by_type/get_edges_by_type/remove_edge
+    # convenience methods that RecordingGraphBuilder implements (Teammate 6
+    # ROOT FIX in this same sprint). DrugOSGraphBuilder (Neo4j) does NOT
+    # implement these methods — for Neo4j, the fold would need a Cypher
+    # migration (out of scope for this fix; Neo4j is not the PyG training
+    # path). The fold is wrapped in try/except so a non-RecordingGraphBuilder
+    # builder (e.g. DrugOSGraphBuilder) silently skips it without crashing
+    # the bridge.
+    try:
+        from .clinical_outcome_folder import fold_meddra_to_clinical_outcome
+        fold_report = fold_meddra_to_clinical_outcome(builder)
+        report["clinical_outcome_fold"] = fold_report
+        if fold_report["folded_nodes"] > 0:
+            logger.info(
+                "load_into_graph: fold_meddra_to_clinical_outcome folded "
+                "%d MedDRA_Term nodes into ClinicalOutcome nodes; "
+                "re-routed %d causes_adverse_event edges to "
+                "(Compound, causes, ClinicalOutcome). The Phase 3 GT "
+                "model now has a clinical_outcome node type to train on "
+                "(P2-001 root fix).",
+                fold_report["folded_nodes"],
+                fold_report["folded_edges"],
+            )
+    except TypeError as _fold_type_exc:
+        # Builder does not implement the required methods (e.g.
+        # DrugOSGraphBuilder). This is expected for the Neo4j path —
+        # log at INFO so it doesn't look like an error.
+        logger.info(
+            "load_into_graph: fold_meddra_to_clinical_outcome skipped "
+            "(builder %s does not implement the RecordingGraphBuilder "
+            "API: %s). Neo4j path uses a Cypher migration instead.",
+            type(builder).__name__, _fold_type_exc,
+        )
+    except Exception as _fold_exc:
+        # Any other fold failure is non-fatal — the bridge has already
+        # loaded the SIDER data; only the fold (MedDRA_Term →
+        # ClinicalOutcome) failed. Log loudly so operators can
+        # investigate, but do NOT crash the bridge.
+        logger.exception(
+            "load_into_graph: fold_meddra_to_clinical_outcome raised "
+            "%s: %s. The SIDER MedDRA_Term nodes are still loaded but "
+            "ClinicalOutcome nodes were NOT created — the Phase 3 GT "
+            "model will train without a clinical_outcome node type "
+            "(patient-safety signal absent). Investigate and re-run "
+            "the fold manually if needed.",
+            type(_fold_exc).__name__, _fold_exc,
+        )
+        report.setdefault("errors", []).append(
+            f"clinical_outcome_fold: {_fold_exc}"
+        )
 
     return report
 
