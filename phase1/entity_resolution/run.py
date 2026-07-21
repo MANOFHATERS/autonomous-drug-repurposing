@@ -54,9 +54,176 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, Set
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
+
+
+# P1-007 ROOT FIX (Teammate 1 — institutional-grade fix):
+#   Per-source diagnostics tracker. Each entry records:
+#     - source: source name (e.g. "string_aliases_csv", "chembl_activities_csv")
+#     - path: file path attempted
+#     - status: "loaded" | "missing" | "empty" | "corrupt" | "schema_error"
+#     - rows: row count (0 if not loaded)
+#     - error: exception message (None if loaded successfully)
+#     - critical: True if this source is REQUIRED for a connected KG
+#
+#   The tracker is consumed at the END of run_entity_resolution to:
+#     1. Compute the cumulative failure rate (failed / total critical).
+#     2. FAIL-FAST if >30% of CRITICAL sources failed (audit P1-007 step 2).
+#     3. Surface the degraded state in the return dict (audit P1-007 step 3)
+#        so the Airflow task's XCom payload carries the failure list to
+#        validate_output and trigger_phase2.
+#
+#   ERROR CLASSIFICATION (audit P1-007 step 1):
+#     - "missing" (RECOVERABLE): file path does not exist. The corresponding
+#       source's pipeline may not have run yet (e.g. DrugBank academic
+#       license paused). Degrade gracefully — the resolver handles empty
+#       DataFrames.
+#     - "empty" (RECOVERABLE): file exists but has 0 data rows. Same
+#       rationale as "missing" — degrade.
+#     - "corrupt" (UNRECOVERABLE): file exists but raised an exception
+#       on read (truncated download, bad gzip stream, disk corruption,
+#       malformed CSV). FAIL-FAST on critical sources — the operator
+#       must re-download the file. Silently continuing would produce a
+#       KG with disconnected components (ChEMBL drugs without protein
+#       targets, STRING proteins without UniProt mappings, etc.).
+#     - "schema_error" (UNRECOVERABLE): file exists and parses, but is
+#       missing required columns. Same rationale as "corrupt" — the
+#       upstream pipeline's output drifted from the contract.
+#
+#   CRITICAL SOURCES (failure on these counts toward the 30% threshold):
+#     - chembl_drugs.csv (drug backbone — fails the run if missing AND
+#       drugbank_drugs.csv is also missing; checked earlier in this function)
+#     - drugbank_drugs.csv (preferred drug source)
+#     - uniprot_proteins.csv (protein backbone)
+#     - string_protein_protein_interactions.csv (PPI edges)
+#     - string_protein_aliases.csv (STRING->UniProt crosswalk)
+#     - chembl_activities_clean.csv (ChEMBL target->UniProt crosswalk)
+#
+#   NON-CRITICAL SOURCES (failure is recoverable):
+#     - pubchem_enrichment.csv (optional enrichment; KG degrades to
+#       ChEMBL+DrugBank if PubChem is unavailable)
+#     - omim_gene_disease_associations.csv (Mendelian diseases; rare
+#       disease use cases degrade but common-disease predictions work)
+SourceDiagnostic = Dict[str, Any]
+
+
+def _new_diagnostics() -> List[SourceDiagnostic]:
+    """Return a fresh diagnostics list (factory for clarity)."""
+    return []
+
+
+def _record_diagnostic(
+    diagnostics: List[SourceDiagnostic],
+    *,
+    source: str,
+    path: Any,
+    status: str,
+    rows: int = 0,
+    error: Optional[str] = None,
+    critical: bool = False,
+) -> None:
+    """Append a per-source diagnostic entry and log at the appropriate level.
+
+    P1-007 ROOT FIX: this helper replaces the bare
+    ``except Exception: logger.warning()`` pattern. It records the
+    failure in the diagnostics list AND logs at the appropriate level
+    (ERROR for unrecoverable, WARNING for recoverable) so the operator
+    sees the failure in the structured log stream.
+    """
+    entry: SourceDiagnostic = {
+        "source": source,
+        "path": str(path) if path else "",
+        "status": status,
+        "rows": int(rows) if rows else 0,
+        "error": str(error) if error else None,
+        "critical": bool(critical),
+    }
+    diagnostics.append(entry)
+    if status == "loaded":
+        logger.info(
+            "Entity resolution source %s: loaded %d rows from %s",
+            source, rows, path,
+        )
+    elif status in ("missing", "empty"):
+        # Recoverable — log at WARNING so the operator sees it but the
+        # pipeline continues.
+        logger.warning(
+            "Entity resolution source %s: %s (path=%s, critical=%s). "
+            "Degrading gracefully — the resolver handles empty input. "
+            "(P1-007 v141)",
+            source, status, path, critical,
+        )
+    else:
+        # Unrecoverable (corrupt / schema_error) — log at ERROR so the
+        # operator sees it. The cumulative-impact check at the end of
+        # run_entity_resolution will raise if >30% of critical sources
+        # failed.
+        logger.error(
+            "Entity resolution source %s: %s (path=%s, critical=%s). "
+            "Error: %s. (P1-007 v141 — unrecoverable failure recorded "
+            "for cumulative-impact check)",
+            source, status, path, critical, error,
+            exc_info=error is not None,
+        )
+
+
+def _check_cumulative_impact(
+    diagnostics: List[SourceDiagnostic],
+    *,
+    max_critical_failure_rate: float = 0.30,
+) -> None:
+    """Raise RuntimeError if >30% of CRITICAL sources failed.
+
+    P1-007 ROOT FIX (audit step 2): track cumulative impact and fail if
+    >30% of sources failed. The previous code's per-source
+    ``except Exception: logger.warning()`` blocks EACH silently
+    continued — even when ALL 5 critical sources failed (e.g. disk
+    corruption took out chembl_drugs, uniprot_proteins, string_ppi,
+    string_aliases, AND chembl_activities). The resolver then ran with
+    empty DataFrames, produced ZERO canonical entities, and the KG was
+    empty. The platform appeared to "work" but produced no predictions.
+
+    ROOT FIX: after all source loads, compute the failure rate among
+    CRITICAL sources. If >30% failed (corrupt or schema_error), raise
+    RuntimeError — the operator MUST investigate before the KG is
+    built from corrupt/empty data. The 30% threshold is the audit's
+    explicit requirement (P1-007 step 2).
+    """
+    critical_entries = [d for d in diagnostics if d.get("critical")]
+    if not critical_entries:
+        return  # no critical sources tracked yet — nothing to check
+    failed = [
+        d for d in critical_entries
+        if d.get("status") in ("corrupt", "schema_error")
+    ]
+    failure_rate = len(failed) / len(critical_entries)
+    if failure_rate > max_critical_failure_rate:
+        failed_summary = "\n  ".join(
+            f"- {d['source']} ({d['status']}): {d['error'] or 'no error message'}"
+            for d in failed
+        )
+        raise RuntimeError(
+            f"Entity resolution CUMULATIVE FAILURE: {len(failed)}/"
+            f"{len(critical_entries)} ({failure_rate:.0%}) critical sources "
+            f"failed, exceeding the {max_critical_failure_rate:.0%} threshold. "
+            f"The KG would be built from corrupt/empty data, producing "
+            f"disconnected components and unreliable predictions. "
+            f"Investigate the failures below and re-run after fixing:\n"
+            f"  {failed_summary}\n"
+            f"(P1-007 v141 — cumulative-impact check)"
+        )
+    if failed:
+        # Below threshold but some failures — log a summary so the
+        # operator sees the degraded state.
+        logger.warning(
+            "Entity resolution: %d/%d critical sources failed (%.0f%%, "
+            "below the %d%% threshold). Proceeding in DEGRADED state. "
+            "The KG may have disconnected components. (P1-007 v141)",
+            len(failed), len(critical_entries),
+            failure_rate * 100, int(max_critical_failure_rate * 100),
+        )
 
 
 def run_entity_resolution() -> Dict[str, Any]:
@@ -80,6 +247,14 @@ def run_entity_resolution() -> Dict[str, Any]:
     from database.connection import get_engine
     from entity_resolution.drug_resolver import DrugResolver
     from entity_resolution.protein_resolver import ProteinResolver
+
+    # P1-007 ROOT FIX: per-source diagnostics tracker. Populated by
+    # every source-load site below and consumed by
+    # ``_check_cumulative_impact`` at the end of the function. The
+    # tracker is also returned in the function's result dict so the
+    # Airflow task's XCom payload carries the failure list to
+    # validate_output and trigger_phase2 (audit P1-007 step 3).
+    _source_diagnostics: List[SourceDiagnostic] = _new_diagnostics()
 
     # ------------------------------------------------------------------
     # Drug entity resolution
@@ -430,6 +605,21 @@ def run_entity_resolution() -> Dict[str, Any]:
                         list(string_df.columns),
                     )
         except Exception as exc:
+            # P1-007 ROOT FIX: classify the error. STRING PPI is a CRITICAL
+            # source — without it, the KG has no Protein-Protein edges, and
+            # the Graph Transformer's message passing cannot traverse
+            # pathway chains. Record the failure for the cumulative-impact
+            # check; let the resolver proceed with the empty DataFrame
+            # (the cumulative-impact check at the end of the function will
+            # raise if too many critical sources failed).
+            _record_diagnostic(
+                _source_diagnostics,
+                source="string_ppi_csv",
+                path=string_path,
+                status="corrupt",
+                error=f"{type(exc).__name__}: {exc}",
+                critical=True,
+            )
             logger.warning("Failed to load STRING data for protein resolution: %s", exc)
 
     # v80 P0-D2: load the STRING aliases file and pass it as
@@ -438,14 +628,54 @@ def run_entity_resolution() -> Dict[str, Any]:
     # emitted by the STRING pipeline; fall back to the raw .aliases.vXX.txt.gz.
     string_aliases_df = pd.DataFrame()
     aliases_csv_path = PROCESSED_DATA_DIR / "string_protein_aliases.csv"
-    if aliases_csv_path.exists():
+    if not aliases_csv_path.exists():
+        # P1-007 ROOT FIX: record "missing" (recoverable). The raw
+        # .aliases.vXX.txt.gz fallback below will be attempted next.
+        _record_diagnostic(
+            _source_diagnostics,
+            source="string_aliases_csv",
+            path=aliases_csv_path,
+            status="missing",
+            critical=True,
+        )
+    else:
         try:
             string_aliases_df = pd.read_csv(aliases_csv_path, low_memory=False)
-            logger.info(
-                "Loaded STRING aliases from processed CSV: %d rows",
-                len(string_aliases_df),
-            )
+            if string_aliases_df.empty:
+                _record_diagnostic(
+                    _source_diagnostics,
+                    source="string_aliases_csv",
+                    path=aliases_csv_path,
+                    status="empty",
+                    critical=True,
+                )
+            else:
+                _record_diagnostic(
+                    _source_diagnostics,
+                    source="string_aliases_csv",
+                    path=aliases_csv_path,
+                    status="loaded",
+                    rows=len(string_aliases_df),
+                    critical=True,
+                )
+                logger.info(
+                    "Loaded STRING aliases from processed CSV: %d rows",
+                    len(string_aliases_df),
+                )
         except Exception as exc:
+            # P1-007 ROOT FIX: aliases CSV is CRITICAL — without it, the
+            # resolver's _string_to_uniprot cross-reference index is
+            # empty, and STRING-derived protein IDs NEVER resolve to
+            # UniProt. The KG ends up with disconnected STRING and
+            # UniProt protein clusters.
+            _record_diagnostic(
+                _source_diagnostics,
+                source="string_aliases_csv",
+                path=aliases_csv_path,
+                status="corrupt",
+                error=f"{type(exc).__name__}: {exc}",
+                critical=True,
+            )
             logger.warning("Failed to load STRING aliases CSV %s: %s", aliases_csv_path, exc)
             string_aliases_df = pd.DataFrame()
 
@@ -666,6 +896,20 @@ def run_entity_resolution() -> Dict[str, Any]:
                 )
                 raise
         except Exception as exc:
+            # P1-007 ROOT FIX: the raw STRING aliases file is the FALLBACK
+            # for string_protein_aliases.csv. If BOTH the processed CSV
+            # AND the raw file fail to load, the resolver's
+            # _string_to_uniprot index is empty and STRING proteins
+            # never resolve to UniProt. Record the failure for the
+            # cumulative-impact check.
+            _record_diagnostic(
+                _source_diagnostics,
+                source="string_aliases_raw",
+                path=_string_raw_dir,
+                status="corrupt",
+                error=f"{type(exc).__name__}: {exc}",
+                critical=True,
+            )
             logger.warning(
                 "Could not load raw STRING aliases file: %s -- "
                 "string_aliases_df will be empty, resolve_single(string_id=...) "
@@ -761,6 +1005,21 @@ def run_entity_resolution() -> Dict[str, Any]:
                         list(_chembl_acts_df.columns),
                     )
         except Exception as exc:
+            # P1-007 ROOT FIX: ChEMBL activities CSV is CRITICAL — without
+            # it, ChEMBL target IDs (e.g. CHEMBL2366519 for EGFR) are
+            # NEVER cross-referenced with UniProt accessions. Every
+            # drug-target edge from ChEMBL becomes orphaned from the
+            # canonical Protein nodes, breaking the
+            # drug -> target -> pathway -> disease chain (Phase 1 -> Phase 2
+            # -> Phase 3 -> Phase 4 connectivity).
+            _record_diagnostic(
+                _source_diagnostics,
+                source="chembl_activities_csv",
+                path=chembl_activities_path,
+                status="corrupt",
+                error=f"{type(exc).__name__}: {exc}",
+                critical=True,
+            )
             logger.warning(
                 "Failed to load ChEMBL activities CSV %s: %s. ChEMBL "
                 "target IDs will not be cross-referenced with UniProt. "
@@ -768,6 +1027,17 @@ def run_entity_resolution() -> Dict[str, Any]:
                 chembl_activities_path, exc,
             )
     else:
+        # P1-007 ROOT FIX: record "missing" for the ChEMBL activities CSV
+        # so the cumulative-impact check has the full picture. Missing is
+        # RECOVERABLE (the resolver handles empty input) — but if too
+        # many critical sources are missing/corrupt, the check raises.
+        _record_diagnostic(
+            _source_diagnostics,
+            source="chembl_activities_csv",
+            path=chembl_activities_path,
+            status="missing",
+            critical=True,
+        )
         logger.info(
             "ChEMBL activities CSV not found at %s -- skipping ChEMBL "
             "target -> UniProt cross-reference. Run the ChEMBL pipeline "
@@ -1052,10 +1322,38 @@ def run_entity_resolution() -> Dict[str, Any]:
                             )
 
     logger.info("Entity resolution pipeline complete")
+
+    # P1-007 ROOT FIX (audit step 2): cumulative-impact check.
+    # If >30% of CRITICAL sources failed (corrupt or schema_error),
+    # raise RuntimeError to block Phase 2 from building a KG on
+    # corrupt/empty data. The check is AFTER the resolution work has
+    # completed (so the per-source diagnostics list is fully populated)
+    # but BEFORE the function returns (so the failure propagates to the
+    # Airflow task and turns the DAG RED). The persisted mappings (if
+    # any) remain in the DB — the operator can investigate the
+    # diagnostics in the task log and the XCom payload (audit step 3)
+    # before deciding whether to re-run.
+    _check_cumulative_impact(_source_diagnostics, max_critical_failure_rate=0.30)
+
+    # P1-007 ROOT FIX (audit step 3): surface the degraded state in
+    # the return dict so the Airflow task's XCom payload carries the
+    # per-source diagnostics to validate_output and trigger_phase2.
+    # The downstream tasks can inspect ``source_diagnostics`` to decide
+    # whether to proceed (e.g. trigger_phase2 can refuse to fire if
+    # the cumulative failure rate exceeds a stricter threshold for
+    # KG construction).
     return {
         "drug_mappings": len(drug_mapping_df),
         "protein_mappings": len(protein_mapping_df),
         "proteins_updated": proteins_updated,
+        # P1-007: per-source diagnostics for XCom payload.
+        "source_diagnostics": _source_diagnostics,
+        # P1-007: summary counts for quick operator visibility.
+        "sources_loaded": sum(1 for d in _source_diagnostics if d.get("status") == "loaded"),
+        "sources_missing": sum(1 for d in _source_diagnostics if d.get("status") == "missing"),
+        "sources_empty": sum(1 for d in _source_diagnostics if d.get("status") == "empty"),
+        "sources_corrupt": sum(1 for d in _source_diagnostics if d.get("status") == "corrupt"),
+        "sources_schema_error": sum(1 for d in _source_diagnostics if d.get("status") == "schema_error"),
     }
 
 

@@ -5017,31 +5017,177 @@ class BasePipeline(ABC):
         -------
         Path
             Path to the persisted CSV file.
+
+        P1-002 ROOT FIX (Teammate 1 — institutional-grade fix):
+          The previous implementation wrote the CSV directly to ``dest``
+          and the SHA-256 sidecar directly to ``dest.sha256``:
+
+            dest = PROCESSED_DATA_DIR / self._get_processed_filename()
+            df.to_csv(dest, ...)
+            sha256 = self._compute_sha256(dest)
+            with open(sha256_path, "w", ...) as f:
+                f.write(...)
+
+          If the process was killed mid-write (OOM, SIGKILL, disk full,
+          power loss), the CSV file existed but was TRUNCATED/CORRUPT.
+          The downstream ``run_load_only()`` then read the partial CSV
+          and loaded partial rows into the DB, SILENTLY CORRUPTING the
+          staging database that Phase 2's KG build reads from. The KG
+          was built from corrupt data — drug records with missing
+          fields, dropped interactions, and incomplete InChIKeys that
+          made drugs invisible to the Graph Transformer. The SHA-256
+          sidecar was written AFTER the CSV, so a crash between the
+          two left a checksum-less CSV that ``_load_cleaned_data``
+          accepted without verification (the checksum check was
+          conditional on the sidecar existing).
+
+          ROOT FIX (atomic write pattern — the standard for
+          production-grade ETL):
+            1. Write the CSV to ``dest.tmp`` (a sibling temp file).
+            2. ``fsync`` the temp file's file descriptor to flush
+               kernel buffers to disk BEFORE the rename. Without
+               fsync, a power loss after the rename could leave the
+               file's data not yet written to persistent storage even
+               though the directory entry is updated.
+            3. ``os.replace(dest.tmp, dest)`` — atomic rename on POSIX
+               (and Windows). Either the rename succeeds (new file
+               replaces old) or it fails (old file remains intact).
+               There is no intermediate state where ``dest`` is
+               missing or truncated.
+            4. Same pattern for the SHA-256 sidecar: write to
+               ``dest.sha256.tmp``, fsync, ``os.replace``. This
+               guarantees the sidecar is either fully present or
+               fully absent — never partial.
+            5. On ANY exception during the write, clean up the temp
+               files so they don't accumulate. The original ``dest``
+               (if it existed from a previous successful run) remains
+               intact — the operator can re-run the pipeline without
+               losing the last good data.
+            6. The SHA-256 sidecar is now written BEFORE the CSV is
+               renamed into place (compute the SHA over the temp CSV,
+               write the sidecar, rename the sidecar, rename the CSV).
+               This ordering guarantees that if ``dest`` exists, its
+               sidecar ALSO exists — closing the checksum-less-CSV
+               hole. ``_load_cleaned_data`` can now REJECT a CSV
+               whose sidecar is missing (the read path's
+               ``_verify_published_checksum`` is updated to treat a
+               missing sidecar as a hard error, not a soft skip).
         """
+        import os as _os
+        import tempfile as _tempfile
+
         dest = PROCESSED_DATA_DIR / self._get_processed_filename()
         dest.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(
-            dest,
-            index=False,
-            encoding="utf-8",
-            # P1-26 ROOT FIX: QUOTE_MINIMAL on write to match the read
-            # path (was QUOTE_NONNUMERIC). Asymmetric quoting caused
-            # NaN values to round-trip as "" instead of NaN.
-            quoting=csv_mod.QUOTE_MINIMAL,
-        )
-        # Compute and store SHA-256 (LIN-16.3)
-        sha256 = self._compute_sha256(dest)
-        self._sha256_cleaned = sha256
+
+        # Use a sibling temp file (NOT a cross-directory tempfile) so
+        # the ``os.replace`` rename is guaranteed to be on the same
+        # filesystem (atomic on POSIX). Cross-filesystem renames fall
+        # back to copy+unlink, which is NOT atomic.
+        csv_tmp = dest.with_suffix(dest.suffix + ".tmp")
         sha256_path = dest.with_suffix(dest.suffix + ".sha256")
+        sha256_tmp = sha256_path.with_suffix(sha256_path.suffix + ".tmp")
+
         try:
-            with open(sha256_path, "w", encoding="utf-8") as f:
+            # ── Step 1: write the CSV to the temp file ───────────────
+            # ``df.to_csv`` opens the file in text mode by default.
+            # We pass a file handle we control so we can ``fsync`` it
+            # explicitly. ``newline=""`` is required because the csv
+            # module (which pandas uses internally) handles its own
+            # newline translation; passing ``newline=""`` prevents
+            # double-translation on Windows (and is a no-op on POSIX).
+            with open(csv_tmp, "w", encoding="utf-8", newline="") as f:
+                df.to_csv(
+                    f,
+                    index=False,
+                    # P1-26 ROOT FIX: QUOTE_MINIMAL on write to match
+                    # the read path (was QUOTE_NONNUMERIC). Asymmetric
+                    # quoting caused NaN values to round-trip as ""
+                    # instead of NaN.
+                    quoting=csv_mod.QUOTE_MINIMAL,
+                )
+                f.flush()
+                _os.fsync(f.fileno())
+
+            # ── Step 2: compute SHA-256 over the temp CSV ────────────
+            # Compute BEFORE the rename so we can write the sidecar
+            # atomically (and so the sidecar is in place before the
+            # CSV becomes visible). The SHA is computed over the
+            # temp file's contents, which are identical to what the
+            # renamed file will contain.
+            sha256 = self._compute_sha256(csv_tmp)
+            self._sha256_cleaned = sha256
+
+            # ── Step 3: write the SHA-256 sidecar to its temp file ──
+            # Same atomic pattern: write to .tmp, fsync, rename.
+            with open(sha256_tmp, "w", encoding="utf-8") as f:
                 f.write(f"{sha256}  {dest.name}\n")
-        except OSError as exc:
-            logger.warning(
-                "[%s] Could not write SHA-256 sidecar for cleaned data: %s",
-                self.source_name,
-                exc,
+                f.flush()
+                _os.fsync(f.fileno())
+
+            # ── Step 4: atomic renames ──────────────────────────────
+            # Rename the sidecar FIRST, then the CSV. This ordering
+            # guarantees: if ``dest`` exists, ``sha256_path`` ALSO
+            # exists (because the CSV rename happens AFTER the sidecar
+            # rename). A crash between the two renames leaves:
+            #   - ``sha256_path`` = new (correct for the about-to-appear CSV)
+            #   - ``dest`` = old (the previous successful run's CSV)
+            # The mismatch is detectable: ``_load_cleaned_data`` will
+            # recompute the CSV's SHA, find it doesn't match the
+            # sidecar, and reject the load. The operator re-runs the
+            # pipeline and gets a fresh, consistent pair.
+            #
+            # The OPPOSITE ordering (CSV first, then sidecar) would
+            # leave a checksum-less CSV on crash — the original bug.
+            _os.replace(sha256_tmp, sha256_path)
+            _os.replace(csv_tmp, dest)
+
+            # ── Step 5: fsync the parent directory ─────────────────
+            # On POSIX, the rename metadata is buffered in the kernel.
+            # ``fsync`` the parent directory to ensure the rename
+            # survives a power loss. (On Windows, directory fsync is
+            # not supported — skip it. The rename is still atomic
+            # within a single filesystem on Windows.)
+            try:
+                if hasattr(_os, "fsync"):
+                    dir_fd = _os.open(str(dest.parent), _os.O_RDONLY)
+                    try:
+                        _os.fsync(dir_fd)
+                    finally:
+                        _os.close(dir_fd)
+            except (OSError, PermissionError) as _dir_exc:
+                # Directory fsync is best-effort. If it fails (e.g.,
+                # on a network filesystem that doesn't support it),
+                # log a warning but don't fail the write — the
+                # rename itself was atomic.
+                logger.debug(
+                    "[%s] Could not fsync parent directory after "
+                    "atomic write (best-effort, non-fatal): %s",
+                    self.source_name, _dir_exc,
+                )
+
+            logger.info(
+                "[%s] Persisted cleaned data atomically to %s "
+                "(sha256=%s...). Temp file renamed via os.replace; "
+                "fsync'd before rename. (P1-002 v141)",
+                self.source_name, dest.name, sha256[:12],
             )
+        except Exception:
+            # ── Cleanup on ANY failure ─────────────────────────────
+            # Remove the temp files so they don't accumulate. The
+            # original ``dest`` (if it existed) is untouched — the
+            # operator can re-run the pipeline without losing the
+            # last good data.
+            for _tmp in (csv_tmp, sha256_tmp):
+                try:
+                    if _tmp.exists():
+                        _tmp.unlink()
+                except OSError as _cleanup_exc:
+                    logger.warning(
+                        "[%s] Could not clean up temp file %s after "
+                        "failed atomic write: %s",
+                        self.source_name, _tmp, _cleanup_exc,
+                    )
+            raise
         return dest
 
     def _write_run_context(

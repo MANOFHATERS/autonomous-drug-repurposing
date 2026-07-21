@@ -88,51 +88,48 @@ def _derive_schema_version() -> int:
 
 
 SCHEMA_VERSION: int = _derive_schema_version()
-# v104 FORENSIC ROOT FIX (P1-003 -- SCHEMA_VERSION_FALLBACK stale at 15,
-#   but migrations 016 and 017 exist):
-#   The previous code set ``SCHEMA_VERSION_FALLBACK = 15`` and used it
-#   ONLY when ``_derive_schema_version()`` returned 0 (migrations
-#   directory missing -- e.g. stripped-down Docker image, test
-#   isolation). With migrations 016 (tighten UniProt ID check
-#   constraint) and 017 (add very_strong confidence tier) present in
-#   the repo, a stripped-down install that hit the fallback would
-#   report ``schema_version = 15`` instead of the true ``17``. The
-#   migration runner's ``check_migrations()`` then reported
-#   ``schema_version_matches = False`` forever -- a false-positive
-#   schema drift warning on every pipeline run. Worse, on a FRESH
-#   production deploy where the version-tracking table was missing
-#   (brand-new Postgres), the runner fell back to ``SCHEMA_VERSION =
-#   15`` and skipped applying migrations 016 and 017 entirely, leaving
-#   the ``compound_inchikey_canonical`` (mig 016) and
-#   ``protein_uniprot_accession`` (mig 017) columns missing. The
-#   InChIKey validator in cleaning/normalizer.py and the UniProt
-#   loader's protein_resolver then crashed with ``UndefinedColumn``
-#   at runtime -- a fresh-deploy footgun.
+# P1-008 ROOT FIX (Teammate 1 — institutional-grade fix):
+#   The previous code had:
 #
-#   ROOT FIX: set ``SCHEMA_VERSION_FALLBACK = 0``. Semantics: "if the
-#   migrations directory is missing, we have NO idea what schema the
-#   DB is in -- treat it as a fresh install that needs ALL migrations
-#   applied." This eliminates the staleness class of bugs entirely:
-#   there is no hardcoded version number to forget to bump when a new
-#   migration is added. ``_derive_schema_version()`` continues to be
-#   the source of truth when the migrations directory is present
-#   (returns the max migration version, currently 17); the fallback
-#   only fires in the pathological stripped-install case, where 0 is
-#   the only honest answer.
+#     SCHEMA_VERSION_FALLBACK: int = 0
+#     if SCHEMA_VERSION == 0:
+#         SCHEMA_VERSION = SCHEMA_VERSION_FALLBACK
 #
-#   The previous test ``test_p1_048_schema_version_fallback_bumped``
-#   asserted ``SCHEMA_VERSION_FALLBACK == max_mig``. That test was
-#   the BUG FARM -- it forced every contributor to bump the fallback
-#   when adding a migration, which is exactly the chore that was
-#   forgotten for migrations 016 and 017. The new semantics make
-#   that test obsolete; it has been replaced with
-#   ``test_p1_003_schema_version_fallback_is_zero`` which asserts
-#   ``SCHEMA_VERSION_FALLBACK == 0`` (the fresh-install semantics)
-#   AND ``SCHEMA_VERSION == max_mig`` when the migrations directory
-#   is present (the real correctness check).
+#   This is a COMPLETE NO-OP: when SCHEMA_VERSION == 0, it assigns
+#   SCHEMA_VERSION = 0 (since FALLBACK == 0). The audit (P1-008)
+#   explicitly required REMOVING this no-op line, but the prior "fix"
+#   only changed the FALLBACK value (15 → 0) and KEPT the no-op
+#   assignment — leaving the misleading impression that the code was
+#   doing something useful when it was doing nothing.
+#
+#   SEMANTICS (now properly documented):
+#     SCHEMA_VERSION == 0 means "migrations directory not found / fresh
+#     install". This is a VALID state, not an error. The migration
+#     runner (phase1/database/migrations/run_migrations.py) handles
+#     this case explicitly:
+#       * In ``check_migrations``: code_version == 0 means "we cannot
+#         verify schema version match — assume fresh install and apply
+#         all migrations". The previous code's
+#         ``schema_version_matches = (db_version == code_version)``
+#         would return False when db_version was None (fresh install,
+#         no schema_version table yet) AND code_version was 0 —
+#         falsely reporting "schema drift" on every fresh install.
+#       * In ``run_migrations``: code_version == 0 means "apply ALL
+#         migration files in numeric order" — this was already the
+#         behavior, but the no-op ``SCHEMA_VERSION = SCHEMA_VERSION_FALLBACK``
+#         made it look like the code was using a fallback value when it
+#         wasn't.
+#
+#   ``SCHEMA_VERSION_FALLBACK`` is KEPT for backward compatibility
+#   (the symbol is exported in ``__all__`` and the test suite
+#   ``test_p1_003_schema_version_fallback_is_zero`` asserts it equals
+#   0). Its value is 0 and MUST remain 0 — it documents the fresh-
+#   install semantics. The no-op ``if SCHEMA_VERSION == 0:`` block is
+#   DELETED because it actively misleads readers into thinking there's
+#   a fallback mechanism when there isn't one.
 SCHEMA_VERSION_FALLBACK: int = 0
-if SCHEMA_VERSION == 0:
-    SCHEMA_VERSION = SCHEMA_VERSION_FALLBACK
+# P1-008: NO assignment block here. SCHEMA_VERSION == 0 IS the
+# documented "fresh install" sentinel — see the comment above.
 
 # ---------------------------------------------------------------------------
 # Naming convention for all constraints (CMP-04)

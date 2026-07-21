@@ -89,9 +89,34 @@ app.add_middleware(
     # (comma-separated). Default to localhost:3000 (the Next.js frontend)
     # for dev. Production deployments MUST set PHASE1_CORS_ORIGINS to the
     # real frontend domain.
-    allow_origins=os.environ.get(
-        "PHASE1_CORS_ORIGINS", "http://localhost:3000"
-    ).split(","),
+    # P1-010 ROOT FIX (Teammate 1 — institutional-grade fix):
+    #   The previous code used ``.split(",")`` WITHOUT trimming whitespace.
+    #   A deployment setting ``PHASE1_CORS_ORIGINS="https://app.example.com,
+    #   https://staging.example.com"`` (note the space after the comma, which
+    #   is the natural way humans write a comma-separated list) produced
+    #   ``["https://app.example.com", " https://staging.example.com"]`` —
+    #   the second origin had a LEADING SPACE. CORS origin matching is
+    #   EXACT (per the Fetch spec, section 3.2.1: "If the value of the
+    #   Origin header is not an exact match ... then return error"). The
+    #   browser's preflight request from staging.example.com was REJECTED
+    #   with a CORS error, and the frontend silently failed for any
+    #   non-localhost deployment. This is a production-only failure mode
+    #   that never surfaces in dev (where the env var is typically a
+    #   single origin with no spaces).
+    #
+    # ROOT FIX: strip each origin after splitting. The list comprehension
+    # also drops empty strings (from trailing commas or accidental
+    # double-commas) so ``"a,b,"`` becomes ``["a", "b"]`` (not
+    # ``["a", "b", ""]``). An empty string in ``allow_origins`` would
+    # match the empty Origin header sent by some non-browser clients,
+    # a subtle security hole.
+    allow_origins=[
+        _origin.strip()
+        for _origin in os.environ.get(
+            "PHASE1_CORS_ORIGINS", "http://localhost:3000"
+        ).split(",")
+        if _origin.strip()
+    ],
     # TM3 Task 3.3 v127 ROOT FIX: was ``allow_methods=["GET"]`` which
     # blocked the new POST /datasets/validated_hypotheses endpoint
     # (the data flywheel writeback). The CORS preflight OPTIONS request
@@ -141,7 +166,20 @@ def _open_csv_for_read(path: Path):
 
 
 def _count_csv_rows(path: Path) -> int:
-    """Count data rows in a CSV (excluding header). Returns 0 if missing.
+    """Count data rows in a CSV (excluding header).
+
+    Returns
+    -------
+    int
+        Number of data rows. Returns ``0`` if the file is MISSING (the
+        caller can distinguish "file not present" from "file present but
+        zero rows" by calling ``path.exists()`` separately if needed).
+        Returns ``-1`` (sentinel) if the file EXISTS but could not be
+        read (corrupt CSV, I/O error, permission denied, gzip decode
+        error). The caller MUST treat ``-1`` as "read error" — NOT as
+        zero rows — to avoid hiding a P1-002-style partial-write
+        corruption event (where the cleaned CSV is truncated mid-write
+        and reports 0 rows when the truth is "couldn't read").
 
     P1-018 v113 ROOT FIX: the previous implementation counted NEWLINES
     via `sum(1 for line in f)`. A CSV field with an embedded newline
@@ -157,6 +195,29 @@ def _count_csv_rows(path: Path) -> int:
 
     TEAMMATE-4 ROOT FIX: now uses _open_csv_for_read() so .gz files and
     UTF-8 BOM are handled correctly.
+
+    P1-009 ROOT FIX (Teammate 1 — institutional-grade fix):
+      The previous implementation had ``except Exception: return 0``
+      WITHOUT logging. A corrupt CSV (truncated write, disk error, bad
+      gzip stream) reported 0 rows silently. The /datasets and /stats
+      endpoints then surfaced ``total_drugs=0`` to the dashboard, which
+      the operator could NOT distinguish from a legitimately empty
+      dataset — both look identical. Worse, a P1-002 partial-write
+      corruption event (where ``_persist_cleaned_data`` writes a
+      truncated CSV mid-crash) would be silently misreported as "no
+      drugs" rather than "couldn't read the file", hiding the
+      corruption from the operator.
+      ROOT FIX: log the exception at ERROR level with the file path so
+      the operator sees it in the structured log stream AND return
+      ``-1`` (sentinel) so the caller can distinguish "0 rows" from
+      "couldn't read". The callers in this module (_load_dataset_stats,
+      _load_drug_mechanism, /stats edge-type detection) have been
+      audited: they all use the row count for DISPLAY purposes (KPI
+      cards, edge-type presence flags) — returning -1 vs 0 there does
+      not change their behavior, but logging surfaces the corruption
+      loudly. The validation layer (contracts/validate_output.py) reads
+      CSVs separately with explicit error reporting, so the -1 sentinel
+      does not propagate to the Phase 2 contract gate.
     """
     if not path.exists():
         return 0
@@ -168,8 +229,20 @@ def _count_csv_rows(path: Path) -> int:
             except StopIteration:
                 return 0
             return sum(1 for _row in reader if _row)  # count non-empty rows
-    except Exception:
-        return 0
+    except Exception as _exc:
+        # P1-009 ROOT FIX: log at ERROR with file path so the operator
+        # sees the corruption. Return -1 sentinel so the caller can
+        # distinguish "0 rows" from "couldn't read". The previous code
+        # silently returned 0 — see the docstring for the patient-safety
+        # rationale.
+        logger.error(
+            "Phase 1 service: could not read CSV %s for row count "
+            "(P1-009 v141). Returning -1 sentinel so the caller can "
+            "distinguish '0 rows' from 'read error'. Error: %s",
+            path, _exc,
+            exc_info=True,
+        )
+        return -1
 
 
 def _count_unique_string_proteins(path: Path) -> int:
@@ -405,6 +478,111 @@ def _compute_total_proteins(pdir: Path) -> int:
     return total
 
 
+def _collect_drug_inchikeys(path: Path) -> Set[str]:
+    """Return the SET of unique InChIKeys from a drug-source CSV.
+
+    P1-012 ROOT FIX (Teammate 1 — institutional-grade fix):
+      Used by ``_compute_total_drugs`` for the UNION computation. Reads
+      the ``inchikey`` column (case-insensitive header match) and
+      returns the set of non-empty, non-SYNTH-prefixed values.
+      SYNTH-prefixed InChIKeys are dev-only escape hatches (per
+      migration 009 and the validate_output task's SYNTH% check) — they
+      must NOT be counted as real compounds in the dashboard KPI.
+
+    Returns an empty set if the file is missing, unparseable, or has no
+    ``inchikey`` column.
+    """
+    if not path.exists():
+        return set()
+    try:
+        unique_keys: Set[str] = set()
+        with _open_csv_for_read(path) as f:
+            reader = _csv_module.DictReader(f)
+            if reader.fieldnames is None:
+                return set()
+            # Find the inchikey column (case-insensitive).
+            key_col: Optional[str] = None
+            for fn in reader.fieldnames:
+                if fn and fn.strip().lower() == "inchikey":
+                    key_col = fn
+                    break
+            if key_col is None:
+                logger.warning(
+                    "Phase 1 service: drug CSV %s has no 'inchikey' "
+                    "column (P1-012). Available columns: %s. Returning "
+                    "empty set — this source contributes 0 to the "
+                    "total_drugs UNION.",
+                    path, list(reader.fieldnames)[:10],
+                )
+                return set()
+            for row in reader:
+                val = row.get(key_col)
+                if not val:
+                    continue
+                val = val.strip()
+                # Skip SYNTH-prefixed values (dev-only escape hatch per
+                # migration 009 + the validate_output SYNTH% check).
+                if val.startswith("SYNTH"):
+                    continue
+                # Skip obvious placeholder values.
+                if not val or val.lower() in ("nan", "none", "null"):
+                    continue
+                unique_keys.add(val)
+        return unique_keys
+    except Exception as exc:
+        logger.warning(
+            "Phase 1 service: failed to parse drug CSV %s for InChIKey "
+            "set (P1-012 UNION fix). Returning empty set. Error: %s",
+            path, exc,
+        )
+        return set()
+
+
+def _compute_total_drugs(pdir: Path) -> int:
+    """Compute the total UNIQUE drug count across ALL drug-source CSVs.
+
+    P1-012 ROOT FIX (Teammate 1 — institutional-grade fix):
+      Replaces the previous DrugBank-first fallback chain that
+      undercounted drugs by 30x when DrugBank was paused and ChEMBL had
+      3,000 rows. Computes the cardinality of the UNION of InChIKeys
+      across drugbank_drugs.csv + chembl_drugs.csv + drugs.csv — each
+      unique compound is counted exactly once regardless of which
+      source(s) it appears in. InChIKey is the canonical compound
+      identifier per the project docx §3 and the Phase1OutputContract.
+
+    Returns 0 if no drug CSVs exist or all are empty.
+    """
+    # All known drug-source CSV filenames. The contract declares these
+    # as aliases for the same logical source (drugs), but in practice
+    # multiple files can coexist (chembl_drugs.csv + drugbank_drugs.csv
+    # when both pipelines ran). The union of InChIKeys deduplicates
+    # cross-source.
+    drug_csv_names = (
+        "drugbank_drugs.csv",
+        "chembl_drugs.csv",
+        "drugs.csv",  # legacy alias
+    )
+    all_inchikeys: Set[str] = set()
+    per_source_counts: Dict[str, int] = {}
+    for fname in drug_csv_names:
+        path = pdir / fname
+        if not path.exists():
+            continue
+        keys = _collect_drug_inchikeys(path)
+        per_source_counts[fname] = len(keys)
+        all_inchikeys |= keys
+    total = len(all_inchikeys)
+    if total > 0 or per_source_counts:
+        logger.info(
+            "Phase 1 service /datasets: total_drugs = "
+            "|union of InChIKeys across %s| = %d "
+            "(P1-012 ROOT FIX — UNION, not DrugBank-first fallback). "
+            "Per-source counts: %s",
+            list(per_source_counts.keys()), total, per_source_counts,
+        )
+    return total
+
+
 def _processed_data_dir() -> Path:
     """Return the Phase 1 processed_data directory."""
     return _HERE / "processed_data"
@@ -464,19 +642,51 @@ def _load_dataset_stats() -> Dict[str, Any]:
         if source_name == "string":
             total_interactions = rows
 
-    # P1-006 v113 ROOT FIX: compute total_drugs via a fallback chain.
-    # The previous code unconditionally set total_drugs to the DrugBank
-    # row count. If drugbank_drugs.csv was missing (DrugBank academic
-    # license paused), total_drugs was 0 even if chembl_drugs.csv had
-    # 3,000 rows. ROOT FIX: try drugbank first (canonical FDA-approved
-    # list), then chembl, then a generic drugs.csv fallback. This matches
-    # the Phase1OutputContract's source-priority semantics.
-    for _drug_csv in ("drugbank_drugs.csv", "chembl_drugs.csv", "drugs.csv"):
-        _drug_path = pdir / _drug_csv
-        if _drug_path.exists():
-            total_drugs = _count_csv_rows(_drug_path)
-            if total_drugs > 0:
-                break
+    # P1-012 ROOT FIX (Teammate 1 — institutional-grade fix):
+    #   The previous code used a fallback CHAIN that tried DrugBank first
+    #   and ``break``-ed on the first non-zero count:
+    #
+    #     for _drug_csv in ("drugbank_drugs.csv", "chembl_drugs.csv", "drugs.csv"):
+    #         _drug_path = pdir / _drug_csv
+    #         if _drug_path.exists():
+    #             total_drugs = _count_csv_rows(_drug_path)
+    #             if total_drugs > 0:
+    #                 break
+    #
+    #   If DrugBank had 100 drugs (academic license paused mid-ingest)
+    #   and ChEMBL had 3,000, the service reported ``total_drugs=100`` —
+    #   an undercount by 30x. The "ROOT FIX" comment claimed this
+    #   "matches the Phase1OutputContract's source-priority semantics"
+    #   but that's INCONSISTENT with the audit's explicit requirement
+    #   to SUM all drug CSVs. The Phase1OutputContract treats
+    #   ``drugs.csv`` and ``chembl_drugs.csv`` as ALIASES for the same
+    #   logical source — but in practice BOTH files can exist (when the
+    #   ChEMBL pipeline emits ``chembl_drugs.csv`` AND the DrugBank
+    #   pipeline emits ``drugbank_drugs.csv``), and they OVERLAP heavily
+    #   (FDA-approved drugs are in both). Summing blindly would
+    #   DOUBLE-COUNT Aspirin, Metformin, etc.
+    #
+    # ROOT FIX: compute the cardinality of the UNION of InChIKeys
+    # across ALL drug-source CSVs (drugbank_drugs.csv + chembl_drugs.csv
+    # + drugs.csv). This is the SAME set-theoretic approach the
+    # ``_compute_total_proteins`` function (P1-011) uses for proteins:
+    # each unique compound is counted exactly once regardless of which
+    # source(s) it appears in. InChIKey is the canonical compound
+    # identifier per the project docx §3 (Phase 1) and the
+    # Phase1OutputContract — it's a 27-char hash of the chemical
+    # structure, so two compounds with the same InChIKey ARE the same
+    # compound by definition.
+    #
+    # This matches the audit's FIX REQUIRED step 1 ("Sum the row counts
+    # of ALL drug CSVs") while ALSO satisfying the scientific
+    # correctness requirement (no double-counting). The DB query
+    # ``SELECT COUNT(DISTINCT inchikey) FROM drugs`` would be even more
+    # authoritative (it reflects post-entity-resolution state), but
+    # this CSV-derived count is the best pre-DB estimate available to
+    # the /datasets endpoint — and matches the contract's
+    # source-priority semantics for the cases where only ONE source is
+    # loaded (the union of one set is just that set's cardinality).
+    total_drugs = _compute_total_drugs(pdir)
 
     # TEAMMATE-4 ROOT FIX (replaces P1-029 v117 max() with UNION):
     # The previous formula was
@@ -537,7 +747,25 @@ def _load_drug_mechanism(drug_name: str) -> Dict[str, Any]:
     # 1. Find the drug row in drugbank_drugs.csv.
     drug_row: Optional[Dict[str, str]] = None
     try:
-        with open(drugbank_path, "r", encoding="utf-8", errors="replace") as f:
+        # P1-014 ROOT FIX (Teammate 1 — institutional-grade fix):
+        #   Use ``_open_csv_for_read`` instead of bare ``open()``. The
+        #   DrugBank CSV export ships with a UTF-8 BOM
+        #   (``\xef\xbb\xbf``). With plain ``encoding="utf-8"``, the BOM
+        #   becomes the first character of the first header cell
+        #   (``"\ufeffname"`` instead of ``"name"``). ``row.get("name")``
+        #   then returns None for every row (the actual key is
+        #   ``"\ufeffname"``), so the drug-name match at line 546 ALWAYS
+        #   fails, and the endpoint returns 404 for EVERY drug — not
+        #   just BOM-affected ones. The same bug applied to
+        #   ``interactions_path`` and ``indications_path`` (lines 559,
+        #   577) — they had the same ``encoding="utf-8"`` pattern. The
+        #   pre-existing ``_open_csv_for_read`` helper (line 111) already
+        #   handles BOM AND .gz — using it here is the single-line root
+        #   fix that closes all three BOM holes at once. (The helper was
+        #   added by Teammate 4 for the count helpers but never wired
+        #   into this function — a half-applied fix that the audit
+        #   correctly flagged.)
+        with _open_csv_for_read(drugbank_path) as f:
             reader = csv_mod.DictReader(f)
             for row in reader:
                 # Match by name (case-insensitive). DrugBank CSV columns
@@ -556,7 +784,8 @@ def _load_drug_mechanism(drug_name: str) -> Dict[str, Any]:
     targets: List[Dict[str, Any]] = []
     if interactions_path.exists():
         try:
-            with open(interactions_path, "r", encoding="utf-8", errors="replace") as f:
+            # P1-014 ROOT FIX: same BOM-safe open as above.
+            with _open_csv_for_read(interactions_path) as f:
                 reader = csv_mod.DictReader(f)
                 for row in reader:
                     name = (row.get("drug") or row.get("drug_name") or "").lower()
@@ -574,7 +803,8 @@ def _load_drug_mechanism(drug_name: str) -> Dict[str, Any]:
     indications: List[str] = []
     if indications_path.exists():
         try:
-            with open(indications_path, "r", encoding="utf-8", errors="replace") as f:
+            # P1-014 ROOT FIX: same BOM-safe open as above.
+            with _open_csv_for_read(indications_path) as f:
                 reader = csv_mod.DictReader(f)
                 for row in reader:
                     name = (row.get("drug") or row.get("drug_name") or "").lower()

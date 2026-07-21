@@ -4880,7 +4880,29 @@ def check_migrations(engine=None) -> MigrationHealthResult:
     pending_migrations = [m for m in all_migration_names if m not in set(applied_migrations)]
 
     # Check schema version
+    # P1-008 ROOT FIX (Teammate 1 — institutional-grade fix):
+    #   The previous code did a simple ``schema_version_matches = (db_version == code_version)``.
+    #   On a FRESH INSTALL (brand-new Postgres, no schema_version table yet, no
+    #   migrations applied), ``db_version = None`` and ``code_version = 0``
+    #   (because ``_derive_schema_version()`` returns 0 when the migrations
+    #   directory is missing — e.g., stripped Docker image). The equality
+    #   check ``None == 0`` is False, so ``schema_version_matches = False`` —
+    #   a FALSE-POSITIVE "schema drift" warning on every fresh install.
+    #   Operators would see "schema version mismatch" in the health check
+    #   output and re-run migrations in a panic, even though the DB was
+    #   actually correct (just empty).
+    #
+    #   ROOT FIX: handle the fresh-install case explicitly. When
+    #   ``code_version == 0`` (migrations dir missing) AND ``db_version is None``
+    #   (no schema_version table), treat the check as PASSING with a
+    #   ``schema_version_note`` flag explaining why. This is the same
+    #   semantics as ``SCHEMA_VERSION_FALLBACK = 0`` in database/base.py
+    #   (which is the documented "fresh install" sentinel). The
+    #   ``schema_version_matches`` field remains True so downstream
+    #   consumers (the pipeline health endpoint, the operator dashboard)
+    #   do not flag drift.
     schema_version_matches = False
+    schema_version_note: str = ""
     try:
         from database.base import SCHEMA_VERSION as code_version
         db_version = None
@@ -4888,7 +4910,46 @@ def check_migrations(engine=None) -> MigrationHealthResult:
             with engine.begin() as conn:
                 r = conn.execute(text("SELECT MAX(version) FROM schema_version"))
                 db_version = r.scalar()
-        schema_version_matches = (db_version == code_version)
+
+        if code_version == 0 and db_version is None:
+            # Fresh install: no migrations dir in the image, no
+            # schema_version table in the DB. This is a VALID state.
+            schema_version_matches = True
+            schema_version_note = (
+                "Fresh install (code_version=0, db_version=None). "
+                "Migrations directory not present in this image; "
+                "DB has no schema_version table. Treating as match. "
+                "(P1-008 v141)"
+            )
+            logger.info("check_migrations: %s", schema_version_note)
+        elif code_version == 0 and db_version is not None:
+            # Code version is 0 (migrations dir missing) but the DB
+            # has a schema_version table with a recorded version.
+            # This is the "stripped image deployed against an existing DB"
+            # case — the DB is ahead of the code's knowledge. Log a
+            # WARNING (this is suspicious) but do NOT mark as drift
+            # (the DB might be correct; the code image is just
+            # missing the migrations dir for display purposes).
+            schema_version_matches = True
+            schema_version_note = (
+                f"Stripped image (code_version=0) against DB with "
+                f"schema_version={db_version}. The code image does not "
+                f"include the migrations directory; cannot verify "
+                f"version match. DB version is authoritative. (P1-008 v141)"
+            )
+            logger.warning("check_migrations: %s", schema_version_note)
+        else:
+            # Normal case: code_version > 0 (migrations dir present).
+            # Compare against db_version (which may be None on a
+            # fresh DB or an int after migrations have been applied).
+            schema_version_matches = (db_version == code_version)
+            if not schema_version_matches:
+                logger.warning(
+                    "check_migrations: schema version MISMATCH — "
+                    "code_version=%s, db_version=%s. Apply pending "
+                    "migrations or investigate the drift. (P1-008 v141)",
+                    code_version, db_version,
+                )
     except (OperationalError, ProgrammingError) as exc:
         logger.warning("Could not check schema version: %s", exc)
 
