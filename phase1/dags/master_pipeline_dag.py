@@ -331,6 +331,17 @@ DEFAULT_ARGS = {
 import os as _os
 import uuid as _uuid
 from datetime import datetime as _datetime_module  # alias to avoid name clash
+# P1-007 NB-1 ROOT FIX (Teammate 1 — institutional-grade fix):
+#   ``datetime.utcnow()`` is deprecated in Python 3.12+ (returns a NAIVE
+#   datetime, not tz-aware). The prior fix at line 1234-1240 explicitly
+#   noted this deprecation when fixing the log timestamp, but MISSED the
+#   same pattern at line 2021 for the validate_output payload's
+#   ``validated_at`` field. The XCom payload's timestamp was a naive
+#   datetime — Phase 2's audit log would interpret it as local time
+#   rather than UTC, causing a timestamp drift in end-to-end tracing.
+#   ROOT FIX: import timezone as _tz_module and use
+#   ``datetime.now(timezone.utc)`` for tz-aware UTC timestamps.
+from datetime import timezone as _tz_module
 from pathlib import Path as _Path_module
 
 # Resolve the project root: ``__file__`` is
@@ -2018,7 +2029,7 @@ def _validate_output_impl() -> dict:
         "dpi_missing": bool(dpi_state.get("dpi_missing", False)),
         "dpi_acknowledged": bool(dpi_state.get("acknowledged", False)),
         "dpi_source": dpi_state.get("source", "unknown"),
-        "validated_at": _datetime_module.utcnow().isoformat(),
+        "validated_at": _datetime_module.now(_tz_module.utc).isoformat(),
         "failures": failures,
     }
     return payload
