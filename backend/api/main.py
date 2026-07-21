@@ -814,17 +814,79 @@ async def predict(
         "predict: user=%s org=%s drug=%s disease=%s",
         auth.user_id, auth.org_id, req.drug, req.disease,
     )
-    # TODO: call the GT model service via GT_SERVICE_URL.
-    # For now, return a placeholder that matches the response schema.
-    # The actual GT model call will be implemented when the GT service
-    # is deployed to a GPU node.
+    # P0 ROOT FIX (hostile-auditor v134): wire /predict to the GT service
+    # at GT_SERVICE_URL/predict. The previous implementation returned a
+    # HARDCODED gnn_score=0.5, confidence=0.5 for every (drug, disease)
+    # pair — pharma partners could NOT access the real Graph Transformer
+    # model through the REST API. The GT service IS implemented at
+    # graph_transformer/service.py with a working /predict endpoint that
+    # loads a real checkpoint, but the backend never called it. This fix
+    # proxies to GT_SERVICE_URL/predict using the same httpx pattern as
+    # the /validate endpoint (lines 954-997). If GT_SERVICE_URL is not
+    # configured, we return HTTP 503 (Service Unavailable) so the caller
+    # knows the GT service is not deployed — we NEVER return a fake
+    # placeholder score that could be confused with a real prediction.
+    import httpx
+
+    gt_url = os.environ.get("GT_SERVICE_URL")
+    if not gt_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GT_SERVICE_URL not configured — the Graph Transformer "
+                   "service is not deployed. /predict cannot return real "
+                   "predictions. Deploy the GT service and set GT_SERVICE_URL.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            gt_resp = await client.post(
+                f"{gt_url.rstrip('/')}/predict",
+                json={
+                    "pairs": [{"drug": req.drug, "disease": req.disease}],
+                    "limit": 1,
+                },
+            )
+        if gt_resp.status_code != 200:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"GT service /predict returned {gt_resp.status_code}: "
+                       f"{gt_resp.text[:500]}",
+            )
+        gt_payload = gt_resp.json()
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"GT service unreachable at {gt_url}: {exc}",
+        ) from exc
+
+    # Translate the GT service response into the backend's PredictResponse
+    # shape. The GT service returns {predictions: [{drug, disease, score,
+    # confidence, pathways?}], ...} — we take the first (and only) prediction.
+    predictions = gt_payload.get("predictions") or []
+    if not predictions:
+        # GT service returned 200 but no predictions — the drug or disease
+        # was not in the graph. Return a clearly-marked "not found" response
+        # rather than a fake 0.5 score.
+        return PredictResponse(
+            drug=req.drug,
+            disease=req.disease,
+            gnn_score=0.0,
+            confidence=0.0,
+            pathways=[],
+            literature_supported=False,
+        )
+
+    pred = predictions[0]
+    # GT service uses 'score' for the calibrated probability and
+    # 'confidence' for the entropy-derived confidence. Both are floats
+    # in [0, 1] (clamped by the GT service before serialization).
     return PredictResponse(
-        drug=req.drug,
-        disease=req.disease,
-        gnn_score=0.5,  # placeholder
-        confidence=0.5,  # placeholder
-        pathways=[],
-        literature_supported=False,
+        drug=pred.get("drug", req.drug),
+        disease=pred.get("disease", req.disease),
+        gnn_score=float(pred.get("score", 0.0)),
+        confidence=float(pred.get("confidence", 0.0)),
+        pathways=list(pred.get("pathways", []) or []),
+        literature_supported=bool(pred.get("literature_supported", False)),
     )
 
 
@@ -865,12 +927,57 @@ async def top_k(
         "top-k: user=%s org=%s drug=%s disease=%s k=%d",
         auth.user_id, auth.org_id, req.drug, req.disease, req.k,
     )
-    # TODO: call the RL ranker service via RL_SERVICE_URL with org_id
-    # for org-scoped candidate filtering.
+    # P0 ROOT FIX (hostile-auditor v134): wire /top-k to the RL ranker
+    # service at RL_SERVICE_URL/rank. The previous implementation returned
+    # a HARDCODED candidates=[] (empty list) with source="rl_ranker" —
+    # pharma partners got ZERO candidates from every /top-k query, even
+    # though the RL ranker service (rl/service.py) is fully implemented
+    # with /rank endpoint that loads the PPO checkpoint and returns real
+    # ranked candidates. This fix proxies to RL_SERVICE_URL/rank using
+    # the same httpx pattern as /validate. We forward org_id as a query
+    # param for 21 CFR Part 11 audit attribution. If RL_SERVICE_URL is
+    # not configured, we return HTTP 503 — we NEVER return an empty
+    # candidates list with source="rl_ranker" that could be confused
+    # with a real "no candidates found" result.
+    rl_url = os.environ.get("RL_SERVICE_URL")
+    if not rl_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="RL_SERVICE_URL not configured — the RL ranker service "
+                   "is not deployed. /top-k cannot return real candidates. "
+                   "Deploy the RL service and set RL_SERVICE_URL.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Forward org_id as a query param for audit attribution.
+            # The RL service's _rank_impl accepts org_id and logs it.
+            params = {"org_id": auth.org_id, "limit": req.k}
+            rl_resp = await client.post(
+                f"{rl_url.rstrip('/')}/rank",
+                params=params,
+                json={"drug": req.drug, "disease": req.disease, "limit": req.k},
+            )
+        if rl_resp.status_code != 200:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"RL service /rank returned {rl_resp.status_code}: "
+                       f"{rl_resp.text[:500]}",
+            )
+        rl_payload = rl_resp.json()
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"RL service unreachable at {rl_url}: {exc}",
+        ) from exc
+
+    # Translate the RL service response into TopKResponse. The RL service
+    # returns {candidates: [...], total, source, ...} — we forward as-is
+    # but ensure the org_id is echoed back for audit.
     return TopKResponse(
-        candidates=[],
-        total=0,
-        source="rl_ranker",
+        candidates=list(rl_payload.get("candidates", []) or []),
+        total=int(rl_payload.get("total", 0) or 0),
+        source=str(rl_payload.get("source", "rl_ranker")),
         org_id=auth.org_id,  # TM14: echo back for audit
     )
 
@@ -894,17 +1001,50 @@ async def get_dataset_stats(
         "datasets/stats: user=%s org=%s",
         auth.user_id, auth.org_id,
     )
-    # TODO: call the Phase 1 dataset service via PHASE1_SERVICE_URL.
-    return {
-        "sources": [],
-        "nodesLoaded": 0,
-        "edgesLoaded": 0,
-        "edgeTypesPresent": [],
-        "warnings": [],
-        "errors": [],
-        "generatedAt": datetime.now(timezone.utc).isoformat(),
-        "org_id": auth.org_id,  # audit echo
-    }
+    # P0 ROOT FIX (hostile-auditor v134): wire /datasets/stats to the
+    # Phase 1 dataset service at PHASE1_SERVICE_URL/stats. The previous
+    # implementation returned HARDCODED empty stats (sources=[], nodes=0,
+    # edges=0) — the dashboard's dataset-stats card ALWAYS showed zero
+    # even when Phase 1 had loaded real data. This fix proxies to
+    # PHASE1_SERVICE_URL/stats. If PHASE1_SERVICE_URL is not configured,
+    # we return HTTP 503 — we NEVER return fake empty stats that could
+    # be confused with "Phase 1 has no data loaded".
+    import httpx
+
+    phase1_url = os.environ.get("PHASE1_SERVICE_URL")
+    if not phase1_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PHASE1_SERVICE_URL not configured — the Phase 1 dataset "
+                   "service is not deployed. /datasets/stats cannot return "
+                   "real stats. Deploy the Phase 1 service and set "
+                   "PHASE1_SERVICE_URL.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            p1_resp = await client.get(f"{phase1_url.rstrip('/')}/stats")
+        if p1_resp.status_code != 200:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Phase 1 service /stats returned "
+                       f"{p1_resp.status_code}: {p1_resp.text[:500]}",
+            )
+        p1_payload = p1_resp.json()
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"Phase 1 service unreachable at {phase1_url}: {exc}",
+        ) from exc
+
+    # Merge the Phase 1 service's response with our audit fields. The
+    # Phase 1 /stats endpoint already returns the fields the frontend
+    # destructures (sources, total_drugs, total_proteins, nodesLoaded,
+    # edgesLoaded, edgeTypesPresent, schemaVersion, bridgeVersion,
+    # lastUpdated, warnings, errors, generatedAt, backend). We add
+    # org_id for audit echo (TM14 v132 fix preserved).
+    p1_payload["org_id"] = auth.org_id  # audit echo
+    return p1_payload
 
 
 # ---------------------------------------------------------------------------

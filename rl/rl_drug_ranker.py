@@ -4316,17 +4316,59 @@ class RewardFunction:
         # This makes the gate monotonic AND appropriately strict for
         # borderline-safety drugs. The hard-reject case (safety < hard_reject)
         # is handled above (returns -1.0). Below, safety_val >= hard_reject.
+        #
+        # hostile-auditor v134 ROOT FIX (P4-BUG-6): the three-tier STEP
+        # function above has ZERO GRADIENT almost everywhere (the
+        # derivative is 0 inside each tier and undefined at the
+        # boundaries). PPO learns from value-function gradients — a
+        # step-function reward produces zero gradient on safety_score
+        # except at the boundaries, making it impossible for the policy
+        # to learn a smooth mapping from safety_score to action
+        # probability. The Issue 168 ROOT FIX (sigmoid) was REVERTED by
+        # P4-040 without updating the stale comment at line 4277-4297.
+        #
+        # The fix: restore the SIGMOID from Issue 168, but with a STEEPER
+        # k (k=20 instead of k=10) to address P4-040's "borderline too
+        # permissive" concern. The steep sigmoid transitions from 0.1 to
+        # 0.9 over ~0.1 safety units (vs. ~0.2 with k=10), which is
+        # nearly as decisive as the step function but still SMOOTH (C∞).
+        # PPO can learn a clean gradient. The formula:
+        #   safety_factor = 1 / (1 + exp(-20 * (safety - warning)))
+        # Properties:
+        #   - safety < hard_reject: handled above (returns -1.0)
+        #   - safety == hard_reject: factor ≈ 0.0 (if warning > hard_reject)
+        #   - safety == warning: factor = 0.5 (neutral)
+        #   - safety >> warning: factor ≈ 1.0 (fully accepted)
+        #   - The function is SMOOTH (C∞) — no kinks, no discontinuities
+        #     in the derivative. PPO can learn a clean gradient.
         _hard_reject = float(cfg.safety_hard_reject)
         _warning = float(cfg.safety_warning)
-        if safety_val < _hard_reject + 0.1:
-            # [hard_reject, hard_reject+0.1) — barely above hard-reject; near-reject
-            safety_factor = 0.2
-        elif safety_val < _warning:
-            # [hard_reject+0.1, safety_warning) — cautious zone; halve reward
-            safety_factor = 0.5
-        else:
-            # [safety_warning, 1.0] — clear; no penalty
-            safety_factor = 1.0
+        # hostile-auditor v134: restore the sigmoid (Issue 168 fix) with a
+        # steeper k=20 to address P4-040's "borderline too permissive"
+        # concern. The step function is REMOVED (zero gradient → PPO
+        # cannot learn from safety_score).
+        _k_steep = 20.0  # steepness — transitions over ~0.1 safety units
+        try:
+            _sig_arg = -_k_steep * (safety_val - _warning)
+            # Clamp the argument to avoid overflow in exp() for extreme
+            # values (safety_val far from warning). math.exp(700) is the
+            # approximate limit before overflow on float64.
+            if _sig_arg > 700.0:
+                safety_factor = 0.0
+            elif _sig_arg < -700.0:
+                safety_factor = 1.0
+            else:
+                safety_factor = 1.0 / (1.0 + math.exp(_sig_arg))
+        except (OverflowError, ValueError):
+            # Defensive: if math.exp still overflows, fall back to the
+            # hard-reject/clear endpoints based on the sign of the arg.
+            safety_factor = 0.0 if _sig_arg > 0 else 1.0
+        # Patient-safety invariant: even with the sigmoid, enforce a HARD
+        # floor of 0.0 for safety below hard_reject (already returned -1.0
+        # above) and a hard ceiling of 1.0 for safety above warning. The
+        # sigmoid naturally respects these, but the explicit clamp makes
+        # the invariant visible to auditors.
+        safety_factor = max(0.0, min(1.0, safety_factor))
 
         # MONOTONIC reward: weighted_sum * safety_factor.
         # v89 P0: gnn_factor REMOVED (was making RL a circular
@@ -5856,14 +5898,33 @@ class DrugRankingEnv(gym.Env):
         self._bridge_feature_cols: List[str] = []
 
         # (1) gnn_score_calibrated — the temperature-calibrated GNN score.
-        if GNN_SCORE_CALIBRATED_COL in self.data.columns:
-            # Clip to [0, 1] — calibrated scores are sigmoid outputs in [0, 1].
-            self.data[GNN_SCORE_CALIBRATED_COL] = self.data[GNN_SCORE_CALIBRATED_COL].clip(0.0, 1.0)
-            self._bridge_feature_cols.append(GNN_SCORE_CALIBRATED_COL)
-        else:
-            # Old bridge CSV: fill with 0.0 (neutral — agent learns to ignore).
-            self.data[GNN_SCORE_CALIBRATED_COL] = 0.0
-            self._bridge_feature_cols.append(GNN_SCORE_CALIBRATED_COL)
+        #
+        # hostile-auditor v134 ROOT FIX (P4-BUG-1): the bridge writes the
+        # SAME calibrated value to BOTH ``gnn_score`` and
+        # ``gnn_score_calibrated`` (see gt_rl_bridge.py:2066-2078 — the
+        # P3-004 fix made them identical). Including the duplicate in the
+        # observation space lets the policy network learn a heavier
+        # dependence on the GT score than the v89 P0 0.04 weight cap
+        # intends (the cap on ``gnn_score_calibrated`` weight at line 3698
+        # is meaningless when the policy sees the same signal via
+        # ``gnn_score`` AND ``gnn_score_calibrated`` — the network can
+        # learn to combine them).
+        #
+        # The fix: set ``gnn_score_calibrated`` to a CONSTANT 0.0 in the
+        # observation space (NOT the CSV column — that's preserved for
+        # backward compat with downstream consumers that read it
+        # explicitly). The policy network sees a constant (no signal),
+        # so it cannot use the duplicate to circumvent the 0.04 cap. The
+        # CSV column still holds the real calibrated value for any
+        # consumer that wants to read it.
+        #
+        # This is the ROOT-CAUSE fix: the previous code's
+        # ``self.data[GNN_SCORE_CALIBRATED_COL] = self.data[...].clip(0,1)``
+        # was a no-op in spirit (the value was already in [0,1]), and the
+        # real problem — the duplicate signal in the observation space —
+        # was never addressed. Setting it to 0.0 here closes the loophole.
+        self.data[GNN_SCORE_CALIBRATED_COL] = 0.0
+        self._bridge_feature_cols.append(GNN_SCORE_CALIBRATED_COL)
 
         # (2) gnn_score_age_hours — derived from gnn_score_timestamp.
         # 0.0 = fresh (just computed); large = stale. The agent can learn
@@ -9910,10 +9971,34 @@ def safe_load_input(filepath: str) -> Tuple[pd.DataFrame, str]:
     #      the input path, so users are informed but the pipeline
     #      doesn't crash
     #   4. Set RL_STRICT_SYMLINK_CHECK=1 env var to restore strict mode
+    # hostile-auditor v134 ROOT FIX (P4-BUG-7): the previous code
+    # UNCONDITIONALLY rejected symlinked input files with NO override.
+    # The bridge writes gt_predictions.csv to output_dir; if output_dir
+    # is on a NAS or a Kubernetes volume mount (extremely common in
+    # production), the file may be a symlink. The pipeline then CRASHED
+    # when trying to load its own output. The RL_STRICT_SYMLINK_CHECK
+    # flag only governs the PARENT DIRECTORY check below — not this
+    # file-level check.
+    #
+    # The fix: add an RL_ALLOW_SYMLINK_INPUT env var (default "0") that
+    # allows symlinked input files. Default remains strict (reject) for
+    # defense in depth — operators who need the production escape hatch
+    # must explicitly opt in. When allowed, we still log a WARNING so
+    # the operator knows a symlink was followed.
     if os.path.islink(filepath):
-        raise ValueError(
-            f"Input file is a symlink (security risk): {filepath}. "
-            "Refusing to load. Pass a real file path."
+        _allow_symlink = os.environ.get("RL_ALLOW_SYMLINK_INPUT", "0") in ("1", "true", "yes")
+        if not _allow_symlink:
+            raise ValueError(
+                f"Input file is a symlink (security risk): {filepath}. "
+                "Refusing to load. Pass a real file path, or set "
+                "RL_ALLOW_SYMLINK_INPUT=1 to allow symlinked input files "
+                "(needed when output_dir is on a NAS or K8s volume mount)."
+            )
+        logger.warning(
+            "RL_ALLOW_SYMLINK_INPUT=1: loading symlinked input file %s "
+            "(target=%s). This is allowed because the operator explicitly "
+            "opted in. Verify the symlink target is trusted.",
+            filepath, os.readlink(filepath) if os.path.islink(filepath) else "?",
         )
 
     # ROOT FIX (B-01 / FORENSIC-AUDIT-I28 reversal): the V26 default of
@@ -11400,6 +11485,13 @@ def run_pipeline(
     # can check either.
     _biopython_missing: bool = False
     _literature_check_failed_missing_biopython: bool = False
+    # hostile-auditor v134 ROOT FIX: parallel flag for the ENTREZ_EMAIL-
+    # missing case. The previous code only had a flag for biopython-
+    # missing; the ENTREZ_EMAIL-missing case fell through to `else: raise`
+    # and CRASHED the pipeline. This flag mirrors the biopython pattern:
+    # when set, the scientific_validation gate sees literature_pass=False
+    # and the pipeline refuses to write the output CSV.
+    _literature_check_failed_missing_email: bool = False
     if os.environ.get("RL_SKIP_LITERATURE"):
         # TEST-ONLY escape hatch: skip the literature cross-check
         # entirely (no PubMed network calls). The gate treats this as
@@ -11454,6 +11546,40 @@ def run_pipeline(
                     "biopython (`pip install biopython`) and re-run. "
                     "If you genuinely need to skip the check for a "
                     "dev/CI run, set RL_SKIP_LITERATURE=1 — but this "
+                    "is NOT acceptable for production."
+                )
+            elif "ENTREZ_EMAIL" in str(_lit_err) or "Issue 174" in str(_lit_err):
+                # hostile-auditor v134 ROOT FIX: the ENTREZ_EMAIL-missing
+                # case used to fall through to the `else: raise` branch
+                # below, which CRASHED the entire pipeline with an
+                # uncaught RuntimeError. A production deployment with
+                # biopython installed but no ENTREZ_EMAIL env var would
+                # get a stack trace instead of a clear "set ENTREZ_EMAIL"
+                # message + non-zero exit. This is inconsistent with the
+                # biopython-missing case (which fails the gate gracefully
+                # via _literature_check_failed_missing_biopython=True).
+                #
+                # The fix: mirror the biopython-missing pattern. Set
+                # _literature_check_failed_missing_email=True so the
+                # scientific_validation gate sees literature_pass=False
+                # and adds 'literature' to checks_failed. The pipeline
+                # refuses to write the output CSV (ScientificFailureError)
+                # with a clear message telling the operator to set
+                # ENTREZ_EMAIL. The operator MUST set ENTREZ_EMAIL to a
+                # real email address (or RL_SKIP_LITERATURE=1 for dev/CI)
+                # to pass the gate.
+                _literature_check_failed_missing_email = True
+                logger.error(
+                    "hostile-auditor v134 ROOT FIX: literature cross-check "
+                    "FAILED (ENTREZ_EMAIL env var not set). NCBI Entrez "
+                    "requires a real email for API access. All candidates "
+                    "have literature_support=False. The V1 launch criterion "
+                    "'≥5 literature-supported predictions' is FAILED (not "
+                    "skipped, not crashed). The scientific_validation gate "
+                    "will refuse to write the output CSV. Set "
+                    "ENTREZ_EMAIL=<your_email> in the environment and "
+                    "re-run. If you genuinely need to skip the check for "
+                    "a dev/CI run, set RL_SKIP_LITERATURE=1 — but this "
                     "is NOT acceptable for production."
                 )
             else:
@@ -11812,6 +11938,10 @@ def run_pipeline(
         # compat with both fixes' tests.
         "biopython_missing": _biopython_missing,
         "literature_check_failed_missing_biopython": _literature_check_failed_missing_biopython,
+        # hostile-auditor v134 ROOT FIX: track ENTREZ_EMAIL missing
+        # explicitly so the gate can FAIL (not crash) when the env var
+        # is absent. Mirrors the biopython-missing pattern.
+        "literature_check_failed_missing_email": _literature_check_failed_missing_email,
     }
     # RT-005 + P4-012 ROOT FIX: set literature_pass based on the check outcome.
     #   - RL_SKIP_LITERATURE set (TEST-ONLY): SKIP (literature_pass = None).
@@ -11830,6 +11960,11 @@ def run_pipeline(
     if _literature_check_skipped:
         scientific_validation["literature_pass"] = None  # TEST-ONLY skip
     elif _biopython_missing or _literature_check_failed_missing_biopython:
+        scientific_validation["literature_pass"] = False  # PRODUCTION FAIL
+    elif _literature_check_failed_missing_email:
+        # hostile-auditor v134 ROOT FIX: ENTREZ_EMAIL not set → fail the
+        # gate gracefully (mirror the biopython-missing pattern) instead
+        # of crashing the pipeline with an uncaught RuntimeError.
         scientific_validation["literature_pass"] = False  # PRODUCTION FAIL
     else:
         scientific_validation["literature_pass"] = (

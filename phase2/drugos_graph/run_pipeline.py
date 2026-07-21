@@ -5737,8 +5737,56 @@ def step9_build_pyg(
 
     from .pyg_builder import PyGBuilder
 
-    pyg_builder = PyGBuilder(PyGConfig())
-    data = pyg_builder.build_from_drkg(entity_maps, edge_maps)
+    # hostile-auditor v134 ROOT FIX (P2-BUG-2): the previous code called
+    # ``build_from_drkg(entity_maps, edge_maps)`` with NEITHER
+    # ``node_features`` NOR ``feature_provider``. The Task 109 fix at
+    # pyg_builder.py:942-963 raises ``RuntimeError`` in this case (unless
+    # ``DRUGOS_ALLOW_XAVIER_FALLBACK=1`` is set). The chemberta integration
+    # block at line 5994+ — which would have replaced the random Compound
+    # features with real ChEMBERTa embeddings — was UNREACHABLE because
+    # the build crashed BEFORE the chemberta block could run. The entire
+    # 140-line chemberta "ROOT FIX" was dead code in the default path.
+    #
+    # The fix: when ChEMBERTa is ENABLED (the default — DRUGOS_USE_CHEMBERTA
+    # defaults to "1"), set ``DRUGOS_ALLOW_XAVIER_FALLBACK=1`` BEFORE
+    # calling ``build_from_drkg`` so the build succeeds with random
+    # Xavier features. The chemberta block below then REPLACES the
+    # Compound features with real ChEMBERTa embeddings (mode="replace").
+    # If chemberta fails, ``_strict_raise`` (line 6132) raises
+    # ``FeatureFailureError`` when ``strict_features=True`` — so the
+    # failure mode is LOUD, not silent.
+    #
+    # When ChEMBERTa is DISABLED (DRUGOS_USE_CHEMBERTA=0), do NOT set
+    # the fallback — ``build_from_drkg`` raises ``RuntimeError`` telling
+    # the operator to provide ``node_features`` or ``feature_provider``.
+    # This is correct: if chemberta is disabled, the operator MUST
+    # provide an alternative feature source (the Graph Transformer
+    # cannot train on random noise).
+    _use_chemberta_pre = os.environ.get("DRUGOS_USE_CHEMBERTA", "1") == "1"
+    _xavier_fallback_set_by_us = False
+    if _use_chemberta_pre and os.environ.get("DRUGOS_ALLOW_XAVIER_FALLBACK", "") != "1":
+        os.environ["DRUGOS_ALLOW_XAVIER_FALLBACK"] = "1"
+        _xavier_fallback_set_by_us = True
+        logger.info(
+            "hostile-auditor v134 P2-BUG-2 ROOT FIX: temporarily setting "
+            "DRUGOS_ALLOW_XAVIER_FALLBACK=1 for build_from_drkg because "
+            "DRUGOS_USE_CHEMBERTA=1 (default). The chemberta block below "
+            "will REPLACE the random Compound features with real "
+            "ChEMBERTa embeddings (mode='replace'). If chemberta fails, "
+            "_strict_raise will raise FeatureFailureError (when "
+            "DRUGOS_STRICT_FEATURES=1, the default). The pipeline NO "
+            "LONGER halts at build_from_drkg in the chemberta-enabled path."
+        )
+    try:
+        pyg_builder = PyGBuilder(PyGConfig())
+        data = pyg_builder.build_from_drkg(entity_maps, edge_maps)
+    finally:
+        # Restore the env var so we don't leak the fallback into other
+        # callers in the same process (e.g. step10+ might also call
+        # build_from_drkg and we want it to fail loudly if chemberta
+        # was disabled).
+        if _xavier_fallback_set_by_us:
+            os.environ.pop("DRUGOS_ALLOW_XAVIER_FALLBACK", None)
 
     # ── FIX(C-13): Optional ChEMBERTa SMILES feature integration ───────
     # The DOCX Phase 2 spec implies ChEMBERTa SMILES embeddings inform

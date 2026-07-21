@@ -229,7 +229,7 @@ def _count_unique_string_proteins(path: Path) -> int:
 
 
 def _collect_string_protein_ids(path: Path) -> Set[str]:
-    """Return the SET of unique protein IDs from a STRING PPI CSV.
+    """Return the SET of unique UniProt protein IDs from a STRING PPI CSV.
 
     TEAMMATE-4 ROOT FIX (NEW HELPER): the previous /stats endpoint used
     max(uniprot_rows, string_unique_protein_count) to estimate
@@ -243,6 +243,26 @@ def _collect_string_protein_ids(path: Path) -> Set[str]:
         total_proteins = |uniprot_ids ∪ string_ids|
     which counts each unique protein exactly once regardless of which
     source(s) it appears in.
+
+    hostile-auditor v134 ROOT FIX (P1-BUG-1): the previous code read
+    columns 0 and 1 (the STRING ENSP IDs like "9606.ENSP00000000233")
+    — NOT UniProt accessions. Per the STRING pipeline's _build_output
+    (string_pipeline.py:2224-2231), the column order is:
+      string_id_a, string_id_b, uniprot_id_a, uniprot_id_b, combined_score, ...
+    So columns 0/1 are STRING ENSP IDs, columns 2/3 are UniProt accessions.
+    UniProt IDs (e.g. "P12345") and STRING ENSP IDs (e.g.
+    "9606.ENSP00000000233") are DISJOINT ID namespaces — no string is
+    in both sets. So the set union `|` was effectively a sum (no
+    cross-source deduplication), OVER-COUNTING total_proteins by the
+    size of the intersection (proteins present in both sources).
+
+    ROOT FIX: read columns 2 and 3 (the uniprot_id_a / uniprot_id_b
+    columns) so the returned set is in the SAME namespace as
+    _collect_uniprot_protein_ids. The set union then correctly
+    deduplicates cross-source. If the CSV has fewer than 4 columns
+    (e.g. an old STRING export without UniProt crosswalk), fall back
+    to columns 0/1 (ENSP IDs) with a WARNING — the union will be an
+    over-count, but that's better than crashing.
 
     This helper returns the STRING protein ID SET so the caller can
     compute the union. Returns an empty set if the file is missing or
@@ -258,13 +278,56 @@ def _collect_string_protein_ids(path: Path) -> Set[str]:
                 next(reader)  # skip header
             except StopIteration:
                 return set()
+            # hostile-auditor v134 P1-BUG-1: detect the column layout by
+            # inspecting the header. Prefer the uniprot_id_a / uniprot_id_b
+            # columns (so the returned IDs are in the UniProt namespace,
+            # matching _collect_uniprot_protein_ids). Fall back to columns
+            # 0/1 (ENSP IDs) only if the header doesn't have uniprot columns.
+            # We re-open the file to read the header (the iterator above
+            # already consumed it).
+            _col_a_idx = 0
+            _col_b_idx = 1
+            _using_ensp_fallback = True
+            try:
+                with _open_csv_for_read(path) as _f_hdr:
+                    _reader_hdr = _csv_module.reader(_f_hdr)
+                    try:
+                        _header = next(_reader_hdr)
+                    except StopIteration:
+                        _header = []
+                if _header:
+                    _lower_header = [str(h).strip().lower() for h in _header]
+                    for _i, _h in enumerate(_lower_header):
+                        if _h in ("uniprot_id_a", "uniprot_a", "uniprot_id1"):
+                            _col_a_idx = _i
+                        elif _h in ("uniprot_id_b", "uniprot_b", "uniprot_id2"):
+                            _col_b_idx = _i
+                    # If we found at least one uniprot column, we're not
+                    # in the ENSP fallback path.
+                    if _col_a_idx != 0 or _col_b_idx != 1:
+                        _using_ensp_fallback = False
+            except Exception:
+                # Header inspection failed — fall back to columns 0/1
+                # (the original buggy behavior, but at least we don't crash).
+                pass
+            if _using_ensp_fallback:
+                logger.warning(
+                    "Phase 1 service: STRING PPI CSV %s does not have "
+                    "uniprot_id_a/uniprot_id_b columns (P1-BUG-1 v134 fix). "
+                    "Falling back to columns 0/1 (ENSP IDs). The total_proteins "
+                    "UNION with UniProt accessions will be an OVER-COUNT "
+                    "(ENSP and UniProt IDs are disjoint namespaces). "
+                    "Regenerate the CSV via the STRING pipeline to include "
+                    "the UniProt crosswalk columns.",
+                    path,
+                )
             for row in reader:
                 if not row:
                     continue
-                if len(row) > 0 and row[0]:
-                    unique_ids.add(row[0])
-                if len(row) > 1 and row[1]:
-                    unique_ids.add(row[1])
+                if len(row) > _col_a_idx and row[_col_a_idx]:
+                    unique_ids.add(row[_col_a_idx])
+                if len(row) > _col_b_idx and row[_col_b_idx]:
+                    unique_ids.add(row[_col_b_idx])
         return unique_ids
     except Exception as exc:
         logger.warning(

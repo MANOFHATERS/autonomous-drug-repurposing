@@ -1336,7 +1336,20 @@ class BiomedicalGraphBuilder:
             # Do NOT call ``builder.add_edge("drug", "treats", "disease", ...)``
             # and do NOT call ``known_pairs.append(...)`` — see the
             # ``__init__`` docstring for the full rationale.
-            self.validated_pairs = list(validated_pairs)
+            #
+            # hostile-auditor v134 ROOT FIX: this function is a
+            # ``@staticmethod`` (no ``self`` parameter). The previous
+            # code wrote ``self.validated_pairs = list(validated_pairs)``
+            # which raised ``NameError: name 'self' is not defined`` on
+            # EVERY call — the entire demo-graph code path was DEAD.
+            # The fix: write to the local ``builder`` variable (the
+            # ``BiomedicalGraphBuilder`` instance constructed at line 1208)
+            # instead of the non-existent ``self``. The bridge's own
+            # ``self.validated_pairs`` (gt_rl_bridge.py:504) is a
+            # SEPARATE attribute on the BRIDGE object — this builder
+            # attribute is preserved for backward compat with any
+            # future caller that reads ``builder.validated_pairs``.
+            builder.validated_pairs = list(validated_pairs)
             logger.info(
                 f"TM15 v132 P3-008 ROOT FIX: storing {len(validated_pairs)} "
                 f"validated hypothesis pairs on builder.validated_pairs "
@@ -1349,7 +1362,10 @@ class BiomedicalGraphBuilder:
             # Ensure the attribute is initialized even when no validated
             # hypotheses are passed (defensive — __init__ already sets it
             # to [], but a caller might have manually overwritten it).
-            self.validated_pairs = []
+            # hostile-auditor v134 ROOT FIX: write to ``builder`` (the
+            # local BiomedicalGraphBuilder instance), NOT ``self`` — this
+            # is a @staticmethod, so ``self`` does not exist here.
+            builder.validated_pairs = []
 
         # ------------------------------------------------------------------
         # TASK-146 ROOT FIX (v111 forensic): REAL FEATURES, NOT RANDOM NOISE.

@@ -5226,19 +5226,25 @@ def resolve_gene_symbol_to_uniprot(
         #   treats None as "unresolved" (the ``still_unresolved`` mask at
         #   line 4659 checks ``df["uniprot_id"].isna()``), so preserving
         #   None semantics is correct.
-        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup.astype(object)
-        # V90 CI fix: pandas 2.2+ raises TypeError when assigning a
-        # mixed-dtype Series (object with float NaN + str values) to a
-        # column that pandas has inferred as 'str' dtype. The fix is
-        # to ensure the assignment is object-dtype-safe by converting
-        # db_lookup to a plain Python-object Series before assignment.
-        # This was a pre-existing CI failure (P2 + Chain-1 verification
-        # job) unrelated to the Phase 3 V90 fixes, but it blocked the
-        # merge gate. Root cause: pandas 2.2+ stricter dtype enforcement.
-        df.loc[need_resolution_mask, "uniprot_id"] = db_lookup.astype(object)
-        # v89 fix: ensure dtype-safe assignment. Newer pandas (2.2+) raises
-        # TypeError when assigning a mixed Series to a str-dtype column.
-        # Convert to str with NaN preservation, then assign.
+        #
+        #   V90 CI fix: pandas 2.2+ raises TypeError when assigning a
+        #   mixed-dtype Series (object with float NaN + str values) to a
+        #   column that pandas has inferred as 'str' dtype. The fix is
+        #   to ensure the assignment is object-dtype-safe by converting
+        #   db_lookup to a plain Python-object Series before assignment,
+        #   then using .where() to preserve NaN as pd.NA.
+        #
+        # hostile-auditor v134 ROOT FIX (P1-BUG-4): the previous code had
+        #   THREE duplicate assignments to the same `df.loc[mask, col]`:
+        #     line 5229: db_lookup.astype(object)
+        #     line 5238: db_lookup.astype(object)  (DUPLICATE — dead code)
+        #     line 5242: db_lookup.astype(object).where(db_lookup.notna(), other=pd.NA)
+        #   The first two were immediately overwritten by the third. The
+        #   "v89 ROOT FIX" and "V90 CI fix" comments described three
+        #   separate fixes, but the executable code only honored the last
+        #   one. Removed the two dead assignments; kept the final correct
+        #   one. This is the aspirational-fix-left-dead-code pattern the
+        #   user complained about.
         df.loc[need_resolution_mask, "uniprot_id"] = db_lookup.astype(object).where(db_lookup.notna(), other=pd.NA)
 
     # Step 2: still-unresolved rows -- try protein_name map as fallback.
@@ -5251,10 +5257,11 @@ def resolve_gene_symbol_to_uniprot(
         )
         # v89 ROOT FIX (pandas 3.x dtype strictness -- same as Step 1):
         # explicit ``.astype(object)`` to allow None values in the
-        # string-dtype column.
-        df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback.astype(object)
-        # V90 CI fix: same dtype-safe assignment as Step 1.
-        df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback.astype(object)
+        # string-dtype column. V90 CI fix: use .where() to preserve NaN
+        # as pd.NA.
+        # hostile-auditor v134 ROOT FIX (P1-BUG-4): same dead-code cleanup
+        # as Step 1 — removed two duplicate assignments, kept the final
+        # correct one.
         df.loc[still_unresolved, "uniprot_id"] = protein_name_fallback.astype(object).where(protein_name_fallback.notna(), other=pd.NA)
 
     unresolved_count = df["uniprot_id"].isna().sum()

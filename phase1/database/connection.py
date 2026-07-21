@@ -1888,7 +1888,21 @@ def init_db(initiator: Optional[str] = None) -> None:
             # FATAL. SQLite is exempt because pg_advisory_lock is not
             # supported there (single-process anyway), so the SQLite
             # branch below is intentionally unchanged.
+            #
+            # hostile-auditor v134 ROOT FIX (P1-BUG-5): set
+            # ``conn_for_lock = None`` after ``conn_for_lock.close()``
+            # so the finally block at line 1957 correctly skips the
+            # already-closed connection. The previous code kept the
+            # variable bound to the closed connection, so the finally
+            # block attempted ``conn_for_lock.execute(text("SELECT
+            # pg_advisory_unlock(12345)"))`` on a CLOSED connection
+            # (silently swallowed by the inner except) and then called
+            # ``conn_for_lock.close()`` AGAIN (double-close). For most
+            # SQLAlchemy drivers this is a no-op, but for some it
+            # raises. Setting the variable to None is the standard
+            # pattern for safe resource cleanup.
             conn_for_lock.close()
+            conn_for_lock = None  # P1-BUG-5: prevent double-close in finally
             raise RuntimeError(
                 "Cannot acquire pg_advisory_lock — another init_db() "
                 "may be running. Concurrent schema migrations can "

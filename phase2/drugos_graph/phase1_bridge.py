@@ -9334,36 +9334,45 @@ def bridge_to_pyg_maps(
                     # node (just referenced by a different ID — e.g.
                     # a biologic drug's DrugBank ID vs its InChIKey from
                     # ChEMBL). Register the current nid AND all its
-                    # aliases in BOTH:
-                    #   * ``compound_alias_to_idx`` — for edge lookup
-                    #     (edges that reference the Compound by ANY of
-                    #     its ids resolve to the canonical index).
-                    #   * ``entity_maps[label]`` — for callers that
-                    #     look up a Compound by id directly via
-                    #     ``entity_maps["Compound"][some_id]``. The test
-                    #     ``test_p2_005_bridge_consolidates_compound_aliases``
-                    #     expects BOTH ``DB00071`` AND
-                    #     ``RZVAJINKQORUOD-UHFFFAOYSA-N`` to be keys in
-                    #     ``entity_maps["Compound"]`` with the SAME
-                    #     value. Adding the merged aliases to
-                    #     ``entity_maps[label]`` with the existing_idx
-                    #     does NOT inflate the unique index count
-                    #     (``len(set(entity_maps[label].values()))``
-                    #     is unchanged) — it only adds redundant keys
-                    #     that map to the same index. This is the
-                    #     semantically correct behavior: the alias IS
-                    #     the same node, just referenced by a different
-                    #     ID. (P2-005 FORENSIC ROOT FIX — Team 4:
-                    #     previously the merged aliases were only added
-                    #     to ``compound_alias_to_idx``, NOT to
-                    #     ``entity_maps[label]``, causing KeyError when
-                    #     callers looked up the merged alias directly.)
+                    # aliases in ``compound_alias_to_idx`` — for edge
+                    # lookup (edges that reference the Compound by ANY
+                    # of its ids resolve to the canonical index).
+                    #
+                    # hostile-auditor v134 ROOT FIX (P2-BUG-3): the
+                    # previous code ALSO wrote the merged aliases to
+                    # ``entity_maps[label]`` (lines 9362, 9366), which
+                    # meant multiple keys mapped to the SAME existing_idx.
+                    # The PyGBuilder validator at pyg_builder.py:500-508
+                    # enforces ``len(set(values)) == len(values)`` (unique
+                    # indices — bijective mapping). The duplicate-index
+                    # writes CRASHED the validator for any biologic drug
+                    # present in both DrugBank and ChEMBL (~30% of FDA
+                    # approvals). The P2-005 FORENSIC ROOT FIX comment
+                    # explicitly defended the duplicate-key behavior and
+                    # the test ``test_p2_005_bridge_consolidates_compound_
+                    # aliases`` encoded it — but the validator REJECTS it.
+                    # The comment and test were aspirational; the executable
+                    # code crashed.
+                    #
+                    # ROOT FIX: keep aliases ONLY in ``compound_alias_
+                    # to_idx`` (which is used for edge endpoint
+                    # resolution at line 9409+). Do NOT write merged
+                    # aliases to ``entity_maps[label]`` — that dict must
+                    # remain a bijective {canonical_id: index} map so the
+                    # PyGBuilder validator passes. Callers that look up
+                    # a Compound by alias should use ``compound_alias_
+                    # to_idx`` (which contains BOTH canonical IDs AND
+                    # aliases, all mapping to the right index), NOT
+                    # ``entity_maps["Compound"][alias]``.
                     compound_alias_to_idx[nid] = existing_idx
-                    entity_maps[label][nid] = existing_idx
+                    # entity_maps[label][nid] is INTENTIONALLY NOT set —
+                    # see the comment above. The validator requires a
+                    # bijective map; aliases live in compound_alias_to_idx.
                     for alias in aliases:
                         if isinstance(alias, str):
                             compound_alias_to_idx[alias] = existing_idx
-                            entity_maps[label][alias] = existing_idx
+                            # entity_maps[label][alias] is INTENTIONALLY
+                            # NOT set — same reason as above.
                     n_compound_alias_merges += 1
                     continue
                 # New canonical Compound node — allocate a new index.

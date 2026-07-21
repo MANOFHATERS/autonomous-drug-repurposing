@@ -2426,7 +2426,28 @@ class GTRLBridge:
                 # in-memory writer. This eliminates the 250 lines of
                 # duplicate feature-computation logic that had diverged
                 # from _compute_supplementary_features (D-02 audit finding).
-                p = np.clip(scores_np, 1e-7, 1 - 1e-7)
+                #
+                # hostile-auditor v134 ROOT FIX (P3-BUG-2): the previous
+                # code computed `p` (and thus `entropy` and `confidence_np`)
+                # from `scores_np` (the RAW sigmoid, apply_temperature=False
+                # at line 2395). But `gnn_score` (line 2462) is set to
+                # `batch_gnn_calibrated` (the CALIBRATED probability). The
+                # in-memory path's comment at gt_rl_bridge.py:1896-1909
+                # explicitly calls this out as BUG #1 and fixes it by
+                # computing confidence from the calibrated matrix. The
+                # streaming path still had BUG #1 — the RL env saw
+                # `gnn_score`=0.6 (calibrated) paired with
+                # `confidence`=0.99 (derived from raw sigmoid 0.99) for
+                # the same pair. At production scale (≥100K pairs, the
+                # STREAMING_THRESHOLD at line 3425), the trained policy
+                # sees inconsistent features that don't generalize from
+                # the dev/CI in-memory path.
+                #
+                # The fix: compute `p` from `calibrated_scores_np` (NOT
+                # `scores_np`) so `confidence` and `gnn_score` derive from
+                # the SAME calibrated matrix — mirroring the in-memory
+                # path's fix.
+                p = np.clip(calibrated_scores_np, 1e-7, 1 - 1e-7)
                 entropy = -(p * np.log(p) + (1 - p) * np.log(1 - p))
                 # P3-008 ROOT FIX (HIGH, fp32 precision): clip confidence to
                 # [0.0, 1.0]. With fp32 gnn_scores, the entropy can be slightly
