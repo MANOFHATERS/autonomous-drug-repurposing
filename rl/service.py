@@ -31,9 +31,10 @@ import json
 import logging
 import os
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Make rl + repo root importable.
 _HERE = Path(__file__).resolve().parent
@@ -43,7 +44,7 @@ _REPO_ROOT = _HERE.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -542,6 +543,128 @@ def _load_candidates_from_csv(
     return {"candidates": out, "total": total_filtered}
 
 
+# ============================================================================
+# P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+# Cache the GTRLBridge + RL input DataFrame at service startup so /rank
+# doesn't rebuild the bridge on every request.
+# ----------------------------------------------------------------------------
+# THE BUG (forensic root cause):
+#   The previous ``_load_candidates_from_checkpoint`` built a NEW
+#   ``GTRLBridge`` on EVERY /rank request:
+#     bridge = GTRLBridge(...)
+#     bridge.build_model()           # ← trains the graph transformer
+#     rl_input_df = bridge.generate_rl_input()   # ← full graph traversal
+#   On a real KG, ``build_model()`` takes minutes (it trains the graph
+#   transformer) and ``generate_rl_input()`` does a full graph traversal.
+#   Every /rank request added multi-minute latency — the pharma partner
+#   API was unusable.
+#
+# ROOT FIX:
+#   Build the bridge ONCE (lazy on first /rank call, or eagerly via the
+#   ``/reload`` endpoint), then reuse it for all subsequent /rank requests.
+#   The PPO model + VecNormalize sidecar are still loaded per-request
+#   (the checkpoint may change between requests), but the expensive
+#   bridge build is cached.
+#
+# THREAD SAFETY:
+#   FastAPI runs sync endpoints in a threadpool, so concurrent /rank
+#   requests may race to build the bridge. We use ``threading.Lock``
+#   with double-checked locking so only ONE thread builds the bridge;
+#   the rest wait and then receive the cached instance.
+#
+# INVALIDATION:
+#   ``invalidate_bridge_cache()`` clears the cache. Called by the
+#   ``/reload`` endpoint (admin-only) after a KG update. The next /rank
+#   request will rebuild the bridge with the new KG data.
+# ============================================================================
+_bridge_cache: Optional[Any] = None     # GTRLBridge instance (None = not built yet)
+_rl_input_cache: Optional[Any] = None   # pandas DataFrame from bridge.generate_rl_input()
+_bridge_lock = threading.Lock()
+
+
+def get_cached_bridge() -> Tuple[Any, Any]:
+    """Return the cached (GTRLBridge, rl_input_df), building it on first call.
+
+    P4-024 ROOT FIX (Teammate 12): the previous ``_load_candidates_from_checkpoint``
+    built a NEW GTRLBridge on every /rank request — calling ``build_model()``
+    (which trains the graph transformer — multi-minute on a real KG) AND
+    ``generate_rl_input()`` (a full graph traversal) on EVERY request.
+    This added multi-minute latency to every /rank call, making the pharma
+    partner API unusable.
+
+    ROOT FIX: build the bridge ONCE (lazy on first /rank call), then reuse
+    it for all subsequent /rank requests. The PPO model and VecNormalize
+    sidecar are still loaded per-request (the checkpoint may change between
+    requests), but the expensive bridge build is cached.
+
+    Thread-safety: uses double-checked locking so concurrent /rank requests
+    don't race to build the bridge.
+
+    Returns:
+        Tuple of (bridge, rl_input_df). The bridge is a ``GTRLBridge``
+        instance; ``rl_input_df`` is a ``pandas.DataFrame`` from
+        ``bridge.generate_rl_input()``.
+    """
+    global _bridge_cache, _rl_input_cache
+    if _bridge_cache is not None and _rl_input_cache is not None:
+        return _bridge_cache, _rl_input_cache
+    with _bridge_lock:
+        # Double-checked locking: re-test inside the lock so only the
+        # first thread does the build; the rest receive the cached instance.
+        if _bridge_cache is not None and _rl_input_cache is not None:
+            return _bridge_cache, _rl_input_cache
+        from graph_transformer.gt_rl_bridge import GTRLBridge
+        bridge = GTRLBridge(
+            output_dir=str(_HERE / "_service_output"),
+            device="cpu",
+            seed=42,
+        )
+        # Train the graph transformer ONCE. This is the expensive step
+        # (multi-minute on a real KG); caching it cuts /rank latency
+        # from minutes to seconds.
+        bridge.build_model()
+        # Pre-compute the RL training input. This is a graph traversal
+        # that produces the (drug, disease, features) rows the RL env
+        # consumes. Caching it avoids re-traversal on every /rank call.
+        rl_input_df = bridge.generate_rl_input()
+        _rl_input_len = len(rl_input_df) if rl_input_df is not None else 0
+        if _rl_input_len == 0:
+            logger.warning(
+                "P4-024 ROOT FIX (Teammate 12): bridge generated EMPTY RL "
+                "input — /rank will return empty candidates. Check that "
+                "phase1/phase2 data is loaded and the KG has drug→protein→"
+                "pathway→disease edges."
+            )
+        else:
+            logger.info(
+                "P4-024 ROOT FIX (Teammate 12): bridge cached at startup. "
+                "RL input has %d rows. Subsequent /rank requests reuse "
+                "this cache (no multi-minute rebuild). Use POST /reload "
+                "to refresh the cache after a KG update.",
+                _rl_input_len,
+            )
+        _bridge_cache = bridge
+        _rl_input_cache = rl_input_df
+        return _bridge_cache, _rl_input_cache
+
+
+def invalidate_bridge_cache() -> None:
+    """Clear the cached GTRLBridge + RL input.
+
+    Called by the ``/reload`` endpoint (admin-only) after a KG update.
+    The next /rank request will rebuild the bridge with the new KG data.
+    """
+    global _bridge_cache, _rl_input_cache
+    with _bridge_lock:
+        _bridge_cache = None
+        _rl_input_cache = None
+        logger.info(
+            "P4-024 ROOT FIX (Teammate 12): bridge cache invalidated. "
+            "The next /rank request will rebuild the bridge (may take "
+            "several minutes on a large KG)."
+        )
+
+
 def _load_candidates_from_checkpoint(
     checkpoint_path: str,
     drug: Optional[str],
@@ -584,6 +707,15 @@ def _load_candidates_from_checkpoint(
          ``bridge.get_top_k_novel_predictions`` so the bridge normalizes
          obs via the SAME wrapper the model was trained with.
 
+    P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+      The previous code created a NEW ``GTRLBridge`` on every /rank
+      request and called ``build_model()`` + ``generate_rl_input()``
+      each time — multi-minute latency per request. The fix uses the
+      cached bridge from ``get_cached_bridge()`` so the expensive build
+      happens ONCE (at startup or first request), not per-call. The PPO
+      model + VecNormalize sidecar are still loaded per-request because
+      the checkpoint may change between requests.
+
     P4-012 ROOT FIX: returns a dict with 'candidates' AND 'total' keys
     (consistent with _load_candidates_from_csv). When limit=0, returns
     ALL candidates (not empty) — the previous code returned an empty
@@ -605,19 +737,24 @@ def _load_candidates_from_checkpoint(
         # Load the model without env first (env attached later).
         model = PPO.load(checkpoint_path, device=device)
 
-        # Build bridge and env for ranking.
-        from graph_transformer.gt_rl_bridge import GTRLBridge
-        from rl.rl_drug_ranker import DrugRankingEnv, PipelineConfig
-        bridge = GTRLBridge(output_dir=str(_HERE / "_service_output"), device="cpu", seed=42)
-        # Build a minimal graph for the env. In production, this uses
-        # real Phase 1/2 data; here we build the demo graph.
-        bridge.build_model()
-        rl_input_df = bridge.generate_rl_input()
-        if len(rl_input_df) == 0:
-            logger.warning("INT-023: bridge generated empty RL input — no candidates.")
+        # P4-024 ROOT FIX (Teammate 12): use the CACHED bridge instead
+        # of creating a new one on every request. The bridge's
+        # ``build_model()`` trains the graph transformer (multi-minute on
+        # a real KG) and ``generate_rl_input()`` does a full graph
+        # traversal — caching them at startup cuts /rank latency from
+        # minutes to seconds. The PPO model + VecNormalize sidecar are
+        # still loaded per-request (the checkpoint may change).
+        bridge, rl_input_df = get_cached_bridge()
+        if rl_input_df is None or len(rl_input_df) == 0:
+            logger.warning(
+                "P4-024: cached bridge has empty RL input — no candidates. "
+                "Check phase1/phase2 data is loaded. Use POST /reload to "
+                "rebuild the bridge after a KG update."
+            )
             return {"candidates": [], "total": 0}
 
-        # Build RL config and env.
+        # Build RL config and env from the CACHED rl_input_df.
+        from rl.rl_drug_ranker import DrugRankingEnv, PipelineConfig
         cfg = PipelineConfig()
         env = DrugRankingEnv(data=rl_input_df, config=cfg)
 
@@ -954,6 +1091,139 @@ def rank_post(
     FastAPI parses offset from the query string even for POST.
     """
     return _rank_impl(req.drug, req.disease, req.limit, org_id=org_id)
+
+
+# ============================================================================
+# P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+# /reload endpoint — admin-only cache refresh after a KG update.
+# ============================================================================
+#
+# WHY THIS EXISTS:
+#   The ``get_cached_bridge()`` function builds the GTRLBridge ONCE and
+#   reuses it for all subsequent /rank requests (multi-minute latency
+#   cut to seconds). But when the underlying KG is updated (e.g., a
+#   pharma partner validates a new hypothesis via /validate, which
+#   appends to phase1/processed_data/validated_hypotheses.csv and adds
+#   a Neo4j edge), the cached bridge is STALE — it was built from the
+#   OLD KG. Without /reload, /rank would serve rankings computed from
+#   the old KG until the service is restarted.
+#
+# AUTH:
+#   /reload triggers a multi-minute rebuild on the next /rank call.
+#   Anonymous access would let any caller DoS the service by repeatedly
+#   invalidating the cache. We require a bearer token matching the
+#   ``RL_ADMIN_TOKEN`` env var. If ``RL_ADMIN_TOKEN`` is not set, the
+#   endpoint returns 503 (admin not configured) — forcing operators
+#   to explicitly set the token before /reload can be used.
+#
+#   In production, /reload should ALSO be protected at the network
+#   layer (e.g., only reachable from the backend's subnet, not from
+#   the public internet). The token check is DEFENSE-IN-DEPTH, not a
+#   substitute for network ACLs.
+# ============================================================================
+
+_RELOAD_URL = "/reload"
+
+
+def _verify_admin_token(
+    authorization: Optional[str] = Header(
+        default=None,
+        description="Bearer <RL_ADMIN_TOKEN> — required to call /reload.",
+    ),
+) -> str:
+    """Verify the bearer token against RL_ADMIN_TOKEN (admin-only endpoints).
+
+    Returns the token (for audit logging) on success; raises 401/503 otherwise.
+    """
+    expected_token = os.environ.get("RL_ADMIN_TOKEN", "").strip()
+    if not expected_token:
+        # Operator has not configured the admin token → /reload is disabled.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "P4-024 ROOT FIX (Teammate 12): /reload is disabled because "
+                "RL_ADMIN_TOKEN env var is not set. To enable /reload, set "
+                "RL_ADMIN_TOKEN to a strong random string (e.g., "
+                "`openssl rand -hex 32`) and restart the service. In "
+                "production, also restrict /reload at the network layer "
+                "(backend subnet only)."
+            ),
+        )
+    if authorization is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing Authorization header. Expected: Bearer <RL_ADMIN_TOKEN>.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Authorization header. Expected: Bearer <RL_ADMIN_TOKEN>.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = parts[1].strip()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Empty bearer token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    # Constant-time comparison to prevent timing attacks on the token.
+    import hmac as _hmac
+    if not _hmac.compare_digest(token, expected_token):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid admin token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return token
+
+
+@app.post(_RELOAD_URL, tags=["admin"])
+def reload_bridge(
+    _admin_token: str = Depends(_verify_admin_token),
+) -> Dict[str, Any]:
+    """Reload the GT bridge and RL input cache.
+
+    P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+
+    Invalidates the cached ``GTRLBridge`` + RL input DataFrame so the
+    next /rank request rebuilds them from the CURRENT KG. Use this
+    after a KG update (e.g., after a pharma partner validates a new
+    hypothesis via /validate, which appends to validated_hypotheses.csv
+    and adds a Neo4j edge).
+
+    BEHAVIOR:
+      1. Clears the cached bridge + RL input (fast, no rebuild here).
+      2. The NEXT /rank request will rebuild the bridge (multi-minute
+         latency on a real KG). The /reload endpoint itself returns
+         immediately — the rebuild is LAZY, not eager. This avoids
+         blocking the admin call while the rebuild runs, but it means
+         the first /rank call after /reload will be slow.
+
+    AUTH:
+      Bearer token matching RL_ADMIN_TOKEN env var. If RL_ADMIN_TOKEN
+      is not set, returns 503 (admin not configured).
+
+    RETURNS:
+      {
+        "status": "reloaded",
+        "note": "Next /rank request will rebuild the bridge (may take several minutes)."
+      }
+    """
+    invalidate_bridge_cache()
+    logger.info(
+        "P4-024 ROOT FIX (Teammate 12): /reload called by admin — bridge "
+        "cache invalidated. Next /rank request will rebuild the bridge."
+    )
+    return {
+        "status": "reloaded",
+        "note": (
+            "Bridge cache invalidated. The next /rank request will "
+            "rebuild the bridge (may take several minutes on a large KG)."
+        ),
+    }
 
 
 # ============================================================================

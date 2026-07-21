@@ -1595,3 +1595,27 @@ Stage Summary:
 - Files modified: rl/reward.py, rl/rl_drug_ranker.py, rl/tests/test_reward_withdrawn_drugs.py.
 - Files added: rl/tests/integration/__init__.py, rl/tests/integration/test_p1_to_p4_safety_integration.py.
 - All 22 new/updated tests PASS. Zero new test failures introduced.
+
+---
+Task ID: 12 (Teammate 12 — P4 to Backend Integration) — REBASE NOTE
+Agent: Super Z (main agent, GLM)
+Task: After the initial commit on fix/teammate-12-p4-to-backend-top-k-proxy-v131, main advanced (Teammates 4/5/8/9 merged their own fixes). Re-applying my changes surgically on top of current main to avoid conflicts and integrate cleanly with the new code.
+
+Work Log:
+- Detected that main now has: Teammate 4's create_test_jwt + verify_org_id (with request.state stashing), Teammate 8's httpx import + /kg/* proxy routes + rate_limit.py, Teammate 9's P3→P2 integration fixes.
+- Confirmed main STILL has the /top-k placeholder (P4-001 not fixed by other teammates) and rl/service.py STILL rebuilds the bridge per-request (P4-024 not fixed by other teammates).
+- Re-applied ONLY my missing changes on top of main (surgical, no conflicts):
+  * backend/api/main.py: Updated TopKCandidate (added score, pathway_score, pathway_chain, confidence; extra="allow"), TopKResponse (added pathway_enrichment_available; extra="allow"), added PathwayChainItem model, added RL_SERVICE_URL/GT_SERVICE_URL/RL_SERVICE_TIMEOUT_SECONDS constants, replaced /top-k placeholder with real httpx proxy to RL service /rank (passes org_id as query param + X-Org-Id header, returns 503 on connection failure, 401 on RL 401, maps "service"/"none" source to "rl_ranker"), added ReadyResponse model + GET /ready endpoint (probes RL service /health, GT service /health, DATABASE_URL env var).
+  * rl/service.py: Added threading import + Tuple typing, added Depends/Header to fastapi import, added _bridge_cache/_rl_input_cache/_bridge_lock module vars, added get_cached_bridge() (double-checked locking, lazy build on first /rank call), added invalidate_bridge_cache(), refactored _load_candidates_from_checkpoint to use the cached bridge (PPO + VecNormalize still loaded per-request), added _verify_admin_token dependency (constant-time comparison against RL_ADMIN_TOKEN env var), added POST /reload endpoint (admin-only, invalidates cache).
+  * Did NOT re-add: verify_org_id (already in main from Teammate 4/8 — two copies exist as a pre-existing duplicate bug, out of scope for Teammate 12), create_test_jwt (already in main from Teammate 4), _decode_jwt_payload (not needed — main's verify_jwt does inline decoding + request.state stashing), httpx import (already in main from Teammate 8).
+- Updated tests to use main's create_test_jwt(*, user_id=, org_id=) keyword-only signature and expect 403 (not 401) for missing org_id (matches Teammate 8's verify_org_id behavior).
+- Verified all 10 integration tests PASS after the surgical rebase.
+- Verified the smoke test (5/5) PASSES — real /top-k endpoint exercised through TestClient with mocked RL service.
+- Verified NO new test failures introduced in rl/tests/ (all pre-existing failures are unchanged: stable_baselines3 missing, outdated test assertions).
+
+Stage Summary:
+- All 7 ROOT FIXES successfully re-applied on top of current main (which advanced during my work).
+- 10/10 integration tests PASS.
+- 5/5 smoke tests PASS.
+- Zero merge conflicts (surgical rebase avoided the messy auto-merge that produced duplicate verify_org_id definitions).
+- Clean integration with Teammate 4/8/9's parallel work (rate limiting, /kg/* proxy, /datasets/* proxy, P3→P2 integration all preserved).
