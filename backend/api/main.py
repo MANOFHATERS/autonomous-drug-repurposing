@@ -68,7 +68,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 # FastAPI + Pydantic are declared in the top-level requirements.txt and
 # in phase1/requirements.txt (P1-003 v114 fix). When this module is
@@ -86,6 +86,20 @@ except ImportError as _fastapi_import_err:  # pragma: no cover
         "Install with `pip install fastapi uvicorn[standard]`. "
         f"Original error: {_fastapi_import_err}"
     ) from _fastapi_import_err
+
+# TM17 v132 ROOT FIX (Teammate 17 — Observability):
+# Wire up shared observability (metrics + structured JSON logging +
+# OpenTelemetry + Sentry). The previous code did NOT call
+# ``configure_app()``, so the public REST API had NO /metrics endpoint
+# (Prometheus got 404 from every scrape), NO structured logging (logs
+# were unparseable text), NO distributed traces (OpenTelemetry was
+# configured in docker-compose but never instrumented in the app), and
+# NO Sentry error reporting (production errors were swallowed by stdout).
+# This single call fixes all four issues.
+try:
+    from shared.observability import configure_app as _configure_observability
+except Exception:  # Defensive fallback — service still runs without observability.
+    _configure_observability = None
 
 logger = logging.getLogger(__name__)
 
@@ -261,35 +275,96 @@ app.add_middleware(
     max_age=600,  # Cache preflight responses for 10 minutes.
 )
 
+# TM17 v132 ROOT FIX (Teammate 17 — Observability):
+# Mount /metrics, configure JSON logging, instrument OpenTelemetry, init
+# Sentry. MUST come AFTER all middleware is added (the OTel FastAPI
+# instrumentation hooks into the middleware stack).
+if _configure_observability is not None:
+    _configure_observability(app, service_name="backend-api")
+    logger.info("TM17 v132: observability configured for backend-api "
+                "(metrics=/metrics, JSON logging, OTel, Sentry).")
+else:
+    logger.warning(
+        "TM17 v132: shared.observability not importable — backend-api is "
+        "running WITHOUT /metrics, structured logging, OTel, or Sentry. "
+        "This is a production observability gap; install shared.observability "
+        "dependencies (prometheus_client, opentelemetry-sdk, sentry-sdk)."
+    )
+
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
 async def health() -> HealthResponse:
     """Health check endpoint — used by load balancers and uptime monitors.
 
     No authentication required (returns only public status info).
+
+    TM17 v132 ROOT FIX (P1-004 — false-positive health):
+        The previous code probed services by checking env var PRESENCE
+        (``gt_loaded = bool(os.environ.get('GT_MODEL_PATH'))``). This
+        reported "healthy" even when the GT service was DOWN — the env
+        var was set at deploy time, but the service could crash hours
+        later. Load balancers kept routing traffic to a dead service.
+
+        ROOT FIX: actually probe each service via HTTP /health. Use a
+        short timeout (2s) so a hung service doesn't stall the health
+        check. Distinguish:
+          * gt_model_loaded  — GT service responds 200 to /health.
+          * rl_agent_loaded  — RL service responds 200 to /health.
+          * database_connected — DATABASE_URL is set AND the DB accepts
+            connections (lazy import of sqlalchemy + SELECT 1).
+        Each probe is best-effort — a failure sets the flag to False
+        but doesn't fail the health check (the API is still up, just
+        degraded). Callers (load balancers) can decide whether to drain
+        traffic based on the individual flags.
     """
-    # Probe the GT model service, RL ranker service, and database.
-    # Each probe is best-effort — a failure sets the corresponding flag
-    # to False but doesn't fail the health check (the API is still up,
-    # just degraded).
+    import httpx
+
     gt_loaded = False
     rl_loaded = False
     db_connected = False
-    try:
-        # TODO: probe the GT model service via ML_SERVICE_URL.
-        # For now, assume it's loaded if the env var is set.
-        gt_loaded = bool(os.environ.get("GT_MODEL_PATH"))
-    except Exception as exc:
-        logger.debug("health: GT probe failed: %s", exc)
-    try:
-        rl_loaded = bool(os.environ.get("RL_CHECKPOINT_PATH"))
-    except Exception as exc:
-        logger.debug("health: RL probe failed: %s", exc)
-    try:
-        # TODO: probe the database via DATABASE_URL.
-        db_connected = bool(os.environ.get("DATABASE_URL"))
-    except Exception as exc:
-        logger.debug("health: DB probe failed: %s", exc)
+
+    # --- GT service probe ---
+    gt_url = os.environ.get("GT_SERVICE_URL") or os.environ.get("ML_SERVICE_URL")
+    if gt_url:
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                r = await client.get(f"{gt_url.rstrip('/')}/health")
+                gt_loaded = r.status_code == 200
+        except Exception as exc:
+            logger.debug("health: GT probe failed (%s): %s", gt_url, exc)
+    else:
+        logger.debug("health: GT_SERVICE_URL/ML_SERVICE_URL not set — skipping GT probe")
+
+    # --- RL service probe ---
+    rl_url = os.environ.get("RL_SERVICE_URL")
+    if rl_url:
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                r = await client.get(f"{rl_url.rstrip('/')}/health")
+                rl_loaded = r.status_code == 200
+        except Exception as exc:
+            logger.debug("health: RL probe failed (%s): %s", rl_url, exc)
+    else:
+        logger.debug("health: RL_SERVICE_URL not set — skipping RL probe")
+
+    # --- Database probe ---
+    db_url = os.environ.get("DATABASE_URL") or os.environ.get("PHASE1_DB_URL")
+    if db_url:
+        try:
+            # Lazy import — sqlalchemy is only needed for the DB probe.
+            from sqlalchemy import create_engine, text
+            engine = create_engine(db_url, pool_pre_ping=True, connect_args={
+                "check_same_thread": False} if db_url.startswith("sqlite") else {}
+            )
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            db_connected = True
+            engine.dispose()
+        except Exception as exc:
+            logger.debug("health: DB probe failed (%s): %s", db_url, exc)
+    else:
+        logger.debug("health: DATABASE_URL not set — skipping DB probe")
+
     return HealthResponse(
         status="ok",
         version="1.0.0",
@@ -309,25 +384,75 @@ async def predict(
     Calls the Graph Transformer model to produce a 0-1 score, a confidence
     value, and the top pathway chains connecting the drug to the disease.
 
-    This endpoint mirrors `POST /api/predict` in the Next.js frontend.
-    The Next.js route is kept during the migration period (it proxies to
-    this FastAPI service when ML_SERVICE_URL is set). Eventually, the
-    Next.js route will be removed and pharma partners will call this
-    endpoint directly.
+    TM17 v132 ROOT FIX (real GT service wiring, not placeholder 0.5):
+        The previous code returned ``gnn_score=0.5`` unconditionally
+        with the comment "placeholder". This made the V1 launch
+        criterion "GT AUC > 0.85" impossible to verify (the E2E smoke
+        test explicitly checks ``gnn_score != 0.5`` to detect this). The
+        fix actually proxies the request to the GT service via
+        ``GT_SERVICE_URL``. If the GT service is not configured, the
+        endpoint returns HTTP 503 (not a placeholder 0.5 — pharma
+        partners must NOT receive random scores labeled as predictions).
     """
-    # TODO: call the GT model service via ML_SERVICE_URL.
-    # For now, return a placeholder that matches the response schema.
-    # The actual GT model call will be implemented in the next phase
-    # (when the GT service is deployed to a GPU node).
+    import httpx
+
     logger.info("predict: user=%s drug=%s disease=%s", user_id, req.drug, req.disease)
-    return PredictResponse(
-        drug=req.drug,
-        disease=req.disease,
-        gnn_score=0.5,  # placeholder
-        confidence=0.5,  # placeholder
-        pathways=[],
-        literature_supported=False,
-    )
+
+    gt_url = os.environ.get("GT_SERVICE_URL") or os.environ.get("ML_SERVICE_URL")
+    if not gt_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GT_SERVICE_URL not configured — the Graph Transformer "
+                   "service is not deployed. /predict cannot return real "
+                   "predictions without the GT model. Deploy the GT service "
+                   "and set GT_SERVICE_URL.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            gt_resp = await client.post(
+                f"{gt_url.rstrip('/')}/predict",
+                json={
+                    "drug": req.drug,
+                    "disease": req.disease,
+                    "include_pathways": req.include_pathways,
+                },
+            )
+        if gt_resp.status_code != 200:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"GT service returned {gt_resp.status_code}: "
+                       f"{gt_resp.text[:500]}",
+            )
+        data = gt_resp.json()
+        # The GT service returns {predictions: [{drug, disease, gnn_score, ...}]}.
+        # Extract the prediction for THIS pair.
+        predictions = data.get("predictions", [])
+        match = next(
+            (p for p in predictions
+             if p.get("drug", "").lower() == req.drug.lower()
+             and p.get("disease", "").lower() == req.disease.lower()),
+            None,
+        )
+        if match is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"GT service did not return a prediction for "
+                       f"({req.drug}, {req.disease}). Response: {data}",
+            )
+        return PredictResponse(
+            drug=req.drug,
+            disease=req.disease,
+            gnn_score=float(match.get("gnn_score", 0.5)),
+            confidence=float(match.get("confidence", 0.5)),
+            pathways=match.get("pathways", []),
+            literature_supported=bool(match.get("literature_supported", False)),
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"GT service unreachable at {gt_url}: {exc}",
+        ) from exc
 
 
 @app.post("/top-k", response_model=TopKResponse, tags=["ranking"])
@@ -341,8 +466,16 @@ async def top_k(
     If `disease` is provided, returns the top-K drugs for that disease.
     Exactly one of `drug` or `disease` must be provided.
 
-    This endpoint mirrors `POST /api/top-k` in the Next.js frontend.
+    TM17 v132 ROOT FIX (real RL service wiring, not empty list):
+        The previous code returned ``candidates=[]`` with the comment
+        "TODO: call the RL ranker service". This made the V1 launch
+        criterion "100 concurrent requests" meaningless (every request
+        returned an empty list in <1ms). The fix actually proxies the
+        request to the RL service via ``RL_SERVICE_URL``. If the RL
+        service is not configured, returns 503.
     """
+    import httpx
+
     if not req.drug and not req.disease:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -353,9 +486,160 @@ async def top_k(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Provide EITHER 'drug' OR 'disease', not both.",
         )
-    # TODO: call the RL ranker service via RL_SERVICE_URL.
     logger.info("top-k: user=%s drug=%s disease=%s k=%d", user_id, req.drug, req.disease, req.k)
-    return TopKResponse(candidates=[], total=0, source="rl_ranker")
+
+    rl_url = os.environ.get("RL_SERVICE_URL")
+    if not rl_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="RL_SERVICE_URL not configured — the RL ranker service "
+                   "is not deployed. /top-k cannot return real rankings.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            rl_resp = await client.post(
+                f"{rl_url.rstrip('/')}/rank",
+                json={
+                    "drug": req.drug,
+                    "disease": req.disease,
+                    "limit": req.k,
+                },
+            )
+        if rl_resp.status_code != 200:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"RL service returned {rl_resp.status_code}: "
+                       f"{rl_resp.text[:500]}",
+            )
+        data = rl_resp.json()
+        candidates = [
+            TopKCandidate(
+                drug=c.get("drug", ""),
+                disease=c.get("disease", ""),
+                gnn_score=float(c.get("gnn_score", 0.0)),
+                rl_rank=c.get("rl_rank"),
+                safety_score=c.get("safety_score"),
+                market_score=c.get("market_score"),
+            )
+            for c in data.get("candidates", [])[: req.k]
+        ]
+        # Apply min_score filter (the RL service may not have filtered).
+        if req.min_score > 0.0:
+            candidates = [c for c in candidates if c.gnn_score >= req.min_score]
+        return TopKResponse(
+            candidates=candidates,
+            total=len(candidates),
+            source=data.get("source", "rl_ranker"),
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"RL service unreachable at {rl_url}: {exc}",
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# TM15 v132 ROOT FIX (Teammate 15 — Data Flywheel, requirement #8):
+# POST /validate — proxy to the RL service's /validate endpoint.
+# ---------------------------------------------------------------------------
+# The RL service (rl/service.py) already implements /validate, which calls
+# phase4.writeback.write_validated_hypothesis() to write the validated
+# hypothesis to ALL 3 phases (Phase 1 CSV, Phase 2 Neo4j edge, Phase 3
+# retrain trigger). The backend proxy adds:
+#   * JWT auth (the RL service's /validate does NOT require auth — it
+#     trusts the backend to authenticate).
+#   * Audit logging (the backend logs the validate call to Sentry / OTel
+#     for the pharma partner's audit trail).
+#   * Rate limiting (future: limit per-org validations to prevent abuse).
+#
+# CONTRACT (matches the RL service's /validate):
+#   Request body: {drug, disease, outcome, validated_by?, notes?, ...}
+#   Response 200: {ok, writeback: {phase1_csv_path, phase2_neo4j_written, ...}}
+#   Response 400: invalid outcome enum value
+#   Response 502: RL service returned non-200
+#   Response 503: RL_SERVICE_URL not configured
+#   Response 504: RL service unreachable
+# ---------------------------------------------------------------------------
+class ValidateRequest(BaseModel):
+    """POST /validate request body — mirrors rl/service.py's ValidateRequest."""
+    model_config = ConfigDict(extra="forbid")
+    drug: str = Field(..., min_length=1, max_length=200)
+    disease: str = Field(..., min_length=1, max_length=200)
+    outcome: str = Field(..., description="One of: validated_positive, "
+                                          "validated_negative, validated_toxic, invalidated")
+    validated_by: Optional[str] = Field(None, max_length=200)
+    validation_study_id: Optional[str] = Field(None, max_length=200)
+    notes: Optional[str] = None
+    original_gt_score: Optional[float] = Field(None, ge=0.0, le=1.0)
+    original_rl_rank: Optional[int] = Field(None, ge=0)
+
+
+@app.post("/validate", tags=["data-flywheel"])
+async def validate(
+    req: ValidateRequest,
+    user_id: str = Depends(verify_jwt),
+) -> Dict[str, Any]:
+    """Validate a drug-disease hypothesis and write it back to all 3 phases.
+
+    This endpoint is the data flywheel entry point (DOCX §10). When a
+    pharma partner wet-lab-validates a hypothesis, they POST it here.
+    The backend proxies to the RL service's /validate endpoint, which
+    writes the validated hypothesis to:
+      1. Phase 1 CSV (phase1/processed_data/validated_hypotheses.csv)
+      2. Phase 1 DB (validated_hypotheses table — via the POST
+         /datasets/validated_hypotheses endpoint on the Phase 1 service)
+      3. Phase 2 Neo4j (:VALIDATED_TREATS edge between drug and disease)
+      4. Phase 3 retrain trigger (graph_transformer/retrain_triggered.json)
+
+    When 10+ new validated hypotheses accumulate, the Airflow DAG
+    ``retrain_on_validated`` triggers a full Phase 2 → 3 → 4 retraining
+    run. This is the data flywheel in action.
+    """
+    import httpx
+
+    logger.info(
+        "validate: user=%s drug=%s disease=%s outcome=%s",
+        user_id, req.drug, req.disease, req.outcome,
+    )
+
+    rl_url = os.environ.get("RL_SERVICE_URL")
+    if not rl_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="RL_SERVICE_URL not configured — the RL ranker service "
+                   "is not deployed. /validate cannot write back the "
+                   "validated hypothesis. Deploy the RL service and set "
+                   "RL_SERVICE_URL.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            rl_resp = await client.post(
+                f"{rl_url.rstrip('/')}/validate",
+                json={
+                    "drug": req.drug,
+                    "disease": req.disease,
+                    "outcome": req.outcome,
+                    "validated_by": req.validated_by or user_id,
+                    "validation_study_id": req.validation_study_id,
+                    "notes": req.notes,
+                    "original_gt_score": req.original_gt_score,
+                    "original_rl_rank": req.original_rl_rank,
+                },
+            )
+        if rl_resp.status_code != 200:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"RL service /validate returned {rl_resp.status_code}: "
+                       f"{rl_resp.text[:500]}",
+            )
+        return rl_resp.json()
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"RL service unreachable at {rl_url}: {exc}",
+        ) from exc
 
 
 @app.get("/openapi.json", tags=["system"], include_in_schema=False)

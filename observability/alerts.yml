@@ -104,3 +104,160 @@ groups:
               docker-compose logs backup --tail 50
             And verify pushgateway is healthy:
               curl http://pushgateway:9091/-/healthy
+
+  # =========================================================================
+  # TM17 v132 ROOT FIX (Teammate 17 — Observability alerts):
+  # 6 new alert rules for ML pipeline health, Neo4j latency, MLflow
+  # dangling runs, Airflow DAG failures, and Phase 1 data freshness.
+  # These alerts give operators visibility into the platform's ML
+  # health — without them, a GT AUC drop or RL reward collapse goes
+  # undetected until a pharma partner complains.
+  # =========================================================================
+  - name: ml-pipeline-health
+    interval: 30s
+    rules:
+      # ──────────────────────────────────────────────────────────────────
+      # CRITICAL: GT model AUC dropped below 0.80.
+      # The DOCX §8 V1 launch criterion is "GT AUC > 0.85". A drop
+      # below 0.80 means the GT model has degraded to the point where
+      # predictions are no longer trustworthy — pharma partners may
+      # be receiving random rankings labeled as "scientifically
+      # validated". Page immediately.
+      # ──────────────────────────────────────────────────────────────────
+      - alert: GTModelAUCDrop
+        expr: phase3_gt_model_auc < 0.80
+        for: 5m
+        labels:
+          severity: critical
+          patient_safety: 'true'
+          component: phase3-gt
+        annotations:
+          summary: 'GT model AUC dropped below 0.80'
+          description: >-
+            The GT model's AUC is {{ $value }}. The DOCX §8 V1 launch
+            criterion requires GT AUC > 0.85. A drop below 0.80 means
+            predictions are no longer trustworthy — pharma partners may
+            be receiving random rankings labeled as "scientifically
+            validated". Investigate immediately:
+              1. Check the GT service logs for training errors.
+              2. Verify the test set has not been corrupted (data drift).
+              3. Re-run the scientific validation gate:
+                 python scripts/run_production_readiness_gate.py
+              4. If the AUC does not recover, roll back to the previous
+                 GT checkpoint and retrain.
+
+      # ──────────────────────────────────────────────────────────────────
+      # WARNING: RL reward mean dropped below 0.5.
+      # The RL agent's reward signal has degraded — either the policy
+      # is collapsing (gradient instability) or the reward function's
+      # weights have drifted. Send a Slack warning (do NOT page).
+      # ──────────────────────────────────────────────────────────────────
+      - alert: RLRewardDrop
+        expr: phase4_rl_reward_mean < 0.5
+        for: 5m
+        labels:
+          severity: warning
+          component: phase4-rl
+        annotations:
+          summary: 'RL reward mean dropped below 0.5'
+          description: >-
+            The RL agent's mean reward is {{ $value }}. This indicates
+            the policy is collapsing or the reward function's weights
+            have drifted. Check the RL service logs and consider
+            retraining with a different seed.
+
+      # ──────────────────────────────────────────────────────────────────
+      # WARNING: Neo4j query p95 latency > 5s.
+      # The KG is the foundation of every prediction. A p95 latency
+      # above 5s means /predict and /top-k will time out under load
+      # (the 30s timeout is shared across all downstream calls).
+      # ──────────────────────────────────────────────────────────────────
+      - alert: Neo4jQueryLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(phase2_neo4j_query_seconds_bucket[5m])) by (le)) > 5
+        for: 2m
+        labels:
+          severity: warning
+          component: phase2-kg
+        annotations:
+          summary: 'Neo4j query p95 latency > 5s'
+          description: >-
+            Neo4j p95 query latency is {{ $value }}s. The KG is the
+            foundation of every prediction — sustained high latency
+            means /predict and /top-k will time out under load. Check:
+              1. Neo4j container resources (CPU/memory).
+              2. Query plans for full-table scans (EXPLAIN the query).
+              3. Index coverage on Compound.name, Disease.name.
+
+      # ──────────────────────────────────────────────────────────────────
+      # WARNING: MLflow dangling runs detected.
+      # The TM17 v132 root fix added the
+      # ``mlflow_atexit_close_failures_total`` Counter — each
+      # increment is a close() failure that left an MLflow run in
+      # RUNNING state. A single failure in 24h is enough to alert
+      # (the run is silently losing metrics).
+      # ──────────────────────────────────────────────────────────────────
+      - alert: MLflowDanglingRuns
+        expr: increase(mlflow_atexit_close_failures_total[24h]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: phase2-mlflow
+        annotations:
+          summary: '{{ $value }} MLflow atexit close failures in 24h'
+          description: >-
+            The MLflowTracker._atexit_close handler failed {{ $value }}
+            time(s) in the last 24h. Each failure leaves an MLflow run
+            in RUNNING state — metrics logged AFTER the failure are
+            LOST (21 CFR Part 11 data integrity violation). Check:
+              1. MLflow server connectivity (network issues).
+              2. MLflow server disk space (full disk rejects writes).
+              3. Run check_for_dangling_mlflow_runs() to reap stale runs.
+
+      # ──────────────────────────────────────────────────────────────────
+      # WARNING: Airflow DAG failure.
+      # An Airflow DAG (Phase 1 ETL or the retrain_on_validated DAG)
+      # failed. The data flywheel depends on these DAGs running
+      # successfully — a failure means validated hypotheses are not
+      # being incorporated into retraining.
+      # ──────────────────────────────────────────────────────────────────
+      - alert: AirflowDAGFailure
+        expr: airflow_dag_status{status="failed"} == 1
+        for: 1m
+        labels:
+          severity: warning
+          component: airflow
+        annotations:
+          summary: 'Airflow DAG {{ $labels.dag_id }} failed'
+          description: >-
+            Airflow DAG {{ $labels.dag_id }} failed. Check the Airflow
+            UI for the task instance traceback. Common causes:
+              1. Phase 1 ETL: source API down (ChEMBL, DrugBank, etc.).
+              2. retrain_on_validated: GT trainer crashed (OOM, GPU).
+              3. Database connectivity (Postgres, Neo4j).
+
+      # ──────────────────────────────────────────────────────────────────
+      # WARNING: Phase 1 row count dropped >20% from yesterday.
+      # A 20%+ drop in any Phase 1 source's row count indicates a
+      # silent data loss (partial download, schema change in the
+      # source, deduplicator bug). Without this alert, the data loss
+      # would propagate to Phase 2 (KG) → Phase 3 (GT training) →
+      # Phase 4 (RL) before anyone notices.
+      # ──────────────────────────────────────────────────────────────────
+      - alert: Phase1RowCountDrop
+        expr: |
+          phase1_row_count
+            < 0.8 * phase1_row_count offset 1d
+        for: 5m
+        labels:
+          severity: warning
+          component: phase1
+        annotations:
+          summary: 'Phase 1 row count dropped >20% from yesterday'
+          description: >-
+            Phase 1 source {{ $labels.source }} row count dropped
+            >20% from yesterday's value. This indicates silent data
+            loss — check:
+              1. The source API (ChEMBL, DrugBank, etc.) for schema
+                 changes or outages.
+              2. The Phase 1 ETL logs for partial-download errors.
+              3. The deduplicator's logs for unexpected rejection rates.

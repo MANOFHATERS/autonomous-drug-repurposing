@@ -43,7 +43,7 @@ from typing import Final
 
 logger = logging.getLogger(__name__)
 
-#: Canonical list of all 8 DAG IDs that MUST be registered with Airflow.
+#: Canonical list of all 9 DAG IDs that MUST be registered with Airflow.
 #: Tests assert that every ID in this list resolves to a registered DAG.
 DAG_IDS: Final[list[str]] = [
     # 7 source DAGs
@@ -56,9 +56,11 @@ DAG_IDS: Final[list[str]] = [
     "pubchem_pipeline",
     # 1 master DAG
     "drug_repurposing_master",
+    # TM15 v132: data flywheel retrain-on-validated DAG (every 6 hours).
+    "retrain_on_validated",
 ]
 
-#: Expected total DAG count (7 source + 1 master = 8).
+#: Expected total DAG count (7 source + 1 master + 1 flywheel = 9).
 EXPECTED_DAG_COUNT: Final[int] = len(DAG_IDS)
 
 
@@ -101,6 +103,8 @@ def _register_all_dags() -> None:
     _import_dag_module("omim_dag")
     _import_dag_module("pubchem_dag")
     _import_dag_module("master_pipeline_dag")
+    # TM15 v132: data flywheel retrain-on-validated DAG (every 6 hours).
+    _import_dag_module("retrain_on_validated_dag")
 
 
 def get_registered_dag_ids() -> set[str]:
@@ -121,6 +125,8 @@ def get_registered_dag_ids() -> set[str]:
         ("omim_pipeline", "dags.omim_dag"),
         ("pubchem_pipeline", "dags.pubchem_dag"),
         ("drug_repurposing_master", "dags.master_pipeline_dag"),
+        # TM15 v132: data flywheel retrain-on-validated DAG.
+        ("retrain_on_validated", "dags.retrain_on_validated_dag"),
     ):
         mod = sys.modules.get(module_name)
         if mod is not None and hasattr(mod, "dag"):

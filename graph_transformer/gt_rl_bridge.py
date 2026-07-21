@@ -354,6 +354,27 @@ class GTRLBridge:
         self.drug_names: List[str] = []
         self.disease_names: List[str] = []
         self.known_pairs: List[Tuple[str, str]] = []
+        # TM15 v132 ROOT FIX (P3-008 — validated pairs leak):
+        # ``validated_pairs`` is the list of (drug, disease) pairs that
+        # pharma partners have validated via the /validate endpoint.
+        # These pairs are:
+        #   * STORED in the validated_hypotheses.csv + Phase 1 DB +
+        #     Neo4j (as :VALIDATED_TREATS edges) — the durable record.
+        #   * PASSED THROUGH to the RL env via the ``is_validated``
+        #     column in the RL input CSV (computed in
+        #     ``generate_rl_input`` and ``save_rl_input_streaming``).
+        #     The RL env's reward function gives each validated pair a
+        #     +0.1 ``validated_bonus`` (RewardConfig.validated_bonus).
+        #   * NOT INJECTED into the GT training graph (the demo builder
+        #     no longer adds them as "treats" edges — see
+        #     graph_builder.py P3-008 fix). The GT model is NOT trained
+        #     on these pairs at demo / evaluation time; they remain
+        #     NOVEL predictions. In production, validated pairs flow into
+        #     the GT training set ONLY via the canonical Phase 1 CSV →
+        #     Phase 2 KG → Phase 3 trainer path, triggered by the
+        #     Airflow DAG ``phase1/dags/retrain_on_validated_dag.py``
+        #     when 10+ new validated hypotheses accumulate.
+        self.validated_pairs: List[Tuple[str, str]] = []
 
         # P4-017 ROOT FIX (Team Member 12): track the timestamp when the
         # knowledge graph was built/loaded into memory. The
@@ -458,6 +479,21 @@ class GTRLBridge:
         self.drug_names = list(self.node_maps.get("drug", {}).keys())
         self.disease_names = list(self.node_maps.get("disease", {}).keys())
 
+        # TM15 v132 ROOT FIX (P3-008 — validated pairs leak):
+        # Capture the validated pairs list on the bridge so
+        # ``generate_rl_input`` / ``save_rl_input_streaming`` can add
+        # the ``is_validated`` column to the RL input CSV. The RL env's
+        # reward function reads this column to apply the +0.1
+        # ``validated_bonus`` (RewardConfig.validated_bonus).
+        #
+        # These pairs are NOT in ``self.known_pairs`` (which is the GT
+        # model's evaluation set — KP recovery). They are also NOT
+        # injected as "treats" edges in the demo graph (the builder
+        # stores them on ``builder.validated_pairs`` instead — see
+        # graph_builder.py P3-008 fix). The GT model is NEVER trained
+        # on these pairs; they remain NOVEL predictions.
+        self.validated_pairs = list(validated_hypotheses) if validated_hypotheses else []
+
         # P4-017 ROOT FIX: record the timestamp when the KG was built.
         # The train_graph_transformer method compares this to the GT
         # checkpoint's mtime — if the checkpoint is older, the
@@ -469,7 +505,8 @@ class GTRLBridge:
             f"Graph built: {len(self.drug_names)} drugs, "
             f"{len(self.disease_names)} diseases, "
             f"{len(self.known_pairs)} known treatment pairs "
-            f"({len(validated_hypotheses) if validated_hypotheses else 0} validated, "
+            f"({len(self.validated_pairs)} validated [stored separately, "
+            f"P3-008 root fix — NOT injected as treats edges], "
             f"kg_built_at={self._kg_built_at:.3f})"
         )
 
@@ -1953,6 +1990,56 @@ class GTRLBridge:
             "gnn_score_timestamp": pd.Timestamp.now(tz="UTC").isoformat(),
         })
 
+        # TM15 v132 ROOT FIX (P3-008 — validated pairs leak):
+        # Add the ``is_validated`` column to the RL input. The RL env's
+        # reward function (RewardFunction.compute + step) reads this
+        # column to apply the +0.1 ``validated_bonus``
+        # (RewardConfig.validated_bonus) — see rl/rl_drug_ranker.py.
+        #
+        # CRITICAL: a pair is marked ``is_validated=True`` ONLY if it
+        # appears in ``self.validated_pairs`` (the list captured from
+        # the demo builder / Phase 1 CSV). The GT model has NOT been
+        # trained on these pairs (the demo builder no longer injects
+        # them as "treats" edges — see graph_builder.py P3-008 fix),
+        # so the GT model's ``gnn_score`` for these pairs is a TRUE
+        # NOVEL prediction (not memorized). The +0.1 bonus is the data
+        # flywheel's reward signal — pharma partners see their
+        # validated pairs ranked slightly higher, encouraging more
+        # validations. When 10+ new validated hypotheses accumulate,
+        # the Airflow DAG ``retrain_on_validated_dag`` triggers a full
+        # Phase 1->2->3->4 retraining run, which is the ONLY path by
+        # which validated pairs enter the GT training set.
+        if self.validated_pairs:
+            _validated_set = {
+                (d.strip().lower(), dis.strip().lower())
+                for d, dis in self.validated_pairs
+            }
+            df["is_validated"] = df.apply(
+                lambda row: (
+                    str(row["drug"]).strip().lower(),
+                    str(row["disease"]).strip().lower(),
+                ) in _validated_set,
+                axis=1,
+            )
+            n_validated_in_rl = int(df["is_validated"].sum())
+            logger.info(
+                f"TM15 v132 P3-008: marked {n_validated_in_rl} / {len(df)} "
+                f"pairs as is_validated=True (out of {len(self.validated_pairs)} "
+                f"validated pairs). The RL env will apply the +0.1 "
+                f"validated_bonus to these pairs. The GT model was NOT "
+                f"trained on them (they are NOVEL predictions)."
+            )
+        else:
+            # No validated pairs — set is_validated=False for all rows
+            # so the column always exists (the RL env's reward function
+            # reads it unconditionally).
+            df["is_validated"] = False
+            logger.info(
+                "TM15 v132 P3-008: no validated pairs to mark "
+                "(self.validated_pairs is empty). All rows have "
+                "is_validated=False."
+            )
+
         # C1 fix: compute REAL supplementary features from graph topology
         df = self._compute_supplementary_features(df, drug_map, disease_map)
 
@@ -2110,6 +2197,15 @@ class GTRLBridge:
         # pairs are scored from the same encoding).
         from datetime import datetime, timezone
         _gnn_score_timestamp = datetime.now(timezone.utc).isoformat()
+        # TM15 v132 ROOT FIX (P3-008): pre-compute the lower-cased
+        # validated_pairs SET once (outside the batch loop) so the
+        # ``is_validated`` lookup per row is O(1). Without this, the
+        # streaming writer would do an O(N_validated) linear scan
+        # PER ROW — at 100M pairs * 10 validated, that's 1B comparisons.
+        _validated_pairs_set = {
+            (str(d).strip().lower(), str(dis).strip().lower())
+            for d, dis in (self.validated_pairs or [])
+        }
         columns = [
             "drug", "disease", "gnn_score", "gnn_score_calibrated", "confidence",
             "safety_score", "market_score", "pathway_score", "patent_score",
@@ -2119,6 +2215,11 @@ class GTRLBridge:
             # expects. The env's groupby re-derives these at runtime, but the
             # CSV column count must match the audit's 15-column expectation.
             "disease_pair_count", "disease_avg_gnn", "disease_avg_safety",
+            # TM15 v132 P3-008: is_validated column — the RL env reads this
+            # to apply the +0.1 validated_bonus. The GT model was NOT trained
+            # on these pairs (see graph_builder.py P3-008 fix); they remain
+            # NOVEL predictions.
+            "is_validated",
         ]
 
         with open(output_path, "w", newline="", encoding="utf-8") as f:
@@ -2259,6 +2360,13 @@ class GTRLBridge:
                 batch_gnn_calibrated = calibrated_scores_np.flatten()
                 batch_gnn = batch_gnn_calibrated  # P3-004: gnn_score IS calibrated now
                 batch_conf = confidence_np.flatten()
+                # TM15 v132 P3-008: compute is_validated per row in this batch.
+                # The lookup is O(1) per row because _validated_pairs_set is
+                # a Python set built once before the batch loop.
+                batch_is_validated = np.array([
+                    (str(d).strip().lower(), str(dis).strip().lower()) in _validated_pairs_set
+                    for d, dis in zip(batch_drugs_tiled, batch_diseases_tiled)
+                ], dtype=bool)
                 batch_df = pd.DataFrame({
                     "drug": batch_drugs_tiled,
                     "disease": batch_diseases_tiled,
@@ -2269,6 +2377,9 @@ class GTRLBridge:
                     # All rows in this batch share the same timestamp (the
                     # model was encoded once for this generate_rl_input call).
                     "gnn_score_timestamp": _gnn_score_timestamp,
+                    # TM15 v132 P3-008: is_validated flag — the RL env applies
+                    # the +0.1 validated_bonus to rows where this is True.
+                    "is_validated": batch_is_validated,
                 })
 
                 # ROOT FIX (D-02): call the SHARED _compute_supplementary_features
@@ -2311,6 +2422,9 @@ class GTRLBridge:
                     # TASK-149: include the 3 disease-context columns in the
                     # float formatting so they're written with 6 decimal places.
                     "disease_pair_count", "disease_avg_gnn", "disease_avg_safety",
+                    # NOTE: is_validated is a bool, NOT a float — it's NOT in
+                    # format_cols. pandas to_csv writes bool as True/False
+                    # (PyArrow CSV format), which the RL env parses correctly.
                 ]
                 batch_df_out = batch_df.copy()
                 for col in format_cols:

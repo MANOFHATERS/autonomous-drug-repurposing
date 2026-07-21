@@ -722,54 +722,154 @@ def create_validated_hypothesis(payload: "ValidatedHypothesisRequest") -> Dict[s
         from sqlalchemy import select
         from datetime import datetime
 
-        # --- Translate TM14 CSV-shape payload -> 10-column canonical schema ---
-        # drug_id / disease_id: look up from the drugs table by name. If the
-        # drug is not in the drugs table (e.g. newly-validated drug not yet
-        # loaded by Phase 1 ETL), drug_id stays NULL — the row is still
-        # accepted (drug_name is the NOT NULL column).
+        # =========================================================================
+        # TM15 v132 ROOT FIX (P1-022 — drug_id/disease_id lookup error swallow)
+        # =========================================================================
+        # RED-TEAM AUDIT FINDING (hostile auditor, Teammate 15):
+        #   The previous code used a broad ``except Exception: logger.warning(...)``
+        #   around the drug_id and disease_id SQL lookups. This SWALLOWED two
+        #   very different failure modes into a single "proceed with NULL"
+        #   path:
+        #
+        #     1. ``not_found`` — the drug/disease is genuinely not in the DB
+        #        yet (e.g. a newly-validated drug that Phase 1 ETL has not
+        #        loaded). drug_id=NULL is the CORRECT outcome here — the
+        #        row is still persisted (drug_name is NOT NULL), and a
+        #        future ETL run can backfill drug_id.
+        #
+        #     2. ``db_error`` — the database is unreachable, the connection
+        #        was reset, the table is missing, or the query raised
+        #        IntegrityError/OperationalError. The previous code
+        #        SWALLOWED these and persisted the row with drug_id=NULL.
+        #        The operator had NO way to know the lookup failed — the
+        #        endpoint returned 201 (Created) even though the DB was
+        #        on fire. This produced ORPHANED rows: drug_name persisted
+        #        with no FK link, silently corrupting the data flywheel's
+        #        referential integrity. A subsequent KG build would not be
+        #        able to join validated_hypotheses -> drugs -> proteins,
+        #        breaking the Phase 1 -> Phase 2 -> Phase 3 -> Phase 4
+        #        chain that the DOCX §10 data flywheel depends on.
+        #
+        # ROOT FIX:
+        #   * Distinguish ``not_found`` (NULL is OK; row is persisted with
+        #     ``drug_lookup_status='not_found'``) from ``db_error`` (FAIL
+        #     the request with HTTP 503; do NOT persist a row that would
+        #     be orphaned).
+        #   * Persist two new audit columns on every row:
+        #       - ``drug_lookup_status``: 'found' | 'found_no_id' | 'not_found'
+        #       - ``disease_lookup_status``: 'found' | 'not_found'
+        #     These are written to the ``notes`` field (prefixed with
+        #     ``[drug_lookup_status=...]`` and ``[disease_lookup_status=...]``)
+        #     to avoid a schema migration. A future migration can promote
+        #     them to real columns if needed.
+        #   * Catch ``OperationalError`` (DB connection / table-level error)
+        #     SEPARATELY from generic ``Exception``. OperationalError → 503.
+        #     Generic Exception → 500 (unexpected; surface for debugging).
+        # =========================================================================
+
         drug_id: Optional[str] = None
         disease_id: Optional[str] = None
+        # TM15: explicit lookup status — surfaced in the response so the
+        # caller (rl/service.py /validate) can detect silent lookups failures
+        # and the operator can monitor for orphaned rows.
+        drug_lookup_status: str = "not_found"
+        disease_lookup_status: str = "not_found"
 
+        # --- Drug lookup ------------------------------------------------------
+        # Use a NARROW except clause: OperationalError means the DB itself
+        # is broken (connection lost, table missing, etc.) → 503. Any
+        # OTHER exception is unexpected → 500 (do NOT swallow silently).
         try:
-            # Look up drug_id from the drugs table (match by name, case-
-            # insensitive). Take the InChIKey as the canonical ID if
-            # present, else drugbank_id, else chembl_id. This is a best-
-            # effort enrichment — failure to find a drug_id is NOT an error.
-            #
-            # PERF/ROBUSTNESS FIX: select ONLY the three ID columns we
-            # need (inchikey, drugbank_id, chembl_id) — do NOT load the
-            # full Drug ORM object. Loading the full object triggers
-            # SQLAlchemy's lazy-load of Drug.drug_protein_interactions
-            # (cascade='all, delete-orphan' relationship), which issues a
-            # second SELECT against drug_protein_interactions. That second
-            # query (a) is wasted work (we don't need the interactions),
-            # and (b) FAILS if the drug_protein_interactions table is
-            # empty/missing in a minimal schema bootstrap, causing the
-            # drug_id lookup to silently fail and the row to be persisted
-            # with drug_id=NULL. The column-only SELECT avoids both issues.
             from phase1.database.models import Drug
             from sqlalchemy import select as _sel
+            from sqlalchemy.exc import OperationalError as _SAOperationalError
+        except ImportError as _imp_exc:
+            # ImportError here means SQLAlchemy/psycopg2 are not installed.
+            # This is a deployment misconfiguration — fail with 503 so
+            # the operator knows to install the deps.
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"SQLAlchemy or phase1.database.models not importable — "
+                    f"cannot persist validated hypothesis. Install "
+                    f"phase1 requirements. Original error: {_imp_exc!r}"
+                ),
+            )
+
+        try:
+            # PERF/ROBUSTNESS: select ONLY the three ID columns we need
+            # (inchikey, drugbank_id, chembl_id) — do NOT load the full
+            # Drug ORM object (avoids lazy-load of drug_protein_interactions).
             _drug_cols = session.execute(
                 _sel(Drug.inchikey, Drug.drugbank_id, Drug.chembl_id).where(
                     func_lower_or_self(Drug.name) == payload.drug.lower()
                 ).limit(1)
             ).first()
             if _drug_cols is not None:
+                # Take the first non-null ID (InChIKey preferred, then
+                # drugbank_id, then chembl_id).
                 drug_id = _drug_cols[0] or _drug_cols[1] or _drug_cols[2] or None
-        except Exception as exc:
-            logger.warning(
+                drug_lookup_status = "found" if drug_id else "found_no_id"
+            # else: drug_lookup_status stays 'not_found' (NULL is OK — the
+            # row will still be persisted; a future ETL run can backfill).
+        except _SAOperationalError as exc:
+            # TM15 v132 ROOT FIX (P1-022): DB error — FAIL the request.
+            # The previous code swallowed this with logger.warning and
+            # proceeded with drug_id=NULL, producing an orphaned row
+            # that would silently corrupt the data flywheel.
+            logger.error(
                 "phase1.service POST /datasets/validated_hypotheses: "
-                "drug_id lookup failed for %r: %s. Proceeding with "
-                "drug_id=NULL (drug_name is the NOT NULL column).",
+                "DB OperationalError during drug_id lookup for %r: %s. "
+                "FAILING the request with 503 (P1-022 root fix — do NOT "
+                "persist an orphaned row). The DB must be healthy before "
+                "validated hypotheses can be written.",
                 payload.drug, exc,
             )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"DB error during drug_id lookup for {payload.drug!r}: "
+                    f"{type(exc).__name__}: {exc}. The validated hypothesis "
+                    f"was NOT persisted (P1-022 root fix — refusing to "
+                    f"create an orphaned row). Restore the DB and retry."
+                ),
+            )
+        except Exception as exc:
+            # Unexpected non-DB error (programming bug, type coercion, etc.)
+            # — fail with 500, do NOT swallow.
+            logger.exception(
+                "phase1.service POST /datasets/validated_hypotheses: "
+                "UNEXPECTED error during drug_id lookup for %r (not a "
+                "DB error — likely a code bug). FAILING with 500.",
+                payload.drug,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Unexpected error during drug_id lookup for "
+                    f"{payload.drug!r}: {type(exc).__name__}: {exc}. "
+                    f"This is a code bug — investigate the traceback in "
+                    f"the service logs."
+                ),
+            )
 
-        # disease_id lookup: gene_disease_associations has disease_id +
-        # disease_name. Best-effort match by disease_name (case-insensitive).
-        # Same column-only SELECT pattern as the drug_id lookup above.
+        # --- Disease lookup ---------------------------------------------------
+        # Same pattern: narrow except for OperationalError (→ 503),
+        # generic Exception → 500. Never swallow silently.
         try:
             from phase1.database.models import GeneDiseaseAssociation
             from sqlalchemy import select as _sel2
+            from sqlalchemy.exc import OperationalError as _SAOperationalError2
+        except ImportError as _imp_exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"phase1.database.models not importable — cannot "
+                    f"look up disease_id. Original error: {_imp_exc!r}"
+                ),
+            )
+
+        try:
             _disease_col = session.execute(
                 _sel2(GeneDiseaseAssociation.disease_id).where(
                     func_lower_or_self(GeneDiseaseAssociation.disease_name) == payload.disease.lower()
@@ -777,12 +877,38 @@ def create_validated_hypothesis(payload: "ValidatedHypothesisRequest") -> Dict[s
             ).scalar()
             if _disease_col is not None:
                 disease_id = _disease_col
-        except Exception as exc:
-            logger.warning(
+                disease_lookup_status = "found"
+            # else: stays 'not_found' (NULL is OK)
+        except _SAOperationalError2 as exc:
+            # TM15 v132 ROOT FIX (P1-022): DB error on disease lookup → 503.
+            logger.error(
                 "phase1.service POST /datasets/validated_hypotheses: "
-                "disease_id lookup failed for %r: %s. Proceeding with "
-                "disease_id=NULL.",
+                "DB OperationalError during disease_id lookup for %r: %s. "
+                "FAILING the request with 503 (P1-022 root fix — do NOT "
+                "persist an orphaned row).",
                 payload.disease, exc,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"DB error during disease_id lookup for "
+                    f"{payload.disease!r}: {type(exc).__name__}: {exc}. "
+                    f"The validated hypothesis was NOT persisted (P1-022 "
+                    f"root fix). Restore the DB and retry."
+                ),
+            )
+        except Exception as exc:
+            logger.exception(
+                "phase1.service POST /datasets/validated_hypotheses: "
+                "UNEXPECTED error during disease_id lookup for %r.",
+                payload.disease,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Unexpected error during disease_id lookup for "
+                    f"{payload.disease!r}: {type(exc).__name__}: {exc}."
+                ),
             )
 
         # Parse validated_at (ISO-8601). Pydantic already validated the
@@ -799,6 +925,9 @@ def create_validated_hypothesis(payload: "ValidatedHypothesisRequest") -> Dict[s
 
         # Compose the notes field — combine TM14 notes + writeback_version
         # + original_rl_rank (which is not in the 10-col schema).
+        # TM15 v132: ALSO append drug_lookup_status + disease_lookup_status
+        # so a downstream KG build / auditor can see whether each row's
+        # drug_id/disease_id was resolved, found-no-id, or not-found.
         notes_parts: list[str] = []
         if payload.notes:
             notes_parts.append(payload.notes)
@@ -806,6 +935,11 @@ def create_validated_hypothesis(payload: "ValidatedHypothesisRequest") -> Dict[s
             notes_parts.append(f"[writeback_version={payload.writeback_version}]")
         if payload.original_rl_rank is not None:
             notes_parts.append(f"[original_rl_rank={payload.original_rl_rank}]")
+        # TM15 v132 P1-022: surface the lookup status in the notes field
+        # (avoids a schema migration; a future migration can promote these
+        # to real columns if needed).
+        notes_parts.append(f"[drug_lookup_status={drug_lookup_status}]")
+        notes_parts.append(f"[disease_lookup_status={disease_lookup_status}]")
         combined_notes = " ".join(notes_parts) if notes_parts else None
 
         # Build the ORM object.
@@ -827,14 +961,20 @@ def create_validated_hypothesis(payload: "ValidatedHypothesisRequest") -> Dict[s
 
         logger.info(
             "phase1.service POST /datasets/validated_hypotheses: persisted "
-            "id=%d drug=%r disease=%r outcome=%r score=%s drug_id=%r disease_id=%r",
+            "id=%d drug=%r disease=%r outcome=%r score=%s drug_id=%r "
+            "disease_id=%r drug_lookup_status=%s disease_lookup_status=%s",
             vh.id, vh.drug_name, vh.disease_name, vh.outcome, vh.score,
-            vh.drug_id, vh.disease_id,
+            vh.drug_id, vh.disease_id, drug_lookup_status, disease_lookup_status,
         )
 
         return {
             "status": "ok",
             "id": vh.id,
+            # TM15 v132 P1-022: surface lookup status in the response so
+            # the caller (rl/service.py /validate) and the dashboard can
+            # detect silent lookup failures without parsing notes.
+            "drug_lookup_status": drug_lookup_status,
+            "disease_lookup_status": disease_lookup_status,
             "validated_hypothesis": {
                 "id": vh.id,
                 "drug_id": vh.drug_id,
@@ -847,6 +987,8 @@ def create_validated_hypothesis(payload: "ValidatedHypothesisRequest") -> Dict[s
                 "validated_by": vh.validated_by,
                 "source": vh.source,
                 "notes": vh.notes,
+                "drug_lookup_status": drug_lookup_status,
+                "disease_lookup_status": disease_lookup_status,
                 "created_at": vh.created_at.isoformat() if vh.created_at else None,
             },
             "flywheel_status": "persisted_to_postgresql",

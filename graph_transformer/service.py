@@ -88,6 +88,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# TM17 v132 ROOT FIX (Teammate 17 — Observability):
+# Wire up shared observability (metrics + structured JSON logging +
+# OpenTelemetry + Sentry). The previous code did NOT call
+# ``configure_app()``, so the GT service had NO /metrics endpoint
+# (Prometheus got 404 from every scrape), NO structured logging, NO
+# distributed traces, NO Sentry error reporting. This single call
+# fixes all four issues.
+try:
+    from shared.observability import configure_app as _configure_observability
+except Exception:  # Defensive fallback — service still runs without observability.
+    _configure_observability = None
+
 logger = logging.getLogger("graph_transformer.service")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
 
@@ -108,6 +120,18 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# TM17 v132 ROOT FIX: mount /metrics + configure JSON logging + OTel +
+# Sentry. MUST come AFTER all middleware is added.
+if _configure_observability is not None:
+    _configure_observability(app, service_name="phase3-gt-api")
+    logger.info("TM17 v132: observability configured for phase3-gt-api "
+                "(metrics=/metrics, JSON logging, OTel, Sentry).")
+else:
+    logger.warning(
+        "TM17 v132: shared.observability not importable — phase3-gt-api is "
+        "running WITHOUT /metrics, structured logging, OTel, or Sentry."
+    )
 
 
 class PredictRequest(BaseModel):
