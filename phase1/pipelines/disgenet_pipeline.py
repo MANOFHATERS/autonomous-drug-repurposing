@@ -631,10 +631,35 @@ RARE_DISEASE_PREVALENCE_THRESHOLD: float = 5.0
 
 # Default prevalence for ORPHA:nnnn disease_ids (Orphanet-curated).
 # Orphanet ONLY lists rare diseases per EU regulation, so any disease
-# tagged with an Orpha ID is by definition rare. We use 1.0/10K as a
-# conservative midpoint of the rare disease prevalence range (orphan
-# diseases range from 0.01 to 4.99 per 10K).
-_ORPHANET_DEFAULT_PREVALENCE_PER_10K: float = 1.0
+# tagged with an Orpha ID is by definition rare. Orphanet's real
+# per-disease prevalence ranges from 0.01/10K (Progeria) to 4.99/10K
+# (just under the rare-disease threshold).
+#
+# hostile-auditor v134 ROOT FIX (P1-BUG-2): the previous code returned
+# the flat default ``1.0`` for ANY ``ORPHA:nnnn`` disease NOT in the
+# curated 50-entry ``DISEASE_PREVALENCE_PER_10K`` dict. This was a
+# 100x OVER-ESTIMATE for Progeria (actual 0.01/10K) and a 4x
+# UNDER-ESTIMATE for Charcot-Marie-Tooth (actual 4.0/10K). The flat
+# 1.0 biased the Phase 4 RL ranker's ``market_opportunity`` score
+# uniformly toward/against rare diseases, corrupting the ranking.
+#
+# ROOT FIX: return ``None`` for uncatalogued Orpha diseases (matching
+# the phase1_schema.py docstring at lines 614-634 which states "NULL
+# for diseases not in the curated table"). Downstream treats None as
+# the neutral 0.5 midpoint (``_lookup_prevalence_per_10k`` returns
+# None → Phase 2 Disease node property = NULL → Phase 4 RL env
+# ``market_opportunity`` falls back to 0.5). The curated 50-entry
+# dict (``DISEASE_PREVALENCE_PER_10K``) still returns REAL values for
+# the most-studied rare diseases (Progeria 0.01, Huntington's 0.5,
+# CF 0.4, etc.) — those are the diseases Phase 4 most needs accurate
+# prevalence for.
+#
+# Operators who want a non-NULL default for uncatalogued Orpha diseases
+# can set ``DRUGOS_ORPHA_DEFAULT_PREVALENCE_PER_10K=<float>`` in the
+# environment. Default is empty (return None) to match the schema
+# docstring. Setting it to 1.0 restores the previous (buggy) behavior
+# for backward-compat with downstream consumers that expect a float.
+_ORPHANET_DEFAULT_PREVALENCE_PER_10K: Optional[float] = None
 
 
 def _lookup_prevalence_per_10k(disease_id: object, disease_name: object) -> Optional[float]:
@@ -664,8 +689,22 @@ def _lookup_prevalence_per_10k(disease_id: object, disease_name: object) -> Opti
     disease_name_str = "" if disease_name is None else str(disease_name).strip().lower()
 
     # Priority 1: Orphanet rare disease ID.
+    # hostile-auditor v134 P1-BUG-2: return None for uncatalogued Orpha
+    # diseases (matching the schema docstring). The previous code returned
+    # the flat 1.0 default — a 100x over-estimate for Progeria. Operators
+    # can override via DRUGOS_ORPHA_DEFAULT_PREVALENCE_PER_10K env var.
     if disease_id_str.startswith("ORPHA:"):
-        return _ORPHANET_DEFAULT_PREVALENCE_PER_10K
+        _env_orpha = os.environ.get("DRUGOS_ORPHA_DEFAULT_PREVALENCE_PER_10K", "")
+        if _env_orpha:
+            try:
+                return float(_env_orpha)
+            except ValueError:
+                logger.warning(
+                    "DRUGOS_ORPHA_DEFAULT_PREVALENCE_PER_10K=%r is not a "
+                    "valid float; falling back to None (P1-BUG-2 v134 fix).",
+                    _env_orpha,
+                )
+        return _ORPHANET_DEFAULT_PREVALENCE_PER_10K  # None by default
 
     # Priority 2: curated table lookup by disease name.
     if disease_name_str and disease_name_str in DISEASE_PREVALENCE_PER_10K:

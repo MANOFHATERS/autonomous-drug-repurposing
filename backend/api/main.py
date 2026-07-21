@@ -1839,17 +1839,50 @@ async def get_dataset_stats(
         "datasets/stats: user=%s org=%s",
         auth.user_id, auth.org_id,
     )
-    # TODO: call the Phase 1 dataset service via PHASE1_SERVICE_URL.
-    return {
-        "sources": [],
-        "nodesLoaded": 0,
-        "edgesLoaded": 0,
-        "edgeTypesPresent": [],
-        "warnings": [],
-        "errors": [],
-        "generatedAt": datetime.now(timezone.utc).isoformat(),
-        "org_id": auth.org_id,  # audit echo
-    }
+    # P0 ROOT FIX (hostile-auditor v134): wire /datasets/stats to the
+    # Phase 1 dataset service at PHASE1_SERVICE_URL/stats. The previous
+    # implementation returned HARDCODED empty stats (sources=[], nodes=0,
+    # edges=0) — the dashboard's dataset-stats card ALWAYS showed zero
+    # even when Phase 1 had loaded real data. This fix proxies to
+    # PHASE1_SERVICE_URL/stats. If PHASE1_SERVICE_URL is not configured,
+    # we return HTTP 503 — we NEVER return fake empty stats that could
+    # be confused with "Phase 1 has no data loaded".
+    import httpx
+
+    phase1_url = os.environ.get("PHASE1_SERVICE_URL")
+    if not phase1_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PHASE1_SERVICE_URL not configured — the Phase 1 dataset "
+                   "service is not deployed. /datasets/stats cannot return "
+                   "real stats. Deploy the Phase 1 service and set "
+                   "PHASE1_SERVICE_URL.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            p1_resp = await client.get(f"{phase1_url.rstrip('/')}/stats")
+        if p1_resp.status_code != 200:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Phase 1 service /stats returned "
+                       f"{p1_resp.status_code}: {p1_resp.text[:500]}",
+            )
+        p1_payload = p1_resp.json()
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"Phase 1 service unreachable at {phase1_url}: {exc}",
+        ) from exc
+
+    # Merge the Phase 1 service's response with our audit fields. The
+    # Phase 1 /stats endpoint already returns the fields the frontend
+    # destructures (sources, total_drugs, total_proteins, nodesLoaded,
+    # edgesLoaded, edgeTypesPresent, schemaVersion, bridgeVersion,
+    # lastUpdated, warnings, errors, generatedAt, backend). We add
+    # org_id for audit echo (TM14 v132 fix preserved).
+    p1_payload["org_id"] = auth.org_id  # audit echo
+    return p1_payload
 
 
 # ---------------------------------------------------------------------------

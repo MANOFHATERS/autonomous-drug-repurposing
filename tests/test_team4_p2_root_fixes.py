@@ -176,7 +176,23 @@ def test_p2_004_gpu_utils_source_has_device_index():
 # Issue 5 (P2-005): bridge_to_pyg_maps consolidates Compound via compound_id_aliases
 # =============================================================================
 def test_p2_005_bridge_consolidates_compound_aliases():
-    """P2-005: bridge_to_pyg_maps merges Compound nodes sharing an alias."""
+    """P2-005: bridge_to_pyg_maps merges Compound nodes sharing an alias.
+
+    hostile-auditor v134 ROOT FIX (P2-BUG-3): the previous version of this
+    test expected BOTH DB00071 AND the InChIKey to be KEYS in
+    entity_maps["Compound"] with the SAME index. That encoded the BUGGY
+    behavior that crashed the PyGBuilder validator (which enforces bijective
+    {canonical_id: index} mapping — no duplicate indices allowed). The fix
+    keeps aliases ONLY in compound_alias_to_idx (used for edge endpoint
+    resolution); entity_maps["Compound"] contains ONLY canonical IDs.
+
+    The CORRECT test verifies:
+      1. Only ONE unique Compound index exists (the merge happened).
+      2. DB00071 (the first canonical ID) is a key in entity_maps["Compound"].
+      3. The InChIKey is NOT a key in entity_maps["Compound"] (it's an alias).
+      4. An edge referencing the InChIKey resolves to DB00071's index (the
+         alias resolution works via compound_alias_to_idx).
+    """
     sys.path.insert(0, str(REPO_ROOT / "phase2"))
     from drugos_graph.phase1_bridge import (
         RecordingGraphBuilder,
@@ -200,22 +216,68 @@ def test_p2_005_bridge_consolidates_compound_aliases():
                     "compound_id_aliases": ["CHEMBL123456"],
                 },
             ],
+        },
+        {
+            "label": "Disease",
+            "nodes": [
+                {"id": "DOID:1234"},
+            ],
+        },
+    ]
+    # Add an edge that references the InChIKey (the alias) — it must
+    # resolve to DB00071's index via compound_alias_to_idx.
+    builder.edge_loads = [
+        {
+            "src_label": "Compound",
+            "rel_type": "treats",
+            "dst_label": "Disease",
+            "edges": [
+                {"src_id": "RZVAJINKQORUOD-UHFFFAOYSA-N", "dst_id": "DOID:1234"},
+            ],
         }
     ]
-    builder.edge_loads = []
     entity_maps, edge_maps = bridge_to_pyg_maps(builder)
     compound_map = entity_maps["Compound"]
-    # Both nodes must map to the SAME index (merged)
-    assert compound_map["DB00071"] == compound_map["RZVAJINKQORUOD-UHFFFAOYSA-N"], (
-        f"P2-005 REGRESSION: biologic DB00071 and its ChEMBL equivalent "
-        f"must merge into ONE Compound node (same index), got "
-        f"DB00071={compound_map['DB00071']} vs "
-        f"inchikey={compound_map['RZVAJINKQORUOD-UHFFFAOYSA-N']}."
-    )
-    # Only ONE unique index (not two)
+
+    # 1. Only ONE unique Compound index (the merge happened)
     assert len(set(compound_map.values())) == 1, (
         f"P2-005 REGRESSION: expected 1 unique Compound index (merged), "
-        f"got {len(set(compound_map.values()))}."
+        f"got {len(set(compound_map.values()))}. "
+        f"compound_map={compound_map}"
+    )
+
+    # 2. DB00071 (the first canonical ID) IS a key in entity_maps["Compound"]
+    assert "DB00071" in compound_map, (
+        f"P2-005 REGRESSION: DB00071 (canonical ID) must be a key in "
+        f"entity_maps['Compound']. compound_map={compound_map}"
+    )
+
+    # 3. hostile-auditor v134 P2-BUG-3: the InChIKey is NOT a key in
+    # entity_maps["Compound"] (it's an alias, lives in compound_alias_to_idx).
+    # The PyGBuilder validator at pyg_builder.py:500-508 enforces bijective
+    # mapping — duplicate indices (multiple keys → same index) crash it.
+    # The InChIKey was merged INTO DB00071, so it must NOT appear as a
+    # separate key.
+    assert "RZVAJINKQORUOD-UHFFFAOYSA-N" not in compound_map, (
+        f"P2-BUG-3 REGRESSION: the InChIKey (an alias) must NOT be a key "
+        f"in entity_maps['Compound'] — it should live ONLY in "
+        f"compound_alias_to_idx. The PyGBuilder validator rejects "
+        f"duplicate indices. compound_map={compound_map}"
+    )
+
+    # 4. The edge referencing the InChIKey must resolve to DB00071's index
+    # via compound_alias_to_idx (the alias resolution works).
+    edge_key = ("Compound", "treats", "Disease")
+    assert edge_key in edge_maps, (
+        f"P2-005 REGRESSION: edge {edge_key} not in edge_maps. "
+        f"edge_maps keys={list(edge_maps.keys())}"
+    )
+    src_indices, dst_indices = edge_maps[edge_key]
+    db00071_idx = compound_map["DB00071"]
+    assert src_indices[0] == db00071_idx, (
+        f"P2-005 REGRESSION: edge referencing InChIKey must resolve to "
+        f"DB00071's index ({db00071_idx}) via compound_alias_to_idx, "
+        f"got {src_indices[0]}. The alias resolution is broken."
     )
 
 

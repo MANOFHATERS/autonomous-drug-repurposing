@@ -449,7 +449,24 @@ SCORE_BY_MAPPING_KEY: dict[int, float] = {
     # patient-safety risk.
     1: OMIM_GENE_MAPPED_SCORE,        # 0.2 -- wild-type gene mapped ("weak" tier)
 }
-DEFAULT_MAPPING_KEY_SCORE: float = 0.4   # for mk=0 (unknown) or out-of-range
+# hostile-auditor v134 ROOT FIX (P1-BUG-3): lowered from 0.4 to 0.1 so
+# mk=0 (unknown mapping) falls in the "sub_weak" tier (score in
+# [0.06, 0.3) is "weak"; 0.1 is in the "weak" tier but BELOW mk=1's
+# 0.2). The previous 0.4 placed mk=0 in the "strong" tier (score in
+# [0.3, 0.5)) — HIGHER than mk=1 (gene mapped, score=0.2, "weak").
+# This was scientifically BACKWARDS: an OMIM record with NO mapping
+# key (mk=0, "unknown") scored HIGHER than a record with mk=1 (gene
+# mapped, no phenotype). The P1-005 ROOT FIX explicitly lowered mk=1
+# and mk=2 to the "weak" tier because weak evidence should not be
+# labeled "strong" — but mk=0 (less info than mk=1) was left at 0.4
+# ("strong"), contradicting that logic. Downstream impact: Phase 3 GNN
+# feature binning and Phase 4 RL ranker use ``confidence_tier`` to
+# weight GDA edges. An mk=0 (unknown) OMIM edge was weighted as
+# "strong" evidence — biasing the model toward unverified associations.
+# ROOT FIX: 0.1 places mk=0 BELOW mk=1 (0.2), restoring the scientific
+# ordering (more evidence → higher score). Both mk=0 and mk=1 are in
+# the "weak" tier, but mk=0 < mk=1 reflects the evidence hierarchy.
+DEFAULT_MAPPING_KEY_SCORE: float = 0.1   # for mk=0 (unknown) or out-of-range
 PMID_BONUS_COEFFICIENT: float = 0.05     # 0.05 · log1p(num_pmids)
 PMID_BONUS_CAP: float = 0.08             # cap at +0.08
 EVIDENCE_BONUS_COEFFICIENT: float = 0.05  # 0.05 · evidence_strength
