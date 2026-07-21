@@ -1752,3 +1752,50 @@ Stage Summary:
 - 21 CFR Part 11 audit compliance: backend audit_log_middleware logs every mutation to the shared AuditLog table (same one the frontend writes to). A compliance auditor sees entries from both layers in a single timeline.
 - Production readiness: rate limiting (slowapi), /ready vs /health separation, port conflict resolved.
 - Next: install dependencies and run real code (tsc --noEmit, npm run build, npm run lint, pytest) to verify no breaking changes. Then push branch, merge to main, re-clone to verify.
+
+---
+Task ID: teammate12-p4-to-backend-top-k-v134
+Agent: Main Agent (Claude/GLM)
+Task: Teammate 12 — P4 to Backend Integration: Wire RL /rank Endpoint into Backend /top-k (P0 — Pharma partner API)
+
+Work Log:
+- Cloned repo to /home/z/my-project/work/autonomous-drug-repurposing (branch fix/teammate12-p4-to-backend-top-k-v134 off main).
+- Read project docx (Cosmic_Build_Process_Updated.docx) — confirmed Phase 4 RL ranker output feeds the backend /top-k endpoint that pharma partners call.
+- Read backend/api/main.py LINE BY LINE (1041 lines). Found /top-k endpoint at lines 831-875 returning HARDCODED candidates=[] with source='rl_ranker' — RL service NEVER invoked. import httpx was DEAD CODE (line 852, never used). verify_org_id dependency ALREADY EXISTS (line 361). /ready endpoint ALREADY EXISTS (line 721) and already probes RL /health. TopKResponse (line 217) MISSING pathway_enrichment_available field. TopKCandidate (line 207) MISSING score, pathway_score, pathway_chain, confidence fields. create_test_jwt helper DOES NOT EXIST (but tests reference it). httpx was imported inline inside functions (line 852) — invisible to unittest.mock.patch.
+- Read rl/service.py LINE BY LINE (1795 lines). VERIFIED (actual code, not comments): bridge caching ALREADY EXISTS (lines 945-1030) — _bridge_cache, _rl_input_cache, _bridge_lock, get_cached_bridge() with double-checked locking, invalidate_bridge_cache(). /reload endpoint ALREADY EXISTS (lines 1583-1626) with admin token auth. /rank REQUIRES org_id (lines 1281-1292) when RL_REQUIRE_AUTH=true (default). RankRequest model (line 143) uses `limit`, NOT `k` — CRITICAL: the issue spec's example code sends `'k': req.k` which would be SILENTLY DROPPED by Pydantic (no extra='forbid'), defaulting to limit=50. This is a silent contract drift the issue spec got wrong.
+- Read backend/tests/integration/test_p4_to_be_top_k.py — confirmed tests are written for TARGET state (referencing create_test_jwt, backend.api.main.httpx.AsyncClient patch, pathway_enrichment_available, score, pathway_chain fields) — these are NOT "fake tests" but tests for code that was NEVER actually implemented in main.py. This is exactly the pattern the user warned about.
+- Read backend/tests/integration/conftest.py — sets JWT_SECRET and DRUGOS_DISABLE_RATE_LIMIT for tests.
+- Read rl/tests/integration/test_service_caches_bridge.py — tests bridge caching with mocked GTRLBridge (no torch needed). These tests are correctly written for the EXISTING rl/service.py code.
+
+ROOT FIXES APPLIED to backend/api/main.py:
+1. Added module-level `import httpx` (lines 116-132) with _HAS_HTTPX flag — so unittest.mock.patch("backend.api.main.httpx.AsyncClient") works. Previous inline `import httpx` inside /top-k was invisible to patch().
+2. Added create_test_jwt() helper (lines 469-520) — keyword-only signature (prevents arg swap security hole in test fixtures). Mints JWTs with sub+org_id+org_role+iss+iat+exp claims signed with JWT_SECRET.
+3. Updated TopKCandidate model (lines 225-272) — added score (overallScore), pathway_score, pathway_chain (List[Dict]), confidence fields. Made gnn_score Optional (RL service may not always have it).
+4. Updated TopKResponse model (lines 275-301) — added pathway_enrichment_available: bool field forwarded from RL service.
+5. REPLACED /top-k endpoint body (lines 983-1389) with REAL httpx proxy:
+   - Added org_id: str = Depends(verify_org_id) to signature.
+   - Maps k → limit in request body (CRITICAL fix — issue spec's 'k' would be silently dropped).
+   - Passes org_id as BOTH query param AND X-Org-Id header (defense in depth).
+   - 60s timeout (was: NO timeout — hung RL service would exhaust connection pool).
+   - httpx.RequestError → 503 Service Unavailable (was: empty 200 with source='rl_ranker').
+   - RL service 401 → 401 (so frontend can re-authenticate).
+   - RL service other 4xx/5xx → 502 Bad Gateway with detail.
+   - Non-JSON response → 502 Bad Gateway.
+   - Explicit camelCase → snake_case field mapping (gnnScore→gnn_score, safetyScore→safety_score, marketScore→market_score, overallScore→score, pathwayScore→pathway_score, pathwayChain→pathway_chain, rank→rl_rank, confidence→confidence).
+   - Defensive: skips malformed candidates (non-dict, missing drug/disease, Pydantic validation failure) with WARNING log — does NOT fail whole request.
+   - Forwards pathway_enrichment_available flag from RL service response.
+   - Forwards total from RL service (falls back to len(candidates) if missing).
+
+NO CHANGES to rl/service.py — VERIFIED the bridge caching, /reload endpoint, and org_id requirement are ALL ALREADY CORRECTLY IMPLEMENTED in the actual code (lines 945-1030, 1583-1626, 1281-1292 respectively). The user warned about "fake fixes" but the RL service side is genuinely fixed.
+
+NO CHANGES to backend/api/rate_limit.py — rate limiting on /top-k already exists (100/min via @limiter.limit decorator).
+
+NO CHANGES to /ready endpoint — already probes RL_SERVICE_URL/health (lines 880-912).
+
+Stage Summary:
+- Branch: fix/teammate12-p4-to-backend-top-k-v134
+- Files modified: 1 (backend/api/main.py)
+- Files created: 0 (test files already exist — test_p4_to_be_top_k.py and test_service_caches_bridge.py were pre-written for the target state)
+- The /top-k endpoint is now a REAL proxy to RL_SERVICE_URL/rank. Pharma partners will receive actual ranked candidates with pathway_chain data (when KG is available) or 503 (when RL service is down) — never an empty 200 with a misleading source label.
+- CRITICAL: mapped k → limit. The issue spec's example code would have SILENTLY DROPPED the k parameter (RankRequest expects `limit`, not `k`). This is a silent contract drift that would have made every /top-k request return 50 candidates regardless of the caller's requested page size.
+- Next: install dependencies (fastapi, httpx, pyjwt, slowapi, sqlalchemy, pytest) and run real code tests: pytest backend/tests/integration/test_p4_to_be_top_k.py + rl/tests/integration/test_service_caches_bridge.py + py_compile main.py. Then commit, push, merge to main, re-clone to verify.
