@@ -177,11 +177,19 @@ def test_rl_service_rank_response_includes_pathway_chain():
         "confidence": 0.85, "pathwayScore": 0.78, "unmetNeedScore": 0.6,
         "efficacyScore": 0.7, "admeScore": 0.8, "literatureSupport": 1,
         "isKnownPositive": False,
-        "pathwayChain": [
+        # TEAMMATE-7 v140 ROOT FIX: snake_case to match the frontend Zod
+        # schema (frontend/src/lib/ml-contracts.ts:198). The previous
+        # test used camelCase `pathwayChain` which matched the BUGGY
+        # implementation but did NOT match the frontend's contract --
+        # the frontend Zod schema's `.default([])` silently dropped the
+        # camelCase field, so the candidate table rendered "0 pathways"
+        # even when the CSV had real pathway data. This test now asserts
+        # on the SPEC field name, not the buggy implementation's field name.
+        "pathway_chain": [
             {"pathway": "mTOR signaling", "intermediate_protein": "mTOR",
              "chain": ["metformin", "mTOR", "mTOR signaling", "cancer"]},
         ],
-        "pathwaySource": "neo4j",
+        "pathway_source": "neo4j",
     }
     mock_loaded = {"candidates": [mock_candidate_dict], "total": 1}
     fake_csv_path = MagicMock()
@@ -197,10 +205,11 @@ def test_rl_service_rank_response_includes_pathway_chain():
     data = response.json()
     assert "pathway_enrichment_available" in data
     assert data["pathway_enrichment_available"] is True
-    assert "pathwayChain" in data["candidates"][0]
-    assert len(data["candidates"][0]["pathwayChain"]) == 1
-    assert data["candidates"][0]["pathwayChain"][0]["pathway"] == "mTOR signaling"
-    assert data["candidates"][0]["pathwaySource"] == "neo4j"
+    # TEAMMATE-7 v140: assert on snake_case `pathway_chain` (matches frontend Zod schema).
+    assert "pathway_chain" in data["candidates"][0]
+    assert len(data["candidates"][0]["pathway_chain"]) == 1
+    assert data["candidates"][0]["pathway_chain"][0]["pathway"] == "mTOR signaling"
+    assert data["candidates"][0]["pathway_source"] == "neo4j"
 
 
 # =============================================================================
@@ -264,11 +273,14 @@ def test_csv_round_trip_preserves_pathway_chain(tmp_path):
     assert loaded["total"] == 1
     candidate = loaded["candidates"][0]
     assert candidate["drug"] == "metformin"
-    assert isinstance(candidate["pathwayChain"], list)
-    assert len(candidate["pathwayChain"]) == 2
-    assert candidate["pathwayChain"][0]["pathway"] == "mTOR signaling"
-    assert candidate["pathwayChain"][1]["pathway"] == "AMPK signaling"
-    assert candidate["pathwaySource"] == "neo4j"
+    # TEAMMATE-7 v140 ROOT FIX: assert on snake_case `pathway_chain` (matches
+    # the frontend Zod schema). The previous test asserted on camelCase
+    # `pathwayChain` which matched the BUGGY implementation.
+    assert isinstance(candidate["pathway_chain"], list)
+    assert len(candidate["pathway_chain"]) == 2
+    assert candidate["pathway_chain"][0]["pathway"] == "mTOR signaling"
+    assert candidate["pathway_chain"][1]["pathway"] == "AMPK signaling"
+    assert candidate["pathway_source"] == "neo4j"
 
 
 # =============================================================================
