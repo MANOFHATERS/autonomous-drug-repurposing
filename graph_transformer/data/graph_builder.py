@@ -342,6 +342,52 @@ class BiomedicalGraphBuilder:
 
         self._finalized = False
 
+        # TM15 v132 ROOT FIX (P3-008 — validated pairs leak):
+        # The previous code (build_demo_graph lines ~1738-1740) injected
+        # validated_hypotheses as "treats" edges AND appended them to
+        # known_pairs. This defeated the "novel prediction" claim:
+        #   * The GT model TRAINED on these pairs (they appeared as
+        #     "treats" edges in the training graph).
+        #   * When the GT model was asked to predict for these pairs at
+        #     test time, the prediction was MEMORIZED (gnn_score ≈ 1.0)
+        #     not LEARNED from graph topology.
+        #   * The pairs then appeared as "novel" high-score predictions
+        #     in the RL ranker's top-N output — but they were not novel,
+        #     they were memorized.
+        #
+        # ROOT FIX: validated pairs are now stored SEPARATELY on the builder
+        # (this list) and are NEVER added as "treats" edges or to
+        # known_pairs. They are passed through to the RL env via the
+        # gt_rl_bridge's `is_validated` column so the +0.1 validated_bonus
+        # can fire — but the GT model is NEVER trained on them.
+        #
+        # This is the data flywheel (DOCX §10) done correctly:
+        #   * Pharma partner validates a hypothesis.
+        #   * The hypothesis is stored as a labeled data point.
+        #   * The GT model is NOT retrained on it (it stays NOVEL).
+        #   * The RL ranker gives it a +0.1 bonus (the bonus is the
+        #     flywheel's reward signal — pharma partners see their
+        #     validated pairs ranked slightly higher, encouraging more
+        #     validations).
+        #   * When 10+ new validated hypotheses accumulate, an Airflow
+        #     DAG (phase1/dags/retrain_on_validated_dag.py) triggers a
+        #     full Phase 1->2->3->4 retraining run. ONLY THEN are the
+        #     validated pairs incorporated into the GT training set
+        #     (via the Phase 1 CSV → Phase 2 KG → Phase 3 trainer flow,
+        #     NOT via this demo builder's "treats" edges).
+        self.validated_pairs: List[Tuple[str, str]] = []
+
+    def get_validated_pairs(self) -> List[Tuple[str, str]]:
+        """Return the validated (drug, disease) pairs stored on this builder.
+
+        TM15 v132 ROOT FIX (P3-008): these pairs are NOT in the "treats"
+        edge set (they are stored separately to prevent the GT model from
+        training on them — see ``__init__`` docstring for the full
+        rationale). The RL env reads them via the gt_rl_bridge's
+        ``is_validated`` column to apply the +0.1 validated_bonus.
+        """
+        return list(self.validated_pairs)
+
     def register_node(
         self,
         node_type: str,
@@ -1245,20 +1291,37 @@ class BiomedicalGraphBuilder:
         # gnn_score for them is low → the RL agent sees low gnn_score
         # and may rank them LOW despite the +0.1 bonus.
         #
-        # By injecting the validated pairs as "treats" edges, the GT
-        # model learns them, gnn_score becomes high, and the RL agent
-        # ranks them HIGH (both gnn_score AND validated_bonus push them
-        # up). This is the data flywheel in action: validated pairs
-        # become GT training data → GT gnn_score improves → RL ranks
-        # them HIGH → pharma partner sees them at the top.
+        # TM15 v132 ROOT FIX (P3-008 — validated pairs leak):
+        # The previous code INJECTED validated pairs as "treats" edges
+        # so the GT model would learn them (gnn_score → 1.0). The audit
+        # (Teammate 15) flagged this as defeating the "novel prediction"
+        # claim: the GT model TRAINED on these pairs, so they appeared
+        # as MEMORIZED predictions, not NOVEL predictions. The data
+        # flywheel was circular: pharma partner validates → GT memorizes
+        # → "novel" prediction at the top → looks like the model
+        # "discovered" the pair, but it actually just regurgitated it.
         #
-        # CRITICAL: validated_hypotheses are kept SEPARATE from
-        # known_positives in the RL reward function (VALIDATED_HYPOTHESES
-        # gives +0.1 bonus, KNOWN_POSITIVES is the AUC label set). The
-        # AUC label set does NOT include validated pairs, so there is NO
-        # circular leakage. The GT model seeing them as "treats" edges
-        # is fine — that's the data flywheel (validated pairs become new
-        # GT training data).
+        # ROOT FIX: validated pairs are now stored on
+        # ``builder.validated_pairs`` (a SEPARATE list, NOT in the
+        # "treats" edge set). The drug/disease names ARE still registered
+        # as nodes (so the RL env's cross-product generates them as
+        # candidate pairs), but no "treats" edge is added — the GT
+        # model has NO signal that these are real pairs at training
+        # time. The pair appears in the RL env's input data with
+        # ``is_validated=True`` (set by the gt_rl_bridge) so the +0.1
+        # validated_bonus can fire.
+        #
+        # The data flywheel is now CORRECT:
+        #   1. Pharma partner validates (drug, disease) pair.
+        #   2. The pair is stored as a labeled data point (CSV + DB +
+        #      Neo4j edge) — NOT injected into the GT training graph.
+        #   3. The RL ranker gives the pair a +0.1 bonus when ranking.
+        #   4. When 10+ new validated pairs accumulate, the Airflow DAG
+        #      ``retrain_on_validated_dag`` triggers a full Phase 1->2
+        #      ->3->4 retraining run. ONLY THEN are the validated pairs
+        #      incorporated into the GT training set, via the canonical
+        #      Phase 1 CSV → Phase 2 KG → Phase 3 trainer flow — NOT
+        #      via this demo builder's "treats" edges.
         validated_pairs: List[Tuple[str, str]] = []
         if validated_hypotheses:
             for drug_name, disease_name in validated_hypotheses:
@@ -1267,13 +1330,26 @@ class BiomedicalGraphBuilder:
                 if disease_name not in disease_names:
                     disease_names.append(disease_name)
                 validated_pairs.append((drug_name, disease_name))
+            # TM15 v132 P3-008: store on the builder so the gt_rl_bridge
+            # can retrieve them via ``builder.get_validated_pairs()`` and
+            # pass them to the RL env via the ``is_validated`` column.
+            # Do NOT call ``builder.add_edge("drug", "treats", "disease", ...)``
+            # and do NOT call ``known_pairs.append(...)`` — see the
+            # ``__init__`` docstring for the full rationale.
+            self.validated_pairs = list(validated_pairs)
             logger.info(
-                f"P4-001 ROOT FIX: injecting {len(validated_pairs)} validated "
-                f"hypothesis pairs as 'treats' edges in the demo graph. "
-                f"Pairs: {validated_pairs}. The GT model will learn these "
-                f"(data flywheel), and the RL agent will see them in its "
-                f"input data so the +0.1 validated_bonus can fire."
+                f"TM15 v132 P3-008 ROOT FIX: storing {len(validated_pairs)} "
+                f"validated hypothesis pairs on builder.validated_pairs "
+                f"(SEPARATE from the 'treats' edge set — the GT model will "
+                f"NOT train on them). Pairs: {validated_pairs}. The RL env "
+                f"will receive them via the gt_rl_bridge's is_validated "
+                f"column so the +0.1 validated_bonus can fire."
             )
+        else:
+            # Ensure the attribute is initialized even when no validated
+            # hypotheses are passed (defensive — __init__ already sets it
+            # to [], but a caller might have manually overwritten it).
+            self.validated_pairs = []
 
         # ------------------------------------------------------------------
         # TASK-146 ROOT FIX (v111 forensic): REAL FEATURES, NOT RANDOM NOISE.

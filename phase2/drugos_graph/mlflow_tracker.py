@@ -63,6 +63,40 @@ from .config import ensure_dirs
 
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# TM17 v132 ROOT FIX (Teammate 17 — Observability, P2-014 mlflow atexit):
+# =============================================================================
+# The audit (P2-014) found that the atexit close handler SWALLOWED
+# close() failures at WARNING level. WARNING logs are typically filtered
+# by aggregators (Datadog, CloudWatch, Loki) — dangling MLflow runs
+# were undetectable until an operator manually inspected the MLflow UI.
+#
+# ROOT FIX:
+#   1. Promote the atexit close failure log from WARNING to ERROR.
+#      ERROR logs are NEVER filtered — they surface in every aggregator.
+#   2. Add a Prometheus Counter ``mlflow_atexit_close_failures_total``
+#      so operators can ALERT on this metric (see alerts.yml). A single
+#      failure in a 24h window is enough to page the on-call engineer.
+#   3. Add ``check_for_dangling_mlflow_runs()`` startup self-check
+#      (defined at the bottom of this module). Called by the Phase 2
+#      service on startup — queries MLflow for RUNNING runs with stale
+#      heartbeats and marks them as FAILED.
+# =============================================================================
+try:
+    from prometheus_client import Counter as _PromCounter
+    MLFLOW_ATEXIT_CLOSE_FAILURES = _PromCounter(
+        "mlflow_atexit_close_failures_total",
+        "Total MLflow atexit close() failures (P2-014 root fix — "
+        "dangling MLflow runs that may be left in RUNNING state). "
+        "Alert on: increase(mlflow_atexit_close_failures_total[24h]) > 0.",
+    )
+except Exception:  # pragma: no cover — prometheus_client is optional
+    # Fallback: no-op counter (the service still runs without Prometheus).
+    class _NoopCounter:
+        def inc(self, _amount: float = 1.0) -> None:
+            pass
+    MLFLOW_ATEXIT_CLOSE_FAILURES = _NoopCounter()
+
 
 # ─── P2-024 heartbeat constants ───────────────────────────────────────────────
 # Env var overrides let ops tune the heartbeat for their environment:
@@ -220,19 +254,61 @@ class MLflowTracker:
         client library's own atexit handlers will retry the close on
         the next interpreter start; we just need to surface that THIS
         shutdown failed.
+
+        TM17 v132 ROOT FIX (Teammate 17 — Observability, P2-014):
+            The v107 fix logged at WARNING level. WARNING logs are
+            typically FILTERED OUT by log aggregators (Datadog,
+            CloudWatch, Loki) at default severity thresholds — dangling
+            MLflow runs were STILL undetectable in production despite
+            the v107 fix. The audit (TM17) flagged this as a regression
+            of the v107 fix.
+
+            ROOT FIX:
+              1. Promote the log level from WARNING to ERROR. ERROR
+                 logs are NEVER filtered — they surface in every
+                 aggregator's default view.
+              2. Increment the Prometheus Counter
+                 ``mlflow_atexit_close_failures_total`` (defined at the
+                 top of this module). Operators can ALERT on this
+                 metric via alerts.yml (alert: MLflowAtexitCloseFailures).
+              3. Expand the log message to include the EXACT patient-
+                 safety implication: the MLflow run may be left in
+                 RUNNING state, which means metrics logged AFTER the
+                 failure are LOST. A regulator auditing the MLflow UI
+                 would see a partial run with no explanation (21 CFR
+                 Part 11 data integrity violation).
         """
         try:
             self.close()
         except Exception as e:
-            # v107 ISSUE-P2-047: log at WARNING so operators can detect
-            # dangling MLflow runs. We still swallow the exception
-            # (atexit handlers must not raise).
-            logger.warning(
+            # TM17 v132 P2-014 ROOT FIX: increment the Prometheus Counter
+            # so operators can alert on this metric. The Counter is
+            # defined at the top of this module (mlflow_atexit_close_failures_total).
+            try:
+                MLFLOW_ATEXIT_CLOSE_FAILURES.inc()
+            except Exception:
+                # Defensive: if the Counter is broken (shouldn't happen
+                # — the no-op fallback is used when prometheus_client is
+                # not installed), do NOT mask the original error.
+                pass
+            # TM17 v132 P2-014 ROOT FIX: log at ERROR (not WARNING) so
+            # the failure surfaces in EVERY log aggregator's default
+            # view. The message includes the patient-safety implication
+            # (21 CFR Part 11 data integrity violation) so the on-call
+            # engineer knows to investigate immediately.
+            logger.error(
                 "MLflowTracker._atexit_close: close() raised %s: %s. "
-                "The MLflow run may be left in an inconsistent state "
-                "(UI may show it as RUNNING). Check the MLflow server "
-                "connectivity and the run's status on next startup. "
-                "v107 ISSUE-P2-047 root fix.",
+                "The MLflow run may be left in an INCONSISTENT state "
+                "(UI may show it as RUNNING). Metrics logged AFTER "
+                "this failure are LOST — a regulator auditing the run "
+                "would see a partial record with no explanation "
+                "(21 CFR Part 11 data integrity violation). "
+                "TM17 v132 P2-014 root fix — investigate immediately. "
+                "Check MLflow server connectivity and the run's status "
+                "on next startup. The Prometheus metric "
+                "'mlflow_atexit_close_failures_total' has been "
+                "incremented — alert on: "
+                "increase(mlflow_atexit_close_failures_total[24h]) > 0.",
                 type(e).__name__, e,
             )
 
@@ -997,3 +1073,106 @@ class MLflowTracker:
             len(result["errors"]), dry_run, stale_threshold_seconds,
         )
         return result
+
+
+# =============================================================================
+# TM17 v132 ROOT FIX (Teammate 17 — Observability, P2-014 dangling runs):
+# Module-level startup self-check. Called by the Phase 2 service on
+# startup to detect RUNNING MLflow runs that have stale heartbeats
+# (left over from a prior crash / OOM kill / SIGKILL).
+# =============================================================================
+def check_for_dangling_mlflow_runs(
+    stale_threshold_seconds: Optional[int] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Detect and reap dangling MLflow runs on startup.
+
+    A "dangling" run is an MLflow run with status=RUNNING but a stale
+    heartbeat (no heartbeat update for > ``stale_threshold_seconds``).
+    These runs are left over from prior crashes (OOM kill, SIGKILL,
+    kernel panic) where the atexit handler could not run.
+
+    This function queries MLflow for all RUNNING runs, checks each run's
+    ``drugos.heartbeat_ts`` tag, and marks runs with stale heartbeats
+    as FAILED (so they no longer appear as "active" in the MLflow UI).
+
+    Args:
+        stale_threshold_seconds: A run is dangling if its heartbeat is
+            older than this. Default: 5 minutes (300s). Override via
+            the ``DRUGOS_MLFLOW_HEARTBEAT_STALE_THRESHOLD_SECONDS`` env var.
+        dry_run: If True, log what would be reaped but do NOT mark runs
+            as FAILED. Useful for first-time deployment to verify the
+            self-check is not over-eager.
+
+    Returns:
+        Dict with keys: ``scanned``, ``reaped``, ``skipped_no_heartbeat_tag``,
+        ``skipped_heartbeat_recent``, ``errors``.
+
+    TM17 v132 P2-014 ROOT FIX: this function is called by the Phase 2
+    service on startup (see phase2/service.py). It uses the
+    ``reap_stale_runs`` method on the MLflowTracker class — this is
+    just a convenience wrapper that constructs a temporary tracker
+    instance (no experiment context needed for the reap operation).
+    """
+    if stale_threshold_seconds is None:
+        stale_threshold_seconds = DEFAULT_HEARTBEAT_STALE_THRESHOLD_SECONDS
+    logger.info(
+        "TM17 v132 P2-014: checking for dangling MLflow runs "
+        "(stale_threshold=%ds, dry_run=%s)...",
+        stale_threshold_seconds, dry_run,
+    )
+    try:
+        # Construct a temporary tracker just for the reap operation.
+        # This is cheap — __init__ only registers atexit + signal
+        # handlers (which are no-ops for a temporary instance since
+        # they're idempotent at the class level).
+        tracker = MLflowTracker()
+        result = tracker.reap_stale_runs(
+            stale_threshold_seconds=stale_threshold_seconds,
+            dry_run=dry_run,
+        )
+        if result["reaped"] > 0:
+            logger.error(
+                "TM17 v132 P2-014: found and reaped %d dangling MLflow "
+                "runs (out of %d scanned). These runs were left in "
+                "RUNNING state by a prior crash (OOM kill, SIGKILL, or "
+                "kernel panic). They have been marked FAILED. Investigate "
+                "the root cause of the crashes — a healthy platform "
+                "should have ZERO dangling runs on startup.",
+                result["reaped"], result["scanned"],
+            )
+        else:
+            logger.info(
+                "TM17 v132 P2-014: no dangling MLflow runs detected "
+                "(scanned=%d). All RUNNING runs have fresh heartbeats.",
+                result["scanned"],
+            )
+        return result
+    except Exception as exc:
+        logger.error(
+            "TM17 v132 P2-014: check_for_dangling_mlflow_runs failed: "
+            "%s: %s. The startup self-check could not run — operators "
+            "should manually inspect the MLflow UI for stale RUNNING "
+            "runs. This is a NON-BLOCKING error (the service still "
+            "starts), but it indicates an MLflow connectivity issue "
+            "that should be investigated.",
+            type(exc).__name__, exc,
+        )
+        return {
+            "scanned": 0,
+            "reaped": 0,
+            "skipped_no_heartbeat_tag": 0,
+            "skipped_heartbeat_recent": 0,
+            "errors": [f"check_for_dangling_mlflow_runs: {type(exc).__name__}: {exc}"],
+        }
+
+
+__all__ = [
+    "MLflowTracker",
+    "MLFLOW_ATEXIT_CLOSE_FAILURES",
+    "check_for_dangling_mlflow_runs",
+    "DEFAULT_HEARTBEAT_INTERVAL_SECONDS",
+    "DEFAULT_HEARTBEAT_STALE_THRESHOLD_SECONDS",
+    "HEARTBEAT_TAG_NAME",
+    "HEARTBEAT_PID_TAG_NAME",
+]

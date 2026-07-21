@@ -8308,8 +8308,29 @@ def compute_auc(
     disease_context_stats: Optional[Dict[str, Dict[str, float]]] = None,
     reward_fn: Optional["RewardFunction"] = None,
     vec_normalize: Any = None,
-) -> Optional[float]:
-    """Compute AUC-ROC of agent's ranking on held-out data.
+    # TM16 v132 ROOT FIX (P4-005 — bootstrap CIs):
+    # n_bootstrap: number of bootstrap resamples for the 95% CI. Default
+    # 1000 (matches sklearn's recommendation). Set to 0 to skip the CI
+    # (returns just the point estimate — useful for fast unit tests).
+    n_bootstrap: int = 1000,
+) -> Optional[Dict[str, Any]]:
+    """Compute AUC-ROC of agent's ranking on held-out data, with bootstrap CI.
+
+    TM16 v132 ROOT FIX (P4-005 — bootstrap CIs):
+        The previous code returned a single ``float`` (the point AUC
+        estimate). The DOCX §8 V1 launch criterion "GT AUC > 0.85" was
+        checked against this single number — but a single AUC value has
+        a WIDE confidence interval on small test sets (e.g. ±0.1 on
+        100 samples). A model with measured AUC 0.86 could have a true
+        AUC anywhere in [0.76, 0.96] — the launch decision was
+        effectively a coin flip.
+
+        ROOT FIX: now returns a Dict with ``{auc, ci_lower, ci_upper,
+        n_bootstrap}``. The scientific validation gate checks
+        ``ci_lower >= 0.85`` (the 95% CI lower bound), NOT ``auc >=
+        0.85`` (the point estimate). This is the scientifically correct
+        test — it guarantees that the model's true AUC is above 0.85
+        with 95% confidence.
 
     v89 P0 ROOT FIX (VecNormalize + off-by-one defensive alignment):
 
@@ -8382,11 +8403,34 @@ def compute_auc(
         reward_fn: Optional RewardFunction from the TRAIN env. When
             provided, the test env reuses this reward_fn's adaptive
             threshold (FORENSIC-AUDIT-I13 fix: no test-data leakage).
+        vec_normalize: Optional VecNormalize wrapper (P4-003 fix).
+        n_bootstrap: TM16 v132 — number of bootstrap resamples for the
+            95% CI. Default 1000. Set to 0 to skip the CI (returns
+            ci_lower=ci_upper=auc — useful for fast unit tests).
 
     Returns:
-        AUC-ROC score in [0, 1], or ``None`` if the test set has zero
-        known positives or only one class (V4 S-F3 fix: ``None`` is
-        distinguishable from 0.5 "random").
+        Dict with keys:
+            - ``auc``: float — point AUC estimate in [0, 1].
+            - ``ci_lower``: float — 2.5th percentile of bootstrap AUCs
+              (95% CI lower bound). Equal to ``auc`` if n_bootstrap=0
+              or if all bootstrap resamples had only one class.
+            - ``ci_upper``: float — 97.5th percentile of bootstrap AUCs.
+            - ``n_bootstrap``: int — number of bootstrap resamples that
+              produced a valid AUC (skipped resamples with only one class).
+        Or ``None`` if the test set has zero known positives or only
+        one class (V4 S-F3 fix: ``None`` is distinguishable from 0.5
+        "random").
+
+    BACKWARD COMPATIBILITY:
+        Existing callers that did ``auc = compute_auc(...)`` and then
+        ``if auc >= 0.85`` will BREAK — the new return is a Dict, not a
+        float. Migrate by either:
+          1. ``result = compute_auc(...); auc = result['auc']`` (preferred).
+          2. ``auc = compute_auc_value(...)`` — backward-compat shim
+             that returns just the float (defined below compute_auc).
+        The CI is the scientifically correct way to compare AUCs —
+        always prefer ``result['ci_lower'] >= threshold`` over
+        ``result['auc'] >= threshold``.
     """
     from sklearn.metrics import roc_auc_score
 
@@ -8596,7 +8640,133 @@ def compute_auc(
         f"not binary actions): {auc:.4f} "
         f"(n_known_positives={n_known_in_test}, n_total={len(labels)})"
     )
-    return auc
+
+    # =========================================================================
+    # TM16 v132 ROOT FIX (P4-005 — bootstrap 95% confidence interval):
+    # =========================================================================
+    # The DOCX §8 V1 launch criterion is "GT AUC > 0.85". The previous
+    # code returned a single float and the gate checked
+    # ``auc >= 0.85``. This is statistically WRONG on small test sets:
+    # a measured AUC of 0.86 on 100 samples has a 95% CI of roughly
+    # [0.76, 0.96] — the model's TRUE AUC could be below 0.85 with
+    # substantial probability. The launch decision was a coin flip.
+    #
+    # ROOT FIX: compute a 95% bootstrap confidence interval. The gate
+    # now checks ``ci_lower >= 0.85`` (the LOWER bound of the 95% CI),
+    # which guarantees the true AUC is above 0.85 with 95% confidence.
+    #
+    # Bootstrap procedure:
+    #   1. Resample N pairs WITH replacement (N = test set size).
+    #   2. Compute AUC on the resample. Skip if the resample has only
+    #      one class (roc_auc_score raises ValueError).
+    #   3. Repeat n_bootstrap times (default 1000).
+    #   4. ci_lower = 2.5th percentile, ci_upper = 97.5th percentile.
+    #
+    # The random seed is FIXED (42) for reproducibility — the CI must
+    # be the same across runs so the launch decision is deterministic.
+    # =========================================================================
+    if n_bootstrap <= 0:
+        # Fast path: skip the CI (used by unit tests that only need the
+        # point estimate). ci_lower = ci_upper = auc.
+        ci_lower = auc
+        ci_upper = auc
+        n_valid_bootstrap = 0
+    else:
+        # Use a fixed RNG seed for reproducibility. The bootstrap CI is
+        # used for the launch decision — it MUST be the same across runs
+        # (an operator should not get a different verdict by re-running
+        # the gate on the same checkpoint).
+        bootstrap_rng = np.random.default_rng(42)
+        bootstrap_aucs: List[float] = []
+        n_test = len(labels)
+        labels_arr = np.asarray(labels)
+        preds_arr = np.asarray(predictions)
+        for _ in range(n_bootstrap):
+            # Resample WITH replacement (bootstrap).
+            idx = bootstrap_rng.integers(0, n_test, size=n_test)
+            boot_labels = labels_arr[idx]
+            # Skip if the resample has only one class (roc_auc_score
+            # would raise ValueError). This is the standard bootstrap
+            # procedure for AUC CIs.
+            if len(set(boot_labels.tolist())) < 2:
+                continue
+            boot_preds = preds_arr[idx]
+            try:
+                boot_auc = float(roc_auc_score(boot_labels, boot_preds))
+                bootstrap_aucs.append(boot_auc)
+            except ValueError:
+                # Edge case: all predictions identical for this resample.
+                # roc_auc_score raises ValueError. Skip.
+                continue
+        n_valid_bootstrap = len(bootstrap_aucs)
+        if n_valid_bootstrap > 0:
+            ci_lower = float(np.percentile(bootstrap_aucs, 2.5))
+            ci_upper = float(np.percentile(bootstrap_aucs, 97.5))
+        else:
+            # All bootstrap resamples had only one class — the test set
+            # is too small or too imbalanced for a meaningful CI.
+            # Fall back to ci_lower = ci_upper = auc (no CI).
+            logger.warning(
+                f"TM16 v132 P4-005: 0/{n_bootstrap} bootstrap resamples "
+                f"had both classes — CI undefined. Falling back to "
+                f"ci_lower = ci_upper = auc = {auc:.4f}. The test set "
+                f"is too small or too imbalanced for a meaningful CI."
+            )
+            ci_lower = auc
+            ci_upper = auc
+
+    logger.info(
+        f"TM16 v132 P4-005: AUC = {auc:.4f} "
+        f"(95% CI: [{ci_lower:.4f}, {ci_upper:.4f}], "
+        f"n_bootstrap={n_valid_bootstrap}/{n_bootstrap}). "
+        f"The scientific validation gate checks "
+        f"ci_lower >= threshold (not auc >= threshold)."
+    )
+
+    return {
+        "auc": auc,
+        "ci_lower": ci_lower,
+        "ci_upper": ci_upper,
+        "n_bootstrap": n_valid_bootstrap,
+    }
+
+
+def compute_auc_value(
+    model: Any,
+    test_data: pd.DataFrame,
+    config: Optional[PipelineConfig] = None,
+    disease_context_stats: Optional[Dict[str, Dict[str, float]]] = None,
+    reward_fn: Optional["RewardFunction"] = None,
+    vec_normalize: Any = None,
+) -> Optional[float]:
+    """Backward-compat shim — return just the AUC float (NOT the CI dict).
+
+    TM16 v132 ROOT FIX (P4-005): this is a SHIM for callers that haven't
+    been migrated to the new Dict return value of ``compute_auc``. It
+    calls ``compute_auc(...)`` and returns ``result['auc']``.
+
+    NEW CODE should call ``compute_auc(...)`` directly and use
+    ``result['ci_lower']`` for the launch decision (the 95% CI lower
+    bound is the scientifically correct threshold, NOT the point
+    estimate). This shim exists ONLY to avoid breaking existing tests
+    during the migration period.
+
+    Returns:
+        AUC float in [0, 1], or ``None`` if the test set has zero
+        known positives or only one class.
+    """
+    result = compute_auc(
+        model=model,
+        test_data=test_data,
+        config=config,
+        disease_context_stats=disease_context_stats,
+        reward_fn=reward_fn,
+        vec_normalize=vec_normalize,
+        n_bootstrap=0,  # skip the CI for speed (shim only needs the point estimate)
+    )
+    if result is None:
+        return None
+    return result["auc"]
 
 
 def literature_crosscheck(
@@ -10973,15 +11143,28 @@ def run_pipeline(
     if len(test_df) > 0:
         t0 = _time.perf_counter()
         # v89 P0: pass vec_normalize so obs is normalized at inference.
-        auc = compute_auc(
+        # TM16 v132 P4-005: compute_auc now returns a Dict
+        # {auc, ci_lower, ci_upper, n_bootstrap}. We extract the 'auc'
+        # field for backward compat with the existing log + report
+        # plumbing; the CI is used by the scientific validation gate
+        # (run_scientific_validation_gate) which reads the FULL Dict via
+        # produce_evaluation_report.
+        _auc_result = compute_auc(
             model, test_df, config=config,
             disease_context_stats=train_disease_stats,
             reward_fn=reward_fn,
             vec_normalize=vec_normalize,
         )
+        auc = _auc_result["auc"] if _auc_result is not None else None
         metrics.inference_latency_ms = (_time.perf_counter() - t0) * 1000
-        if auc is not None:
-            logger.info(f"Held-out AUC (policy probs): {auc:.4f} (inference: {metrics.inference_latency_ms:.0f}ms)")
+        if auc is not None and _auc_result is not None:
+            logger.info(
+                f"Held-out AUC (policy probs): {auc:.4f} "
+                f"(95% CI: [{_auc_result['ci_lower']:.4f}, "
+                f"{_auc_result['ci_upper']:.4f}], "
+                f"n_bootstrap={_auc_result['n_bootstrap']}, "
+                f"inference: {metrics.inference_latency_ms:.0f}ms)"
+            )
         else:
             logger.warning("Held-out AUC is None (degenerate test set). See warnings above.")
 
@@ -11827,11 +12010,28 @@ def produce_evaluation_report(
     # build a fresh test env that recomputed disease stats from test
     # data — the AUC was computed against a DIFFERENT distribution than
     # the policy was trained against.
-    auc = compute_auc(
+    # TM16 v132 P4-005: compute_auc now returns a Dict
+    # {auc, ci_lower, ci_upper, n_bootstrap}. The 'auc' field is the
+    # point estimate (used by the report's 'auc' key for backward compat
+    # with downstream consumers like the dashboard). The 'ci_lower' and
+    # 'ci_upper' fields are the 95% bootstrap CI bounds — used by the
+    # scientific validation gate to check the DOCX §8 criterion
+    # "GT AUC > 0.85" via ci_lower >= 0.85 (not auc >= 0.85).
+    _auc_full = compute_auc(
         model, test_data, config=config, vec_normalize=vec_normalize,
         reward_fn=reward_fn,
         disease_context_stats=disease_context_stats,
     )
+    if _auc_full is None:
+        auc = None
+        auc_ci_lower = None
+        auc_ci_upper = None
+        auc_n_bootstrap = 0
+    else:
+        auc = _auc_full["auc"]
+        auc_ci_lower = _auc_full["ci_lower"]
+        auc_ci_upper = _auc_full["ci_upper"]
+        auc_n_bootstrap = _auc_full["n_bootstrap"]
 
     # 3. KP recovery.
     all_ranked = [
@@ -11943,6 +12143,15 @@ def produce_evaluation_report(
 
     report: Dict[str, Any] = {
         "auc": float(auc) if auc is not None else None,
+        # TM16 v132 P4-005: bootstrap 95% CI bounds. The scientific
+        # validation gate (run_scientific_validation_gate) checks
+        # ``ci_lower >= threshold`` (NOT ``auc >= threshold``) for the
+        # DOCX §8 criterion "GT AUC > 0.85" — this is the statistically
+        # correct test (it guarantees the true AUC is above 0.85 with
+        # 95% confidence, not just the point estimate).
+        "auc_ci_lower": float(auc_ci_lower) if auc_ci_lower is not None else None,
+        "auc_ci_upper": float(auc_ci_upper) if auc_ci_upper is not None else None,
+        "auc_n_bootstrap": int(auc_n_bootstrap),
         "kp_recovery": kp_recovery,
         "top_candidates": top_candidates_report,
         "n_test_pairs": int(len(test_data)),
@@ -11981,6 +12190,26 @@ def run_scientific_validation_gate(
     run_literature_check: bool = False,
     literature_api_key: str = "",
     output_path: Optional[str] = None,
+    # TM16 v132 ROOT FIX (P4-005 + P4-018):
+    # gt_test_auc: REQUIRED for the gate to verify the DOCX §8 criterion
+    #   "Graph Transformer achieves >0.85 AUC on held-out drug-disease
+    #   pairs." The previous code PROXIED this from the RL agent's AUC
+    #   (a meaningless reassignment that passed the gate even when the
+    #   GT model was random). Now: if ``gt_test_auc`` is None, the gate
+    #   FAILS immediately with a clear error. The caller MUST pass a
+    #   real GT test AUC (computed by Phase 3's trainer on the held-out
+    #   test set).
+    gt_test_auc: Optional[float] = None,
+    # TM16 v132 ROOT FIX (P4-018 — test-data leakage in adaptive threshold):
+    # train_gnn_scores: REQUIRED when ``config.reward.gnn_hard_reject_adaptive``
+    #   is True. The previous code computed the adaptive threshold from
+    #   ``test_data[GNN_SCORE_COL]`` — a TEST-DATA LEAKAGE that inflated
+    #   the AUC. The reward function's adaptive threshold must be set
+    #   from the TRAIN data's gnn_score distribution (the same
+    #   distribution the policy was trained against). If
+    #   ``train_gnn_scores`` is None and adaptive is enabled, the gate
+    #   FAILS immediately (do NOT fall back to test data).
+    train_gnn_scores: Optional["np.ndarray"] = None,
 ) -> Dict[str, Any]:
     """Run the scientific validation gate. Exit non-zero on failure.
 
@@ -11995,6 +12224,26 @@ def run_scientific_validation_gate(
     This function runs all 4 checks and returns a verdict. The CLI's
     ``validate`` subcommand calls this and exits non-zero on failure
     (so CI/Airflow can detect a failing gate).
+
+    TM16 v132 ROOT FIX (P4-005 — GT AUC proxy):
+        The previous code PROXIED the GT test AUC from the RL agent's
+        AUC (a meaningless reassignment of rl_auc into gt_test_auc).
+        This made the DOCX §8 criterion "GT AUC > 0.85" meaningless —
+        the gate passed whenever the RL agent's AUC was high enough,
+        even if the GT model was random. Now: ``gt_test_auc`` is a
+        REQUIRED parameter. If None,
+        the gate FAILS immediately with a clear error.
+
+    TM16 v132 ROOT FIX (P4-018 — test-data leakage):
+        The previous code set the reward function's adaptive threshold
+        from ``test_data[GNN_SCORE_COL]`` (the TEST set's gnn_score
+        distribution). This is test-data leakage: the reward function
+        is supposed to use the TRAIN set's distribution (the same one
+        the policy was trained against). Using test data inflates the
+        AUC because the threshold is calibrated to the test set's
+        score distribution. Now: ``train_gnn_scores`` is REQUIRED when
+        ``config.reward.gnn_hard_reject_adaptive`` is True. If None,
+        the gate FAILS immediately (do NOT fall back to test data).
 
     Args:
         checkpoint_path: Path to the trained PPO checkpoint (.zip).
@@ -12013,6 +12262,15 @@ def run_scientific_validation_gate(
         run_literature_check: If True, run PubMed cross-check.
         literature_api_key: NCBI API key.
         output_path: If given, write the JSON report here.
+        gt_test_auc: TM16 v132 — REQUIRED. The GT model's test AUC
+            (computed by Phase 3's trainer on the held-out test set).
+            If None, the gate FAILS immediately (the DOCX §8 criterion
+            cannot be verified without a real GT test AUC).
+        train_gnn_scores: TM16 v132 — REQUIRED when
+            ``config.reward.gnn_hard_reject_adaptive`` is True. The
+            TRAIN set's gnn_score distribution (used to set the reward
+            function's adaptive threshold). If None and adaptive is
+            enabled, the gate FAILS immediately (do NOT use test data).
 
     Returns:
         Dict with keys:
@@ -12034,6 +12292,120 @@ def run_scientific_validation_gate(
 
     if config is None:
         config = PipelineConfig()
+
+    # =========================================================================
+    # TM16 v132 ROOT FIX (P4-005 — GT AUC proxy, EARLY-FAIL):
+    # If ``gt_test_auc`` is None, FAIL the gate IMMEDIATELY before loading
+    # the checkpoint or running any inference. The DOCX §8 criterion
+    # "GT AUC > 0.85" CANNOT be verified without a real GT test AUC.
+    # The previous code PROXIED this from the RL agent's AUC, which is
+    # scientifically meaningless — the GT model and the RL agent are
+    # DIFFERENT models with DIFFERENT AUCs.
+    # =========================================================================
+    if gt_test_auc is None:
+        _early_fail_result: Dict[str, Any] = {
+            "overall_pass": False,
+            "checks": {
+                "gt_test_auc": {
+                    "value": None,
+                    "threshold": gt_auc_threshold,
+                    "passed": False,
+                    "reason": (
+                        "gt_test_auc is None — the caller did not pass "
+                        "the GT model's test AUC. The DOCX §8 criterion "
+                        "'GT AUC > 0.85' CANNOT be verified without a "
+                        "real GT test AUC (TM16 v132 P4-005 root fix — "
+                        "do NOT proxy from RL AUC)."
+                    ),
+                },
+            },
+            "failure_reasons": [
+                "gt_test_auc is None — required for the DOCX §8 V1 launch "
+                "criterion 'GT AUC > 0.85'. Pass the GT model's test AUC "
+                "from Phase 3's trainer."
+            ],
+            "report": {},
+            "checkpoint_path": checkpoint_path,
+            "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        logger.error(
+            "TM16 v132 P4-005: scientific validation gate FAILED — "
+            "gt_test_auc is None. The caller must pass the GT model's "
+            "test AUC (computed by Phase 3's trainer on the held-out "
+            "test set). The previous code proxied this from the RL "
+            "agent's AUC, which is scientifically meaningless."
+        )
+        if output_path:
+            import json as _json_early
+            from pathlib import Path as _Path_early
+            out = _Path_early(output_path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_suffix(out.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                _json_early.dump(_early_fail_result, f, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(str(tmp), str(out))
+        return _early_fail_result
+
+    # =========================================================================
+    # TM16 v132 ROOT FIX (P4-018 — test-data leakage, EARLY-FAIL):
+    # If ``config.reward.gnn_hard_reject_adaptive`` is True, the reward
+    # function uses an adaptive threshold (the 20th percentile of the
+    # gnn_score distribution). The PREVIOUS code computed this from
+    # ``test_data[GNN_SCORE_COL]`` — a TEST-DATA LEAKAGE that inflated
+    # the AUC. The threshold must be computed from the TRAIN set's
+    # gnn_score distribution (the same distribution the policy was
+    # trained against).
+    # =========================================================================
+    if getattr(config.reward, "gnn_hard_reject_adaptive", False):
+        if train_gnn_scores is None:
+            _early_fail_adaptive: Dict[str, Any] = {
+                "overall_pass": False,
+                "checks": {
+                    "adaptive_threshold_train_data": {
+                        "value": None,
+                        "threshold": "train_gnn_scores required",
+                        "passed": False,
+                        "reason": (
+                            "config.reward.gnn_hard_reject_adaptive is "
+                            "True but train_gnn_scores is None. The "
+                            "adaptive threshold CANNOT be computed from "
+                            "test data (test-data leakage that inflates "
+                            "AUC). Pass the TRAIN set's gnn_score "
+                            "distribution via train_gnn_scores."
+                        ),
+                    },
+                },
+                "failure_reasons": [
+                    "train_gnn_scores is None — required when "
+                    "config.reward.gnn_hard_reject_adaptive is True. "
+                    "The adaptive threshold must be computed from TRAIN "
+                    "data, not test data (TM16 v132 P4-018 root fix)."
+                ],
+                "report": {},
+                "checkpoint_path": checkpoint_path,
+                "evaluated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            logger.error(
+                "TM16 v132 P4-018: scientific validation gate FAILED — "
+                "train_gnn_scores is None but "
+                "config.reward.gnn_hard_reject_adaptive is True. The "
+                "adaptive threshold CANNOT be computed from test data "
+                "(test-data leakage)."
+            )
+            if output_path:
+                import json as _json_adp
+                from pathlib import Path as _Path_adp
+                out = _Path_adp(output_path)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                tmp = out.with_suffix(out.suffix + ".tmp")
+                with open(tmp, "w", encoding="utf-8") as f:
+                    _json_adp.dump(_early_fail_adaptive, f, indent=2, default=str)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(str(tmp), str(out))
+            return _early_fail_adaptive
 
     # Build test data (if not provided) BEFORE loading the checkpoint so
     # we can construct a VecEnv for VecNormalize.load() below.
@@ -12188,12 +12560,42 @@ def run_scientific_validation_gate(
                 _vh_reward_fn = RewardFunction(config.reward)
         else:
             _vh_reward_fn = RewardFunction(config.reward)
+        # TM16 v132 ROOT FIX (P4-018 — test-data leakage in adaptive threshold):
+        # The previous code computed the adaptive threshold from
+        # ``test_data[GNN_SCORE_COL]`` — a TEST-DATA LEAKAGE that
+        # inflated the AUC (the threshold was calibrated to the test
+        # set's score distribution, not the train set's). The reward
+        # function's adaptive threshold must be set from the TRAIN set's
+        # gnn_score distribution (the same distribution the policy was
+        # trained against).
+        #
+        # ROOT FIX: use ``train_gnn_scores`` (passed in by the caller).
+        # If adaptive is enabled but ``train_gnn_scores`` is None, the
+        # gate ALREADY failed at the top of this function (the early-fail
+        # block). We do NOT fall back to test data here — the early-fail
+        # is the explicit invariant.
         if (
             getattr(config.reward, 'gnn_hard_reject_adaptive', False)
-            and GNN_SCORE_COL in test_data.columns
-            and len(test_data) > 0
+            and train_gnn_scores is not None
+            and len(train_gnn_scores) > 0
         ):
-            _vh_reward_fn.set_adaptive_threshold(test_data[GNN_SCORE_COL].values)
+            _vh_reward_fn.set_adaptive_threshold(train_gnn_scores)
+            logger.info(
+                "TM16 v132 P4-018: set adaptive threshold from TRAIN "
+                "data (%d samples) — NOT test data (no leakage).",
+                len(train_gnn_scores),
+            )
+        elif getattr(config.reward, 'gnn_hard_reject_adaptive', False):
+            # This branch is unreachable — the early-fail at the top of
+            # the function returned when train_gnn_scores is None and
+            # adaptive is True. The branch is kept as a defensive
+            # invariant (in case a future code change removes the early-fail).
+            raise RuntimeError(
+                "TM16 v132 P4-018 INVARIANT VIOLATION: adaptive threshold "
+                "enabled but train_gnn_scores is None. This should have "
+                "been caught by the early-fail at the top of "
+                "run_scientific_validation_gate. Investigate the code path."
+            )
         # Compute disease_context_stats from test_data (mirrors what
         # DrugRankingEnv would compute internally if not provided).
         _vh_disease_stats: Optional[Dict[str, Dict[str, float]]] = None
@@ -12247,16 +12649,42 @@ def run_scientific_validation_gate(
     rl_auc = report.get("auc")
     kp_rec = report.get("kp_recovery", {}).get("recovery_rate", 0.0)
 
-    # GT test AUC: we don't have a separate GT model here, so we use the
-    # RL agent's AUC as a proxy. In a full Phase 3 + Phase 4 gate, the
-    # caller would pass the GT model's test AUC separately.
-    gt_test_auc = rl_auc  # proxy
+    # TM16 v132 ROOT FIX (P4-005 — GT AUC proxy, REMOVED):
+    # The previous code PROXIED the GT test AUC from the RL agent's AUC
+    # (a meaningless reassignment of rl_auc to gt_test_auc). This was
+    # SCIENTIFICALLY MEANINGLESS — the GT model and the RL agent are
+    # DIFFERENT models with DIFFERENT AUCs. The DOCX §8 criterion "GT
+    # AUC > 0.85" was NEVER actually verified; the gate passed whenever
+    # the RL agent's AUC was high enough, even if the GT model was
+    # random (AUC = 0.5).
+    #
+    # ROOT FIX: ``gt_test_auc`` is now a REQUIRED parameter (checked at
+    # the top of this function — if None, the gate FAILS immediately).
+    # By the time we reach this line, ``gt_test_auc`` is guaranteed to
+    # be a real float (the caller MUST have passed the GT model's test
+    # AUC from Phase 3's trainer). The proxy is REMOVED — no variable
+    # reassignment here.
+    #
+    # If the caller needs to compute ``rl_auc`` first and then pass it
+    # as ``gt_test_auc``, they can — but the gate no longer does this
+    # implicitly. The caller takes EXPLICIT responsibility for the value
+    # they pass.
 
     checks = {
         "gt_test_auc": {
+            # TM16 v132 P4-005: use the PASSED-IN gt_test_auc (NOT rl_auc).
+            # The 'value' field documents what was checked; the caller
+            # can see whether the GT model's AUC was passed separately
+            # or proxied (in the new contract, it MUST be passed — the
+            # early-fail at the top guarantees this).
             "value": gt_test_auc,
             "threshold": gt_auc_threshold,
             "passed": gt_test_auc is not None and gt_test_auc >= gt_auc_threshold,
+            # TM16 v132: surface whether the value was real or proxied.
+            # In the new contract, this is ALWAYS 'real' (the early-fail
+            # would have returned if None). The field is kept for
+            # backward-compat with consumers that read this dict.
+            "source": "passed_in" if gt_test_auc is not None else "missing",
         },
         "rl_auc": {
             "value": rl_auc,

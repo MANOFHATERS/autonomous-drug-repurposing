@@ -93,7 +93,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 # FastAPI + Pydantic are declared in the top-level requirements.txt and
 # in phase1/requirements.txt (P1-003 v114 fix). When this module is
@@ -112,6 +112,20 @@ except ImportError as _fastapi_import_err:  # pragma: no cover
         "Install with `pip install fastapi uvicorn[standard]`. "
         f"Original error: {_fastapi_import_err}"
     ) from _fastapi_import_err
+
+# TM17 v132 ROOT FIX (Teammate 17 — Observability):
+# Wire up shared observability (metrics + structured JSON logging +
+# OpenTelemetry + Sentry). The previous code did NOT call
+# ``configure_app()``, so the public REST API had NO /metrics endpoint
+# (Prometheus got 404 from every scrape), NO structured logging (logs
+# were unparseable text), NO distributed traces (OpenTelemetry was
+# configured in docker-compose but never instrumented in the app), and
+# NO Sentry error reporting (production errors were swallowed by stdout).
+# This single call fixes all four issues.
+try:
+    from shared.observability import configure_app as _configure_observability
+except Exception:  # Defensive fallback — service still runs without observability.
+    _configure_observability = None
 
 # TM14 ROOT FIX (v132): slowapi for rate limiting. Imported OPTIONALLY so
 # the module can still be imported in dev envs without slowapi installed
@@ -491,6 +505,22 @@ app.add_middleware(
     max_age=600,  # Cache preflight responses for 10 minutes.
 )
 
+# TM17 v132 ROOT FIX (Teammate 17 — Observability):
+# Mount /metrics, configure JSON logging, instrument OpenTelemetry, init
+# Sentry. MUST come AFTER all middleware is added (the OTel FastAPI
+# instrumentation hooks into the middleware stack).
+if _configure_observability is not None:
+    _configure_observability(app, service_name="backend-api")
+    logger.info("TM17 v132: observability configured for backend-api "
+                "(metrics=/metrics, JSON logging, OTel, Sentry).")
+else:
+    logger.warning(
+        "TM17 v132: shared.observability not importable — backend-api is "
+        "running WITHOUT /metrics, structured logging, OTel, or Sentry. "
+        "This is a production observability gap; install shared.observability "
+        "dependencies (prometheus_client, opentelemetry-sdk, sentry-sdk)."
+    )
+
 # TM14 ROOT FIX (v132): wire up slowapi rate limiting.
 # The Limiter is keyed by remote IP (get_remote_address). When the
 # service runs behind a load balancer, the LB's IP would be used —
@@ -819,6 +849,8 @@ async def top_k(
 
     Rate-limited to 100 req/min per IP. 429 + Retry-After on exceed.
     """
+    import httpx
+
     if not req.drug and not req.disease:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -873,6 +905,96 @@ async def get_dataset_stats(
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "org_id": auth.org_id,  # audit echo
     }
+
+
+# ---------------------------------------------------------------------------
+# TM15 v132 ROOT FIX (Teammate 15 — Data Flywheel, requirement #8):
+# POST /validate — proxy to the RL service's /validate endpoint.
+# ---------------------------------------------------------------------------
+# The RL service (rl/service.py) already implements /validate, which calls
+# phase4.writeback.write_validated_hypothesis() to write the validated
+# hypothesis to ALL 3 phases (Phase 1 CSV, Phase 2 Neo4j edge, Phase 3
+# retrain trigger). The backend proxy adds JWT auth + audit logging.
+# ---------------------------------------------------------------------------
+class ValidateRequest(BaseModel):
+    """POST /validate request body — mirrors rl/service.py's ValidateRequest."""
+    model_config = ConfigDict(extra="forbid")
+    drug: str = Field(..., min_length=1, max_length=200)
+    disease: str = Field(..., min_length=1, max_length=200)
+    outcome: str = Field(..., description="One of: validated_positive, "
+                                          "validated_negative, validated_toxic, invalidated")
+    validated_by: Optional[str] = Field(None, max_length=200)
+    validation_study_id: Optional[str] = Field(None, max_length=200)
+    notes: Optional[str] = None
+    original_gt_score: Optional[float] = Field(None, ge=0.0, le=1.0)
+    original_rl_rank: Optional[int] = Field(None, ge=0)
+
+
+@app.post("/validate", tags=["data-flywheel"])
+async def validate(
+    req: ValidateRequest,
+    auth: AuthContext = Depends(verify_jwt),
+) -> Dict[str, Any]:
+    """Validate a drug-disease hypothesis and write it back to all 3 phases.
+
+    This endpoint is the data flywheel entry point (DOCX §10). When a
+    pharma partner wet-lab-validates a hypothesis, they POST it here.
+    The backend proxies to the RL service's /validate endpoint, which
+    writes the validated hypothesis to:
+      1. Phase 1 CSV (phase1/processed_data/validated_hypotheses.csv)
+      2. Phase 1 DB (validated_hypotheses table — via the POST
+         /datasets/validated_hypotheses endpoint on the Phase 1 service)
+      3. Phase 2 Neo4j (:VALIDATED_TREATS edge between drug and disease)
+      4. Phase 3 retrain trigger (graph_transformer/retrain_triggered.json)
+
+    When 10+ new validated hypotheses accumulate, the Airflow DAG
+    ``retrain_on_validated`` triggers a full Phase 2 → 3 → 4 retraining
+    run. This is the data flywheel in action.
+    """
+    import httpx
+
+    logger.info(
+        "validate: user=%s drug=%s disease=%s outcome=%s",
+        auth.user_id, req.drug, req.disease, req.outcome,
+    )
+
+    rl_url = os.environ.get("RL_SERVICE_URL")
+    if not rl_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="RL_SERVICE_URL not configured — the RL ranker service "
+                   "is not deployed. /validate cannot write back the "
+                   "validated hypothesis. Deploy the RL service and set "
+                   "RL_SERVICE_URL.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            rl_resp = await client.post(
+                f"{rl_url.rstrip('/')}/validate",
+                json={
+                    "drug": req.drug,
+                    "disease": req.disease,
+                    "outcome": req.outcome,
+                    "validated_by": req.validated_by or auth.user_id,
+                    "validation_study_id": req.validation_study_id,
+                    "notes": req.notes,
+                    "original_gt_score": req.original_gt_score,
+                    "original_rl_rank": req.original_rl_rank,
+                },
+            )
+        if rl_resp.status_code != 200:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"RL service /validate returned {rl_resp.status_code}: "
+                       f"{rl_resp.text[:500]}",
+            )
+        return rl_resp.json()
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"RL service unreachable at {rl_url}: {exc}",
+        ) from exc
 
 
 @app.get("/openapi.json", tags=["system"], include_in_schema=False)

@@ -174,7 +174,19 @@ CORE_EDGE_TYPES: list[Tuple[str, str, str]] = [
     ("Compound", "has_clinical_outcome", "ClinicalOutcome"),
     # v107 ROOT FIX (ISSUE-P2-040): "validated_treats" was missing from
     # CORE_EDGE_TYPES — the data flywheel creates these edges.
-    ("Drug", "validated_treats", "Disease"),
+    # TM15 v132 ROOT FIX (P2-consistency): corrected "Drug" -> "Compound"
+    # to match the canonical PascalCase label used by EVERY other drug-side
+    # edge in CORE_EDGE_TYPES (see ("Compound", "treats", "Disease") above
+    # and ~10 other ("Compound", ..., ...) entries). The previous ("Drug",
+    # "validated_treats", "Disease") tuple was inconsistent — the writeback
+    # module's MERGE had to try BOTH :Drug and :Compound labels to find
+    # the existing node, because the actual KG nodes are labeled :Compound
+    # (the loaders emit :Compound, not :Drug). With ("Compound",
+    # "validated_treats", "Disease"), the writeback's primary-label MERGE
+    # finds the node on the FIRST try — the legacy-label fallback path is
+    # now dead code (kept as a defensive belt-and-suspenders in case a
+    # future schema change reintroduces :Drug).
+    ("Compound", "validated_treats", "Disease"),
 ]
 
 # Fixes audit issue 2.1 — CORE_EDGE_TYPES_SET for O(1) lookup
