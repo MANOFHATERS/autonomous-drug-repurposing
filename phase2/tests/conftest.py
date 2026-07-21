@@ -18,8 +18,31 @@ module. This ensures ``torch_geometric/__init__.py`` fully executes
 once, setting all attributes on the ``torch_geometric`` module, so
 subsequent test-module imports of submodules don't hit the partial-
 initialization window.
+
+Teammate 8 ROOT FIX (test isolation): the pre-import was UNCONDITIONAL,
+which forced every test in phase2/tests/ (including the new
+integration tests that don't use torch_geometric at all) to install
+the full PyTorch + PyG stack. This made CI slow and blocked running
+targeted integration tests on minimal environments (e.g., a CI job
+that only wants to verify the /kg/stats canonicalNodeCount fix without
+installing 2GB of PyTorch).
+
+ROOT FIX: wrap the pre-import in a try/except. If torch_geometric is
+available, pre-import it (preserving the v61 circular-import fix for
+tests that DO use PyG). If it's NOT available, skip the pre-import —
+tests that don't import torch_geometric submodules (like the new
+Teammate 8 integration tests) will still collect + run fine. Tests
+that DO import torch_geometric submodules will fail at their own
+import time with a clear ModuleNotFoundError, telling the operator to
+install the PyG stack.
 """
-import torch_geometric  # noqa: F401 -- pre-import to avoid circular import
-import torch_geometric.typing  # noqa: F401
-import torch_geometric.data  # noqa: F401
-import torch_geometric.transforms  # noqa: F401
+try:
+    import torch_geometric  # noqa: F401 -- pre-import to avoid circular import
+    import torch_geometric.typing  # noqa: F401
+    import torch_geometric.data  # noqa: F401
+    import torch_geometric.transforms  # noqa: F401
+except ImportError:
+    # torch_geometric not installed — skip the pre-import. Tests that
+    # don't use PyG will still run; tests that do will fail at their
+    # own import time with a clear error.
+    pass

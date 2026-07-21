@@ -759,6 +759,147 @@ def _extract_formal_charge(smiles: Optional[str]) -> Optional[int]:
 
 
 # ---------------------------------------------------------------------------
+# Single-CID PubChem lookup (testability helper)
+# ---------------------------------------------------------------------------
+# Teammate 2 — P1 to P3 Integration ROOT FIX:
+# The issue's verification test requires a callable that accepts a single
+# PubChem CID (int) and returns a dict with the standard PubChem property
+# keys (CID, InChIKey, IsomericSMILES, CanonicalSMILES, XLogP, etc.). The
+# existing ``_v50_downloaders.download_pubchem_full`` operates on a LIST
+# of InChIKeys and writes a CSV file — it's the wrong granularity for a
+# unit test (would have to write a fixture CSV + read it back). This
+# helper does ONE PUG-REST request and returns the raw property dict.
+#
+# The function is also useful as a building block for any future per-CID
+# enrichment use case (e.g. backfilling isomeric_smiles for drugs whose
+# old download omitted it — the original concern in the issue).
+#
+# It NEVER raises — on any error (network, HTTP non-200, JSON parse, etc.)
+# it returns a dict with ``CID`` set and all other fields as ``None`` /
+# empty string. Callers can detect failure by checking ``result["CID"]``
+# is set but ``result["InChIKey"]`` is empty.
+
+PUBCHEM_PUG_REST_BASE: str = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+PUBCHEM_SINGLE_CID_PROPERTY_LIST: str = (
+    "MolecularFormula,MolecularWeight,InChIKey,InChI,"
+    "CanonicalSMILES,IsomericSMILES,IUPACName,"
+    "XLogP,ExactMass,TPSA,Complexity,"
+    "HBondDonorCount,HBondAcceptorCount,"
+    "RotatableBondCount,HeavyAtomCount"
+)
+
+
+def _download_pubchem_compound(cid: int) -> dict:
+    """Fetch a single PubChem compound's properties by CID.
+
+    Parameters
+    ----------
+    cid : int
+        PubChem Compound ID (e.g. ``2244`` for aspirin).
+
+    Returns
+    -------
+    dict
+        Always contains ``"CID"`` (the input int). On success, also
+        contains the full PubChem property set:
+        ``MolecularFormula, MolecularWeight, InChIKey, InChI,
+        CanonicalSMILES, IsomericSMILES, IUPACName, XLogP, ExactMass,
+        TPSA, Complexity, HBondDonorCount, HBondAcceptorCount,
+        RotatableBondCount, HeavyAtomCount``.
+        On failure (network error, 404, malformed JSON), the additional
+        keys are absent or set to ``None`` — the caller can detect this
+        via ``not result.get("InChIKey")``.
+
+    Network
+    -------
+    One HTTP GET to ``pubchem.ncbi.nlm.nih.gov``. PubChem's rate limit
+    is 5 req/sec — a single call is fine. The function uses a 30s
+    timeout (matches ``_v50_downloaders.download_pubchem_full``).
+
+    Notes
+    -----
+    * ``IsomericSMILES`` is always present in the response key set
+      (because we always REQUEST it). When PubChem has no stereo data
+      for the compound (a small minority of CIDs), the value equals
+      ``CanonicalSMILES`` (no ``@`` stereocenters). The empty-string
+      fallback path of the issue's original "EXACT FIX CODE" is NOT
+      needed — PubChem always returns the field, just possibly equal to
+      canonical.
+    * The function is INTENTIONALLY module-level (not a method of
+      ``PubChemPipeline``) so it can be called without instantiating the
+      full pipeline (which requires DB config, env vars, etc.). The
+      class instantiates a HTTP session and config; the helper uses a
+      bare ``requests.get`` to stay stateless.
+    """
+    import requests
+    from urllib.parse import quote as _url_quote
+
+    # Defensive: cid must be a positive int. PubChem CIDs start at 1.
+    try:
+        cid_int = int(cid)
+    except (TypeError, ValueError):
+        return {"CID": cid, "error": f"invalid cid: {cid!r}"}
+    if cid_int <= 0:
+        return {"CID": cid, "error": f"cid must be > 0, got {cid_int}"}
+
+    url = (
+        f"{PUBCHEM_PUG_REST_BASE}/compound/cid/{cid_int}/property/"
+        + _url_quote(PUBCHEM_SINGLE_CID_PROPERTY_LIST, safe="")
+        + "/JSON"
+    )
+    try:
+        resp = requests.get(
+            url,
+            headers={"User-Agent": "DrugOS-Phase1/1.0 (PubChem lookup)"},
+            timeout=30.0,
+        )
+    except Exception as exc:
+        return {"CID": cid_int, "error": f"network: {type(exc).__name__}: {exc}"}
+
+    if resp.status_code != 200:
+        return {
+            "CID": cid_int,
+            "error": f"http_{resp.status_code}",
+            "url": url,
+        }
+
+    try:
+        data = resp.json()
+    except Exception as exc:
+        return {"CID": cid_int, "error": f"json: {type(exc).__name__}: {exc}"}
+
+    props_list = data.get("PropertyTable", {}).get("Properties", [])
+    if not props_list:
+        return {"CID": cid_int, "error": "no_properties_in_response"}
+    props = props_list[0]
+    # Always carry CID in the response (PubChem's CID key may be int
+    # or string depending on the endpoint version — normalize to int).
+    props["CID"] = int(props.get("CID", cid_int))
+
+    # SCI-FIX (PubChem SMILES response key mapping):
+    # PubChem's PUG-REST API accepts ``CanonicalSMILES`` and
+    # ``IsomericSMILES`` as INPUT property names, but the JSON RESPONSE
+    # always returns them under different keys:
+    #   - ``SMILES``               -> isomeric SMILES (with stereo,
+    #                                  isotope, and charge info).
+    #                                  When the molecule has no
+    #                                  stereo/isotope/charge, this
+    #                                  equals the canonical SMILES.
+    #   - ``ConnectivitySMILES``   -> canonical SMILES (no stereo).
+    # The existing ``pubchem_pipeline._parse_pubchem_response`` (line
+    # ~2924) already handles this for the bulk path. We mirror the
+    # same normalization here so callers of the single-CID helper can
+    # use the INPUT property names (``IsomericSMILES`` / ``CanonicalSMILES``)
+    # to look up the values, regardless of which response key PubChem
+    # used. This matches the issue's expected interface.
+    if "SMILES" in props and "IsomericSMILES" not in props:
+        props["IsomericSMILES"] = props["SMILES"]
+    if "ConnectivitySMILES" in props and "CanonicalSMILES" not in props:
+        props["CanonicalSMILES"] = props["ConnectivitySMILES"]
+    return props
+
+
+# ---------------------------------------------------------------------------
 # PubChemPipeline
 # ---------------------------------------------------------------------------
 

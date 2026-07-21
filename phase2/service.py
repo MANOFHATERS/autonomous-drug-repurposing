@@ -235,6 +235,47 @@ def _startup_neo4j_check() -> None:
     )
 
 
+# ─── Teammate 8 ROOT FIX (P2 -> Backend + Frontend Integration):
+# Canonical KG node types per the project docx Phase 2 "Graph Structure"
+# section: Drugs, Proteins, Pathways, Diseases, Clinical Outcomes.
+# The KG label vocabulary uses the SINGULAR form ``ClinicalOutcome``
+# (NOT ``ClinicalOutcomes``) — see ``drugos_graph.schemas`` and the
+# ``_PHASE1_SOURCE_TO_CSV`` bridge table. The frontend's
+# ``CANONICAL_NODE_TYPE_SET`` (frontend/src/lib/ml-contracts.ts) MUST
+# match this set exactly; the previous frontend used the plural form
+# ``ClinicalOutcomes`` which silently classified all ClinicalOutcome
+# nodes as non-canonical, dropping them from the canonical nodeCount.
+# This constant is the SINGLE source of truth for the canonical type
+# set; both the Neo4j and the in-memory bridge paths use it to compute
+# ``canonicalNodeCount`` in the /kg/stats response.
+CANONICAL_NODE_TYPES: Set[str] = {
+    "Compound",
+    "Protein",
+    "Pathway",
+    "Disease",
+    "ClinicalOutcome",  # SINGULAR — matches the Phase 2 KG label vocabulary
+}
+
+
+def _compute_canonical_node_count(node_types: Dict[str, int]) -> int:
+    """Sum the per-type counts for CANONICAL types only.
+
+    Returns 0 when ``node_types`` is empty or contains only non-canonical
+    types (e.g. ``Gene``, ``MedDRA_Term``, ``Anatomy``). This is the
+    number the frontend's Knowledge Graph Explorer displays as
+    "canonical nodes" — the count of scientifically meaningful entities
+    per the project docx Phase 2 contract.
+    """
+    if not node_types:
+        return 0
+    return int(
+        sum(
+            count for node_type, count in node_types.items()
+            if node_type in CANONICAL_NODE_TYPES
+        )
+    )
+
+
 # ─── P2-001 ROOT FIX (v109 forensic): unified Neo4j credential env vars
 # v107 had TWO different env var names for the same Neo4j password:
 #   * ``service.py`` read ``NEO4J_PASSWORD``.
@@ -356,6 +397,16 @@ def _get_kg_stats_from_neo4j() -> Optional[Dict[str, Any]]:
         # ``generatedAt`` is the server-authoritative UTC timestamp.
         from datetime import datetime, timezone
         _generated_at = datetime.now(timezone.utc).isoformat()
+        # Teammate 8 ROOT FIX: compute canonicalNodeCount (sum of
+        # canonical-type nodes only). The frontend's Knowledge Graph
+        # Explorer shows BOTH ``nodeCount`` (total, including
+        # non-canonical types like Gene/MedDRA_Term/Anatomy) AND
+        # ``canonicalNodeCount`` (canonical types only — Compound,
+        # Protein, Pathway, Disease, ClinicalOutcome). Without this
+        # field, the dashboard could not tell researchers how many of
+        # the total nodes are scientifically meaningful entities per the
+        # project docx Phase 2 contract.
+        _canonical_node_count = _compute_canonical_node_count(node_types)
         return {
             # Legacy fields (backward compat)
             "node_count": int(node_count),
@@ -372,6 +423,8 @@ def _get_kg_stats_from_neo4j() -> Optional[Dict[str, Any]]:
             # frontend/src/lib/ml-contracts.ts:KgStatsResponseSchema so
             # the TS schema validates directly without transformation).
             "nodeCount": int(node_count),
+            # Teammate 8: canonicalNodeCount — canonical types only.
+            "canonicalNodeCount": _canonical_node_count,
             "edgeCount": int(edge_count),
             "nodeTypeCounts": node_types,
             "edgeTypeCounts": edge_types,
@@ -626,6 +679,17 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
         _backend_legacy = "in_memory_bridge"
         _source = "in_memory"
         _sources_read = summary.get("sources_read", []) or []
+        # Teammate 8 ROOT FIX: compute canonicalNodeCount from the
+        # per-type breakdown (canonical types only — Compound, Protein,
+        # Pathway, Disease, ClinicalOutcome). The bridge's
+        # ``nodes_loaded`` is the TOTAL node count (includes
+        # non-canonical types like Gene/MedDRA_Term/Anatomy); the
+        # canonical count is the sum of canonical-type entries in
+        # ``node_types``. This MUST be emitted in the response so the
+        # frontend can display "X canonical nodes of Y total" — without
+        # it, the dashboard conflates scientific entities with auxiliary
+        # lookup nodes.
+        _canonical_node_count = _compute_canonical_node_count(node_types)
         return {
             # Legacy fields (backward compat with kg-service.ts)
             "node_count": _nodes_loaded,
@@ -643,6 +707,8 @@ def _get_kg_stats_from_builder() -> Dict[str, Any]:
             # frontend/src/lib/ml-contracts.ts:KgStatsResponseSchema so
             # the TS schema validates directly without transformation).
             "nodeCount": _nodes_loaded,
+            # Teammate 8: canonicalNodeCount — canonical types only.
+            "canonicalNodeCount": _canonical_node_count,
             "edgeCount": _edges_loaded,
             "nodeTypeCounts": node_types,
             "edgeTypeCounts": edge_types,

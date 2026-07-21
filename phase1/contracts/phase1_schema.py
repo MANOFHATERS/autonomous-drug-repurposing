@@ -43,6 +43,33 @@ from typing import Dict, List, Optional
 
 
 # =============================================================================
+# CONTRACT VERSION — Teammate 5 (P2→P1 Integration, P0 root fix)
+# =============================================================================
+# Bumped to ``2.0.0`` to enforce the Phase 2 bridge's contract-version gate.
+# The bridge (``phase2/drugos_graph/phase1_bridge.py``) reads this constant at
+# the top of ``read_phase1_outputs`` and FAILS FAST with
+# ``CriticalDataSourceError`` if the major version is < 2. This blocks the
+# silent schema-drift failure mode where Phase 1 ships a v1 contract (with
+# the old ``drugs.csv``-only ChEMBL mapping and no ``chembl_id`` requirement)
+# but Phase 2's bridge expects v2 (canonical ``chembl_drugs.csv`` + explicit
+# ``chembl_id`` required column). Without this gate the bridge would
+# silently accept v1 outputs and produce a degraded KG missing Compound
+# identity — exactly the "85% aligned" failure mode the audit flagged.
+#
+# SEMVER CONTRACT:
+#   * MAJOR bump (2.x.x → 3.x.x): breaking change to ``required_columns``,
+#     ``aliases``, or ``filename`` of any source. Phase 2 MUST re-pin.
+#   * MINOR bump (2.0.x → .1.x): additive change (new optional column,
+#     new source). Phase 2 keeps working.
+#   * PATCH bump (2.0.0 → 2.0.1): doc-only or comment-only change.
+#
+# The bridge checks ONLY the major version (``< 2`` = fail). This is
+# intentional — minor and patch changes are non-breaking by semver.
+# =============================================================================
+__version__: str = "2.0.0"
+
+
+# =============================================================================
 # ColumnSpec — typed specification for one Phase 1 output column
 # =============================================================================
 
@@ -818,9 +845,155 @@ def get_optional_columns(source_key: str) -> List[str]:
 
 
 def get_all_aliases(source_key: str) -> List[str]:
-    """Return [filename] + list of aliases for ``source_key``."""
+    """Return [filename] + list of aliases for ``source_key``.
+
+    Teammate 5 (P2→P1 Integration, P0 root fix): the Phase 2 bridge uses
+    this function to resolve Phase 1 CSV filenames via the contract —
+    eliminating the hardcoded ``_PHASE1_SOURCE_TO_CSV`` dict that
+    previously drifted from the actual Phase 1 pipeline output.
+    """
     spec = PHASE1_OUTPUT_SCHEMA[source_key]
     return [spec.filename] + list(spec.aliases)
+
+
+# NOTE: ``get_required_id_column`` is defined LATER in this module (below
+# the ``_REQUIRED_ID_COLUMNS`` dict) with a curated per-source mapping
+# based on scientific semantics (inchikey for Compound, uniprot_id for
+# Protein, gene_symbol for Gene, etc.). The earlier simple "first match
+# in declaration order" implementation was removed by Teammate 5 during
+# the rebase onto main (main's curated version is more correct — it
+# returns ``inchikey`` for chembl_drugs rather than ``chembl_id``,
+# matching the IUPAC universal Compound key standard).
+
+
+# =============================================================================
+# TM1 TASK 1.4 ROOT FIX (v131 -- Teammate 1 P1->P2 integration):
+# get_required_id_column — canonical ID column per source.
+# =============================================================================
+# RED-TEAM AUDIT FINDING (v131, hostile-auditor pass):
+#   The Teammate 1 task spec ("Wire Phase 1 Master DAG to Phase 2 KG
+#   Construction") requires the master DAG's validate_output task to
+#   resolve CSV filenames via the contract (PHASE1_OUTPUT_SCHEMA +
+#   get_all_aliases) AND verify each CSV has the expected ID column.
+#   The previous contract module exposed ``get_required_columns`` (which
+#   returns ALL required column names for a source) but NOT a function
+#   that returns the SINGLE canonical ID column for a source. The master
+#   DAG's validate_output therefore hardcoded a dict of {filename:
+#   id_column} pairs — 4 of the 7 filenames were WRONG (see
+#   master_pipeline_dag.py lines 1193-1201 for the broken code) and the
+#   id_column values were hand-maintained, causing them to drift from
+#   the contract. This is the exact "comments claim fixed, code is
+#   broken" failure mode the audit mandates against.
+#
+# ROOT FIX (v131, this commit):
+#   1. Add ``get_required_id_column(source_key)`` that returns the
+#      canonical ID column for the source — the column whose value
+#      uniquely identifies a row for downstream deduplication,
+#      provenance tracing, and entity resolution. Returns None for
+#      sources whose primary key is a multi-column composite
+#      (e.g. string_ppi's protein pair, interactions' drug+target pair).
+#   2. The mapping is HAND-MAINTAINED in this contract module (the
+#      single source of truth) so future pipeline changes that rename
+#      an ID column MUST update this mapping in the same PR. A CI test
+#      in ``phase1/tests/integration/test_p1_to_p2_master_dag.py``
+#      asserts that for every source key, the ID column returned by
+#      ``get_required_id_column`` is present in the source's
+#      ``required_columns`` OR ``any_of_groups`` (so the mapping cannot
+#      silently drift from the column spec).
+#   3. ``__all__`` is extended so ``from phase1.contracts.phase1_schema
+#      import get_required_id_column`` works for downstream callers
+#      (master_pipeline_dag, Phase 2 bridge).
+# ---------------------------------------------------------------------------
+
+# Canonical ID column per source. Sources with multi-column primary keys
+# (e.g. a pair of proteins in a PPI edge, a drug+target pair in a DPI
+# edge) map to None — the master DAG's validate_output SKIPS the ID-
+# column header check for those sources (the contract's required_columns
+# already enforces both halves of the composite key).
+_REQUIRED_ID_COLUMNS: Dict[str, Optional[str]] = {
+    # Drug / compound sources: inchikey is the canonical compound key.
+    "chembl_drugs": "inchikey",
+    "drugs": "inchikey",
+    "pubchem_enrichment": "inchikey",
+    # Protein source: uniprot_id is the canonical protein key (the
+    # contract's any_of_group accepts uniprot_ac / accession /
+    # uniprot_id, but uniprot_id is the canonical name emitted by the
+    # pipeline after entity resolution).
+    "uniprot_proteins": "uniprot_id",
+    # GDA sources: gene_symbol is the canonical gene key. disease_id is
+    # also required but gene_symbol is the join key to UniProt proteins
+    # (which carry gene_symbol as a required column).
+    "disgenet_gda": "gene_symbol",
+    "omim_gda": "gene_symbol",
+    "omim_susceptibility": "gene_symbol",
+    # ChEMBL activities: molecule_chembl_id is the canonical compound
+    # reference on an activity row. (target_chembl_id is also required
+    # but molecule_chembl_id is the join key to chembl_drugs.)
+    "chembl_activities": "molecule_chembl_id",
+    # Multi-column-key sources: None means "no single ID column — skip
+    # the header check; the contract's required_columns already
+    # enforces both halves of the composite key."
+    "interactions": None,    # (drugbank_id, uniprot_id) pair
+    "indications": None,     # (drugbank_id, disease_id) pair
+    "string_ppi": None,      # (uniprot_id_a, uniprot_id_b) pair
+}
+
+
+def get_required_id_column(source_key: str) -> Optional[str]:
+    """Return the canonical ID column for ``source_key``, or None.
+
+    The ID column is the column whose value uniquely identifies a row
+    for downstream deduplication, provenance tracing, and entity
+    resolution. Used by ``master_pipeline_dag.validate_output`` to
+    verify each Phase 1 CSV has the expected ID column in its header
+    (so a pipeline schema drift that renames the ID column is caught
+    BEFORE Phase 2 builds a KG on rows with NULL IDs).
+
+    Returns None for sources whose primary key is a multi-column
+    composite (e.g. ``string_ppi``'s protein pair,
+    ``interactions``'s drug+target pair). Callers MUST handle None
+    by skipping the ID-column header check — the contract's
+    ``required_columns`` already enforces both halves of the composite
+    key for those sources.
+
+    Parameters
+    ----------
+    source_key : str
+        Canonical source key (e.g. ``"chembl_drugs"``, ``"drugs"``).
+
+    Returns
+    -------
+    str or None
+        The canonical ID column name, or None for multi-column-key
+        sources.
+
+    Raises
+    ------
+    KeyError
+        If ``source_key`` is not in :data:`PHASE1_OUTPUT_SCHEMA`.
+    """
+    if source_key not in PHASE1_OUTPUT_SCHEMA:
+        raise KeyError(
+            f"get_required_id_column: unknown source_key {source_key!r}. "
+            f"Known keys: {sorted(PHASE1_OUTPUT_SCHEMA.keys())}"
+        )
+    return _REQUIRED_ID_COLUMNS.get(source_key)
+
+
+# =============================================================================
+# TM1 TASK 1.4 ROOT FIX (v131): SCHEMA_VERSION constant for XCom payload.
+# =============================================================================
+# The master DAG's validate_output task returns an XCom payload that
+# includes ``schema_version`` so downstream consumers (trigger_phase2,
+# Phase 2 run_pipeline.py) can verify they're reading Phase 1 output
+# from a compatible contract version. The version is bumped whenever a
+# BREAKING change is made to PHASE1_OUTPUT_SCHEMA (column renamed,
+# required column added, source added/removed). Non-breaking additions
+# (new optional columns) do NOT bump the version.
+#
+# Current version: "11" — 11 sources in PHASE1_OUTPUT_SCHEMA.
+# -----------------------------------------------------------------------------
+SCHEMA_VERSION: str = "11"
 
 
 # =============================================================================
@@ -1117,11 +1290,16 @@ __all__: list[str] = [
     "SourceSpec",
     "ValidationIssue",
     "PHASE1_OUTPUT_SCHEMA",
+    "PHASE1_CSV_FILENAMES",
     "get_required_columns",
     "get_any_of_groups",
     "get_optional_columns",
     "get_all_aliases",
+    "get_required_id_column",
+    "SCHEMA_VERSION",
     "detect_contract_vs_pipeline_drift",
+    # Teammate 5 (P2→P1 Integration): contract version gate
+    "__version__",
     # TM3 Task 3.4 v127: MatchConfidence contract re-export
     "MatchConfidence",
     # TM3 Task 3.3 v127: ValidatedHypothesis ORM model re-export

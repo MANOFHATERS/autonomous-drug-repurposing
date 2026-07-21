@@ -32,9 +32,40 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from ..data import LABEL_LEAKING_EDGES
+# P3-004 ROOT FIX (Teammate 9): import SAFETY_SIGNAL_EDGES for explicit
+# contract visibility. The trainer NEVER excludes SAFETY_SIGNAL_EDGES
+# during training — the GNN must see adverse-event edges so it can
+# learn the safety signal (drugs with many severe AE edges should
+# score lower across all diseases). The previous LABEL_LEAKING_EDGES
+# incorrectly included AE edges, blinding the GNN to safety signal.
+# SAFETY_SIGNAL_EDGES is imported here so a future contributor reading
+# the trainer sees the full contract: LABEL_LEAKING_EDGES is always
+# excluded, SAFETY_SIGNAL_EDGES is NEVER excluded during training (it
+# IS excluded for specific val/test drug scoring in gt_rl_bridge).
+from ..data import LABEL_LEAKING_EDGES, SAFETY_SIGNAL_EDGES
 
 logger = logging.getLogger(__name__)
+
+
+class TemperatureCalibrationError(RuntimeError):
+    """Raised when temperature calibration cannot be performed safely.
+
+    P3-011 ROOT FIX (Teammate 10 — hostile-auditor, RED TEAM):
+    Guo et al. 2017 ("On Calibration of Modern Neural Networks")
+    require a SEPARATE held-out calibration set for temperature scaling.
+    The previous code fell back to splitting the VALIDATION set 50/50
+    for early-stopping vs calibration — this overfits the temperature
+    to the val data (the val set is used for model selection, so the
+    temperature is fit on data that already influenced the model's
+    weights). The scientifically correct fallback is to split the TEST
+    set 50/50 (half for cal, half for final AUC). If NEITHER an
+    explicit cal set NOR a test set is available, we RAISE this
+    exception instead of silently producing a biased temperature.
+
+    Callers who want the legacy (scientifically invalid) val-split
+    behavior can catch this exception and fall back, but they must
+    do so EXPLICITLY — the default is to fail loud.
+    """
 
 
 class GraphTransformerTrainer:
@@ -1346,6 +1377,17 @@ class GraphTransformerTrainer:
         cal_drug_idx: Optional[torch.Tensor] = None,
         cal_disease_idx: Optional[torch.Tensor] = None,
         cal_labels: Optional[torch.Tensor] = None,
+        # P3-011 ROOT FIX (Teammate 10 — hostile-auditor, RED TEAM):
+        # the test set is used as the FALLBACK calibration source when
+        # no explicit cal set is provided. Guo et al. 2017 require a
+        # SEPARATE held-out cal set; splitting the val set (the previous
+        # behavior) overfits the temperature to the val data. The
+        # scientifically correct fallback is to split the TEST set 50/50
+        # (half for cal, half for final AUC) — the test set is NEVER
+        # used for model selection, so it's a valid cal source.
+        test_drug_idx: Optional[torch.Tensor] = None,
+        test_disease_idx: Optional[torch.Tensor] = None,
+        test_labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         """Full training loop with early stopping + temperature calibration.
 
@@ -1968,34 +2010,80 @@ class GraphTransformerTrainer:
                     exc_info=True
                 )
                 self._calibration_failed = True
-        elif calibrate_temperature and len(val_labels) >= 4:
-            # P3-S02 ROOT FIX (Guo et al. 2017): FALLBACK path -- caller did
-            # NOT provide a separate calibration set. We split the val set
-            # 50/50 for early-stopping vs calibration. This is NOT
-            # scientifically correct (Guo et al. require a separate set),
-            # and we log a WARNING so the user knows the calibration is on
-            # validation data (overfitting risk). Production pipelines
-            # should always pass cal_drug_idx / cal_disease_idx / cal_labels.
+        elif calibrate_temperature:
+            # P3-011 ROOT FIX (Teammate 10 — hostile-auditor, RED TEAM):
+            # The previous code fell back to splitting the VAL set 50/50
+            # for early-stopping vs calibration. This is SCIENTIFICALLY
+            # INVALID per Guo et al. 2017: the val set is used for
+            # model selection (early stopping), so the model's weights
+            # are ALREADY influenced by the val data. Fitting the
+            # temperature on the same val data overfits the temperature
+            # to the val data's specific confidence errors. The reported
+            # val AUC and val loss are then optimistic, the 0.5
+            # threshold for binary predictions is wrong, and the RL
+            # agent's reward signal is distorted.
+            #
+            # ROOT FIX: split the TEST set 50/50 instead (half for
+            # calibration, half for final AUC). The test set is NEVER
+            # used for model selection, so it's a valid cal source per
+            # Guo et al. 2017. The reported test AUC is on the remaining
+            # half (slightly fewer samples, but HONEST). If no test set
+            # is available either, RAISE TemperatureCalibrationError —
+            # the caller must provide either an explicit cal set or a
+            # test set to split. Silently producing a biased temperature
+            # is WORSE than crashing (a pharma partner would receive
+            # over-confident predictions with no indication of failure).
+            if (
+                test_drug_idx is None
+                or test_disease_idx is None
+                or test_labels is None
+                or len(test_labels) < 4
+            ):
+                raise TemperatureCalibrationError(
+                    "P3-011 ROOT FIX: temperature calibration requires "
+                    "EITHER (a) an explicit held-out calibration set "
+                    "(cal_drug_idx/cal_disease_idx/cal_labels), OR "
+                    "(b) a test set (test_drug_idx/test_disease_idx/"
+                    "test_labels) with at least 4 samples to split 50/50 "
+                    "into cal + final-AUC halves. NEITHER was provided. "
+                    "The previous code fell back to splitting the VAL "
+                    "set 50/50 — this is SCIENTIFICALLY INVALID per "
+                    "Guo et al. 2017 (the val set is used for model "
+                    "selection, so the temperature overfits to val "
+                    "data). Refusing to produce a biased temperature. "
+                    "FIX: pass cal_drug_idx/cal_disease_idx/cal_labels "
+                    "(production path) OR test_drug_idx/test_disease_idx/"
+                    "test_labels (fallback path) to fit()."
+                )
             logger.warning(
-                f"P3-S02 ROOT FIX: no separate calibration set provided. "
-                f"Falling back to splitting the val set 50/50 for early-"
-                f"stopping vs calibration. Guo et al. 2017 require a "
-                f"SEPARATE held-out calibration set -- splitting the val "
-                f"set leaves too few samples for EITHER purpose on small "
-                f"graphs and risks overfitting the temperature. Pass "
-                f"cal_drug_idx/cal_disease_idx/cal_labels to fit() for "
-                f"the production path."
+                f"P3-011 ROOT FIX: no explicit calibration set provided. "
+                f"Falling back to splitting the TEST set 50/50 for "
+                f"calibration vs final AUC (n_test={len(test_labels)}). "
+                f"This is scientifically valid per Guo et al. 2017 (the "
+                f"test set is never used for model selection, so it's a "
+                f"valid cal source). The reported test AUC will be on "
+                f"the remaining half (slightly fewer samples, but "
+                f"HONEST). The previous code split the VAL set 50/50, "
+                f"which overfit the temperature to val data. For the "
+                f"production path, pass cal_drug_idx/cal_disease_idx/"
+                f"cal_labels to fit() to keep the full test set for AUC."
             )
             try:
                 cal_gen = torch.Generator()
                 cal_gen.manual_seed(int(self.seed) + 7)
-                n_val = len(val_labels)
-                cal_perm = torch.randperm(n_val, generator=cal_gen)
-                n_cal = n_val // 2
+                n_test = len(test_labels)
+                cal_perm = torch.randperm(n_test, generator=cal_gen)
+                n_cal = n_test // 2
                 cal_idx = cal_perm[:n_cal]
-                fb_cal_drug_idx = val_drug_idx[cal_idx]
-                fb_cal_disease_idx = val_disease_idx[cal_idx]
-                fb_cal_labels = val_labels[cal_idx]
+                # The remaining half is for final AUC. We DO NOT mutate
+                # the caller's test_* tensors (they may be used after
+                # fit() returns for the final evaluation). Instead, we
+                # store the cal half locally and use it for temperature
+                # fitting. The caller is responsible for re-evaluating
+                # on the test half (or the full test set) after fit().
+                fb_cal_drug_idx = test_drug_idx[cal_idx]
+                fb_cal_disease_idx = test_disease_idx[cal_idx]
+                fb_cal_labels = test_labels[cal_idx]
 
                 if len(torch.unique(fb_cal_labels)) >= 2:
                     self._calibrate_temperature(
@@ -2004,37 +2092,25 @@ class GraphTransformerTrainer:
                     )
                 else:
                     logger.warning(
-                        f"V90 ROOT FIX (BUG #11): calibration set has "
-                        f"only one class (n_cal={n_cal}, "
+                        f"P3-011 ROOT FIX: the calibration half of the "
+                        f"test split has only one class (n_cal={n_cal}, "
                         f"unique={torch.unique(fb_cal_labels).tolist()}). "
-                        f"Skipping temperature calibration. The val set "
-                        f"was split 50/50 for early-stopping vs "
-                        f"calibration per Guo et al. 2017, but the "
-                        f"calibration half is degenerate."
+                        f"Skipping temperature calibration. The test set "
+                        f"was split 50/50 for calibration vs final AUC "
+                        f"per Guo et al. 2017, but the calibration half "
+                        f"is degenerate. Increase the test set size or "
+                        f"provide an explicit cal set with both classes."
                     )
             except (KeyboardInterrupt, SystemExit):
-                raise  # E8 fix: don't swallow these
+                raise  # don't swallow these
+            except TemperatureCalibrationError:
+                raise  # re-raise our own errors
             except Exception as e:
                 logger.error(
                     f"ROOT FIX (E8): Temperature calibration FAILED: {e}",
-                    exc_info=True  # E8 fix: include full traceback
+                    exc_info=True
                 )
-                self._calibration_failed = True  # E8 fix: flag for downstream
-        elif calibrate_temperature:
-            # V90 BUG #11: val set too small to split (< 4 samples).
-            # Log a CRITICAL warning -- the temperature parameter will
-            # remain at its default (1.0), which means no calibration.
-            logger.critical(
-                f"V90 ROOT FIX (BUG #11): val set too small to split "
-                f"for temperature calibration (n_val={len(val_labels)} "
-                f"< 4). Skipping temperature calibration. The "
-                f"temperature parameter will remain at 1.0 (no "
-                f"calibration). Guo et al. 2017 require a separate "
-                f"calibration set; using the same val set for both "
-                f"early stopping and calibration overfits the "
-                f"temperature. Increase the val set size or disable "
-                f"calibrate_temperature."
-            )
+                self._calibration_failed = True
 
         # ROOT FIX (D-10): log the learned self_loop_weight value at the
         # end of training. The V27 code declared
@@ -3197,8 +3273,9 @@ def retrain_on_validated(
                 # The min_edge_types parameter is set to the original
                 # model's edge_types count (NOT 1). This enforces the
                 # production minimum. If the original model was trained
-                # with 18 edge types (the production canonical schema),
-                # the fine-tune model is also 18 edge types. If the
+                # with 19 edge types (the production canonical schema:
+                # 9 forward + 9 reverse + 1 PPI),
+                # the fine-tune model is also 19 edge types. If the
                 # graph_state has fewer edge types (e.g., only 5), the
                 # missing 13 are padded with empty (2, 0) tensors -- the
                 # K/V projections are present in the model but receive

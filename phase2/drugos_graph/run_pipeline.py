@@ -9734,6 +9734,18 @@ def run_full_pipeline(
     # ``step1_load_phase1``.
     from_saved_path: Optional[Path | str] = None,
     save_graph_path: Optional[Path | str] = None,
+    # TM1 Task 1.4 v131 ROOT FIX (Teammate 1 P1->P2 integration):
+    # ``provenance_id`` is the Phase 1 ``pipeline_run_id`` (UUID)
+    # forwarded by the master DAG's _trigger_phase2 task via the
+    # ``--provenance`` CLI flag. When set, the pipeline logs
+    # "Provenance ID: <UUID>" at startup (so operators can grep the
+    # Phase 2 log for the Phase 1 run that triggered it) and stores
+    # it in the pipeline metadata dict (``results["provenance_id"]``)
+    # so downstream consumers (MLflow, lineage manifest) can record
+    # it. When NOT set (operator invoked run_pipeline.py directly,
+    # not via the master DAG), the pipeline logs a WARNING that the
+    # run is untraceable across the Phase 1 -> Phase 2 boundary.
+    provenance_id: Optional[str] = None,
 ) -> dict:
     """Execute the complete Week 2 graph construction pipeline.
 
@@ -9794,12 +9806,24 @@ def run_full_pipeline(
         file extension (``.json`` → JSON, ``.parquet`` → Parquet).
         No effect when ``from_saved_path`` is also set (loading an
         existing snapshot, no point saving it again).
+    provenance_id : str, optional
+        TM1 Task 1.4 v131 ROOT FIX: Phase 1 ``pipeline_run_id`` (UUID)
+        forwarded by the master DAG's ``_trigger_phase2`` task via the
+        ``--provenance`` CLI flag. When set, the pipeline logs
+        ``"Provenance ID: <UUID>"`` at startup so operators can grep
+        the Phase 2 log for the Phase 1 run that triggered it, and
+        stores it in ``results["provenance_id"]`` so downstream
+        consumers (MLflow, lineage manifest) can record it. When NOT
+        set (operator invoked ``run_pipeline.py`` directly, not via
+        the master DAG), the pipeline logs a WARNING that the run is
+        untraceable across the Phase 1 -> Phase 2 boundary.
 
     Returns
     -------
     dict
         Full pipeline results with per-step metrics, V1 criteria check,
-        pipeline metadata, and lineage information.
+        pipeline metadata, lineage information, and (TM1 v131)
+        ``provenance_id`` for end-to-end tracing.
 
     Failure Modes
     -------------
@@ -9817,6 +9841,22 @@ def run_full_pipeline(
         skip_training,
         fresh_start,
     )
+
+    # TM1 TASK 1.4 v131 ROOT FIX: log the Phase 1 provenance ID at the
+    # START of the Phase 2 run so operators can grep the Phase 2 log for
+    # the Phase 1 run that triggered it. The provenance ID is also
+    # stored in the results dict (see ``results["provenance_id"]`` below)
+    # so downstream consumers (MLflow, lineage manifest) can record it.
+    if provenance_id:
+        logger.info("Provenance ID: %s", provenance_id)
+    else:
+        logger.warning(
+            "Provenance ID: <not set> -- this Phase 2 run is UNTRACEABLE "
+            "across the Phase 1 -> Phase 2 boundary. The master DAG's "
+            "_trigger_phase2 task should pass --provenance <UUID> (TM1 "
+            "Task 1.4 v131). Direct CLI invocations should pass "
+            "--provenance $(uuidgen) for traceability."
+        )
 
     # FIX TOP-14 (FIX-CFG-ML audit): set the global RNG seed as the FIRST
     # action of run_full_pipeline so model construction (nn.Embedding init)
@@ -9865,7 +9905,90 @@ def run_full_pipeline(
     results: Dict[str, Any] = {
         "pipeline_version": PIPELINE_VERSION,
         "schema_version": SCHEMA_VERSION,
+        # TM1 Task 1.4 v131: store the Phase 1 provenance ID in the
+        # results dict so downstream consumers (MLflow, lineage
+        # manifest, V1 launch criteria check) can record it. None when
+        # the operator invoked run_pipeline.py directly without
+        # --provenance (a WARNING was logged above).
+        "provenance_id": provenance_id,
     }
+
+    # =========================================================================
+    # Teammate 5 (P2→P1 Integration, P0 root fix): Phase 1 contract
+    # version gate. MUST run BEFORE step1_load_data so a stale contract
+    # fails fast with a clear error instead of producing a degraded KG.
+    #
+    # The bridge (phase1_bridge.read_phase1_outputs) ALSO checks the
+    # contract version at the top of its own function — but if the
+    # contract is too old, we want the pipeline to abort HERE (before
+    # any work is done) with a clear log line, rather than letting the
+    # bridge raise mid-step1 (which would be caught by step1's generic
+    # Exception handler and reported as a step1 failure with no context
+    # about the contract version being the root cause).
+    #
+    # In DEGRADED mode (contract not importable) the version is
+    # "0.0.0-degraded" — the gate fires and the operator sees a clear
+    # error pointing them at the import fix. Production deployments
+    # MUST have the contract importable.
+    # =========================================================================
+    try:
+        from phase1.contracts.phase1_schema import (
+            __version__ as _phase1_contract_version,
+        )
+        try:
+            _p1_major = int(str(_phase1_contract_version).split(".")[0])
+        except (ValueError, TypeError) as _ver_exc:
+            logger.error(
+                "Phase 1 contract version is malformed: %r (%s). "
+                "Pipeline cannot verify schema compatibility. Aborting.",
+                _phase1_contract_version, _ver_exc,
+            )
+            results["aborted"] = True
+            results["fatal_reason"] = (
+                f"Phase 1 contract version malformed: "
+                f"{_phase1_contract_version!r}"
+            )
+            return results
+        if _p1_major < 2:
+            logger.error(
+                "Phase 1 contract version %s is too old (expected "
+                "major >= 2). Pipeline aborted — the Phase 2 bridge "
+                "requires the v2 contract surface (canonical "
+                "chembl_drugs.csv filename, chembl_id required column, "
+                "get_all_aliases() accessor). Run `git pull` in "
+                "phase1/ and reinstall.",
+                _phase1_contract_version,
+            )
+            results["aborted"] = True
+            results["fatal_reason"] = (
+                f"Phase 1 contract version {_phase1_contract_version} "
+                f"is too old (expected major >= 2)."
+            )
+            return results
+        logger.info(
+            "Phase 1 contract version: %s (Teammate 5 P0 gate passed)",
+            _phase1_contract_version,
+        )
+        results["phase1_contract_version"] = _phase1_contract_version
+    except ImportError as _p1_import_exc:
+        # Contract not importable — DEGRADED mode. The pipeline CANNOT
+        # verify schema compatibility. Abort with a clear error.
+        logger.error(
+            "phase1.contracts.phase1_schema not importable (%s: %s). "
+            "Pipeline aborted — the Phase 2 bridge requires the Phase 1 "
+            "contract as the SINGLE source of truth for source filenames, "
+            "column requirements, and source required/optional status. "
+            "Fix: ensure phase1/ is on the Python path (the repo-root "
+            "conftest.py inserts it for pytest; for production, install "
+            "phase1/ via `pip install -e phase1/` or set PYTHONPATH).",
+            type(_p1_import_exc).__name__, _p1_import_exc,
+        )
+        results["aborted"] = True
+        results["fatal_reason"] = (
+            f"phase1.contracts.phase1_schema not importable: "
+            f"{_p1_import_exc}"
+        )
+        return results
 
     # ─── Step 1: Load data (FATAL) ────────────────────────────────────────
     # v6 fix (bug #B17): default data source is now Phase 1 (via the
@@ -10984,6 +11107,39 @@ def main() -> None:
              "--from-saved is also set (loading an existing "
              "snapshot, no point saving it again).",
     )
+    # TM1 TASK 1.4 ROOT FIX (v131 -- Teammate 1 P1->P2 integration):
+    # ``--provenance`` accepts the Phase 1 ``pipeline_run_id`` (a UUID
+    # generated by the master DAG's validate_output task) and forwards
+    # it through the Phase 2 pipeline so the KG build can be traced
+    # end-to-end across the Phase 1 -> Phase 2 boundary. The
+    # provenance ID is:
+    #   1. Logged at the START of run_full_pipeline ("Provenance ID: <UUID>")
+    #      so operators can grep the Phase 2 log for the Phase 1 run that
+    #      triggered it.
+    #   2. Stored in the pipeline metadata dict (``results["provenance_id"]``)
+    #      so downstream consumers (MLflow, lineage manifest) can record it.
+    #   3. Included in the V1 launch criteria check so a KG built without
+    #      a provenance ID is flagged as untraceable (operator must
+    #      re-run with --provenance to get a traceable KG).
+    # The previous code had NO --provenance flag -- Phase 2 runs were
+    # untraceable across the Phase 1 -> Phase 2 boundary. The master
+    # DAG's _trigger_phase2 task now passes --provenance <UUID> (see
+    # master_pipeline_dag.py TM1 Task 1.4 v131 root fix).
+    parser.add_argument(
+        "--provenance",
+        type=str,
+        default=None,
+        metavar="UUID",
+        help="TM1 Task 1.4 v131: Phase 1 pipeline_run_id (UUID) that "
+             "triggered this Phase 2 run. Forwarded by the master DAG's "
+             "_trigger_phase2 task. When set, the pipeline logs "
+             "'Provenance ID: <UUID>' at startup and stores it in the "
+             "pipeline metadata dict (results['provenance_id']). When "
+             "NOT set, the pipeline logs a WARNING that the run is "
+             "untraceable across the Phase 1 -> Phase 2 boundary "
+             "(operators should investigate why the master DAG did not "
+             "pass --provenance).",
+    )
     args = parser.parse_args()
 
     # GAP-CONF-02: Validate config on startup
@@ -11057,6 +11213,15 @@ def main() -> None:
                 # default, so existing invocations are unaffected.
                 from_saved_path=args.from_saved,
                 save_graph_path=args.save_graph,
+                # TM1 Task 1.4 v131 ROOT FIX: forward the Phase 1
+                # pipeline_run_id (UUID) so the KG build can be traced
+                # end-to-end across the Phase 1 -> Phase 2 boundary.
+                # ``run_full_pipeline`` logs "Provenance ID: <UUID>" at
+                # startup and stores it in the pipeline metadata dict.
+                # None when the operator invokes run_pipeline.py
+                # directly (not via the master DAG) -- a WARNING is
+                # logged in that case (untraceable run).
+                provenance_id=args.provenance,
             )
         except V1LaunchCriteriaFailed as exc:
             # v21 ROOT FIX (Audit Chain 12): the typed exception from

@@ -46,12 +46,28 @@ import { z } from "zod";
 // ============================================================================
 // Phase 3 — Graph Transformer Service (graph_transformer/service.py)
 // ============================================================================
+//
+// TEAMMATE-11 ROOT FIX (P3-005): added structured PathwayItem schema.
+// Each pathway is now {pathway, intermediate_protein, chain[]}, not a
+// bare string. The backend's PredictResponse.pathways is List[PathwayItem].
+//
+// TEAMMATE-11 ROOT FIX (P3-006): added `model_version` to GtPredictResponse
+// so the caller can verify which model version produced the score.
+
+export const PathwayItemSchema = z.object({
+  pathway: z.string(),
+  intermediate_protein: z.string(),
+  chain: z.array(z.string()),
+});
 
 export const GtPredictionSchema = z.object({
   drug: z.string(),
   disease: z.string(),
   score: z.number(),
   confidence: z.number().optional(),
+  // TEAMMATE-11 P3-005: structured pathway chain (replaces bare string list).
+  pathways: z.array(PathwayItemSchema).optional(),
+  literature_supported: z.boolean().optional(),
   note: z.string().optional(),
 });
 
@@ -59,6 +75,11 @@ export const GtPredictResponseSchema = z.object({
   predictions: z.array(GtPredictionSchema),
   source: z.string(),
   modelVersion: z.string().optional(),
+  // TEAMMATE-11 P3-006: snake_case mirror of modelVersion for callers
+  // that read the backend's PredictResponse directly (the backend returns
+  // `model_version` snake_case; the GT service returns `modelVersion`
+  // camelCase). The frontend tolerates either.
+  model_version: z.string().optional(),
   generatedAt: z.string(),
   count: z.number(),
   checkpointPath: z.string().nullable().optional(),
@@ -76,6 +97,7 @@ export const GtTopKResponseSchema = z.object({
   ),
   source: z.string(),
   modelVersion: z.string().optional(),
+  model_version: z.string().optional(),
   generatedAt: z.string(),
   count: z.number(),
   checkpointPath: z.string().nullable().optional(),
@@ -89,6 +111,7 @@ export const GtHealthResponseSchema = z.object({
   checkpoint_loaded: z.boolean(),
 });
 
+export type PathwayItem = z.infer<typeof PathwayItemSchema>;
 export type GtPrediction = z.infer<typeof GtPredictionSchema>;
 export type GtPredictResponse = z.infer<typeof GtPredictResponseSchema>;
 export type GtTopKResponse = z.infer<typeof GtTopKResponseSchema>;
@@ -116,6 +139,37 @@ export type GtPredictRequest = z.infer<typeof GtPredictRequestSchema>;
 // Phase 4 — RL Hypothesis Ranker Service (rl/service.py)
 // ============================================================================
 
+/**
+ * TM13 ROOT FIX (v132, CRITICAL — Phase 2 ↔ Phase 4 wiring):
+ * PathwayChainItemSchema describes ONE pathway chain connecting a drug to
+ * a disease. The chain is an ordered list of biological entities, e.g.:
+ *   ["metformin", "mTOR", "mTOR signaling", "cancer"]
+ *   ["aspirin", "COX-2", "prostaglandin synthesis", "inflammation"]
+ *
+ * The Python rl/service.py attaches pathway_chain to each RankedHypothesis
+ * by querying the Phase 2 Neo4j knowledge graph (phase2/service.py /kg/explore).
+ * This is the "biological pathway chain that explains the prediction"
+ * deliverable mandated by project docx §6 (Phase 4 output). Without this
+ * field, the dashboard could show scores with no mechanistic explanation —
+ * exactly the broken state Teammate 13's issue describes.
+ *
+ * Fields:
+ *   - pathway: the canonical pathway name (e.g., "mTOR signaling").
+ *   - intermediate_protein: the drug target protein that links the drug
+ *     to the pathway (e.g., "mTOR" for metformin). May be omitted when
+ *     the chain is drug → pathway directly (no intermediate).
+ *   - chain: the ordered list of biological entities from drug to disease.
+ *     chain[0] is the drug, chain[chain.length-1] is the disease. Middle
+ *     elements are proteins/pathways.
+ */
+export const PathwayChainItemSchema = z.object({
+  pathway: z.string(),
+  intermediate_protein: z.string().optional(),
+  chain: z.array(z.string()),
+});
+
+export type PathwayChainItem = z.infer<typeof PathwayChainItemSchema>;
+
 export const RankedHypothesisSchema = z.object({
   drug: z.string(),
   disease: z.string(),
@@ -134,10 +188,29 @@ export const RankedHypothesisSchema = z.object({
   admeScore: z.number().nullable().optional(),
   literatureSupport: z.number().nullable().optional(),
   isKnownPositive: z.boolean().optional(),
+  /**
+   * TM13 ROOT FIX (v132): pathway_chain is the list of biological
+   * pathways connecting this drug to this disease. Empty array when
+   * the Phase 2 KG has no pathway data for this pair, or when the KG
+   * service is unreachable. The candidate table renders this as an
+   * expandable "N pathways" cell.
+   */
+  pathway_chain: z.array(PathwayChainItemSchema).default([]),
 });
 
 export const RlRankResponseSchema = z.object({
   candidates: z.array(RankedHypothesisSchema),
+  /**
+   * TM13 ROOT FIX (v132): the Python service returns source: "service"
+   * (per P4-045 fix). The previous Zod schema accepted any string, which
+   * was permissive enough — but the frontend's RlRankerResponse type
+   * restricted source to "rl_service" | "none", causing the hardcoded
+   * source override in rl-ranker.ts. The Zod schema here stays permissive
+   * (accepts any string); the narrowing happens at the rl-ranker.ts
+   * type level. This keeps the runtime validation lenient (so a future
+   * Python update adding a new source value doesn't break the frontend)
+   * while the TypeScript type forces callers to handle the known set.
+   */
   source: z.string(),
   modelVersion: z.string().optional(),
   generatedAt: z.string(),
@@ -148,6 +221,25 @@ export const RlRankResponseSchema = z.object({
   csvPath: z.string().optional(),
   backend: z.string().optional(),
   note: z.string().optional(),
+  /**
+   * TM13 ROOT FIX (v132): orgId is echoed back by the Python service
+   * for audit attribution (21 CFR Part 11). The previous schema silently
+   * dropped this field. Now validated as an optional string (the service
+   * returns "anonymous" when RL_REQUIRE_AUTH=false, so it's always
+   * present in practice, but kept optional for dev/CI environments
+   * that may not set it).
+   */
+  orgId: z.string().optional(),
+  /**
+   * TM13 ROOT FIX (v132): pathway_enrichment_available is a boolean
+   * flag indicating whether the Python service successfully queried the
+   * Phase 2 KG for pathway chains. When true, candidates' pathway_chain
+   * arrays may be non-empty. When false, all pathway_chain arrays are
+   * empty (KG unreachable, no pathways found, or pathway enrichment
+   * disabled in config). The candidate table reads this flag to decide
+   * whether to render the Pathway column at all.
+   */
+  pathway_enrichment_available: z.boolean().optional().default(false),
 });
 
 export const RlHealthResponseSchema = z.object({
@@ -214,6 +306,18 @@ export const GraphSourceStatSchema = z.object({
 export const KgStatsResponseSchema = z.object({
   sources: z.array(GraphSourceStatSchema),
   nodeCount: z.number(),
+  // Teammate 8 ROOT FIX: canonicalNodeCount — count of CANONICAL-type
+  // nodes only (Compound, Protein, Pathway, Disease, ClinicalOutcome).
+  // The Phase 2 service emits this directly (phase2/service.py:
+  // _compute_canonical_node_count); the backend FastAPI proxy passes
+  // it through unchanged. The frontend's Knowledge Graph Explorer
+  // displays BOTH nodeCount (total, includes non-canonical types like
+  // Gene/MedDRA_Term/Anatomy) AND canonicalNodeCount (canonical
+  // scientific entities only). The field is OPTIONAL in the schema
+  // for backward compat with older Phase 2 deployments that don't
+  // emit it yet — when missing, kg-service.ts derives it client-side
+  // by summing the canonical entries in nodeTypeCounts.
+  canonicalNodeCount: z.number().optional(),
   edgeCount: z.number(),
   nodeTypeCounts: z.record(z.string(), z.number()),
   edgeTypeCounts: z.record(z.string(), z.number()),
@@ -304,13 +408,33 @@ export type DatasetHealthResponse = z.infer<typeof DatasetHealthResponseSchema>;
 // ============================================================================
 // Canonical node types — per project docx Phase 2 (5 types)
 // ============================================================================
+// Teammate 8 ROOT FIX: the previous list used "ClinicalOutcomes" (PLURAL),
+// but the Phase 2 KG label vocabulary uses the SINGULAR form
+// "ClinicalOutcome" (see phase2/service.py::CANONICAL_NODE_TYPES and
+// drugos_graph.schemas). The plural form caused every ClinicalOutcome
+// node to be classified as non-canonical by the frontend's transform
+// layer (kg-service.ts:175 `if (CANONICAL_NODE_TYPE_SET.has(type))`),
+// silently dropping them from the canonical nodeCount. The dashboard
+// under-reported the canonical node count by the entire
+// ClinicalOutcome population — a scientific reporting bug.
+//
+// ROOT FIX: align with the Phase 2 contract — use "ClinicalOutcome"
+// (singular). This matches:
+//   - phase2/service.py:CANONICAL_NODE_TYPES (the Python source of truth)
+//   - drugos_graph.schemas (the Pydantic KG label enum)
+//   - phase2/drugos_graph/kg_builder.py (the Neo4j label writer)
+//
+// The previous plural form was a typo that propagated from an early
+// Phase 2 design doc; the Phase 2 service code has ALWAYS used the
+// singular form. This fix aligns the frontend with the actual Phase 2
+// implementation.
 
 export const CANONICAL_NODE_TYPES = [
   "Compound",
   "Protein",
   "Pathway",
   "Disease",
-  "ClinicalOutcomes",
+  "ClinicalOutcome", // SINGULAR — matches Phase 2 KG label vocabulary
 ] as const;
 
 export type CanonicalNodeType = (typeof CANONICAL_NODE_TYPES)[number];

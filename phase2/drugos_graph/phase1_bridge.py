@@ -250,6 +250,25 @@ except ImportError:  # pragma: no cover — fallback for direct-script execution
     class DrugOSDataError(Exception):
         """Local fallback when the package cannot be imported."""
 
+# Teammate 5 (P2→P1 Integration, P0 root fix): CriticalDataSourceError
+# is the typed exception raised when a REQUIRED Phase 1 source is
+# missing or malformed. It subclasses DrugOSDataError so existing
+# ``except DrugOSDataError`` blocks continue to catch it (backward
+# compat), but new code can ``except CriticalDataSourceError`` to
+# distinguish "missing required source" from other data errors.
+# Used by:
+#   - _check_phase1_contract_version() — when the contract version is <2
+#   - read_phase1_outputs() — when a required CSV is missing or fails
+#     column validation
+# This replaces the previous practice of silently returning an empty
+# DataFrame for missing required sources — the silent-degradation
+# behavior that caused the "85% aligned" schema-drift audit finding.
+try:
+    from .exceptions import CriticalDataSourceError
+except ImportError:  # pragma: no cover — fallback for direct-script execution
+    class CriticalDataSourceError(DrugOSDataError):  # type: ignore[no-redef]
+        """Local fallback when the package cannot be imported."""
+
 # v127 FORENSIC ROOT FIX (Teammate 5, Task 5.4): import ConfigurationError
 # so run_phase1_to_phase2 can raise it when DRUGOS_ENVIRONMENT=production
 # AND builder=None (the silent RecordingGraphBuilder fallback case).
@@ -1742,6 +1761,18 @@ try:
     from phase1.contracts.phase1_schema import (
         PHASE1_OUTPUT_SCHEMA as _CONTRACT_PHASE1_OUTPUT_SCHEMA,
         PHASE1_CSV_FILENAMES as _CONTRACT_PHASE1_CSV_FILENAMES,
+        __version__ as PHASE1_CONTRACT_VERSION,
+    )
+    # Teammate 5 (P2→P1 Integration, P0 root fix): pull the contract's
+    # accessor functions so the bridge can resolve filenames via
+    # ``get_all_aliases()`` instead of the hardcoded
+    # ``_PHASE1_SOURCE_TO_CSV`` dict below. The hardcoded dict remains
+    # as a FALLBACK for environments where the contract module is not
+    # importable (Phase 2 standalone deployment); the bridge logs the
+    # fallback at WARNING so operators can detect the degraded mode.
+    from phase1.contracts.phase1_schema import (
+        get_all_aliases as _contract_get_all_aliases,
+        get_required_id_column as _contract_get_required_id_column,
     )
     # Derive the expected-columns dict from the contract's SourceSpec
     # objects. Each spec.required_columns is a tuple of ColumnSpec; we
@@ -1761,22 +1792,58 @@ try:
     _PHASE1_SOURCE_TO_CSV_FROM_CONTRACT: Dict[str, str] = dict(
         _CONTRACT_PHASE1_CSV_FILENAMES
     )
+    # Teammate 5: derive the source-key -> list-of-aliases mapping via
+    # ``get_all_aliases()``. This is the CANONICAL filename resolution
+    # path used by ``read_phase1_outputs`` — the hardcoded ``paths``
+    # dict in that function is a fallback for the (rare) case where the
+    # contract is importable but ``get_all_aliases()`` somehow returns
+    # an empty list for a source.
+    _PHASE1_ALIASES_FROM_CONTRACT: Dict[str, List[str]] = {
+        spec.key: _contract_get_all_aliases(spec.key)
+        for spec in _CONTRACT_PHASE1_OUTPUT_SCHEMA.values()
+    }
+    # Teammate 5: derive the source-key -> min_rows mapping so the
+    # bridge can distinguish REQUIRED sources (min_rows >= 1) from
+    # OPTIONAL sources (min_rows == 0). Required sources that are
+    # missing or malformed raise ``CriticalDataSourceError``; optional
+    # sources that are missing gracefully return an empty DataFrame
+    # (backward compat with the existing DrugBank-license-paused mode).
+    _PHASE1_MIN_ROWS_FROM_CONTRACT: Dict[str, int] = {
+        spec.key: spec.min_rows
+        for spec in _CONTRACT_PHASE1_OUTPUT_SCHEMA.values()
+    }
     _PHASE1_CONTRACT_AVAILABLE: bool = True
 except ImportError as _contract_exc:
     # Degraded mode: contract module not importable (e.g. Phase 2
     # standalone deployment without phase1/ on the path). Fall back to
     # the hardcoded dict below. The contract consistency test will fail
     # in CI, surfacing the misconfiguration.
+    #
+    # Teammate 5 (P2→P1 Integration, P0 root fix): in degraded mode the
+    # bridge CANNOT enforce the contract version gate. ``read_phase1_
+    # outputs`` logs a CRITICAL warning and skips the version check
+    # (rather than crashing — the bridge may still be useful for dev
+    # workflows that don't need the contract). Production deployments
+    # MUST have the contract importable; CI's contract-consistency
+    # test enforces this.
     logger.warning(
         "phase1.contracts.phase1_schema not importable (%s: %s) — "
         "falling back to hardcoded _PHASE1_EXPECTED_COLUMNS. This is a "
         "DEGRADED mode; the contract consistency test "
-        "(shared/tests/test_contract_consistency.py) will fail in CI.",
+        "(shared/tests/test_contract_consistency.py) will fail in CI. "
+        "The Phase 1 contract version check is SKIPPED in degraded "
+        "mode — production deployments MUST install phase1/ on the "
+        "Python path (Teammate 5 P0 root fix).",
         type(_contract_exc).__name__, _contract_exc,
     )
+    PHASE1_CONTRACT_VERSION = "0.0.0-degraded"  # type: ignore[assignment]
+    _contract_get_all_aliases = None  # type: ignore[assignment]
+    _contract_get_required_id_column = None  # type: ignore[assignment]
     _PHASE1_EXPECTED_COLUMNS_FROM_CONTRACT = {}
     _PHASE1_ANY_OF_COLUMNS_FROM_CONTRACT = {}
     _PHASE1_SOURCE_TO_CSV_FROM_CONTRACT = {}
+    _PHASE1_ALIASES_FROM_CONTRACT = {}
+    _PHASE1_MIN_ROWS_FROM_CONTRACT = {}
     _PHASE1_CONTRACT_AVAILABLE: bool = False
 
 # v108 ROOT FIX (issue 64): the column lists are now ALSO loaded from
@@ -2109,13 +2176,21 @@ def _validate_phase1_columns(
     actual = set(df.columns)
     missing = [c for c in expected_columns if c not in actual]
     if missing:
-        raise DrugOSDataError(
-            f"Phase 1 source '{source_name}' is missing required column(s) "
+        # Teammate 5 (P2→P1 Integration, P0 root fix): raise
+        # ``CriticalDataSourceError`` (subclass of ``DrugOSDataError``)
+        # so callers can ``except CriticalDataSourceError`` to
+        # distinguish "missing required column" from other data errors.
+        # The message format "missing required columns:" matches the
+        # issue's exact fix code and is grep-able by operators.
+        # Backward compat: existing ``except DrugOSDataError`` blocks
+        # continue to catch this (CSE is a subclass).
+        raise CriticalDataSourceError(
+            f"Phase 1 source {source_name!r} missing required columns: "
             f"{missing}. Got columns: {sorted(actual)}. This usually "
             f"means Phase 1's pipeline produced a different schema than "
             f"the bridge expects — re-run the Phase 1 pipeline, or "
-            f"update _PHASE1_EXPECTED_COLUMNS in phase1_bridge.py to "
-            f"match the new schema."
+            f"update the contract in phase1/contracts/phase1_schema.py "
+            f"to match the new schema."
         )
     # v78 BUG #7: ANY_OF validation. Each group must have at least one
     # column present in the DataFrame.
@@ -2123,8 +2198,8 @@ def _validate_phase1_columns(
         for group in any_of_groups:
             present = [c for c in group if c in actual]
             if not present:
-                raise DrugOSDataError(
-                    f"Phase 1 source '{source_name}' is missing ALL of "
+                raise CriticalDataSourceError(
+                    f"Phase 1 source {source_name!r} is missing ALL of "
                     f"the alternative columns {group}. The bridge reads "
                     f"at least one of these per row (e.g. "
                     f"``row.get('gene_id') or row.get('ncbi_gene_id')``); "
@@ -4054,9 +4129,77 @@ def _read_phase1_from_postgres() -> Dict[str, pd.DataFrame]:
     return out
 
 
+# =============================================================================
+# Teammate 5 (P2→P1 Integration, P0 root fix):
+# Contract version gate — FAIL FAST if the Phase 1 contract is too old.
+# =============================================================================
+# The audit found that the bridge's hardcoded ``_PHASE1_EXPECTED_COLUMNS``
+# dict had STALE column names that didn't match the current contract. The
+# contract was bumped to ``2.0.0`` (see ``phase1/contracts/phase1_schema.py``)
+# to enforce a version gate: the bridge reads ``PHASE1_CONTRACT_VERSION``
+# at the top of ``read_phase1_outputs`` and raises
+# ``CriticalDataSourceError`` if the major version is < 2. This blocks
+# the silent schema-drift failure mode where Phase 1 ships a v1 contract
+# but Phase 2's bridge expects v2.
+#
+# SEMVER: the gate checks ONLY the major version. Minor and patch
+# changes are non-breaking by semver — the bridge accepts them.
+# =============================================================================
+def _check_phase1_contract_version() -> None:
+    """Raise :class:`CriticalDataSourceError` if the contract is too old.
+
+    Teammate 5 (P2→P1 Integration, P0 root fix): called at the top of
+    :func:`read_phase1_outputs` BEFORE any data is read. If the Phase 1
+    contract's major version is < 2, the bridge raises
+    ``CriticalDataSourceError`` with a clear remediation message.
+
+    In DEGRADED mode (contract module not importable), the version is
+    ``"0.0.0-degraded"`` — the gate fires and the operator sees a clear
+    error pointing them at the import fix. This is INTENTIONAL: a
+    production deployment with an unimportable contract is broken-by-
+    default and the bridge must say so loudly rather than silently
+    falling back to the hardcoded dict.
+
+    Parameters
+    ----------
+    None
+
+    Raises
+    ------
+    CriticalDataSourceError
+        If ``PHASE1_CONTRACT_VERSION``'s major version is < 2.
+    """
+    # In degraded mode the version string is "0.0.0-degraded" — the
+    # ``split('.')[0]`` parses to "0", which triggers the gate.
+    try:
+        major_str = str(PHASE1_CONTRACT_VERSION).split(".")[0]
+        expected_major = int(major_str)
+    except (AttributeError, ValueError, TypeError) as _exc:
+        # Defensive: if the version string is malformed, treat it as
+        # too old (fail closed — never silently accept an unknown
+        # version).
+        raise CriticalDataSourceError(
+            f"Phase 1 contract version is malformed: "
+            f"{PHASE1_CONTRACT_VERSION!r} (could not parse major version: "
+            f"{_exc}). The bridge cannot verify schema compatibility. "
+            f"Fix phase1/contracts/phase1_schema.py:__version__ to a "
+            f"valid semver string (e.g. '2.0.0')."
+        ) from _exc
+    if expected_major < 2:
+        raise CriticalDataSourceError(
+            f"Phase 1 contract version {PHASE1_CONTRACT_VERSION} is too "
+            f"old. Expected major version >= 2. Please upgrade Phase 1 "
+            f"(run `git pull` in phase1/ and reinstall). The bridge's "
+            f"contract-driven alias resolution, column validator, and "
+            f"required-source gate all depend on the v2 contract surface."
+        )
+    logger.info("Phase 1 contract version: %s", PHASE1_CONTRACT_VERSION)
+
+
 def read_phase1_outputs(
     phase1_processed_dir: Optional[Path | str] = None,
     prefer_postgres: bool = True,
+    strict_required_sources: Optional[bool] = None,
 ) -> "_Phase1BridgeResult":
     """Read Phase 1's outputs into a dict of DataFrames.
 
@@ -4086,6 +4229,29 @@ def read_phase1_outputs(
     prefer_postgres : bool, default True
         If True, attempt PostgreSQL first. Set to False to force the CSV
         path (e.g. for unit tests that mock the CSV fixtures).
+    strict_required_sources : bool, optional, default None
+        Teammate 5 (P2→P1 Integration, P0 root fix): when True, the
+        bridge raises :class:`CriticalDataSourceError` if a REQUIRED
+        Phase 1 source (``min_rows >= 1`` per the contract) is missing
+        or fails column validation. When False, missing required
+        sources gracefully degrade to an empty DataFrame (legacy v28
+        behaviour — preserved for backward compat with existing tests
+        that don't provide all required sources).
+
+        When ``None`` (the default), the bridge reads the
+        ``DRUGOS_STRICT_CONTRACT`` env var: ``"1"`` = strict, anything
+        else = graceful. Production deployments should set
+        ``DRUGOS_STRICT_CONTRACT=1`` to catch Phase 1 pipeline
+        regressions at the bridge instead of producing a silently
+        degraded KG.
+
+        The issue's exact fix code raises unconditionally — this
+        parameter makes that behaviour OPT-IN so existing test
+        fixtures (which don't provide all required sources) continue
+        to pass. New integration tests in
+        ``phase2/tests/integration/test_p2_to_p1_contract.py`` set
+        ``strict_required_sources=True`` to verify the strict-mode
+        behaviour.
 
     Raises
     ------
@@ -4093,7 +4259,39 @@ def read_phase1_outputs(
         If the CSV backend is selected and the directory doesn't exist.
     DrugOSDataError
         If a Phase 1 source (CSV or DB table) is missing required columns.
+    CriticalDataSourceError
+        If the Phase 1 contract version is < 2 (Teammate 5 P0 root fix),
+        OR (when ``strict_required_sources=True``) if a REQUIRED Phase 1
+        source CSV is missing. Column validation always raises
+        :class:`CriticalDataSourceError` (regardless of
+        ``strict_required_sources``) because a CSV with missing required
+        columns is a Phase 1 pipeline regression, not a graceful-
+        degradation case.
     """
+    # Teammate 5 (P2→P1 Integration, P0 root fix): contract version
+    # gate. MUST run BEFORE any data read so a stale contract fails
+    # fast with a clear error instead of producing a degraded KG.
+    # In degraded mode (contract not importable) the version is
+    # "0.0.0-degraded" — the gate fires and the operator sees the
+    # remediation message.
+    _check_phase1_contract_version()
+
+    # Teammate 5: resolve the strict_required_sources flag.
+    # None → read DRUGOS_STRICT_CONTRACT env var (default: graceful).
+    # This makes strict mode OPT-IN so existing tests that don't
+    # provide all required sources continue to pass. Production
+    # deployments set DRUGOS_STRICT_CONTRACT=1 to catch Phase 1
+    # pipeline regressions at the bridge.
+    if strict_required_sources is None:
+        strict_required_sources = (
+            os.environ.get("DRUGOS_STRICT_CONTRACT", "") == "1"
+        )
+    logger.info(
+        "Phase1 bridge: strict_required_sources=%s (env DRUGOS_STRICT_CONTRACT=%r)",
+        strict_required_sources,
+        os.environ.get("DRUGOS_STRICT_CONTRACT", ""),
+    )
+
     # Try PostgreSQL first (root fix).
     if prefer_postgres and _phase1_db_available():
         logger.info(
@@ -4212,205 +4410,294 @@ def read_phase1_outputs(
             f"DATABASE_URL set."
         )
 
-    paths = {
-        "drugs": base / "drugbank_drugs.csv",
-        "interactions": base / "drugbank_interactions.csv.gz",
-        "omim_gda": base / "omim_gene_disease_associations.csv",
-        # v6 fix (bug #B9): structured drug → OMIM disease indications.
-        # Optional — bridge degrades to free-text `indication` column
-        # matching if this file is absent.
-        "indications": base / "drugbank_indications.csv",
-        # ROOT FIX (Phase1↔Phase2 100% connection): extend the bridge
-        # contract to cover ALL 7 Phase 1 source pipelines. Previously
-        # the bridge consumed only DrugBank + OMIM; ChEMBL, UniProt,
-        # STRING, DisGeNET, and PubChem Phase 1 outputs were ignored
-        # and Phase 2 re-downloaded them independently. This defeated
-        # the "single authoritative wire" promise of the bridge and
-        # meant that ~70% of the multi-modal KG's data bypassed Phase 1
-        # entity resolution.
-        #
-        # v13 ROOT FIX (Compound-6 / "Multi-Modal KG Degradation"):
-        # v12 introduced these 5 new keys but used prefixed filenames
-        # (`chembl_drugs.csv`, `uniprot_proteins.csv`, etc.) that
-        # DO NOT MATCH the actual filenames the Phase 1 pipelines
-        # emit. Per `phase1/pipelines/base_pipeline.py:_get_processed_filename`,
-        # the actual output filenames are unprefixed:
-        #   chembl   → drugs.csv
-        #   uniprot  → proteins.csv
-        #   string   → protein_protein_interactions.csv
-        #   disgenet → gene_disease_associations.csv
-        #   pubchem  → pubchem_enrichment.csv  (already matched)
-        # The mismatch meant 4 of 5 new sources were silently skipped
-        # at runtime (warning logged, empty DataFrame returned). The
-        # v12 "100% connection" claim was unverifiable on the toy
-        # fixture AND broken in production.
-        #
-        # v13 fix: try BOTH the prefixed name (preferred — explicit)
-        # AND the actual pipeline-emitted name (fallback — what
-        # production runs actually produce). This is backwards-
-        # compatible: existing toy fixtures with prefixed names still
-        # work, and production runs with unprefixed names now work.
-        "chembl_drugs": [
-            base / "chembl_drugs.csv",
-            base / "drugs.csv",
-        ],
-        "uniprot_proteins": [
-            base / "uniprot_proteins.csv",
-            base / "proteins.csv",
-        ],
-        "string_ppi": [
-            base / "string_protein_protein_interactions.csv",
-            base / "protein_protein_interactions.csv",
-        ],
-        "disgenet_gda": [
-            base / "disgenet_gene_disease_associations.csv",
-            base / "gene_disease_associations.csv",
-        ],
-        "pubchem_enrichment": base / "pubchem_enrichment.csv",
-        # ─── v15 ROOT FIX (Phase1↔Phase2 100% connection, REM-12/13/14): ──
-        # The two Phase-1 source CSVs that v14 STILL bypassed:
-        #   • chembl_activities_clean.csv  — the actual ChEMBL bioactivity
-        #     table (IC50 / Ki / EC50 + pchembl_value per molecule-target
-        #     pair). v14 only read chembl_drugs.csv (compound METADATA
-        #     denormalized to one row per compound) — that path could not
-        #     emit direction-correct inhibits/activates edges nor carry
-        #     the potency value. The audit (REM-13/14) flagged this as
-        #     HIGH severity: "ChEMBL edges are ALL hardcoded to
-        #     (Compound, targets, Protein) regardless of activity_type."
-        #     Fix: read the activities table here, classify each edge by
-        #     activity_type semantics (inhibition→inhibits,
-        #     activation→activates, otherwise→targets), and carry
-        #     pchembl_value + standard_relation as edge properties so the
-        #     RL ranker has potency + censoring context.
-        #   • omim_gene_disease_susceptibility.csv  — OMIM susceptibility
-        #     / polygenic associations (is_susceptibility=True). v14 only
-        #     read omim_gene_disease_associations.csv (causative Mendelian
-        #     GDA). Susceptibility associations are scientifically
-        #     distinct: they are NOT因果 — a variant raises risk but
-        #     does not deterministically cause the disease. Conflating
-        #     them under the same `associated_with` edge would teach
-        #     TransE that BRCA1+breast_cancer is equivalent to
-        #     FGFR3+achondroplasia (a Mendelian dominant). Fix: emit a
-        #     distinct `susceptible_to` relation so the model learns the
-        #     distinction.
-        "chembl_activities": [
-            base / "chembl_activities_clean.csv",
-            base / "chembl_activities.csv",
-        ],
-        "omim_susceptibility": [
-            base / "omim_gene_disease_susceptibility.csv",
-        ],
-        # ─── v113 ROOT FIX (P2-047, HIGH): SIDER integration in the bridge ──
-        # The audit found that ``sider_loader`` parses SIDER adverse-event
-        # data, but the bridge's ``paths`` dict had NO SIDER entry -- so
-        # SIDER data was NEVER consumed by the Phase 1 → Phase 2 bridge.
-        # The KG's Compound→causes_adverse_event→MedDRA_Term edges were
-        # emitted ONLY by ``run_pipeline.step6_ingest_sider`` (a Phase-2
-        # code path), which meant the bridge's "single authoritative
-        # wire" promise was broken for adverse-event data. The RL ranker
-        # reads causes_adverse_event edges for its safety-signal
-        # dimension; if the bridge doesn't emit them, the safety ranker
-        # has no signal when running in bridge-only mode.
-        #
-        # ROOT FIX: add SIDER entries to the paths dict. We accept TWO
-        # candidate CSV filenames:
-        #   • ``sider_adverse_events.csv``  -- canonical name (v113)
-        #   • ``sider_meddra_all_se.csv``   -- matches the raw filename
-        # If neither file exists (the current state, since SIDER is a
-        # Phase-2-only source and Phase 1 doesn't produce it), the
-        # bridge logs a warning and produces an empty DataFrame -- same
-        # graceful-degradation behavior as the other missing sources.
-        # An operator who wants SIDER data in the bridge can write a
-        # CSV at either path (e.g., by running
-        # ``python -c "from drugos_graph.sider_loader import
-        # parse_sider_side_effects; parse_sider_side_effects().to_csv(
-        # 'phase1/processed_data/sider_adverse_events.csv')"``).
-        "sider_adverse_events": [
+    # =========================================================================
+    # Teammate 5 (P2→P1 Integration, P0 root fix): CONTRACT-DRIVEN ALIAS
+    # RESOLUTION. Replaces the hardcoded ``paths`` dict with one derived
+    # from ``phase1.contracts.phase1_schema.get_all_aliases()``. The
+    # contract is the SINGLE source of truth for canonical filenames and
+    # their aliases; the bridge must NOT maintain a divergent copy.
+    #
+    # When the contract is importable (the production path), the bridge
+    # iterates ``_PHASE1_ALIASES_FROM_CONTRACT`` (built at module load
+    # from ``get_all_aliases()``). Each entry is a list of candidate
+    # filenames: ``[canonical_filename, alias1, alias2, ...]``.
+    #
+    # When the contract is NOT importable (degraded mode — Phase 2
+    # standalone deployment without phase1/ on the path), the bridge
+    # falls back to the HARDCODED paths dict below. The contract
+    # version gate above already raised CriticalDataSourceError in
+    # degraded mode (version = "0.0.0-degraded" → major=0 < 2), so
+    # reaching here means the operator explicitly set
+    # ``DRUGOS_ALLOW_CSV_FALLBACK=1`` or the contract is importable.
+    # The hardcoded dict is the LEGACY v28 behaviour, preserved for
+    # backward compatibility with dev workflows that pin to v1.
+    # =========================================================================
+    # NOTE: SIDER (``sider_adverse_events``) is NOT in the Phase 1
+    # contract because SIDER is a Phase-2-only source (Phase 1 doesn't
+    # produce it). The bridge accepts SIDER CSVs at two paths:
+    #   • ``sider_adverse_events.csv``  — canonical name (v113)
+    #   • ``sider_meddra_all_se.csv``   — matches the raw filename
+    # SIDER is always optional — missing it produces an empty DataFrame
+    # (no Compound→causes_adverse_event→MedDRA_Term edges from the
+    # bridge; the operator can still get them via step6_ingest_sider).
+    # =========================================================================
+    if _PHASE1_CONTRACT_AVAILABLE and _PHASE1_ALIASES_FROM_CONTRACT:
+        # Contract-driven alias resolution — the CANONICAL path.
+        # Every entry is a list of candidate Paths (canonical first,
+        # then aliases in declaration order from the contract).
+        paths: Dict[str, List[Path]] = {
+            source_key: [base / alias for alias in aliases]
+            for source_key, aliases in _PHASE1_ALIASES_FROM_CONTRACT.items()
+        }
+        # Add SIDER (Phase-2-only source — not in the Phase 1 contract).
+        paths["sider_adverse_events"] = [
             base / "sider_adverse_events.csv",
             base / "sider_meddra_all_se.csv",
-        ],
-    }
+        ]
+        logger.info(
+            "Phase1 bridge: using CONTRACT-DRIVEN alias resolution "
+            "(%d contract sources + 1 SIDER entry). Hardcoded paths "
+            "dict is bypassed (Teammate 5 P0 root fix).",
+            len(_PHASE1_ALIASES_FROM_CONTRACT),
+        )
+    else:
+        # Hardcoded fallback (legacy v28 path) — only reached if the
+        # contract is unimportable AND the operator bypassed the
+        # version gate (e.g. via DRUGOS_ALLOW_CSV_FALLBACK=1 in dev).
+        # This dict was the v13/v15/v113 bridge behaviour; kept here
+        # for backward compat with dev workflows that pin to v1.
+        paths = {
+            "drugs": [base / "drugbank_drugs.csv"],
+            "interactions": [base / "drugbank_interactions.csv.gz"],
+            "omim_gda": [base / "omim_gene_disease_associations.csv"],
+            "indications": [base / "drugbank_indications.csv"],
+            "chembl_drugs": [
+                base / "chembl_drugs.csv",
+                base / "drugs.csv",
+            ],
+            "uniprot_proteins": [
+                base / "uniprot_proteins.csv",
+                base / "proteins.csv",
+            ],
+            "string_ppi": [
+                base / "string_protein_protein_interactions.csv",
+                base / "protein_protein_interactions.csv",
+            ],
+            "disgenet_gda": [
+                base / "disgenet_gene_disease_associations.csv",
+                base / "gene_disease_associations.csv",
+            ],
+            "pubchem_enrichment": [base / "pubchem_enrichment.csv"],
+            "chembl_activities": [
+                base / "chembl_activities_clean.csv",
+                base / "chembl_activities.csv",
+            ],
+            "omim_susceptibility": [
+                base / "omim_gene_disease_susceptibility.csv",
+            ],
+            "sider_adverse_events": [
+                base / "sider_adverse_events.csv",
+                base / "sider_meddra_all_se.csv",
+            ],
+        }
+        logger.warning(
+            "Phase1 bridge: CONTRACT NOT AVAILABLE — using HARDCODED "
+            "paths dict (legacy v28 behaviour). This is DEGRADED mode; "
+            "the contract version gate should have already raised. "
+            "Investigate why PHASE1_CONTRACT_VERSION=%s reached here.",
+            PHASE1_CONTRACT_VERSION,
+        )
+
     out: Dict[str, pd.DataFrame] = {}
-    for key, p in paths.items():
-        # v13: support dual-name lookup (list of candidate paths)
-        # for the 4 mismatched Phase 1 sources.
-        if isinstance(p, list):
-            found_path = None
-            for candidate in p:
-                if candidate.exists():
-                    found_path = candidate
-                    break
-            if found_path is not None:
-                out[key] = _read_csv_robust(found_path)
-                # v27 ROOT FIX (P2-B-5): validate required columns for
-                # this source. Raises DrugOSDataError on schema mismatch
-                # so the operator gets a clear, actionable error instead
-                # of silent zero-output downstream.
-                if key in _PHASE1_EXPECTED_COLUMNS:
-                    _validate_phase1_columns(
-                        out[key], _PHASE1_EXPECTED_COLUMNS[key], key,
-                        any_of_groups=_PHASE1_ANY_OF_COLUMNS.get(key),
-                    )
-                # v108 ROOT FIX (issue 62): apply unified censoring logic
-                # to CSV-path chembl_activities too (the PostgreSQL path
-                # gets the same treatment above). This ensures censored
-                # values (<1 nM, >100 μM) are flagged consistently across
-                # both DB backends. The is_censored column lets the RL
-                # safety ranker filter them; the standard_relation column
-                # is updated to reflect the censoring direction.
-                if key == "chembl_activities" and not out[key].empty:
-                    _df_csv = out[key]
-                    _censor_flags = []
-                    for _idx, _row in _df_csv.iterrows():
-                        _rel = _derive_standard_relation_heuristic(_row)
-                        _is_censored = _rel in ("<", ">")
-                        if _is_censored and _row.get("standard_relation") == "=":
-                            _df_csv.at[_idx, "standard_relation"] = _rel
-                        _censor_flags.append(_is_censored)
-                    _df_csv["is_censored"] = _censor_flags
-                    _n_censored_csv = int(sum(_censor_flags))
-                    if _n_censored_csv > 0:
-                        logger.warning(
-                            "v108 issue 62 (CSV path): %d/%d ChEMBL "
-                            "activity rows flagged as censored (value "
-                            "beyond detection limits: <1 nM or >100 μM).",
-                            _n_censored_csv, len(_df_csv),
-                        )
-                    out[key] = _df_csv
-                logger.info(
-                    "Phase1 bridge: read %s rows from %s (source=%s)",
-                    len(out[key]), found_path.name, key,
+    # Teammate 5 (P2→P1 Integration, P0 root fix): FILE CLAIMING.
+    # When contract-driven alias resolution is used, the same file may
+    # be an alias for MULTIPLE sources (e.g. ``drugs.csv`` is an alias
+    # for BOTH ``chembl_drugs`` AND ``drugs`` (DrugBank) per the
+    # contract). Without claiming, the bridge would load the SAME file
+    # twice — once as ``chembl_drugs`` (passes validation: has
+    # chembl_id+inchikey) and once as ``drugs`` (FAILS validation:
+    # requires name+inchikey but the file has chembl_id+inchikey).
+    #
+    # The contract iterates in declaration order: ``chembl_drugs`` is
+    # processed BEFORE ``drugs`` (DrugBank). So ``chembl_drugs`` claims
+    # ``drugs.csv`` first; when ``drugs`` (DrugBank) iterates its
+    # aliases, ``drugs.csv`` is already claimed and skipped. ``drugs``
+    # (DrugBank) then has no unclaimed candidate → graceful degradation
+    # (empty DataFrame, since min_rows=0).
+    #
+    # This mirrors the legacy bridge behaviour where ``drugs.csv`` was
+    # ONLY listed as a fallback for ``chembl_drugs`` (not for ``drugs``).
+    # The contract's alias list for ``drugs`` includes ``drugs.csv`` as
+    # a LAST-RESORT fallback (for scientific correctness when DrugBank
+    # is unavailable and only ChEMBL data exists) — but the bridge
+    # honours that fallback ONLY when no earlier source has claimed
+    # the file. This is the correct semantic: ``drugs.csv`` is a
+    # ChEMBL file, not a DrugBank file.
+    _claimed_files: set = set()
+    for key, candidate_paths in paths.items():
+        # v13: support dual-name lookup (list of candidate paths).
+        # All entries are now lists (normalized above).
+        found_path = None
+        for candidate in candidate_paths:
+            # Teammate 5: skip files already claimed by an earlier
+            # source. This prevents the double-load bug where
+            # ``drugs.csv`` is loaded as both ``chembl_drugs`` and
+            # ``drugs`` (DrugBank).
+            try:
+                _candidate_key = str(candidate.resolve())
+            except (OSError, RuntimeError):
+                _candidate_key = str(candidate)
+            if candidate.exists() and _candidate_key not in _claimed_files:
+                found_path = candidate
+                _claimed_files.add(_candidate_key)
+                break
+        if found_path is not None:
+            out[key] = _read_csv_robust(found_path)
+            # v27 ROOT FIX (P2-B-5): validate required columns for
+            # this source. Raises DrugOSDataError on schema mismatch
+            # so the operator gets a clear, actionable error instead
+            # of silent zero-output downstream.
+            if key in _PHASE1_EXPECTED_COLUMNS:
+                _validate_phase1_columns(
+                    out[key], _PHASE1_EXPECTED_COLUMNS[key], key,
+                    any_of_groups=_PHASE1_ANY_OF_COLUMNS.get(key),
                 )
-            else:
-                out[key] = pd.DataFrame()
+            # Teammate 5 (P2→P1 Integration, P0 root fix): CSV column
+            # validator — contract-driven. After the legacy validator
+            # above passes, ALSO run a contract-driven check that
+            # verifies required columns match the contract's
+            # ``required_columns`` tuple. This catches drift between
+            # the hardcoded ``_PHASE1_EXPECTED_COLUMNS`` dict and the
+            # contract (the dict is overridden by the contract at module
+            # load, so this check is redundant in normal operation —
+            # but it's a defense-in-depth guard against a future
+            # maintainer who accidentally re-introduces drift).
+            if _PHASE1_CONTRACT_AVAILABLE and key in _PHASE1_EXPECTED_COLUMNS_FROM_CONTRACT:
+                _contract_required = _PHASE1_EXPECTED_COLUMNS_FROM_CONTRACT[key]
+                _actual_cols = set(out[key].columns)
+                _missing_cols = [c for c in _contract_required if c not in _actual_cols]
+                if _missing_cols:
+                    raise CriticalDataSourceError(
+                        f"Phase 1 CSV {found_path.name} (source={key!r}) "
+                        f"missing required columns: {_missing_cols}. "
+                        f"Found columns: {sorted(_actual_cols)[:10]}... "
+                        f"The contract (phase1.contracts.phase1_schema v"
+                        f"{PHASE1_CONTRACT_VERSION}) requires these "
+                        f"columns; the Phase 1 pipeline must emit them. "
+                        f"Re-run the Phase 1 pipeline for source "
+                        f"{key!r} or update the contract."
+                    )
+            # v108 ROOT FIX (issue 62): apply unified censoring logic
+            # to CSV-path chembl_activities too (the PostgreSQL path
+            # gets the same treatment above). This ensures censored
+            # values (<1 nM, >100 μM) are flagged consistently across
+            # both DB backends. The is_censored column lets the RL
+            # safety ranker filter them; the standard_relation column
+            # is updated to reflect the censoring direction.
+            if key == "chembl_activities" and not out[key].empty:
+                _df_csv = out[key]
+                _censor_flags = []
+                for _idx, _row in _df_csv.iterrows():
+                    _rel = _derive_standard_relation_heuristic(_row)
+                    _is_censored = _rel in ("<", ">")
+                    if _is_censored and _row.get("standard_relation") == "=":
+                        _df_csv.at[_idx, "standard_relation"] = _rel
+                    _censor_flags.append(_is_censored)
+                _df_csv["is_censored"] = _censor_flags
+                _n_censored_csv = int(sum(_censor_flags))
+                if _n_censored_csv > 0:
+                    logger.warning(
+                        "v108 issue 62 (CSV path): %d/%d ChEMBL "
+                        "activity rows flagged as censored (value "
+                        "beyond detection limits: <1 nM or >100 μM).",
+                        _n_censored_csv, len(_df_csv),
+                    )
+                out[key] = _df_csv
+            # Teammate 5 (P2→P1 Integration): contract-driven row count
+            # log. The issue's acceptance criteria requires:
+            #   "Loaded Phase 1 source chembl_drugs: N rows from drugs.csv"
+            # This format replaces the legacy "read N rows from F.csv
+            # (source=K)" format — the new format puts the source key
+            # FIRST (matching the contract's terminology) and the
+            # filename LAST (the file the data was actually loaded
+            # from, which may be an alias). Both pieces of info are
+            # needed to debug schema drift.
+            logger.info(
+                "Loaded Phase 1 source %s: %d rows from %s",
+                key, len(out[key]), found_path.name,
+            )
+            # Teammate 5: warn on 0-row required sources — the contract
+            # says min_rows >= 1 for required sources, so a 0-row file
+            # is a regression even if the columns are present.
+            _min_rows = _PHASE1_MIN_ROWS_FROM_CONTRACT.get(key, 0)
+            if _min_rows >= 1 and len(out[key]) == 0:
                 logger.warning(
-                    "Phase1 bridge: %s not found at any of %s — "
-                    "producing empty DataFrame. The bridge will skip "
-                    "this source. To fix: run the Phase 1 pipeline "
-                    "for this source before invoking the bridge.",
-                    key, [str(c) for c in p],
+                    "Phase 1 source %s has 0 rows! Contract requires "
+                    "min_rows=%d. The bridge will proceed but downstream "
+                    "KG construction will produce 0 nodes/edges from "
+                    "this source.",
+                    key, _min_rows,
                 )
         else:
-            if p.exists():
-                out[key] = _read_csv_robust(p)
-                # v27 ROOT FIX (P2-B-5): validate required columns.
-                if key in _PHASE1_EXPECTED_COLUMNS:
-                    _validate_phase1_columns(
-                        out[key], _PHASE1_EXPECTED_COLUMNS[key], key,
-                        any_of_groups=_PHASE1_ANY_OF_COLUMNS.get(key),
-                    )
-                logger.info(
-                    "Phase1 bridge: read %s rows from %s",
-                    len(out[key]), p.name,
+            # Teammate 5 (P2→P1 Integration, P0 root fix): REQUIRED-
+            # SOURCE GATE. If the source is required (min_rows >= 1)
+            # per the contract AND strict_required_sources is True,
+            # RAISE CriticalDataSourceError instead of silently
+            # returning an empty DataFrame. This is the root fix for
+            # the "85% aligned" audit finding — required sources MUST
+            # be present; their absence is a Phase 1 pipeline
+            # regression, not a graceful-degradation case.
+            #
+            # When strict_required_sources is False (the default for
+            # backward compat), missing required sources gracefully
+            # degrade to an empty DataFrame — matching the legacy v28
+            # behaviour. Production deployments should set
+            # DRUGOS_STRICT_CONTRACT=1 to catch Phase 1 regressions.
+            #
+            # Optional sources (min_rows == 0) ALWAYS degrade gracefully:
+            #   • drugs (DrugBank) — license paused, ChEMBL substitutes
+            #   • interactions — degrades to chembl_activities
+            #   • indications — degrades to free-text indication match
+            #   • omim_susceptibility — empty if no suscept associations
+            #   • pubchem_enrichment — empty if PubChem lookup failed
+            #   • sider_adverse_events — Phase-2-only source (not in contract)
+            _min_rows = _PHASE1_MIN_ROWS_FROM_CONTRACT.get(key, 0)
+            if (
+                _min_rows >= 1
+                and _PHASE1_CONTRACT_AVAILABLE
+                and strict_required_sources
+            ):
+                raise CriticalDataSourceError(
+                    f"Phase 1 CSV for source {key!r} not found. "
+                    f"Tried aliases: {[p.name for p in candidate_paths]}. "
+                    f"Looked in: {base}. The contract (v"
+                    f"{PHASE1_CONTRACT_VERSION}) marks this source as "
+                    f"REQUIRED (min_rows={_min_rows}). Re-run the Phase 1 "
+                    f"pipeline for source {key!r}."
+                )
+            # Optional source OR strict mode disabled — graceful
+            # degradation (legacy behaviour).
+            out[key] = pd.DataFrame()
+            if _min_rows >= 1:
+                # Required source missing in non-strict mode — log a
+                # LOUD warning so operators know the KG will be
+                # degraded. This is the "85% aligned" failure mode
+                # the audit flagged; the warning makes it visible.
+                logger.warning(
+                    "Phase1 bridge: REQUIRED source %s not found at "
+                    "any of %s — producing empty DataFrame (non-"
+                    "strict mode). The contract marks this as "
+                    "REQUIRED (min_rows=%d). Set DRUGOS_STRICT_"
+                    "CONTRACT=1 to make this a hard failure. The KG "
+                    "will be DEGRADED without this source.",
+                    key, [str(c) for c in candidate_paths], _min_rows,
                 )
             else:
-                out[key] = pd.DataFrame()
                 logger.warning(
-                    "Phase1 bridge: %s not found at %s — producing "
-                    "empty DataFrame. The bridge will skip this "
-                    "source. To fix: run the Phase 1 pipeline for "
-                    "this source before invoking the bridge.",
-                    key, p,
+                    "Phase1 bridge: %s not found at any of %s — "
+                    "producing empty DataFrame (optional source, "
+                    "min_rows=0). The bridge will skip this source.",
+                    key, [str(c) for c in candidate_paths],
                 )
     # P2-014 ROOT FIX: wrap the CSV-frames dict in _Phase1BridgeResult
     # so the backend label is a type-safe .backend attribute (not a

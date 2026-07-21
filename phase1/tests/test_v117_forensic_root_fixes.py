@@ -233,16 +233,25 @@ def test_v117_p1_012_environment_lazy(monkeypatch):
 # ===========================================================================
 
 def test_v117_p1_029_total_proteins_uses_string_csv(tmp_path, monkeypatch):
-    """FIX #4: ``_load_dataset_stats`` must compute total_proteins as
-    ``max(uniprot_rows, string_unique_protein_count)``. The previous v113
-    "fix" only handled the rare case where uniprot_proteins.csv was
-    COMPLETELY ABSENT, leaving the common case (both CSVs exist)
-    unaddressed.
+    """FIX #4: ``_load_dataset_stats`` must compute total_proteins as the
+    UNION of uniprot_ids and string_ids (TEAMMATE-4 ROOT FIX).
+
+    The original v117 fix used ``max(uniprot_rows, string_unique_protein_count)``
+    which UNDERCOUNTED proteins that appear in only one source. The
+    TEAMMATE-4 ROOT FIX replaces max() with the set UNION:
+        total_proteins = |uniprot_ids ∪ string_ids|
+
+    The test data:
+      UniProt: 3 proteins (P001, P002, P003)
+      STRING: 7 unique proteins (ENSP1..ENSP7) — none overlap with UniProt
+              (different ID namespaces).
+      max(3, 7) = 7   (WRONG — drops the 3 uniprot proteins)
+      UNION(3, 7) = 10 (CORRECT — counts all unique proteins)
     """
     # Build a fake processed_data dir with:
-    #   - uniprot_proteins.csv (3 rows -> 3 proteins)
+    #   - uniprot_proteins.csv (3 rows -> 3 proteins: P001, P002, P003)
     #   - string_protein_protein_interactions.csv (6 rows, 7 unique protein
-    #     IDs across both columns: ENSP1..ENSP7)
+    #     IDs across both columns: ENSP1..ENSP7 — NONE overlap with UniProt)
     pdir = tmp_path / "processed_data"
     pdir.mkdir()
     (pdir / "uniprot_proteins.csv").write_text(
@@ -252,7 +261,8 @@ def test_v117_p1_029_total_proteins_uses_string_csv(tmp_path, monkeypatch):
         "P003,EGFR\n"
     )
     # 6 PPI rows; column 0 has ENSP1..ENSP6 (6 unique), column 1 has
-    # ENSP2..ENSP7 (6 unique). Union = ENSP1..ENSP7 = 7 unique proteins.
+    # ENSP2..ENSP7 (6 unique). Union = ENSP1..ENSP7 = 7 unique proteins
+    # (none overlap with the UniProt P001/P002/P003 IDs).
     (pdir / "string_protein_protein_interactions.csv").write_text(
         "protein1,protein2,combined_score\n"
         "9606.ENSP1,9606.ENSP2,900\n"
@@ -269,10 +279,14 @@ def test_v117_p1_029_total_proteins_uses_string_csv(tmp_path, monkeypatch):
     monkeypatch.setattr(svc, "_processed_data_dir", lambda: pdir)
 
     result = svc._load_dataset_stats()
-    assert result["total_proteins"] == 7, (
-        f"total_proteins must be max(uniprot_rows=3, string_unique=7) = 7. "
-        f"Got {result['total_proteins']}. The v117 ROOT FIX parses the STRING "
-        f"PPI CSV and counts unique protein IDs across BOTH columns."
+    # TEAMMATE-4 ROOT FIX: UNION of 3 uniprot + 7 string (no overlap) = 10.
+    # The previous v117 max() returned 7, dropping the 3 UniProt proteins
+    # because STRING's protein count (7) was larger. UNION correctly counts
+    # all 10 unique proteins.
+    assert result["total_proteins"] == 10, (
+        f"total_proteins must be |uniprot ∪ string| = |3 ∪ 7| = 10 "
+        f"(TEAMMATE-4 UNION fix). Got {result['total_proteins']}. "
+        f"If you got 7, the bug is back: max() instead of UNION."
     )
 
 
