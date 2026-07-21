@@ -1937,9 +1937,29 @@ def _validate_output_impl() -> dict:
             from contracts.feature_validator import (  # type: ignore[no-redef]
                 validate_feature_completeness as _validate_feature_completeness,
             )
+        # v133 ROOT FIX (Teammate 1 P1->P2 integration, hostile-auditor pass):
+        # The previous code passed the FULL ``PHASE1_OUTPUT_SCHEMA`` (all 11
+        # sources) to ``validate_feature_completeness``. This caused
+        # ``validate_output`` to FAIL in production whenever ANY of the 4
+        # non-Phase-2-blocking sources (``chembl_activities``,
+        # ``interactions``, ``indications``, ``omim_susceptibility``) was
+        # missing or below threshold — even though those sources are
+        # validated separately by ``_validate_phase1_contract`` (the
+        # schema-level check) and are NOT required for Phase 2 to fire.
+        # The issue spec's TARGET STATE explicitly lists only 7 sources
+        # (ChEMBL drugs, DrugBank drugs, UniProt proteins, STRING PPI,
+        # DisGeNET GDA, OMIM GDA, PubChem enrichment) as required for
+        # Phase 2. ROOT FIX: pass a SUB-SCHEMA containing only the 7
+        # sources in ``_REQUIRED_SOURCES_FOR_PHASE2``. The other 4
+        # sources remain validated by ``_validate_phase1_contract``.
+        _feature_schema = {
+            k: PHASE1_OUTPUT_SCHEMA[k]
+            for k in _REQUIRED_SOURCES_FOR_PHASE2
+            if k in PHASE1_OUTPUT_SCHEMA
+        }
         _feature_ok, _feature_failures = _validate_feature_completeness(
             processed_dir,
-            schema=PHASE1_OUTPUT_SCHEMA,
+            schema=_feature_schema,
             max_null_rate=0.05,
         )
         if not _feature_ok:

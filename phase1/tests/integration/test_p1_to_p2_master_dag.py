@@ -122,19 +122,17 @@ def test_validate_output_passes_with_real_filenames():
                 "acknowledged": False,
                 "source": "test_mock",
             },
-        ), patch(
-            # TM2's feature_validator (Check 5) flags missing optional
-            # columns. The test fixtures only include the minimum
-            # columns needed for the ID-column check, so feature_validator
-            # would flag every optional column as missing. Patch it out
-            # here -- the feature_validator has its own dedicated tests in
-            # test_p1_to_p3_feature_completeness.py.
-            "contracts.feature_validator.validate_feature_completeness",
-            return_value=(True, []),
         ):
-            # Import AFTER patching so the module-level state is fresh.
-            # The import is idempotent (Python caches modules) but the
-            # function reads module state at CALL TIME via globals().
+            # v133 ROOT FIX (Teammate 1 P1->P2 integration, hostile-auditor pass):
+            # The previous version of this test PATCHED OUT
+            # ``validate_feature_completeness`` with a fake ``(True, [])``
+            # return value. That made the test a "fake" -- it passed even
+            # when the real feature_validator had a bug that flagged every
+            # missing optional column as a failure (blocking trigger_phase2
+            # in production). The fix removed the patch so the test now
+            # exercises the REAL feature_validator code path. The v133 fix
+            # to feature_validator.py (differentiate required vs optional
+            # columns) makes this test pass with minimal CSV fixtures.
             from phase1.dags.master_pipeline_dag import _validate_output_impl
             result = _validate_output_impl()
 
@@ -212,10 +210,9 @@ def test_validate_output_fails_on_synth_inchikeys():
                 "acknowledged": False,
                 "source": "test_mock",
             },
-        ), patch(
-            "contracts.feature_validator.validate_feature_completeness",
-            return_value=(True, []),
         ):
+            # v133 ROOT FIX: removed the validate_feature_completeness patch
+            # so this test exercises the REAL feature_validator code path.
             from phase1.dags.master_pipeline_dag import _validate_output_impl
             result = _validate_output_impl()
 
@@ -552,10 +549,9 @@ def test_validate_output_fails_on_missing_id_column():
                 "acknowledged": False,
                 "source": "test_mock",
             },
-        ), patch(
-            "contracts.feature_validator.validate_feature_completeness",
-            return_value=(True, []),
         ):
+            # v133 ROOT FIX: removed the validate_feature_completeness patch
+            # so this test exercises the REAL feature_validator code path.
             from phase1.dags.master_pipeline_dag import _validate_output_impl
             result = _validate_output_impl()
 
