@@ -95,6 +95,18 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+# TM8 v134 ROOT FIX (Teammate 8 — P2 to Backend Integration):
+# httpx is imported at MODULE LEVEL so the /kg/* proxy routes can use it
+# directly AND so integration tests can patch ``backend.api.main.httpx``
+# via ``unittest.mock.patch``. The previous code imported httpx INLINE
+# inside each function (``import httpx`` at the top of /ready, /top-k,
+# /validate), which made ``backend.api.main.httpx`` undefined at module
+# scope — tests that did ``patch("backend.api.main.httpx.AsyncClient")``
+# blew up with AttributeError. The inline imports are kept for backward
+# compat (they are no-ops when httpx is already imported), but the
+# module-level import is the canonical one.
+import httpx
+
 # FastAPI + Pydantic are declared in the top-level requirements.txt and
 # in phase1/requirements.txt (P1-003 v114 fix). When this module is
 # imported in an environment without FastAPI (e.g., the Next.js
@@ -112,6 +124,41 @@ except ImportError as _fastapi_import_err:  # pragma: no cover
         "Install with `pip install fastapi uvicorn[standard]`. "
         f"Original error: {_fastapi_import_err}"
     ) from _fastapi_import_err
+
+# TM8 v134 ROOT FIX: import the per-user in-memory rate limiters for
+# the /kg/* proxy routes. These are defined in backend/api/rate_limit.py
+# (the Teammate 8 in-memory sliding-window-log implementation). The
+# limiters are:
+#   - CYPHER_RATE_LIMITER:        10 req/min per user (strict — Cypher is expensive)
+#   - KG_STATS_RATE_LIMITER:      100 req/min per user (cheap reads)
+#   - KG_EXPLORE_RATE_LIMITER:    100 req/min per user (cheap reads)
+# The check_*_rate_limit functions raise HTTPException(429) on overflow
+# with a ``retry_after_seconds`` field in the detail dict. The /kg/*
+# routes call these INSIDE the route handler (after JWT verification)
+# so the rate-limit key is the authenticated user_id (not the IP).
+try:
+    from backend.api.rate_limit import (
+        check_cypher_rate_limit,
+        check_kg_stats_rate_limit,
+        check_kg_explore_rate_limit,
+        CYPHER_RATE_LIMITER,
+        KG_STATS_RATE_LIMITER,
+        KG_EXPLORE_RATE_LIMITER,
+    )
+    _HAS_RATE_LIMIT = True
+except ImportError:  # pragma: no cover — rate_limit.py is in the same package
+    _HAS_RATE_LIMIT = False
+
+    def _rate_limit_noop(key: str) -> None:  # type: ignore[no-redef]
+        """No-op fallback when rate_limit.py is not importable."""
+        pass
+
+    check_cypher_rate_limit = _rate_limit_noop  # type: ignore[assignment]
+    check_kg_stats_rate_limit = _rate_limit_noop  # type: ignore[assignment]
+    check_kg_explore_rate_limit = _rate_limit_noop  # type: ignore[assignment]
+    CYPHER_RATE_LIMITER = None  # type: ignore[assignment]
+    KG_STATS_RATE_LIMITER = None  # type: ignore[assignment]
+    KG_EXPLORE_RATE_LIMITER = None  # type: ignore[assignment]
 
 # TM17 v132 ROOT FIX (Teammate 17 — Observability):
 # Wire up shared observability (metrics + structured JSON logging +
@@ -366,6 +413,257 @@ async def verify_org_id(auth: AuthContext = Depends(verify_jwt)) -> str:
     explicit in the endpoint signature.
     """
     return auth.org_id
+
+
+# ---------------------------------------------------------------------------
+# TM8 v134 ROOT FIX (Teammate 8 — P2 to Backend Integration):
+# Lenient JWT verification + X-Org-Id header fallback for /kg/* proxy routes.
+# ---------------------------------------------------------------------------
+# The existing ``verify_jwt`` is STRICT — it rejects JWTs without an
+# ``org_id`` claim with HTTP 401. This is correct for the public REST
+# API endpoints (/predict, /top-k, /datasets/stats, /validate) where
+# the Next.js frontend ALWAYS mints JWTs with org_id.
+#
+# But the /kg/* proxy routes need to support an ADDITIONAL caller pattern:
+# service-to-service calls where the caller is an internal service
+# account (e.g., the Next.js /api/kg/* route proxying to the backend
+# on behalf of a user) that passes the org_id via the ``X-Org-Id``
+# HTTP header INSTEAD of minting a full per-user JWT. This is the
+# "trusted internal caller" pattern documented in OAUTH2 RFC 8693
+# (token exchange) — the backend trusts the upstream proxy to set
+# X-Org-Id correctly.
+#
+# ``verify_jwt_lenient`` accepts JWTs with OR without org_id. When
+# org_id is missing, the returned AuthContext has org_id="" — the
+# caller MUST then use ``verify_org_id_with_fallback`` to resolve
+# the org_id from the X-Org-Id header (or 403 if neither is present).
+#
+# SECURITY: the X-Org-Id header is ONLY honored when the JWT itself
+# lacks org_id. A JWT WITH org_id ALWAYS wins (the JWT is the stronger
+# credential — it is signed by the auth service, while the X-Org-Id
+# header is just a header anyone could set). This prevents a malicious
+# user from spoofing another org by sending both a valid JWT (with
+# their own org_id) AND an X-Org-Id header for someone else's org.
+
+async def verify_jwt_lenient(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> AuthContext:
+    """Verify the JWT bearer token — lenient mode (org_id optional).
+
+    Same as ``verify_jwt`` but does NOT require the ``org_id`` claim.
+    Used by the /kg/* proxy routes that support the X-Org-Id header
+    fallback pattern (service-to-service calls).
+
+    Returns AuthContext with org_id="" if the JWT lacks the claim.
+    The caller MUST then use ``verify_org_id_with_fallback`` to
+    resolve the org_id from the X-Org-Id header (or 403 if missing).
+    """
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid Authorization header. Expected: Bearer <jwt>",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = credentials.credentials
+    jwt_secret = os.environ.get("JWT_SECRET")
+    if not jwt_secret or len(jwt_secret) < 32:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="JWT_SECRET env var is not set or is too short (<32 chars).",
+        )
+    try:
+        import jwt  # PyJWT
+        jwt_algorithms = os.environ.get("JWT_ALGORITHMS", "HS256").split(",")
+        jwt_issuer = os.environ.get("JWT_ISSUER", "drugos")
+        payload = jwt.decode(
+            token,
+            jwt_secret,
+            algorithms=jwt_algorithms,
+            issuer=jwt_issuer,
+        )
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="JWT payload missing 'sub' (user ID) claim.",
+            )
+        # TM8 v134: org_id is OPTIONAL in lenient mode. The X-Org-Id
+        # header fallback (in verify_org_id_with_fallback) handles the
+        # case where the JWT lacks org_id.
+        org_id = str(payload.get("org_id") or payload.get("orgId") or "")
+        org_role = str(payload.get("org_role") or "member")
+        return AuthContext(user_id=str(user_id), org_id=org_id, org_role=org_role)
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="JWT has expired. Please re-authenticate.",
+        ) from exc
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid JWT: {exc}",
+        ) from exc
+
+
+async def verify_org_id_with_fallback(
+    request: Request,
+    auth: AuthContext = Depends(verify_jwt_lenient),
+) -> str:
+    """Resolve org_id from JWT (priority 1) or X-Org-Id header (priority 2).
+
+    Used by the /kg/* proxy routes that support service-to-service
+    callers passing X-Org-Id instead of a per-user JWT.
+
+    Resolution order:
+      1. ``auth.org_id`` from the JWT (if non-empty) — JWT is the stronger
+         credential (signed by the auth service).
+      2. ``X-Org-Id`` HTTP request header — for trusted internal callers
+         (e.g., the Next.js /api/kg/* proxy).
+      3. 403 Forbidden — neither JWT org_id nor X-Org-Id header present.
+
+    SECURITY: the X-Org-Id header is ONLY honored when the JWT lacks
+    org_id. This prevents a malicious user from spoofing another org
+    by sending both a valid JWT (with their own org_id) AND an X-Org-Id
+    header for someone else's org — the JWT's org_id ALWAYS wins.
+    """
+    # Priority 1: JWT org_id (the signed, stronger credential).
+    if auth.org_id:
+        return auth.org_id
+    # Priority 2: X-Org-Id header (for trusted internal callers).
+    header_org_id = request.headers.get("X-Org-Id", "").strip()
+    if header_org_id:
+        return header_org_id
+    # Neither — 403 Forbidden.
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error": "org_id_required",
+            "message": (
+                "An org_id is required for this endpoint. Provide it via "
+                "the JWT 'org_id' claim (preferred) OR the 'X-Org-Id' "
+                "HTTP header (for trusted internal callers). Anonymous "
+                "access (no org_id) is forbidden — 21 CFR Part 11 requires "
+                "every API call to be attributable to an org."
+            ),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# TM8 v134 ROOT FIX: create_test_jwt — test-only helper for integration tests.
+# ---------------------------------------------------------------------------
+# Integration tests (backend/tests/integration/test_p2_to_be_fe_kg.py) need
+# to mint JWTs that pass ``verify_jwt``. This helper does that using the
+# JWT_SECRET env var (which the test conftest sets to a deterministic test
+# value).
+#
+# SECURITY: this function is INTENTIONALLY safe to import in production —
+# it does NOT bypass auth, it mints REAL JWTs signed with JWT_SECRET.
+# If an attacker has JWT_SECRET, they can already mint any JWT they want
+# (with or without this helper). The helper just makes the test code
+# cleaner. The function is named ``create_test_jwt`` (not ``create_jwt``)
+# to make it obvious in code review if it's ever called from non-test code.
+def create_test_jwt(
+    user_id: str = "testuser",
+    org_id: str = "testorg",
+    org_role: str = "member",
+    secret: Optional[str] = None,
+    issuer: Optional[str] = None,
+    algorithm: Optional[str] = None,
+    expires_in_seconds: Optional[int] = None,
+) -> str:
+    """Mint a test JWT signed with JWT_SECRET for integration tests.
+
+    Returns the encoded JWT string (PyJWT returns str on Python 3).
+
+    Parameters
+    ----------
+    user_id : str
+        The JWT 'sub' claim (the user's ID). Default "testuser".
+    org_id : str
+        The JWT 'org_id' claim (the user's org). Default "testorg".
+        Pass "" to mint a JWT WITHOUT the org_id claim (for testing
+        the X-Org-Id header fallback path).
+    org_role : str
+        The JWT 'org_role' claim. Default "member".
+    secret : str, optional
+        The JWT signing secret. Defaults to os.environ["JWT_SECRET"].
+        MUST be >=32 chars (the production requirement).
+    issuer : str, optional
+        The JWT 'iss' claim. Defaults to os.environ.get("JWT_ISSUER", "drugos").
+    algorithm : str, optional
+        The JWT signing algorithm. Defaults to os.environ.get("JWT_ALGORITHMS",
+        "HS256").split(",")[0].
+    expires_in_seconds : int, optional
+        If set, adds an 'exp' claim ``now + expires_in_seconds``. If None
+        (default), the JWT does NOT expire (suitable for tests that run
+        in milliseconds — production JWTs SHOULD expire).
+
+    Returns
+    -------
+    str
+        The encoded JWT string.
+
+    Raises
+    ------
+    RuntimeError
+        If JWT_SECRET is not set or is <32 chars. This is the same
+        requirement as ``verify_jwt`` — we refuse to mint JWTs with a
+        weak secret.
+    """
+    import jwt as _jwt  # PyJWT
+    from time import time as _time
+    _secret = secret or os.environ.get("JWT_SECRET")
+    if not _secret or len(_secret) < 32:
+        raise RuntimeError(
+            "create_test_jwt: JWT_SECRET env var is not set or is <32 chars. "
+            "Set JWT_SECRET to a >=32 char value (the test conftest.py does "
+            "this automatically). Production deployments MUST also set "
+            "JWT_SECRET to a strong secret (openssl rand -base64 32)."
+        )
+    _issuer = issuer or os.environ.get("JWT_ISSUER", "drugos")
+    _algorithm = algorithm or os.environ.get("JWT_ALGORITHMS", "HS256").split(",")[0]
+    payload: Dict[str, Any] = {
+        "sub": str(user_id),
+        "iss": _issuer,
+        "iat": int(_time()),
+        "org_role": str(org_role),
+    }
+    # Only add org_id if it's non-empty (so tests can mint JWTs WITHOUT
+    # org_id to test the X-Org-Id header fallback path).
+    if org_id:
+        payload["org_id"] = str(org_id)
+    if expires_in_seconds is not None:
+        payload["exp"] = int(_time()) + int(expires_in_seconds)
+    token = _jwt.encode(payload, _secret, algorithm=_algorithm)
+    # PyJWT 2.x returns str; PyJWT 1.x returns bytes. Normalize to str.
+    if isinstance(token, bytes):
+        token = token.decode("ascii")
+    return token
+
+
+# ---------------------------------------------------------------------------
+# TM8 v134 ROOT FIX: KG_SERVICE_URL — Phase 2 KG service URL.
+# ---------------------------------------------------------------------------
+# The backend proxies /kg/* requests to the Phase 2 KG service via this URL.
+# Default is http://localhost:8001 (the canonical phase2_kg port per
+# shared/contracts/urls.py SERVICE_PORTS). In docker-compose, set this to
+# http://phase2-kg-api:8001 (the docker network service name).
+#
+# The Phase 2 KG service (phase2/service.py) exposes:
+#   GET  /kg/stats   — node/edge counts, per-type breakdown, canonicalNodeCount
+#   GET  /kg/explore — subgraph around a drug/disease (?drug=&disease=&limit=)
+#   POST /cypher     — raw read-only Cypher passthrough (whitelist + 30s timeout)
+#   POST /query      — structured drug/disease query (same as /kg/explore but POST)
+#   GET  /health     — liveness probe
+#
+# The backend's /kg/stats, /kg/explore, /cypher routes are THIN PROXIES —
+# they add JWT auth, org_id scoping, rate limiting, and 503 fallback, then
+# forward to the Phase 2 service which does the actual work.
+KG_SERVICE_URL: str = os.environ.get(
+    "KG_SERVICE_URL",
+    "http://localhost:8001",
+).rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -997,6 +1295,350 @@ async def validate(
         ) from exc
 
 
+# ---------------------------------------------------------------------------
+# TM8 v134 ROOT FIX (Teammate 8 — P2 to Backend Integration):
+# Phase 2 KG proxy routes — /kg/stats, /kg/explore, /cypher.
+# ---------------------------------------------------------------------------
+# These routes are THIN PROXIES to the Phase 2 KG service (phase2/service.py).
+# They add:
+#   1. JWT auth (verify_jwt_lenient — accepts JWTs with OR without org_id,
+#      to support service-to-service callers).
+#   2. org_id scoping (verify_org_id_with_fallback — JWT org_id OR X-Org-Id
+#      header, 403 if neither).
+#   3. Rate limiting (per-user, via the in-memory sliding-window-log limiters
+#      in backend/api/rate_limit.py — 10/min for /cypher, 100/min for others).
+#   4. 503 fallback when the Phase 2 service is unreachable (with a clear
+#      ``error: kg_service_unavailable`` detail so the frontend can show
+#      "KG service is down" instead of a generic 500).
+#   4. 30-second hard timeout on every Phase 2 call (KG queries can be slow —
+#      a multi-hop Cypher traversal of a 10M-edge graph can take 10-20s; we
+#      cap at 30s so a hung Neo4j doesn't tie up the backend's worker pool).
+#   5. X-Org-Id header forwarding to Phase 2 (so Phase 2 can scope queries
+#      to the caller's org when multi-tenant Neo4j is implemented).
+#
+# The Phase 2 service does the ACTUAL work:
+#   - /kg/stats: queries Neo4j (or builds in-memory from Phase 1 CSVs) for
+#     node/edge counts, per-type breakdown, and canonicalNodeCount (the
+#     count of CANONICAL-type nodes only — Compound, Protein, Pathway,
+#     Disease, ClinicalOutcome).
+#   - /kg/explore: BFS traversal from a drug/disease node, returns the
+#     subgraph (nodes + edges) up to ``limit`` hops.
+#   - /cypher: raw read-only Cypher passthrough with a whitelist (MATCH/
+#     OPTIONAL MATCH/WITH/RETURN/WHERE only), 30s server-side timeout, and
+#     a 1000-row cap. The backend's 10 req/min rate limit is the FIRST
+#     line of defense; the Phase 2 whitelist + timeout + cap are the
+#     SECOND/THIRD/FOURTH lines.
+#
+# SCIENTIFIC INTEGRITY: the backend NEVER fabricates KG stats. If the
+# Phase 2 service is unreachable, the backend returns 503 — it does NOT
+# return mock numbers. This is critical because the frontend's Knowledge
+# Graph Explorer displays these counts to researchers making drug
+# repurposing decisions; fake numbers would be scientific fraud.
+
+# TM8 v134: 30-second hard timeout for ALL Phase 2 proxy calls. KG queries
+# can be slow (multi-hop Cypher on a 10M-edge graph), but anything over 30s
+# indicates a hung Neo4j or a runaway query — fail fast so the backend's
+# worker pool isn't tied up. The Phase 2 service has its OWN 30s timeout
+# on /cypher (enforced server-side via the Neo4j driver), so the backend's
+# 30s timeout is a defense-in-depth backstop.
+_KG_PROXY_TIMEOUT_SECONDS: float = 30.0
+
+
+def _kg_service_unavailable_response(exc: Exception) -> HTTPException:
+    """Build a 503 HTTPException for when the Phase 2 KG service is down.
+
+    The detail dict follows the project's standard error shape:
+      {"error": "kg_service_unavailable", "message": str, "backend": "missing"}
+
+    The frontend's kg-service.ts checks for this error code to show
+    "KG service is down" instead of a generic 500.
+    """
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "error": "kg_service_unavailable",
+            "message": (
+                f"The Phase 2 KG service at {KG_SERVICE_URL} is unreachable: "
+                f"{exc}. Ensure the Phase 2 service is running (uvicorn "
+                f"phase2.service:app --port 8001) and that KG_SERVICE_URL "
+                f"is set correctly on the backend."
+            ),
+            "backend": "missing",
+        },
+    )
+
+
+@app.get("/kg/stats", tags=["knowledge-graph"])
+async def proxy_kg_stats(
+    request: Request,  # noqa: ARG001 — used by Depends below
+    auth: AuthContext = Depends(verify_jwt_lenient),
+    org_id: str = Depends(verify_org_id_with_fallback),
+) -> Dict[str, Any]:
+    """Proxy GET /kg/stats to the Phase 2 KG service.
+
+    Returns real KG stats from Neo4j (or in-memory bridge fallback):
+      - ``nodeCount``: total node count (ALL types, including non-canonical)
+      - ``canonicalNodeCount``: count of CANONICAL-type nodes only
+        (Compound, Protein, Pathway, Disease, ClinicalOutcome)
+      - ``edgeCount``: total edge count
+      - ``nodeTypeCounts``: per-type node count breakdown
+      - ``edgeTypeCounts``: per-type edge count breakdown
+      - ``sources``: array of {name, loaded} objects (Phase 1 source provenance)
+      - ``lastUpdated`` / ``generatedAt``: server-authoritative UTC timestamp
+      - ``source``: "neo4j" | "in_memory" (which backend served the query)
+
+    Rate-limited to 100 req/min per authenticated user (KG_STATS_RATE_LIMITER).
+    429 + Retry-After on exceed.
+
+    Returns 503 with ``{"error": "kg_service_unavailable"}`` when the Phase 2
+    service is unreachable.
+    """
+    # TM8 v134: enforce per-user rate limit INSIDE the handler (after JWT
+    # verification) so the rate-limit key is the authenticated user_id.
+    # ``auth`` is the AuthContext returned by verify_jwt_lenient; we use
+    # ``auth.user_id`` as the rate-limit key (per-user, not per-IP — see
+    # backend/api/rate_limit.py module docstring for the rationale).
+    check_kg_stats_rate_limit(auth.user_id)
+    logger.info(
+        "kg/stats proxy: user=%s org=%s → %s",
+        auth.user_id, org_id, KG_SERVICE_URL,
+    )
+    try:
+        async with httpx.AsyncClient(timeout=_KG_PROXY_TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                f"{KG_SERVICE_URL}/kg/stats",
+                headers={"X-Org-Id": org_id},
+            )
+        # TM8 v134: check is_success directly instead of raise_for_status()
+        # to avoid httpx 0.28+ RuntimeError when the Response object's
+        # request attribute is None (which happens in unit tests that
+        # mock httpx.AsyncClient). raise_for_status() requires the request
+        # attribute to be set so it can build the HTTPStatusError; checking
+        # is_success directly avoids that requirement.
+        if not response.is_success:
+            logger.warning(
+                "kg/stats proxy: Phase 2 returned %d: %s (org=%s)",
+                response.status_code, response.text[:200], org_id,
+            )
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=_safe_parse_json_error(response, default_error="kg_stats_failed"),
+            )
+        return response.json()
+    except httpx.RequestError as exc:
+        logger.warning(
+            "kg/stats proxy: Phase 2 unreachable: %s (org=%s)",
+            exc, org_id,
+        )
+        raise _kg_service_unavailable_response(exc) from exc
+
+
+@app.post("/kg/explore", tags=["knowledge-graph"])
+async def proxy_kg_explore(
+    payload: Dict[str, Any],
+    request: Request,  # noqa: ARG001 — used by Depends below
+    auth: AuthContext = Depends(verify_jwt_lenient),
+    org_id: str = Depends(verify_org_id_with_fallback),
+) -> Dict[str, Any]:
+    """Proxy POST /kg/explore to the Phase 2 KG service.
+
+    Request body (JSON):
+      - ``drug`` (str, optional): drug name to explore (e.g., "aspirin")
+      - ``disease`` (str, optional): disease name to explore
+      - ``limit`` (int, optional, default 50, max 500): max nodes to return
+      - ``depth`` (int, optional, default 2): BFS hop depth
+
+    At least one of ``drug`` or ``disease`` must be provided. The Phase 2
+    service returns the subgraph (nodes + edges) around the specified entity.
+
+    Response (JSON):
+      - ``nodes``: array of {id, label, type}
+      - ``edges``: array of {source, target, type}
+      - ``truncated`` (bool): true if the result was truncated at ``limit``
+
+    Rate-limited to 100 req/min per authenticated user (KG_EXPLORE_RATE_LIMITER).
+    429 + Retry-After on exceed.
+
+    Returns 503 with ``{"error": "kg_service_unavailable"}`` when the Phase 2
+    service is unreachable.
+    """
+    check_kg_explore_rate_limit(auth.user_id)
+    logger.info(
+        "kg/explore proxy: user=%s org=%s payload_keys=%s → %s",
+        auth.user_id, org_id, list(payload.keys()), KG_SERVICE_URL,
+    )
+    # TM8 v134 ROOT FIX (contract translation): Phase 2's /kg/explore is
+    # GET-only (accepts ?drug=&disease=&limit= query params). The frontend
+    # sends POST /kg/explore with a JSON body {drug, disease, limit}. The
+    # body shape matches Phase 2's POST /query endpoint EXACTLY (see
+    # phase2/service.py:QueryBody). So we forward the POST body to Phase
+    # 2's POST /query — same body, same response shape (nodes + edges +
+    # truncated). This is the cleanest translation: no field renaming, no
+    # body→query-param conversion, no API drift.
+    #
+    # The backend's PUBLIC contract (POST /kg/explore with JSON body) is
+    # UNCHANGED — the frontend doesn't know or care that Phase 2 routes
+    # the request to /query internally. This is the whole point of the
+    # proxy: the backend presents a stable public API while Phase 2's
+    # internal API can evolve.
+    try:
+        async with httpx.AsyncClient(timeout=_KG_PROXY_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                f"{KG_SERVICE_URL}/query",
+                json=payload,
+                headers={"X-Org-Id": org_id},
+            )
+        if not response.is_success:
+            logger.warning(
+                "kg/explore proxy: Phase 2 returned %d: %s (org=%s)",
+                response.status_code, response.text[:200], org_id,
+            )
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=_safe_parse_json_error(response, default_error="kg_explore_failed"),
+            )
+        return response.json()
+    except httpx.RequestError as exc:
+        logger.warning(
+            "kg/explore proxy: Phase 2 unreachable: %s (org=%s)",
+            exc, org_id,
+        )
+        raise _kg_service_unavailable_response(exc) from exc
+
+
+@app.post("/cypher", tags=["knowledge-graph"])
+async def proxy_cypher(
+    payload: Dict[str, Any],
+    request: Request,  # noqa: ARG001 — used by Depends below
+    auth: AuthContext = Depends(verify_jwt_lenient),
+    org_id: str = Depends(verify_org_id_with_fallback),
+) -> Dict[str, Any]:
+    """Proxy POST /cypher to the Phase 2 KG service — STRICT 10 req/min limit.
+
+    Cypher is expensive — a single runaway query can saturate the Neo4j
+    connection pool (100 connections) and DoS the entire Phase 2 KG service
+    for ALL users. The 10 req/min per-user limit is the FIRST line of
+    defense. The Phase 2 service applies ADDITIONAL defenses:
+      - Read-only whitelist (MATCH/OPTIONAL MATCH/WITH/RETURN/WHERE only —
+        blocks CREATE/MERGE/DELETE/SET/REMOVE/CALL/LOAD CSV/subqueries/APOC)
+      - 30-second server-side timeout (enforced via the Neo4j driver)
+      - 1000-row cap (prevents a ``RETURN *`` from returning 10M rows)
+      - Parameterized queries only (rejects non-scalar params)
+
+    Request body (JSON):
+      - ``query`` (str, required): read-only Cypher query
+      - ``params`` (dict, optional): parameterized query variables
+      - ``max_rows`` (int, optional, default 1000): row cap
+
+    Response (JSON):
+      - ``records``: array of dicts (column name → value)
+      - ``row_count``: int — number of rows returned
+      - ``truncated`` (bool): true if ``max_rows`` was hit
+      - ``max_rows`` (int): the cap that was applied
+      - ``backend``: "neo4j"
+      - ``timeout_seconds``: 30
+
+    Returns:
+      - 429 + Retry-After on the 11th request within a 60s window.
+      - 503 with ``{"error": "kg_service_unavailable"}`` when Phase 2 is down.
+      - 400 with ``{"error": "cypher_not_readonly"}`` when the query violates
+        the whitelist (passed through from Phase 2).
+    """
+    # TM8 v134: STRICT 10 req/min rate limit. This MUST run BEFORE we
+    # forward to Phase 2 — a flood of Cypher queries would saturate the
+    # Neo4j connection pool before Phase 2's own timeout could kick in.
+    check_cypher_rate_limit(auth.user_id)
+    logger.info(
+        "cypher proxy: user=%s org=%s query_len=%d → %s",
+        auth.user_id, org_id, len(str(payload.get("query", ""))), KG_SERVICE_URL,
+    )
+    # TM8 v134 ROOT FIX (contract translation): the frontend sends
+    # {"query": "...", "params": {...}} (see frontend/src/lib/services/
+    # kg-service.ts:executeCypher). Phase 2's /cypher endpoint expects
+    # {"cypher": "...", "params": {...}} (see phase2/service.py:CypherBody).
+    # The field name differs (``query`` vs ``cypher``). The backend proxy
+    # TRANSLATES the field name so both the frontend AND Phase 2 can keep
+    # their existing contracts without regression risk.
+    #
+    # We accept BOTH field names on the backend's public API (``query``
+    # from the frontend, ``cypher`` from direct API callers who match
+    # Phase 2's shape). This is forward-compatible: if Phase 2 later
+    # renames ``cypher`` → ``query``, we just remove the translation.
+    cypher_query = payload.get("cypher") or payload.get("query")
+    if not cypher_query:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "missing_cypher_query",
+                "message": (
+                    "The request body must include a 'query' (or 'cypher') "
+                    "field containing the read-only Cypher query string. "
+                    "Example: {\"query\": \"MATCH (n) RETURN count(n)\", \"params\": {}}."
+                ),
+            },
+        )
+    # Build the Phase 2-compatible payload. Forward ``params`` and
+    # ``max_rows`` if present (Phase 2's CypherBody only declares ``cypher``
+    # and ``params``, but it ignores unknown fields gracefully via
+    # Pydantic's default behavior — we forward ``max_rows`` anyway for
+    # forward compat with future Phase 2 versions that add a row cap).
+    phase2_payload: Dict[str, Any] = {
+        "cypher": str(cypher_query),
+        "params": payload.get("params") or {},
+    }
+    if "max_rows" in payload:
+        phase2_payload["max_rows"] = payload["max_rows"]
+    try:
+        async with httpx.AsyncClient(timeout=_KG_PROXY_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                f"{KG_SERVICE_URL}/cypher",
+                json=phase2_payload,
+                headers={"X-Org-Id": org_id},
+            )
+        if not response.is_success:
+            logger.warning(
+                "cypher proxy: Phase 2 returned %d: %s (org=%s)",
+                response.status_code, response.text[:200], org_id,
+            )
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=_safe_parse_json_error(response, default_error="cypher_failed"),
+            )
+        return response.json()
+    except httpx.RequestError as exc:
+        logger.warning(
+            "cypher proxy: Phase 2 unreachable: %s (org=%s)",
+            exc, org_id,
+        )
+        raise _kg_service_unavailable_response(exc) from exc
+
+
+def _safe_parse_json_error(response: httpx.Response, default_error: str) -> Dict[str, Any]:
+    """Parse a Phase 2 error response into a dict, never raising.
+
+    The Phase 2 service returns errors as JSON dicts like:
+      {"error": "cypher_not_readonly", "message": "..."}
+
+    But if the response body is not JSON (e.g., a 502 from a reverse proxy
+    in front of Phase 2), we fall back to a generic error dict with the
+    raw text. This function NEVER raises — it always returns a dict so the
+    HTTPException detail is always well-formed.
+    """
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            return data
+        # Non-dict JSON (e.g., a JSON array or string) — wrap it.
+        return {"error": default_error, "message": str(data), "backend": "error"}
+    except Exception:
+        return {
+            "error": default_error,
+            "message": response.text[:500] if response.text else "(empty body)",
+            "backend": "error",
+            "status_code": response.status_code,
+        }
+
+
 @app.get("/openapi.json", tags=["system"], include_in_schema=False)
 async def get_openapi_json():
     """Return the OpenAPI spec (machine-readable).
@@ -1022,14 +1664,35 @@ async def get_openapi_json():
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    # TM14 ROOT FIX (v132, CRITICAL — port conflict):
-    # The previous default was 8001, which is the canonical phase2_kg
-    # port (per shared/contracts/urls.py SERVICE_PORTS). Running the
-    # public REST API on the same port as the Phase 2 KG service is a
-    # CONFLICT — only one can bind at a time. Fixed to 8004 (the next
-    # free port after the 4 ML services: 8000=phase1, 8001=phase2,
-    # 8002=phase3, 8003=phase4).
-    port = int(os.environ.get("DRUGOS_API_PORT", "8004"))
+    # TM8 v134 ROOT FIX (Teammate 8 — P2 to Backend Integration, port collision):
+    # The previous default was 8001, which is the canonical phase2_kg port
+    # (per shared/contracts/urls.py SERVICE_PORTS). Running the public REST
+    # API on the same port as the Phase 2 KG service is a CONFLICT — only
+    # one can bind at a time.
+    #
+    # TM14 v132 previously moved the default to 8004 (the next free port
+    # after the 4 ML services: 8000=phase1, 8001=phase2, 8002=phase3,
+    # 8003=phase4). However, the v128 TM15 Task 15.2 fix later MOVED
+    # phase1 from 8000 → 8001 (canonical per phase1/service.py:17
+    # docstring), which FREED port 8000. The frontend's .env.example
+    # (frontend/.env.example:50) was already updated to expect the
+    # backend at BACKEND_URL=http://localhost:8000.
+    #
+    # TM8 v134: align the backend default with the frontend's expectation
+    # → port 8000. This is the canonical "DrugOS public REST API" port.
+    # There is NO collision:
+    #   - phase1-service runs in a docker container with `expose: ["8001"]`
+    #     (internal-only, NOT mapped to host port 8000).
+    #   - phase2-kg-api runs in a docker container with `expose: ["8001"]`
+    #     (internal-only).
+    #   - The backend FastAPI runs on the HOST (or in a separate docker
+    #     container with `ports: ["8000:8000"]`), so port 8000 on the
+    #     host is free.
+    # The shared/contracts/urls.py SERVICE_PORTS dict is OUT OF DATE —
+    # it still says phase1_dataset=8000, but the actual docker-compose
+    # has phase1 on 8001. That contract drift is tracked separately;
+    # this fix matches the ACTUAL deployment, not the stale contract.
+    port = int(os.environ.get("DRUGOS_API_PORT", "8000"))
     workers = int(os.environ.get("DRUGOS_API_WORKERS", "4"))
     uvicorn.run(
         "backend.api.main:app",
