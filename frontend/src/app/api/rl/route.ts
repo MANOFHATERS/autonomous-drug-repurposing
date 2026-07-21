@@ -315,6 +315,11 @@ export async function POST(req: NextRequest) {
       // BE-014: surface the persistence outcome so the UI can display
       // "50 candidates saved" or a warning if persistence partially failed.
       persistence,
+      // TM13 ROOT FIX (v132): forward the pathway_enrichment_available
+      // flag and orgId echo from the Python service so the frontend
+      // candidate table knows whether to render the Pathway column.
+      pathwayEnrichmentAvailable: result.pathwayEnrichmentAvailable ?? false,
+      orgId: result.orgId,
     });
   } catch (e: unknown) {
     // FE-063 ROOT FIX: `e: any` disabled type safety; if a non-Error was
@@ -439,6 +444,11 @@ export async function GET(req: NextRequest) {
       page: pageRaw,
       pageSize: pageSizeRaw,
       note: result.note,
+      // TM13 ROOT FIX (v132): forward the pathway_enrichment_available
+      // flag and orgId echo from the Python service so the frontend
+      // candidate table knows whether to render the Pathway column.
+      pathwayEnrichmentAvailable: result.pathwayEnrichmentAvailable ?? false,
+      orgId: result.orgId,
     });
   } catch (e: unknown) {
     // FE-063 ROOT FIX: `e: any` disabled type safety; if a non-Error was

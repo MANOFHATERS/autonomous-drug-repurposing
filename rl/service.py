@@ -331,6 +331,282 @@ def _find_latest_output_csv() -> Optional[Path]:
     return candidates[0][0]
 
 
+# ============================================================================
+# TM13 ROOT FIX (v132, CRITICAL — Phase 2 ↔ Phase 4 wiring):
+# Pathway enrichment — attaches the biological pathway chain (drug → protein
+# → pathway → disease) to each RankedHypothesis by querying the Phase 2
+# knowledge graph service.
+#
+# This is the "biological pathway chain that explains the prediction"
+# deliverable mandated by project docx §6 (Phase 4 output). Without this
+# field, the dashboard could show scores with no mechanistic explanation —
+# exactly the broken state Teammate 13's issue describes.
+#
+# The Phase 2 KG service exposes /kg/explore?node=<name>&depth=3 which
+# returns the multi-hop neighborhood of a node. We use it to find paths
+# from drug → protein → pathway → disease for each candidate. The result
+# is a list of PathwayChainItem objects (one per discovered pathway).
+#
+# FAILURE MODES (all non-fatal — enrichment is best-effort):
+#   - KG_SERVICE_URL not set → returns [], enrichment flag = False
+#   - KG service unreachable → returns [], enrichment flag = False
+#   - No paths found for this drug-disease pair → returns [], flag = True
+#   - KG service returns malformed JSON → returns [], flag = False
+#
+# The enrichment flag (pathway_enrichment_available) is True when the KG
+# service was successfully queried (even if zero paths were found). It is
+# False when the KG service was not configured or returned an error. The
+# candidate table reads this flag to decide whether to render the Pathway
+# column at all (no point rendering an empty column when the KG is down).
+# ============================================================================
+
+def _enrich_candidates_with_pathways(
+    candidates: List[Dict[str, Any]],
+    timeout_ms: int = 2_000,
+) -> bool:
+    """Enrich each candidate in-place with a ``pathway_chain`` field.
+
+    Queries the Phase 2 KG service (KG_SERVICE_URL/kg/explore) for each
+    (drug, disease) pair. The KG service returns the multi-hop neighborhood
+    of the drug node; we walk it to find paths ending at the disease.
+
+    Args:
+        candidates: List of candidate dicts (mutated in-place). Each
+            candidate gets a ``pathway_chain`` key (list of
+            {pathway, intermediate_protein, chain} dicts).
+        timeout_ms: Per-request timeout for the KG service. Default 2s
+            so a slow KG doesn't bottleneck the /rank endpoint.
+
+    Returns:
+        True if the KG service was successfully queried (enrichment
+        available — even if zero pathways were found for these pairs).
+        False if the KG service is not configured, unreachable, or
+        returned malformed data.
+    """
+    if not candidates:
+        # No candidates to enrich. Return True so the response's
+        # pathway_enrichment_available flag is consistent — the operator
+        # can tell that enrichment WOULD have run if there were candidates.
+        return True
+
+    kg_url = os.environ.get("KG_SERVICE_URL") or os.environ.get("PHASE2_SERVICE_URL")
+    if not kg_url:
+        # KG service not configured. Mark all candidates as having no
+        # pathway chain, and return False so the response flag is False.
+        for c in candidates:
+            c["pathway_chain"] = []
+        return False
+
+    kg_url = kg_url.rstrip("/")
+    # Try to import httpx. If it's not available (rare in production but
+    # possible in stripped dev envs), fall back to urllib.request.
+    try:
+        import httpx  # type: ignore[import]
+        _HAS_HTTPX = True
+    except ImportError:
+        _HAS_HTTPX = False
+
+    enrichment_ok = True
+    for c in candidates:
+        drug = (c.get("drug") or "").strip()
+        disease = (c.get("disease") or "").strip()
+        if not drug or not disease:
+            c["pathway_chain"] = []
+            continue
+        # Query the KG service for the drug's neighborhood. We ask for
+        # depth=3 so we can find drug → protein → pathway → disease chains
+        # (3 hops). The KG service may return fewer hops if the data is
+        # sparse.
+        explore_url = f"{kg_url}/kg/explore?node={_url_quote(drug)}&depth=3"
+        try:
+            if _HAS_HTTPX:
+                with httpx.Client(timeout=timeout_ms / 1000.0) as client:
+                    resp = client.get(explore_url)
+                    if resp.status_code != 200:
+                        c["pathway_chain"] = []
+                        enrichment_ok = False
+                        continue
+                    kg_data = resp.json()
+            else:
+                # Fallback: urllib.request (stdlib). Slower but always
+                # available.
+                import urllib.request
+                import urllib.error
+                req = urllib.request.Request(
+                    explore_url,
+                    headers={"Accept": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=timeout_ms / 1000.0) as resp:
+                    if resp.status != 200:
+                        c["pathway_chain"] = []
+                        enrichment_ok = False
+                        continue
+                    import json as _json
+                    kg_data = _json.loads(resp.read().decode("utf-8"))
+            # Walk the KG response to find pathway chains from drug →
+            # disease. The KG /kg/explore response shape is:
+            #   { nodes: [{id, label, type}], edges: [{source, target, type}] }
+            # We do a BFS from the drug node to find paths ending at the
+            # disease node, capped at 3 hops. Each path is converted to a
+            # PathwayChainItem:
+            #   - pathway: the pathway node's label (or "direct" if no
+            #     pathway node is in the path)
+            #   - intermediate_protein: the first Protein node in the path
+            #     (or None)
+            #   - chain: the ordered list of node labels from drug to
+            #     disease
+            chains = _extract_pathway_chains(kg_data, drug, disease, max_hops=3)
+            c["pathway_chain"] = chains
+        except Exception as exc:
+            logger.debug(
+                "TM13 pathway enrichment failed for drug=%s disease=%s: %s",
+                drug, disease, exc,
+            )
+            c["pathway_chain"] = []
+            enrichment_ok = False
+    return enrichment_ok
+
+
+def _url_quote(s: str) -> str:
+    """URL-encode a string for use in a query parameter."""
+    try:
+        from urllib.parse import quote
+        return quote(s, safe="")
+    except Exception:
+        # Fallback: basic encoding for common chars. Should never run
+        # in production (urllib.parse.quote is stdlib), but defensive.
+        return s.replace(" ", "%20").replace("/", "%2F").replace("?", "%3F")
+
+
+def _extract_pathway_chains(
+    kg_data: Dict[str, Any],
+    drug: str,
+    disease: str,
+    max_hops: int = 3,
+    max_chains: int = 5,
+) -> List[Dict[str, Any]]:
+    """Walk a KG /kg/explore response to find drug → disease pathway chains.
+
+    The KG response shape (from phase2/service.py /kg/explore) is:
+        {
+          nodes: [{id, label, type}, ...],
+          edges: [{source, target, type}, ...]
+        }
+
+    We BFS from the drug node, looking for paths that end at the disease
+    node within ``max_hops`` edges. For each path, we extract:
+      - pathway: the label of the first Pathway-type node in the path
+        (or "direct" if the path has no Pathway node)
+      - intermediate_protein: the label of the first Protein-type node
+        (or None if no Protein in path)
+      - chain: ordered list of node labels from drug to disease
+
+    Args:
+        kg_data: The parsed JSON response from /kg/explore.
+        drug: The drug name (used to find the starting node).
+        disease: The disease name (used to find the ending node).
+        max_hops: Maximum path length (edges). Default 3 = drug → protein
+            → pathway → disease.
+        max_chains: Maximum number of chains to return. Default 5 (the
+            dashboard rarely needs more; cap prevents a huge pathway from
+            overwhelming the response).
+
+    Returns:
+        List of PathwayChainItem dicts (each with pathway,
+        intermediate_protein, chain keys).
+    """
+    nodes = kg_data.get("nodes") or []
+    edges = kg_data.get("edges") or []
+    if not nodes or not edges:
+        return []
+    # Build node lookup: id -> node dict. Also build label -> id index
+    # for matching the drug/disease names (case-insensitive).
+    node_by_id: Dict[str, Dict[str, Any]] = {}
+    drug_node_id: Optional[str] = None
+    disease_node_id: Optional[str] = None
+    drug_lower = drug.lower()
+    disease_lower = disease.lower()
+    for n in nodes:
+        nid = n.get("id")
+        if not nid:
+            continue
+        node_by_id[nid] = n
+        label = (n.get("label") or nid).lower()
+        ntype = (n.get("type") or "").lower()
+        if drug_node_id is None and (label == drug_lower or nid.lower() == drug_lower):
+            drug_node_id = nid
+        if disease_node_id is None and (label == disease_lower or nid.lower() == disease_lower):
+            disease_node_id = nid
+    if drug_node_id is None or disease_node_id is None:
+        return []
+    # Build adjacency list for BFS.
+    adj: Dict[str, List[str]] = {}
+    for e in edges:
+        src = e.get("source")
+        tgt = e.get("target")
+        if src and tgt:
+            adj.setdefault(src, []).append(tgt)
+            # KG edges may be directed or undirected depending on the
+            # relationship type. We treat them as undirected for chain
+            # discovery (the KG stores Drug->Protein and Protein->Pathway
+            # as separate edges, but the inverse traversal is also valid
+            # for chain explanation purposes).
+            adj.setdefault(tgt, []).append(src)
+    if drug_node_id not in adj:
+        return []
+    # BFS from drug_node_id, looking for paths to disease_node_id.
+    chains: List[Dict[str, Any]] = []
+    # Each BFS queue entry: (current_node_id, path_so_far).
+    # path_so_far is a list of node IDs.
+    queue = [(drug_node_id, [drug_node_id])]
+    visited_paths: set = set()
+    while queue and len(chains) < max_chains:
+        next_queue: List[tuple] = []
+        for cur_id, path in queue:
+            if len(path) - 1 >= max_hops:
+                continue
+            for neighbor_id in adj.get(cur_id, []):
+                if neighbor_id in path:
+                    # Avoid cycles.
+                    continue
+                new_path = path + [neighbor_id]
+                if neighbor_id == disease_node_id:
+                    # Found a chain! Convert node IDs to labels and
+                    # extract pathway/protein info.
+                    chain_labels = [
+                        (node_by_id[nid].get("label") or nid) for nid in new_path
+                    ]
+                    # Find the first Pathway-type node in the path.
+                    pathway_name = "direct"
+                    for nid in new_path:
+                        n = node_by_id.get(nid, {})
+                        if (n.get("type") or "").lower() == "pathway":
+                            pathway_name = n.get("label") or "pathway"
+                            break
+                    # Find the first Protein-type node (skip the drug).
+                    intermediate_protein: Optional[str] = None
+                    for nid in new_path[1:]:
+                        n = node_by_id.get(nid, {})
+                        if (n.get("type") or "").lower() in ("protein", "receptor", "kinase", "tf", "transcription", "effector"):
+                            intermediate_protein = n.get("label")
+                            break
+                    path_key = tuple(new_path)
+                    if path_key in visited_paths:
+                        continue
+                    visited_paths.add(path_key)
+                    chains.append({
+                        "pathway": pathway_name,
+                        "intermediate_protein": intermediate_protein,
+                        "chain": chain_labels,
+                    })
+                    if len(chains) >= max_chains:
+                        break
+                else:
+                    next_queue.append((neighbor_id, new_path))
+        queue = next_queue
+    return chains
+
+
 def _load_reward_weights_from_meta(csv_path: Path) -> Optional[Dict[str, float]]:
     """P4-004 ROOT FIX: load reward weights from the .meta.json sidecar.
 
@@ -827,6 +1103,12 @@ def _rank_impl(
         all_candidates = _filter_candidates_by_org(all_candidates, org_id_norm, org_private_drugs)
         total = len(all_candidates)
         page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
+        # TM13 ROOT FIX (v132): enrich each candidate with pathway_chain
+        # data from the Phase 2 KG service. This is best-effort — if the
+        # KG is unreachable, candidates get pathway_chain=[] and the flag
+        # is False. The candidate table reads the flag to decide whether
+        # to render the Pathway column.
+        pathway_enrichment_available = _enrich_candidates_with_pathways(page_candidates)
         return {
             "candidates": page_candidates,
             # P4-028 ROOT FIX: use timezone-aware UTC datetime (not deprecated
@@ -847,6 +1129,10 @@ def _rank_impl(
             "count": len(page_candidates),
             "backend": "checkpoint",
             "orgId": org_id_norm,  # BE-043 v128: echo back for audit
+            # TM13 ROOT FIX (v132): Phase 2 ↔ Phase 4 wiring — surface the
+            # pathway enrichment flag so the frontend knows whether to
+            # render the Pathway column.
+            "pathway_enrichment_available": pathway_enrichment_available,
         }
 
     # Fallback: read the latest top_candidates_*.csv.
@@ -863,6 +1149,9 @@ def _rank_impl(
             "count": 0,
             "note": "No RL output yet. Run `python run_4phase.py` to generate top_candidates_*.csv.",
             "orgId": org_id_norm,
+            # TM13 ROOT FIX (v132): no candidates → no enrichment. Flag is
+            # False so the frontend knows the Pathway column would be empty.
+            "pathway_enrichment_available": False,
         }
 
     # BE-070 + INT-022: load ALL matching candidates with total count,
@@ -873,6 +1162,9 @@ def _rank_impl(
     all_candidates = _filter_candidates_by_org(all_candidates, org_id_norm, org_private_drugs)
     total = len(all_candidates)
     page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
+    # TM13 ROOT FIX (v132): enrich each candidate with pathway_chain data
+    # from the Phase 2 KG service (same call as the checkpoint path above).
+    pathway_enrichment_available = _enrich_candidates_with_pathways(page_candidates)
     return {
         "candidates": page_candidates,
         # P4-045: "service" matches frontend contract (not "rl_service")
@@ -887,6 +1179,8 @@ def _rank_impl(
         "csvPath": str(csv_path),
         "backend": "csv",
         "orgId": org_id_norm,  # BE-043 v128: echo back for audit
+        # TM13 ROOT FIX (v132): Phase 2 ↔ Phase 4 wiring.
+        "pathway_enrichment_available": pathway_enrichment_available,
     }
 
 
@@ -1108,7 +1402,18 @@ def validate(req: ValidateRequest) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("RL_SERVICE_PORT", "8004"))
+    # TM13 ROOT FIX (v132, CRITICAL — port drift):
+    # The canonical contract (shared/contracts/urls.py SERVICE_PORTS and
+    # frontend/contracts/_url-constants.ts SERVICE_PORTS) declares
+    # phase4_rl -> 8003. docker-compose.yml maps the phase4-rl container
+    # to 8003. scripts/rl_api.py (the docker entrypoint) defaults to 8003.
+    # But this `python rl/service.py` entrypoint was the ONLY layer still
+    # defaulting to 8004 — so an operator running `python rl/service.py`
+    # directly (without setting RL_SERVICE_PORT) would start on 8004,
+    # while every other layer expected 8003. The frontend's
+    # rl-ranker.ts error hint also pointed at 8004, perpetuating the
+    # drift. This fix aligns the default with the canonical contract.
+    port = int(os.environ.get("RL_SERVICE_PORT", "8003"))
     host = os.environ.get("RL_SERVICE_HOST", "0.0.0.0")
     logger.info("Starting Phase 4 RL Service on %s:%d", host, port)
     uvicorn.run(app, host=host, port=port)
