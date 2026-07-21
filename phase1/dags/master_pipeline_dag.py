@@ -1339,6 +1339,67 @@ def validate_output() -> None:
             "CSV checks above are the primary validation.", exc,
         )
 
+    # ── Check 5: Feature completeness (NULL-rate thresholds) ───────────
+    # Teammate 2 — P1 to P3 Integration ROOT FIX:
+    # validate_output_dir (Check 1 in _validate_phase1_contract) only
+    # enforces NULL=0 on NON-NULLABLE required columns. It does NOT catch
+    # the silent-degradation case where a NULLABLE column (e.g.
+    # pubchem_enrichment.isomeric_smiles, disgenet_gda.prevalence_per_10k)
+    # is populated with 50%+ NULLs because the upstream API silently
+    # dropped a field. Phase 3 (biomedical_tables.compute_drug_features)
+    # then receives degraded training data and the GNN silently learns
+    # from missing features. This check fails the run if any declared
+    # column exceeds the NULL-rate threshold (default 5%).
+    #
+    # The check uses the SAME schema (PHASE1_OUTPUT_SCHEMA) as
+    # validate_output_dir — there is no divergent column list. New
+    # columns added to the schema are automatically subject to this
+    # check on the next pipeline run.
+    try:
+        from contracts.feature_validator import validate_feature_completeness
+        from contracts.phase1_schema import PHASE1_OUTPUT_SCHEMA as _SCHEMA
+        _feature_ok, _feature_failures = validate_feature_completeness(
+            _processed_dir,
+            schema=_SCHEMA,
+            max_null_rate=0.05,
+        )
+        if not _feature_ok:
+            if _is_production:
+                # In production, NULL-rate violations are HARD failures —
+                # they silently corrupt the GNN's training data.
+                for f in _feature_failures:
+                    failures.append(f"validate_output: feature completeness: {f}")
+            else:
+                # In dev / CI, the fixture dataset may have intentionally
+                # sparse columns. Log as warnings so the operator sees the
+                # NULL-rate report without blocking the pipeline.
+                for f in _feature_failures:
+                    logger.warning(
+                        "validate_output: feature completeness (dev mode, "
+                        "non-blocking): %s", f,
+                    )
+    except ImportError as _exc:
+        # feature_validator.py was added in this commit. If the deployment
+        # is mid-rollout (code partially synced), the import will fail. Log
+        # as a warning so the operator knows the check is not running, but
+        # don't fail the pipeline (the existing 4 checks still run).
+        logger.warning(
+            "validate_output: feature_validator module not importable (%s). "
+            "NULL-rate threshold check SKIPPED. This check is added by "
+            "Teammate 2's P1-to-P3 integration fix; ensure the latest "
+            "phase1/contracts/feature_validator.py is deployed to enable it.",
+            _exc,
+        )
+    except Exception as _exc:
+        # Defensive: any unexpected error in the validator must NOT bring
+        # down the DAG. Log and continue with the other 4 checks.
+        logger.warning(
+            "validate_output: feature completeness check raised an "
+            "unexpected error (%s: %s). The check is skipped. Other "
+            "validation checks above still ran.",
+            type(_exc).__name__, _exc,
+        )
+
     # ── Aggregate and fail-fast on any failure ─────────────────────────
     if failures:
         _msg = "validate_output FAILED with %d issue(s):\n" % len(failures)

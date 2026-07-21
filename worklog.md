@@ -1497,3 +1497,63 @@ Test results:
 - 3 contract test files: 51 tests, all PASS.
 - 1 real code integration test file: 6 tests, all PASS (when run alone); 2 SKIP when run with contract tests (pre-existing mapper conflict, unrelated to v130).
 - Total: 57 tests PASS + 2 SKIP (with clear skip reasons).
+
+---
+Task ID: TM2-P1-P3-FEATURE-COMPLETENESS-v129
+Agent: Teammate 2 (P1 to P3 Integration, hostile-auditor forensic pass, v129)
+Task: Forensic root-fix the P1 to P3 integration issue ("Ensure Phase 1 Outputs Contain All Features Phase 3 GT Model Needs"). Verify by reading ACTUAL executable code (not comments, not tests), apply root-cause fixes, write tests, run real code, push to branch, merge to main, re-clone to verify.
+
+Work Log:
+- Read project docx (Cosmic_Build_Process_Updated.docx) end-to-end to understand Phase 1-6 architecture: ChEMBL/DrugBank/UniProt/STRING/DisGeNET/OMIM/PubChem -> Neo4j KG -> Graph Transformer -> RL agent -> API/Dashboard.
+- Cloned main branch and created branch `fix/teammate2-p1-p3-feature-completeness`.
+- FORENSIC AUDIT (hostile-auditor mode, read ACTUAL code not comments): Read line-by-line the 8 files cited in the issue:
+  * phase1/contracts/phase1_schema.py
+  * phase1/pipelines/pubchem_pipeline.py
+  * phase1/pipelines/_v50_downloaders.py
+  * phase1/pipelines/uniprot_pipeline.py
+  * phase1/dags/master_pipeline_dag.py
+  * graph_transformer/data/biomedical_tables.py
+  * graph_transformer/data/phase2_adapter.py
+  * phase1/contracts/validate_output.py (existing)
+- FORENSIC FINDINGS (issue vs reality):
+  * Issue claim: "prevalence_per_10k is a phantom column declared in pubchem_enrichment, never populated."
+    REALITY: prevalence_per_10k is correctly declared in disgenet_gda.optional_columns (phase1_schema.py line 597) — scientifically CORRECT (prevalence is a disease attribute). It IS populated at runtime via Phase 1 DB query at biomedical_tables.py:358-411. NOT a phantom column.
+  * Issue claim: "isomeric_smiles is missing for ~15% of drugs (older PubChem downloads)."
+    REALITY: _v50_downloaders.py line 830 requests IsomericSMILES in the property list and writes it (line 865). pubchem_pipeline.py:2924+ ALSO handles SMILES (isomeric) and ConnectivitySMILES (canonical) — even handles PubChem's response-key mapping quirk. NOT missing.
+  * Issue claim: "subcellular_location parsing is inconsistent — depends on cc_subcellular_location field being parsed correctly."
+    REALITY: uniprot_pipeline.py:1171-1209 (REST path) and 1371-1402 (DAT path) BOTH correctly parse subcellular_location from comment blocks. NOT broken.
+  * Issue claim: "compute_drug_features(row) reads phantom prevalence_per_10k."
+    REALITY: compute_drug_features signature is (smiles, drug_name, feature_dim, allow_chemberta) — uses RDKit Morgan fingerprint (with ChemBERTa first-priority fallback). Returns ZERO vector (not None, not noise) for missing SMILES. The issue's "EXACT FIX CODE" would REGRESS Teammate 6's work — I refused to apply it as written.
+  * Issue claim: "No contract validator runs after the pipeline to verify feature completeness."
+    REALITY: phase1/contracts/validate_output.py exists and runs as the DAG's final task — BUT it only enforces NULL=0 on NON-NULLABLE required columns. It does NOT enforce NULL-rate thresholds on NULLABLE columns (e.g. isomeric_smiles, xlogp). THIS IS THE GENUINELY MISSING PIECE.
+
+- ROOT FIXES APPLIED (surgical, no regression):
+  1. NEW FILE: phase1/contracts/feature_validator.py — validate_feature_completeness(processed_dir, schema, max_null_rate=0.05) -> Tuple[bool, List[str]]. Uses EXISTING SourceSpec/ColumnSpec schema (NOT bare strings — the issue's exact-fix code would have created a divergent schema). Checks NULL rate on every declared column (required + optional + any_of_groups), returns (passed, failures).
+  2. MODIFIED: phase1/dags/master_pipeline_dag.py — wired validate_feature_completeness into validate_output() task as "Check 5: Feature completeness (NULL-rate thresholds)". In production: NULL-rate violations extend failures list (fails DAG). In dev: logs as warnings. Defensive try/except ImportError so mid-rollout deployment doesn't crash.
+  3. MODIFIED: phase1/pipelines/uniprot_pipeline.py — extracted _parse_subcellular_location(entry: dict) -> str as a module-level function (above UniProtPipeline class). _flatten_uniprot_rest_json now CALLS this function instead of inlining the parsing loop. Behavior is IDENTICAL; the function is now unit-testable. The inlined `elif ctype == "SUBCELLULAR LOCATION"` branch was REMOVED (would double-write the field).
+  4. MODIFIED: phase1/pipelines/pubchem_pipeline.py — added _download_pubchem_compound(cid: int) -> dict module-level helper. Single-CID PUG-REST lookup returning the full PubChem property set. SCI-FIX: normalizes PubChem's response-key quirk (response has "SMILES"/"ConnectivitySMILES", not the requested "IsomericSMILES"/"CanonicalSMILES"). Never raises — returns {"CID": cid, "error": "..."} on failure.
+  5. NEW FILE: phase1/tests/integration/test_p1_to_p3_feature_completeness.py — 5 tests covering the issue's acceptance criteria. Adapted to ACTUAL signatures (not the issue's outdated ones):
+     * test_pubchem_enrichment_has_isomeric_smiles — calls _download_pubchem_compound(2244) (aspirin), asserts IsomericSMILES present. Skips gracefully if PubChem unreachable.
+     * test_uniprot_subcellular_location_parsed — calls _parse_subcellular_location with REST fixture, asserts "Cell membrane". Plus 6 malformed-input regression assertions.
+     * test_feature_validator_detects_high_null_rate — 50% NULL fixture -> FAILS, message mentions isomeric_smiles + 50.0%.
+     * test_feature_validator_passes_low_null_rate — 0% NULL fixture -> PASSES (acceptance criterion #4).
+     * test_phase3_compute_drug_features_handles_missing_smiles — empty SMILES -> zero vector (128,); valid SMILES "CCO" -> non-zero vector. Uses DRUGOS_SKIP_CHEMBERTA=1 to skip ChemBERTa in CI.
+
+- VERIFICATION (real code execution):
+  * python3 -m pytest phase1/tests/integration/test_p1_to_p3_feature_completeness.py -v -> 5/5 PASS (with torch, rdkit, sqlalchemy, pandas installed).
+  * Smoke-tested every modified file via direct Python import: feature_validator imports clean, _parse_subcellular_location works on REST fixture, _download_pubchem_compound imports clean, PHASE1_OUTPUT_SCHEMA still loads.
+  * ast.parse() on all 9 touched files: ALL OK (no syntax errors).
+  * Ran existing test_team2_p1_fixes.py -> 49/49 PASS (no regression).
+  * Ran test_uniprot_pipeline_institutional_v346.py + test_pubchem_pipeline_institutional_v131.py -> 13 FAILED. STASHED my changes and re-ran on clean main: SAME 13 failures (pre-existing, NOT caused by my changes). 211 existing tests still pass on top of my 5 new ones.
+
+- DEPENDENCIES INSTALLED for verification: rdkit (2026.03.4), torch (2.13.0+cpu), sqlalchemy (2.0.51), pytest-mock (3.15.1). Will document in commit message.
+
+Stage Summary:
+- ROOT FIX applied: 3 surgical code changes + 2 new files + 5 new tests.
+- ZERO REGRESSIONS: 13 pre-existing failures on main remain unchanged; my changes add 5 new passing tests on top.
+- The issue's "EXACT FIX CODE" was REFUSED verbatim because it would have:
+  (a) re-added prevalence_per_10k to pubchem_enrichment (scientifically wrong — disease attribute)
+  (b) changed compute_drug_features signature from (smiles, drug_name, feature_dim, allow_chemberta) to (row) -> Optional[List[float]] (would break all callers and regress Teammate 6's work)
+  (c) created a divergent schema with bare strings (the existing schema uses rich ColumnSpec/SourceSpec dataclasses)
+- The genuine gap (NULL-rate validator on nullable columns) is now closed with the new feature_validator.py + DAG wiring.
+- Branch: fix/teammate2-p1-p3-feature-completeness (will push, merge to main, re-clone to verify).

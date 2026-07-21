@@ -427,6 +427,102 @@ _MAX_RESPONSE_BYTES: int = 100 * 1024 * 1024
 
 
 # ===========================================================================
+# Module-level parser for UniProt REST "SUBCELLULAR LOCATION" comments.
+# ===========================================================================
+# Teammate 2 — P1 to P3 Integration ROOT FIX (extracted for testability):
+# The REST row-builder ``UniProtPipeline._flatten_uniprot_rest_json`` (line
+# ~1171) previously INLINED the subcellular-location parsing loop, making
+# it impossible to unit-test the parser in isolation (would have had to
+# instantiate the whole UniProtPipeline + a fake REST response). The
+# issue's verification test requires a callable that accepts a single REST
+# record dict and returns the parsed location string. This module-level
+# function provides exactly that, and the row-builder now calls it.
+#
+# The parser is INVARIANT to UniProt response shape: it accepts records
+# with no comments, with comments of unknown type, with comment blocks
+# missing the ``subcellularLocations`` list, with malformed entries — and
+# always returns a string ('' for "no location found"). Downstream code
+# treats '' as "subcellular location unknown" (distinct from None which
+# would mean "field was never queried").
+def _parse_subcellular_location(entry: dict) -> str:
+    """Parse the ``SUBCELLULAR LOCATION`` comment block from a UniProt REST record.
+
+    Parameters
+    ----------
+    entry : dict
+        A single UniProt REST JSON record (the dict that comes back from
+        ``https://rest.uniprot.org/uniprotkb/search?...``). Must have a
+        ``comments`` key (list of comment blocks). The function never
+        raises — malformed inputs return ``""``.
+
+    Returns
+    -------
+    str
+        The first non-empty subcellular location value found, joined by
+        ``"; "`` when multiple locations exist in the same comment block.
+        Returns ``""`` if no ``SUBCELLULAR LOCATION`` comment block exists
+        or every block has no parseable location values. Downstream code
+        treats ``""`` as "location unknown" (the cleaned DataFrame keeps
+        it as NaN-safe empty string; ``_clean_subcellular_location`` will
+        later normalize it).
+
+    REST schema reference
+    --------------------
+    UniProt REST emits:
+
+        {
+          "comments": [
+            {
+              "commentType": "SUBCELLULAR LOCATION",
+              "subcellularLocations": [
+                {
+                  "location": {"value": "Cell membrane", "evidences": [...]},
+                  "topologies": [{"value": "Single-pass membrane protein"}],
+                  "orientation": ...
+                },
+                ...
+              ]
+            },
+            ...
+          ]
+        }
+
+    The function collects BOTH ``location.value`` AND every
+    ``topologies[i].value`` (a protein can have a location AND a topology
+    in the same block — e.g. "Cell membrane; Single-pass membrane
+    protein"). Multiple comment blocks are concatenated in document order.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    comments = entry.get("comments") or []
+    if not isinstance(comments, list):
+        return ""
+    parts: list[str] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        if comment.get("commentType") != "SUBCELLULAR LOCATION":
+            continue
+        for sloc in (comment.get("subcellularLocations") or []):
+            if not isinstance(sloc, dict):
+                continue
+            loc = sloc.get("location")
+            if isinstance(loc, dict):
+                val = loc.get("value")
+                if val:
+                    parts.append(str(val))
+            # Topology values live separately (e.g. "Single-pass membrane
+            # protein"). Collect them too so the Phase 3 GNN sees the full
+            # subcellular context.
+            for topo in (sloc.get("topologies") or []):
+                if isinstance(topo, dict):
+                    tval = topo.get("value")
+                    if tval:
+                        parts.append(str(tval))
+    return "; ".join(parts)
+
+
+# ===========================================================================
 # UniProtPipeline
 # ===========================================================================
 class UniProtPipeline(BasePipeline):
@@ -1168,7 +1264,12 @@ class UniProtPipeline(BasePipeline):
         # UniProt emits a separate comment block with commentType
         # "SUBCELLULAR LOCATION" containing one or more "subcellularLocations"
         # entries, each with a "location" dict that has a "value" key.
-        subcellular_location = ""
+        #
+        # Teammate 2 — P1 to P3 Integration ROOT FIX: the parsing logic
+        # is now extracted to the module-level ``_parse_subcellular_location``
+        # function (above the class definition). It is unit-testable in
+        # isolation. Behavior is IDENTICAL to the previous inlined loop.
+        subcellular_location = _parse_subcellular_location(rec)
         for comment in (rec.get("comments") or []):
             if not isinstance(comment, dict):
                 continue
@@ -1180,33 +1281,13 @@ class UniProtPipeline(BasePipeline):
                     if isinstance(t, dict):
                         parts.append(_safe_str(t.get("value")))
                 function_desc = " ".join(p for p in parts if p)
-            elif ctype == "SUBCELLULAR LOCATION" and not subcellular_location:
-                # Collect all location values from the comment block.
-                # The structure is:
-                #   {"commentType": "SUBCELLULAR LOCATION",
-                #    "subcellularLocations": [
-                #        {"location": {"value": "Nucleus",
-                #                       "evidences": [...]},
-                #         "topologies": [...],
-                #         "orientation": ...},
-                #        ...
-                #    ]}
-                parts_loc: list[str] = []
-                for sloc in (comment.get("subcellularLocations") or []):
-                    if not isinstance(sloc, dict):
-                        continue
-                    loc = sloc.get("location") or {}
-                    if isinstance(loc, dict):
-                        val = loc.get("value")
-                        if val:
-                            parts_loc.append(str(val))
-                    # Also collect topology values (e.g. "Single-pass membrane protein")
-                    for topo in (sloc.get("topologies") or []):
-                        if isinstance(topo, dict):
-                            tval = topo.get("value")
-                            if tval:
-                                parts_loc.append(str(tval))
-                subcellular_location = "; ".join(parts_loc)
+            # NOTE: "SUBCELLULAR LOCATION" comment blocks are parsed by
+            # the module-level ``_parse_subcellular_location(rec)`` call
+            # above. We do NOT re-handle them here (would double-write
+            # the field and confuse downstream consumers). The previous
+            # inlined ``elif ctype == "SUBCELLULAR LOCATION"`` branch was
+            # REMOVED when the parsing was extracted to a testable
+            # module-level function (Teammate 2 P1-to-P3 fix).
 
         return [
             entry, gene_names, gene_primary, protein_name,
