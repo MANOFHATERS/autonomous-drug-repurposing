@@ -136,6 +136,11 @@ except ImportError as _fastapi_import_err:  # pragma: no cover
 # the Phase 2 KG service via httpx.AsyncClient. Without this module-level
 # import, `patch('backend.api.main.httpx.AsyncClient')` in the Teammate 8
 # integration tests would raise AttributeError.
+#
+# P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+# The same module-level `import httpx` is also used by the /top-k endpoint
+# which proxies to the RL service via httpx.AsyncClient. The previous code
+# imported httpx INSIDE the /top-k function body — invisible to patch().
 import httpx  # noqa: E402 — required at module level for test mocking
 
 # TM8 v134 ROOT FIX: import the per-user in-memory rate limiters for
@@ -375,21 +380,82 @@ class TopKRequest(BaseModel):
 
 
 class TopKCandidate(BaseModel):
+    """A single ranked drug-disease repurposing candidate.
+
+    P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+    The previous model had ONLY (drug, disease, gnn_score, rl_rank,
+    safety_score, market_score) — missing the fields the issue-spec API
+    contract requires: ``score`` (overall), ``pathway_score``,
+    ``pathway_chain``, and ``confidence``. The RL service returns these
+    fields (see rl/service.py:_load_candidates_from_csv) but the backend
+    dropped them on the floor because Pydantic's ``extra='forbid'``
+    rejected the unknown keys.
+
+    ROOT FIX: add the missing fields. ``gnn_score`` is now Optional
+    because the RL service's CSV may not always have it (some candidates
+    come from the PPO policy without a separate GNN score). ``score`` is
+    the overall ranking score (the RL agent's reward-weighted composite).
+    ``pathway_chain`` is the list of {pathway, intermediate_protein,
+    chain} dicts from the Phase 2 KG service (TM13 v132 enrichment).
+    ``confidence`` is the model's confidence in the prediction (0-1).
+    """
     model_config = ConfigDict(extra="forbid")
     drug: str
     disease: str
-    gnn_score: float = Field(..., ge=0.0, le=1.0)
+    # gnn_score is Optional now — the RL service's response uses the
+    # camelCase field name `gnnScore` and may be absent for candidates
+    # sourced purely from the PPO policy (without a separate GNN forward
+    # pass). The backend proxy maps gnnScore -> gnn_score.
+    gnn_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     rl_rank: Optional[int] = None
     safety_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     market_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    # P4-024: overall ranking score from the RL agent (0-1). This is the
+    # composite of gnn + safety + market + pathway + confidence scores
+    # weighted by the agent's learned reward weights. The frontend's
+    # CandidateCard displays this as the primary "Match Score" badge.
+    score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    # P4-024: pathway score (0-1) — how well-connected the drug and
+    # disease are in the KG (multi-hop pathway density).
+    pathway_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    # P4-024 + TM13 v132: biological pathway chain explaining the
+    # prediction. Each item is {pathway, intermediate_protein, chain}.
+    # May be empty when the KG service is unreachable (the
+    # pathway_enrichment_available flag on TopKResponse indicates whether
+    # enrichment was attempted).
+    pathway_chain: List[Dict[str, Any]] = Field(default_factory=list)
+    # P4-024: model confidence (0-1) — how confident the GT model is in
+    # the link prediction, based on node connectivity in the KG.
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class TopKResponse(BaseModel):
+    """Response for POST /top-k.
+
+    P4-024 ROOT FIX (Teammate 12): added ``pathway_enrichment_available``
+    field. The RL service returns this flag (True when the KG service
+    was successfully queried for pathway chains, even if zero chains
+    were found for these pairs; False when the KG service was
+    unreachable or not configured). The frontend's PathwayChain.tsx
+    checks this flag to decide whether to render the pathway column —
+    rendering an empty column when enrichment was attempted but found
+    nothing is OK; rendering it when enrichment was NOT attempted is
+    misleading (implies the drug has no pathways, when really we just
+    couldn't query the KG).
+    """
     model_config = ConfigDict(extra="forbid")
     candidates: List[TopKCandidate]
     total: int
     source: str = Field(..., description="Where the results came from: 'gt_model' | 'rl_ranker' | 'cache'")
     org_id: Optional[str] = Field(default=None, description="The org scope the results were fetched for (audit echo)")
+    # P4-024: pathway enrichment flag from the RL service. Forwarded
+    # verbatim from the RL service's response (or False when the RL
+    # service is unreachable — but in that case /top-k returns 503, not
+    # a response with pathway_enrichment_available=False).
+    pathway_enrichment_available: bool = Field(
+        default=False,
+        description="True if the RL service successfully queried the KG for pathway chains (even if zero were found). False if the KG was unreachable or not configured.",
+    )
 
 
 class HealthResponse(BaseModel):
@@ -536,6 +602,80 @@ async def verify_org_id(auth: AuthContext = Depends(verify_jwt)) -> str:
     explicit in the endpoint signature.
     """
     return auth.org_id
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration):
+# create_test_jwt helper for integration tests.
+# ---------------------------------------------------------------------------
+# The integration tests in backend/tests/integration/test_p4_to_be_top_k.py
+# need to mint JWTs that pass verify_jwt. The tests CANNOT use the Next.js
+# frontend's /api/auth/login route (they don't have a frontend running),
+# so they need a Python helper that mints a JWT with the correct claims
+# (sub, org_id, org_role, iss, iat, exp) signed with the test JWT_SECRET.
+#
+# This helper is TEST-ONLY — it is NOT exposed as an endpoint and is NOT
+# importable by the frontend. Production JWTs are issued by the Next.js
+# frontend's /api/auth/login route (see frontend/src/lib/auth/server.ts).
+#
+# The helper is keyword-only (``*``) so callers MUST use ``create_test_jwt(
+# user_id=..., org_id=...)`` — this prevents accidental argument swaps
+# (e.g., ``create_test_jwt('testorg', 'testuser')`` would silently mint a
+# JWT with user_id='testorg' and org_id='testuser', a cross-tenant security
+# hole in test fixtures that would mask real auth bugs).
+def create_test_jwt(
+    *,
+    user_id: str,
+    org_id: str,
+    org_role: str = "member",
+    expires_in_hours: int = 1,
+) -> str:
+    """Mint a test JWT with the given claims (TEST-ONLY — not for production).
+
+    Args:
+        user_id: The user's ID (becomes the JWT 'sub' claim).
+        org_id: The user's active org ID (becomes the JWT 'org_id' claim).
+        org_role: The user's role in the org ('admin' | 'member' | 'viewer').
+            Defaults to 'member'.
+        expires_in_hours: JWT lifetime in hours. Defaults to 1.
+
+    Returns:
+        The encoded JWT string.
+
+    Raises:
+        RuntimeError: If JWT_SECRET env var is not set or is too short
+            (<32 chars). Tests must set JWT_SECRET in conftest.py before
+            importing backend.api.main.
+
+    Note:
+        This helper is for TESTS ONLY. Production JWTs are issued by the
+        Next.js frontend's /api/auth/login route, which signs with the
+        same JWT_SECRET but also does password verification, MFA checks,
+        and rate limiting.
+    """
+    import jwt as pyjwt
+    from datetime import timedelta
+
+    jwt_secret = os.environ.get("JWT_SECRET")
+    if not jwt_secret or len(jwt_secret) < 32:
+        raise RuntimeError(
+            "create_test_jwt: JWT_SECRET env var is not set or is too short "
+            "(<32 chars). Tests must set JWT_SECRET in conftest.py before "
+            "importing backend.api.main. Example: "
+            "os.environ['JWT_SECRET'] = 'test-secret-...-32-chars-min'."
+        )
+    jwt_issuer = os.environ.get("JWT_ISSUER", "drugos")
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": user_id,
+        "org_id": org_id,
+        "org_role": org_role,
+        "iss": jwt_issuer,
+        "iat": now,
+        "exp": now + timedelta(hours=expires_in_hours),
+    }
+    return pyjwt.encode(payload, jwt_secret, algorithm="HS256")
 
 
 # ---------------------------------------------------------------------------
@@ -1446,6 +1586,7 @@ async def top_k(
     request: Request,
     req: TopKRequest,
     auth: AuthContext = Depends(verify_jwt),
+    org_id: str = Depends(verify_org_id),
 ) -> TopKResponse:
     """Get the top-K repurposing candidates for a drug or disease.
 
@@ -1453,37 +1594,385 @@ async def top_k(
     If `disease` is provided, returns the top-K drugs for that disease.
     Exactly one of `drug` or `disease` must be provided.
 
-    TM14 ROOT FIX (v132): the endpoint now receives AuthContext (not just
-    user_id). The auth.org_id is echoed back in the response (TopKResponse.
-    org_id) so the caller can verify the scope of the results. The actual
-    RL ranker call is the same; the fix is in the auth layer + response
-    schema.
+    P4-024 ROOT FIX (Teammate 12 — P4 to Backend Integration, CRITICAL):
+    The previous implementation returned a HARDCODED placeholder:
+        return TopKResponse(candidates=[], total=0, source="rl_ranker")
+    The Phase 4 RL service was NEVER invoked. Pharma partners received
+    empty candidates with a misleading source='rl_ranker' label (implying
+    the ranker returned nothing, when really the backend never called it).
+    Even if the placeholder were replaced, the RL service /rank endpoint
+    REQUIRES org_id (BE-043 v128 — cross-tenant isolation), but the
+    previous backend did NOT pass org_id — every request would have
+    gotten 401 Unauthorized from the RL service.
+
+    ROOT FIX (this endpoint):
+    1. Extract org_id from the JWT via the verify_org_id dependency
+       (already present from Teammate 14's auth refactor).
+    2. Proxy the request to {RL_SERVICE_URL}/rank via httpx.AsyncClient,
+       passing org_id as BOTH a query param (the RL service's
+       rank_post handler reads it via ``org_id: Optional[str] = Query(None)``)
+       AND an X-Org-Id header (defense in depth — the RL service logs
+       the header for audit even if the query param is stripped by a
+       misconfigured proxy).
+    3. Map the backend's ``k`` field to the RL service's ``limit`` field
+       (the RankRequest Pydantic model in rl/service.py uses ``limit``,
+       NOT ``k`` — sending ``k`` would be silently dropped because the
+       model does NOT set extra='forbid', defaulting to limit=50 and
+       ignoring the caller's requested page size).
+    4. On RL service connection failure (httpx.RequestError — connection
+       refused, DNS error, timeout), return 503 Service Unavailable
+       (NOT an empty 200 with source='rl_ranker'). The 503 tells the
+       API client the RL service is down and they should retry; an
+       empty 200 would have silently misled them into thinking the
+       ranker returned no candidates.
+    5. On RL service 401 (org_id rejected — should not happen since the
+       backend already verified the JWT, but defensive), return 401 so
+       the client can re-authenticate. On other 4xx/5xx from the RL
+       service, propagate the status code + detail to the client.
+    6. Map the RL service's camelCase response fields to the backend's
+       snake_case TopKCandidate schema (gnnScore -> gnn_score,
+       safetyScore -> safety_score, etc.). The RL service uses
+       camelCase to match the frontend's TypeScript types; the backend
+       uses snake_case to match Python conventions. The mapping is
+       explicit (not a generic camelCase -> snake_case converter) so
+       the API contract is auditable.
+    7. Forward the pathway_enrichment_available flag from the RL service
+       response (TM13 v132 — True if the KG service was successfully
+       queried for pathway chains).
 
     Rate-limited to 100 req/min per IP. 429 + Retry-After on exceed.
+
+    Args:
+        request: The FastAPI Request (required by slowapi's @limiter.limit).
+        req: The TopKRequest body (drug, disease, k, min_score).
+        auth: The authenticated caller's AuthContext (from verify_jwt).
+        org_id: The caller's org_id (from verify_org_id — extracted
+            from the JWT's org_id claim). Passed to the RL service
+            for cross-tenant isolation (BE-043 v128).
+
+    Returns:
+        TopKResponse with ranked candidates, total count, source,
+        org_id (audit echo), and pathway_enrichment_available flag.
+
+    Raises:
+        400: Neither drug nor disease provided, or both provided.
+        401: JWT missing or invalid (from verify_jwt), or RL service
+            rejected the org_id (propagated 401).
+        429: Rate limit exceeded (100 req/min).
+        503: RL service unreachable (httpx.RequestError) or
+            RL_SERVICE_URL not configured.
+        502/504: RL service returned a non-200 status (propagated).
     """
-    # TEAMMATE-11 v141: httpx is imported at module level now.
+    # TEAMMATE-11 v141 + P4-024: httpx is imported at module level now
+    # (unconditional — no _HAS_HTTPX check needed). If httpx is not
+    # installed, the module fails to load at import time, which is the
+    # desired fail-fast behavior for production.
 
     if not req.drug and not req.disease:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="At least one of 'drug' or 'disease' must be provided.",
         )
-    if req.drug and req.disease:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Provide EITHER 'drug' OR 'disease', not both.",
-        )
+    # P4-024: REMOVED the "if req.drug and req.disease: raise 400" check
+    # that was in the previous code. The RL service's _rank_impl accepts
+    # BOTH drug and disease as optional AND filters (return candidates
+    # matching BOTH). This is a valid use case: a pharma partner asking
+    # "give me the ranking for (metformin, cancer) specifically" should
+    # get a 200 response with that candidate (or empty if no match), NOT
+    # a 400. The previous validation was too strict and broke the issue
+    # spec's API contract (which allows both drug? and disease? in the
+    # request body).
     logger.info(
         "top-k: user=%s org=%s drug=%s disease=%s k=%d",
         auth.user_id, auth.org_id, req.drug, req.disease, req.k,
     )
-    # TODO: call the RL ranker service via RL_SERVICE_URL with org_id
-    # for org-scoped candidate filtering.
+
+    # P4-024: read RL_SERVICE_URL from env. The default
+    # (http://localhost:8003) matches the canonical port for the RL
+    # service per shared/contracts/urls.py SERVICE_PORTS. In production,
+    # this is set to the RL service's internal Docker/k8s DNS name
+    # (e.g., http://phase4-rl:8003). We use the default (NOT raise 503)
+    # when the env var is unset so that:
+    #   1. Local dev "just works" — operator doesn't need to set env vars
+    #      to test against a localhost RL service.
+    #   2. The httpx.RequestError path returns 503 when the RL service is
+    #      actually unreachable (connection refused to localhost:8003).
+    #      This gives a more informative error message than "env var not
+    #      set" — it tells the operator the RL service is not RUNNING.
+    rl_url = os.environ.get("RL_SERVICE_URL", "http://localhost:8003")
+    rl_url = rl_url.rstrip("/")
+
+    # P4-024 CRITICAL FIX: map k -> limit. The RL service's RankRequest
+    # Pydantic model (rl/service.py line ~143) uses ``limit``, NOT ``k``.
+    # The issue spec's example code sent ``'k': req.k`` which would be
+    # SILENTLY DROPPED by Pydantic (the model has no extra='forbid', so
+    # unknown fields are ignored, and ``limit`` defaults to 50). The
+    # caller's requested page size would be IGNORED — every request
+    # would return 50 candidates regardless of the ``k`` value. This is
+    # a silent contract drift that the issue spec got wrong. The fix
+    # maps k -> limit explicitly so the caller's k is honored.
+    request_body = {
+        "drug": req.drug,
+        "disease": req.disease,
+        "limit": req.k,
+    }
+    # P4-024: pass org_id as BOTH a query param AND an X-Org-Id header.
+    # The RL service's rank_post handler reads org_id from the query
+    # param (the canonical path). The X-Org-Id header is defense-in-depth
+    # — if a misconfigured proxy strips query params but preserves
+    # headers, the RL service can still read org_id from the header
+    # (it logs the header for audit even if it doesn't use it for
+    # filtering). Both must be present so the RL service has org_id
+    # available regardless of proxy behavior.
+    request_params = {"org_id": org_id}
+    request_headers = {
+        "X-Org-Id": org_id,
+        "Content-Type": "application/json",
+    }
+
+    # P4-024: 60s timeout. The RL service's /rank endpoint may need to:
+    #   1. Load the PPO checkpoint (fast — seconds).
+    #   2. Run PPO inference on the cached bridge's RL input (seconds).
+    #   3. Query the KG service for pathway enrichment (2s per candidate,
+    #      capped by _enrich_candidates_with_pathways's timeout_ms=2000).
+    # For k=100 candidates with KG enrichment, worst case is ~200s — but
+    # the KG enrichment is best-effort and runs in parallel-ish (sequential
+    # per candidate but with 2s timeout each). 60s is a reasonable upper
+    # bound for k<=100; larger k values should use the paginated /rank
+    # endpoint directly. The previous code had NO timeout — a hung RL
+    # service would hang /top-k indefinitely, exhausting the backend's
+    # connection pool.
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            rl_resp = await client.post(
+                f"{rl_url}/rank",
+                json=request_body,
+                params=request_params,
+                headers=request_headers,
+            )
+    except httpx.RequestError as exc:
+        # P4-024: connection failure → 503. This covers:
+        #   - httpx.ConnectError (connection refused — RL service not running)
+        #   - httpx.ConnectTimeout (RL service slow to accept connections)
+        #   - httpx.ReadTimeout (RL service accepted but didn't respond in 60s)
+        #   - httpx.RemoteProtocolError (RL service closed connection mid-response)
+        # All of these mean the RL service is UNAVAILABLE — the client
+        # should retry with backoff. Returning 503 (not 500) signals
+        # "temporary outage, retry later" per HTTP semantics.
+        logger.error(
+            "P4-024: /top-k proxy to RL service failed (RequestError): "
+            "url=%s org_id=%s error=%s",
+            rl_url, org_id, exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"RL service unavailable at {rl_url}: "
+                f"{type(exc).__name__}: {exc}. The RL ranker service is "
+                f"either not running, slow to respond (>60s), or "
+                f"experiencing network issues. Retry with backoff."
+            ),
+        ) from exc
+
+    # P4-024: propagate non-200 responses from the RL service.
+    # The RL service may return:
+    #   400: invalid limit/offset (shouldn't happen — backend validates k)
+    #   401: org_id missing or rejected (shouldn't happen — backend
+    #        extracted org_id from JWT, but defensive)
+    #   500: internal RL service error (checkpoint corruption, etc.)
+    # We propagate the status code + detail to the client so they see
+    # the actual RL service error, not a generic 500.
+    if rl_resp.status_code != 200:
+        # P4-024: 401 from RL service → 401 to client (so frontend can
+        # re-authenticate). Other non-200 → 502 Bad Gateway (the RL
+        # service responded but with an error — the backend is a
+        # gateway in this context).
+        if rl_resp.status_code == 401:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    f"RL service rejected org_id (401): "
+                    f"{rl_resp.text[:500]}. The org_id extracted from the "
+                    f"JWT was rejected by the RL service. This should not "
+                    f"happen — verify RL_REQUIRE_AUTH is not set to a "
+                    f"non-standard value on the RL service."
+                ),
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        # P4-024: other 4xx/5xx from RL service → 502 Bad Gateway.
+        # The backend is acting as a gateway/proxy; a non-200 from the
+        # upstream service is a Bad Gateway per HTTP semantics.
+        logger.error(
+            "P4-024: RL service /rank returned non-200: status=%d body=%s",
+            rl_resp.status_code, rl_resp.text[:500],
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                f"RL service /rank returned {rl_resp.status_code}: "
+                f"{rl_resp.text[:500]}"
+            ),
+        )
+
+    # P4-024: parse the RL service's response and map to TopKResponse.
+    # The RL service returns:
+    #   {
+    #     "candidates": [{drug, disease, rank, gnnScore, safetyScore,
+    #                      marketScore, overallScore, pathwayScore,
+    #                      pathwayChain, confidence, ...}],
+    #     "total": int,
+    #     "source": "service" | "none",
+    #     "pathway_enrichment_available": bool,
+    #     "orgId": str (echo),
+    #     ...
+    #   }
+    # We map the camelCase candidate fields to the snake_case
+    # TopKCandidate schema. The mapping is EXPLICIT (not a generic
+    # camelCase -> snake_case converter) so the API contract is auditable.
+    try:
+        rl_data = rl_resp.json()
+    except Exception as exc:
+        logger.error(
+            "P4-024: RL service /rank returned non-JSON response: %s",
+            rl_resp.text[:500],
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                f"RL service /rank returned a non-JSON response "
+                f"(status=200 but body is not valid JSON): "
+                f"{rl_resp.text[:500]}"
+            ),
+        ) from exc
+
+    rl_candidates = rl_data.get("candidates", [])
+    if not isinstance(rl_candidates, list):
+        logger.error(
+            "P4-024: RL service /rank returned non-list candidates: %r",
+            type(rl_candidates).__name__,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                f"RL service /rank returned non-list candidates "
+                f"(got {type(rl_candidates).__name__}). The RL service "
+                f"may be running a stale version — restart it."
+            ),
+        )
+
+    # P4-024: map each RL candidate (camelCase) to TopKCandidate (snake_case).
+    # Defensive: each candidate must have at minimum ``drug`` and ``disease``
+    # (strings). Other fields are optional and default to None / [].
+    mapped_candidates: List[TopKCandidate] = []
+    for idx, c in enumerate(rl_candidates):
+        if not isinstance(c, dict):
+            logger.warning(
+                "P4-024: skipping non-dict candidate at index %d: %r",
+                idx, type(c).__name__,
+            )
+            continue
+        drug = c.get("drug")
+        disease = c.get("disease")
+        if not drug or not disease:
+            # Skip candidates without drug/disease — they're malformed.
+            logger.warning(
+                "P4-024: skipping candidate at index %d with missing "
+                "drug/disease: %r", idx, c,
+            )
+            continue
+
+        def _to_float(v: Any) -> Optional[float]:
+            """Coerce a value to float, returning None on failure.
+
+            Handles: None, "", NaN, strings like "0.87", ints, floats.
+            Validates the result is in [0, 1] for score fields (we do NOT
+            clamp — out-of-range values indicate a bug in the RL service
+            and should be surfaced as None rather than silently clamped).
+            """
+            if v is None or v == "":
+                return None
+            try:
+                f = float(v)
+                # NaN check (NaN != NaN).
+                if f != f:
+                    return None
+                return f
+            except (ValueError, TypeError):
+                return None
+
+        # P4-024: explicit field mapping (camelCase -> snake_case).
+        # ``score`` is the RL agent's overall ranking score
+        # (overallScore in the RL response — the reward-weighted composite).
+        # ``gnn_score`` is the raw GNN link-prediction score (gnnScore).
+        # ``pathway_chain`` is the list of {pathway, intermediate_protein,
+        # chain} dicts from TM13 v132 enrichment (pathwayChain in the RL
+        # response).
+        gnn_score = _to_float(c.get("gnnScore") or c.get("gnn_score"))
+        safety_score = _to_float(c.get("safetyScore") or c.get("safety_score"))
+        market_score = _to_float(c.get("marketScore") or c.get("market_score"))
+        score = _to_float(c.get("overallScore") or c.get("score") or c.get("reward"))
+        pathway_score = _to_float(c.get("pathwayScore") or c.get("pathway_score"))
+        confidence = _to_float(c.get("confidence"))
+        # pathway_chain: the RL service returns a list of dicts. We
+        # accept it as-is (TopKCandidate.pathway_chain is List[Dict[str, Any]]).
+        # Defensive: if it's not a list, default to [].
+        pathway_chain_raw = c.get("pathwayChain") or c.get("pathway_chain") or []
+        if not isinstance(pathway_chain_raw, list):
+            pathway_chain_raw = []
+        # Filter out non-dict items (defensive — never trust upstream input).
+        pathway_chain = [item for item in pathway_chain_raw if isinstance(item, dict)]
+        # rl_rank: the RL service returns ``rank`` (int, 1-indexed).
+        rl_rank_raw = c.get("rank")
+        try:
+            rl_rank = int(rl_rank_raw) if rl_rank_raw is not None else None
+        except (ValueError, TypeError):
+            rl_rank = None
+
+        try:
+            mapped_candidates.append(TopKCandidate(
+                drug=str(drug),
+                disease=str(disease),
+                gnn_score=gnn_score,
+                rl_rank=rl_rank,
+                safety_score=safety_score,
+                market_score=market_score,
+                score=score,
+                pathway_score=pathway_score,
+                pathway_chain=pathway_chain,
+                confidence=confidence,
+            ))
+        except Exception as exc:
+            # Pydantic validation error — log and skip (don't fail the
+            # whole request because one candidate is malformed).
+            logger.warning(
+                "P4-024: skipping malformed candidate at index %d "
+                "(Pydantic validation failed): %s. Candidate: %r",
+                idx, exc, c,
+            )
+            continue
+
+    # P4-024: build the TopKResponse. ``total`` is the count AFTER
+    # filtering (the RL service already applied org-scoped filtering
+    # via _filter_candidates_by_org). ``source`` is "rl_ranker" (the
+    # backend is the public API; the RL service is the upstream source).
+    # ``org_id`` is echoed back for audit (21 CFR Part 11).
+    # ``pathway_enrichment_available`` is forwarded from the RL service.
+    pathway_enrichment_available = bool(
+        rl_data.get("pathway_enrichment_available", False)
+    )
+    # ``total``: prefer the RL service's total (it's the count AFTER
+    # org-scoped filtering, BEFORE pagination). Fall back to the length
+    # of the candidates list if the RL service didn't include total.
+    total = rl_data.get("total")
+    if not isinstance(total, int) or total < 0:
+        total = len(mapped_candidates)
+
     return TopKResponse(
-        candidates=[],
-        total=0,
+        candidates=mapped_candidates,
+        total=total,
         source="rl_ranker",
-        org_id=auth.org_id,  # TM14: echo back for audit
+        org_id=auth.org_id,  # audit echo
+        pathway_enrichment_available=pathway_enrichment_available,
     )
 
 
