@@ -521,10 +521,36 @@ NODE_PROPERTY_WHITELIST: dict[str, frozenset[str]] = {
         "mesh_id",              # ID_MAPPING_PRIORITY fallback #2
         "first_seen_drug_id",   # v35 M-5: first Compound pointing here
         "source_drug_ids",      # v35 M-5: ALL Compounds pointing here
+        # Teammate 6 ROOT FIX (P2-001): fold_meddra_to_clinical_outcome
+        # populates these fields when folding SIDER MedDRA_Term nodes
+        # into ClinicalOutcome nodes. Without this whitelist entry,
+        # _apply_node_whitelist strips them — the Phase 3 GT model
+        # loses the MedDRA hierarchy level (PT vs LLT) and the
+        # outcome_kind (adverse_event vs efficacy) that the RL ranker
+        # uses to weight safety signal.
+        "meddra_name",          # human-readable MedDRA term (e.g. "Headache")
+        "meddra_type",          # hierarchy level: PT, LLT, HLT, HLGT, SOC
+        "outcome_kind",         # adverse_event | efficacy | mortality | unknown
+        "folded_from",          # the original MedDRA_Term node ID (audit trail)
+        "entity_type",          # set by add_node; preserved for downstream consumers
     }),
     "MedDRA_Term": frozenset({
         "id", "name", "meddra_code", "meddra_type", "umls_cui",
         "source",
+        # Teammate 6 ROOT FIX (P2-001): the sider_loader emits
+        # meddra_id (the canonical 8-digit code) and meddra_name (the
+        # human-readable term) as separate fields. Without this
+        # whitelist entry, _apply_node_whitelist strips them — the
+        # fold function then has no meddra_name to copy to the
+        # ClinicalOutcome node, and entity_resolver cannot resolve
+        # MedDRA_Term nodes by their canonical meddra_id.
+        "meddra_id",
+        "meddra_name",
+        "side_effect_name",
+        "umls_id_label",
+        "meddra_version",
+        "source_version",
+        "entity_type",
     }),
     "Anatomy": frozenset({"id", "name", "uberon_id", "source"}),
     "Side Effect": frozenset({"id", "name", "umls_cui", "source"}),
@@ -574,6 +600,28 @@ for _src, _rel, _dst in CORE_EDGE_TYPES:
     })
     if _rel in ("causes_adverse_event", "causes_side_effect"):
         _base = _base | frozenset({"frequency", "meddra_type", "meddra_code"})
+    # Teammate 6 ROOT FIX (P2-001): preserve SIDER fold properties on
+    # ("Compound", "causes", "ClinicalOutcome") edges. The
+    # fold_meddra_to_clinical_outcome function re-routes SIDER
+    # causes_adverse_event edges to causes edges, carrying the SIDER
+    # properties (frequency bounds, meddra_name) PLUS fold metadata
+    # (folded_from_rel, folded_from_dst, outcome_kind). Without this
+    # whitelist entry, RecordingGraphBuilder would strip them — the
+    # RL safety ranker would lose frequency bounds (cannot distinguish
+    # 50% ADRs from 0.01% ADRs) and the fold audit trail would be lost.
+    if _rel == "causes" and _src == "Compound" and _dst == "ClinicalOutcome":
+        _base = _base | frozenset({
+            "frequency", "frequency_description",
+            "frequency_lower_bound", "frequency_upper_bound",
+            "frequency_source", "meddra_type", "meddra_code",
+            "meddra_name", "severity",
+            # Fold audit-trail properties
+            "folded_from_rel", "folded_from_dst",
+            "outcome_kind",
+            # Edge-feature properties consumed by pyg_builder to build
+            # edge_attr (confidence, evidence_strength, source_count).
+            "evidence_strength", "source_count",
+        })
     if _rel == "tested_for":
         _base = _base | frozenset({
             "nct_id", "phase", "status", "enrollment", "why_stopped",
@@ -5742,4 +5790,62 @@ def ensure_constraints(
 # uses `ensureConstraints` (camelCase) — keep both names working so
 # operators using either convention can call it.
 ensureConstraints = ensure_constraints
+
+
+# =============================================================================
+# Teammate 6 ROOT FIX: re-export RecordingGraphBuilder for test imports.
+# =============================================================================
+# RecordingGraphBuilder is defined in phase1_bridge.py (it imports from
+# kg_builder at module load, so it cannot be defined here without a
+# circular import). Many tests and external callers expect to import it
+# from kg_builder (e.g. `from drugos_graph.kg_builder import
+# RecordingGraphBuilder`).
+#
+# CIRCULAR IMPORT PROBLEM: if we do `from .phase1_bridge import
+# RecordingGraphBuilder` at the TOP of kg_builder, phase1_bridge's
+# `from .kg_builder import ...` runs before kg_builder is fully loaded →
+# ImportError. If we do it at the BOTTOM (after kg_builder is fully
+# loaded), it works WHEN kg_builder is imported first. BUT if a caller
+# imports phase1_bridge FIRST (which then imports kg_builder), kg_builder
+# finishes loading and tries `from .phase1_bridge import ...` — but
+# phase1_bridge is STILL LOADING (circular) → ImportError → the try/
+# except catches it silently → RecordingGraphBuilder is NEVER set on
+# kg_builder. Subsequent `from kg_builder import RecordingGraphBuilder`
+# fails with ImportError.
+#
+# ROOT FIX: use PEP 562 module-level __getattr__ for LAZY import. The
+# first time someone accesses `kg_builder.RecordingGraphBuilder`, Python
+# calls this __getattr__ which imports phase1_bridge (by then fully
+# loaded) and returns the class. The import is cached on the module
+# object so subsequent accesses are O(1). This is robust to ANY import
+# order — kg_builder first, phase1_bridge first, or simultaneous.
+try:
+    from .phase1_bridge import RecordingGraphBuilder  # noqa: F401,E402
+except ImportError:
+    # Circular import at module load time — phase1_bridge is still
+    # loading. The __getattr__ below will handle the lazy import when
+    # someone actually accesses the attribute.
+    pass
+
+
+def __getattr__(name):
+    """PEP 562 lazy module attribute loader.
+
+    Makes ``from phase2.drugos_graph.kg_builder import
+    RecordingGraphBuilder`` work regardless of import order. When
+    phase1_bridge is imported FIRST (e.g. by a test that does
+    ``from phase2.drugos_graph.phase1_bridge import
+    RecordingGraphBuilder``), kg_builder's top-of-module re-export
+    fails silently due to the circular import. This __getattr__ catches
+    the subsequent access and does the import lazily (by which point
+    phase1_bridge is fully loaded).
+    """
+    if name == "RecordingGraphBuilder":
+        from .phase1_bridge import RecordingGraphBuilder as _RGB
+        # Cache on the module so subsequent accesses skip __getattr__.
+        globals()["RecordingGraphBuilder"] = _RGB
+        return _RGB
+    raise AttributeError(
+        f"module {__name__!r} has no attribute {name!r}"
+    )
 

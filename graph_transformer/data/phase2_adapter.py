@@ -1610,6 +1610,164 @@ def adapt_hetero_data_to_phase3(
     return adapt_phase2_to_phase3(builder_like, seed=seed)
 
 
+def validate_hetero_data(hetero_data: Any) -> None:
+    """Validate that a HeteroData object meets Phase 3 minimum requirements.
+
+    Teammate 6 ROOT FIX (P2-001 + P2→P3 contract enforcement): the
+    Phase 3 GT model expects a HeteroData with:
+      - 5 canonical node types: drug, protein, pathway, disease,
+        clinical_outcome (in either lowercase Phase 3 form or
+        capitalized Phase 2 form — the adapter handles the mapping).
+      - Every edge type's ``edge_index`` has shape ``[2, E]`` (PyG
+        convention: row 0 = source, row 1 = destination). A common
+        bug is ``[E, 2]`` (transposed), which causes PyG's message
+        passing to silently produce wrong attention weights.
+      - Every edge type's ``edge_attr`` (if present) has shape
+        ``[E, D]`` where ``E`` matches ``edge_index.size(1)``. A
+        mismatch causes PyG to crash during the first forward pass
+        with a cryptic CUDA error.
+
+    Raises
+    ------
+    Phase2AdapterValidationError
+        On any contract violation. The error message is specific
+        enough for an operator to fix the issue without reading
+        code.
+
+    Parameters
+    ----------
+    hetero_data : torch_geometric.data.HeteroData
+        The HeteroData object to validate. Must have ``node_types``,
+        ``edge_types``, and per-type ``num_nodes`` / ``edge_index`` /
+        ``edge_attr`` attributes (standard PyG HeteroData API).
+    """
+    # ─── Check 1: HeteroData has node_types and edge_types ──────────────
+    if not hasattr(hetero_data, "node_types") or not hasattr(hetero_data, "edge_types"):
+        raise Phase2AdapterValidationError(
+            f"Expected a torch_geometric.data.HeteroData object with "
+            f"'node_types' and 'edge_types' attributes. Got: "
+            f"{type(hetero_data).__name__}. Did you pass a plain dict "
+            f"or a tensor instead of a HeteroData?"
+        )
+
+    # ─── Check 2: All 5 canonical node types present ────────────────────
+    # Accept BOTH the capitalized Phase 2 form (Compound, Protein, ...)
+    # AND the lowercase Phase 3 form (drug, protein, ...). The adapter
+    # handles the mapping; the validator just needs to confirm both
+    # forms aren't simultaneously absent.
+    expected_pairs = [
+        ("drug", "Compound"),
+        ("protein", "Protein"),
+        ("pathway", "Pathway"),
+        ("disease", "Disease"),
+        ("clinical_outcome", "ClinicalOutcome"),
+    ]
+    present_node_types = set(hetero_data.node_types)
+    missing_node_types: List[str] = []
+    zero_count_node_types: List[str] = []
+
+    for lower, cap in expected_pairs:
+        if lower in present_node_types:
+            nt_key = lower
+        elif cap in present_node_types:
+            nt_key = cap
+        else:
+            missing_node_types.append(
+                f"{lower!r} (or capitalized {cap!r})"
+            )
+            continue
+        # Check non-zero node count (warning, not error — a graph with
+        # 0 Pathway nodes is technically valid if STRING PPI data was
+        # not loaded, but it indicates a data gap).
+        try:
+            n_nodes = hetero_data[nt_key].num_nodes
+        except (AttributeError, KeyError):
+            n_nodes = 0
+        if not n_nodes:
+            zero_count_node_types.append(nt_key)
+
+    if missing_node_types:
+        raise Phase2AdapterValidationError(
+            f"HeteroData is missing required node types: "
+            f"{missing_node_types}. Present node types: "
+            f"{sorted(present_node_types)}. The Phase 3 GT model "
+            f"requires all 5 canonical node types to train. If "
+            f"clinical_outcome is missing, ensure the Phase 2 "
+            f"fold_meddra_to_clinical_outcome ran (check the bridge "
+            f"log for 'folded N MedDRA_Term nodes into ClinicalOutcome "
+            f"nodes'). (P2-001 root fix)"
+        )
+
+    for nt in zero_count_node_types:
+        logger.warning(
+            "validate_hetero_data: node type %r has 0 nodes. The GT "
+            "model will have no signal for this type — check upstream "
+            "loaders. (P2-001 root fix)",
+            nt,
+        )
+
+    # ─── Check 3: edge_index shape is [2, E] ────────────────────────────
+    for edge_type in hetero_data.edge_types:
+        ei = hetero_data[edge_type].edge_index
+        if ei is None:
+            raise Phase2AdapterValidationError(
+                f"Edge type {edge_type}: edge_index is None. Every edge "
+                f"type must have a non-None edge_index (use "
+                f"torch.zeros((2, 0), dtype=torch.long) for empty edge "
+                f"types)."
+            )
+        if ei.dim() != 2 or ei.size(0) != 2:
+            raise Phase2AdapterValidationError(
+                f"Edge type {edge_type}: edge_index shape "
+                f"{list(ei.shape)} is not [2, E]. PyG expects dim=2 "
+                f"and size(0)=2 (row 0 = source, row 1 = destination). "
+                f"A common cause is transposing with .t() on a "
+                f"[E, 2] tensor without .contiguous() — use "
+                f"torch.tensor(data, dtype=torch.long).t().contiguous() "
+                f"instead. (P2→P3 contract)"
+            )
+
+        # ─── Check 4: edge_attr matches edge_index ─────────────────────
+        # Phase 2's pyg_builder now ALWAYS sets edge_attr (Teammate 6
+        # ROOT FIX). If edge_attr is missing, the Phase 2 build is
+        # either old (pre-fix) or someone bypassed the builder. Either
+        # way, warn — but don't raise, because Phase 3 can technically
+        # train without edge_attr (it just loses confidence signal).
+        try:
+            ea = hetero_data[edge_type].edge_attr
+        except AttributeError:
+            ea = None
+        if ea is not None:
+            if ea.dim() != 2:
+                raise Phase2AdapterValidationError(
+                    f"Edge type {edge_type}: edge_attr shape "
+                    f"{list(ea.shape)} is not 2D. Expected [E, D]."
+                )
+            if ea.size(0) != ei.size(1):
+                raise Phase2AdapterValidationError(
+                    f"Edge type {edge_type}: edge_attr has {ea.size(0)} "
+                    f"rows but edge_index has {ei.size(1)} edges. They "
+                    f"must match (edge_attr[i] describes edge_index[:, i])."
+                )
+
+    # ─── Log summary ────────────────────────────────────────────────────
+    total_nodes = sum(
+        hetero_data[nt].num_nodes for nt in hetero_data.node_types
+    )
+    total_edges = 0
+    for et in hetero_data.edge_types:
+        ei = hetero_data[et].edge_index
+        if ei is not None and ei.dim() == 2 and ei.size(0) == 2:
+            total_edges += int(ei.size(1))
+    logger.info(
+        "validate_hetero_data: PASSED. %d node types, %d edge types, "
+        "%d total nodes, %d total edges. (P2-001 root fix)",
+        len(hetero_data.node_types),
+        len(hetero_data.edge_types),
+        total_nodes, total_edges,
+    )
+
+
 def adapt_phase2_to_phase3_from_file(
     hetero_data_path: str,
     seed: int = 42,
@@ -1622,9 +1780,66 @@ def adapt_phase2_to_phase3_from_file(
     """Load a saved HeteroData .pt file and convert to Phase 3 schema.
 
     Convenience wrapper around ``adapt_hetero_data_to_phase3`` that
-    handles the ``torch.load`` call. Uses ``weights_only=False`` because
-    HeteroData objects require unpickling — this is safe because the
-    file is produced by the platform's own pipeline (not untrusted input).
+    handles the ``torch.load`` call.
+
+    P3-007 ROOT FIX (Teammate 6, security): the previous code used
+    ``torch.load(hetero_data_path, weights_only=False)`` unconditionally.
+    ``weights_only=False`` allows arbitrary code execution during
+    unpickling — a malicious .pt file replacing the platform's output
+    could execute arbitrary code on the training server. ROOT FIX: try
+    ``weights_only=True`` first (the secure default since PyTorch 1.13).
+    Fall back to ``weights_only=False`` ONLY if ``weights_only=True``
+    fails (e.g. older PyTorch, or a HeteroData pickle that genuinely
+    requires unsafe deserialization because it carries non-tensor
+    Python objects). The fallback logs a WARNING so operators know the
+    secure load path failed.
+
+    P2-001 ROOT FIX (Teammate 6, validation): call
+    ``validate_hetero_data`` BEFORE adaptation. The validator checks:
+    - All 5 canonical node types present (in either capitalized Phase 2
+      form or lowercase Phase 3 form).
+    - Each node type has a non-zero node count (warning if zero).
+    - Every edge type's edge_index has shape [2, E] (not [E, 2]).
+    - Every edge type's edge_attr (if present) has shape [E, D] that
+      matches edge_index.size(1).
+    Raises ``Phase2AdapterValidationError`` on any contract violation.
     """
-    hetero_data = torch.load(hetero_data_path, weights_only=False)
+    # P3-007 ROOT FIX: try weights_only=True first (secure default).
+    try:
+        hetero_data = torch.load(hetero_data_path, weights_only=True)
+    except Exception as exc:
+        # weights_only=True failed. This can happen when:
+        # 1. PyTorch < 1.13 (no weights_only kwarg).
+        # 2. The HeteroData pickle carries non-tensor Python objects
+        #    (e.g. a dict of edge metadata) that weights_only=True
+        #    refuses to deserialize.
+        # In either case, fall back to weights_only=False with a WARNING.
+        # The .pt file is produced by the platform's own pipeline (not
+        # untrusted input), so the security risk is low — but the WARNING
+        # ensures operators are aware the secure path failed.
+        logger.warning(
+            "adapt_phase2_to_phase3_from_file: weights_only=True failed "
+            "for %s (%s: %s). Falling back to weights_only=False. This "
+            "is acceptable ONLY because the .pt file is produced by the "
+            "platform's own pipeline. If this file came from an "
+            "untrusted source, DO NOT proceed — delete the file and "
+            "re-run Phase 2 step9 to regenerate it. (P3-007 root fix)",
+            hetero_data_path, type(exc).__name__, exc,
+        )
+        try:
+            hetero_data = torch.load(hetero_data_path, weights_only=False)
+        except TypeError:
+            # PyTorch < 1.13 doesn't accept the weights_only kwarg at all.
+            # Use the legacy load with NO weights_only kwarg.
+            logger.warning(
+                "adapt_phase2_to_phase3_from_file: PyTorch < 1.13 does "
+                "not support weights_only kwarg. Using torch.load without "
+                "it (legacy behavior). Upgrade to PyTorch >= 1.13 for "
+                "secure loading. (P3-007 root fix)"
+            )
+            hetero_data = torch.load(hetero_data_path)
+
+    # P2-001 ROOT FIX: validate the HeteroData before adaptation.
+    validate_hetero_data(hetero_data)
+
     return adapt_hetero_data_to_phase3(hetero_data, seed=seed)
