@@ -358,6 +358,77 @@ def _load_reward_weights_from_meta(csv_path: Path) -> Optional[Dict[str, float]]
     return None
 
 
+def _parse_pathway_chain_col(raw_value: Any) -> List[Dict[str, Any]]:
+    """Parse the CSV ``pathway_chain`` column back into a list of dicts.
+
+    TEAMMATE-7 P2->P4 ROOT FIX (v131, hostile-auditor verified):
+
+    ``RankedCandidate.to_dict()`` writes ``pathway_chain`` as a JSON string
+    (a list of dicts cannot fit a CSV cell as-is — pandas would write the
+    Python repr with single quotes, which is invalid JSON on read-back).
+    This helper reverses the serialization:
+      - None / empty / "[]" -> []
+      - Valid JSON list of dicts -> the list (validated: each item must be
+        a dict; non-dict items are filtered out so the frontend's
+        PathwayChain.tsx never receives malformed entries)
+      - Invalid JSON / wrong shape -> [] (with a WARNING log so the
+        operator knows the CSV was written by a stale version)
+
+    Defensive against:
+      - pandas NaN (float) -> []
+      - Python repr strings like "[]" (already valid JSON) -> []
+      - Python repr strings like "[{'pathway': 'mTOR'}]" (single quotes,
+        invalid JSON) -> [] with a warning (the to_dict() fix prevents
+        this, but old CSVs may still have it)
+
+    Args:
+        raw_value: The raw CSV cell value (string, None, or NaN).
+
+    Returns:
+        List of pathway dicts (each has at minimum ``pathway``,
+        ``intermediate_protein``, ``chain`` keys per the issue-spec API
+        contract). Empty list on any parse failure.
+    """
+    if raw_value is None:
+        return []
+    # pandas may hand us a float NaN for missing cells.
+    if isinstance(raw_value, float):
+        if raw_value != raw_value:  # NaN check
+            return []
+        return []
+    if not isinstance(raw_value, str):
+        # Defensive: if pandas already parsed it (e.g., a list), accept.
+        if isinstance(raw_value, list):
+            return [item for item in raw_value if isinstance(item, dict)]
+        return []
+    s = raw_value.strip()
+    if not s or s.lower() in ("nan", "none", "null"):
+        return []
+    try:
+        parsed = json.loads(s)
+    except (json.JSONDecodeError, TypeError) as exc:
+        # The to_dict() fix prevents this, but old CSVs may still have
+        # Python repr strings. Log a WARNING so the operator knows.
+        logger.warning(
+            "TEAMMATE-7 v131: pathway_chain column is not valid JSON (%s). "
+            "Returning empty list. The CSV was likely written by a stale "
+            "version of rl_drug_ranker.py (before TEAMMATE-7 v131). "
+            "Re-run the pipeline to regenerate the CSV with proper JSON. "
+            "Raw value (truncated): %.200s",
+            exc, s,
+        )
+        return []
+    if not isinstance(parsed, list):
+        logger.warning(
+            "TEAMMATE-7 v131: pathway_chain column parsed to %s, expected "
+            "list. Returning empty list.",
+            type(parsed).__name__,
+        )
+        return []
+    # Validate each item is a dict (defensive — never trust CSV input).
+    return [item for item in parsed if isinstance(item, dict)]
+
+
 def _load_candidates_from_csv(
     csv_path: Path,
     drug: Optional[str],
@@ -376,6 +447,12 @@ def _load_candidates_from_csv(
     P4-013: Uses streaming iteration instead of list(reader) to avoid OOM
     on large CSV files. We cannot break early because P4-014 requires sorting
     ALL matching candidates by rank before applying the limit.
+
+    TEAMMATE-7 P2->P4 ROOT FIX (v131): now reads the ``pathway_chain`` column
+    (JSON-serialized by ``RankedCandidate.to_dict()``) and the
+    ``pathway_source`` column. The previous version dropped both — the
+    API response had no pathway data even when the CSV did. See
+    ``_parse_pathway_chain_col`` for the JSON-decode logic.
     """
     import csv as csv_mod
 
@@ -510,6 +587,18 @@ def _load_candidates_from_csv(
                     "admeScore": _num(r.get("adme_score")),
                     "literatureSupport": _num(r.get("literature_support")),
                     "isKnownPositive": str(r.get("is_known_positive", "")).lower() in ("1", "true", "yes"),
+                    # TEAMMATE-7 P2->P4 ROOT FIX (v131, hostile-auditor verified):
+                    # Read the pathway_chain column (JSON-serialized by
+                    # RankedCandidate.to_dict() in rl_drug_ranker.py) and
+                    # the pathway_source column. The previous _load_candidates_from_csv
+                    # did NOT read these columns — even when the CSV had them,
+                    # the API response dropped them, so the frontend's
+                    # PathwayChain.tsx had no data to render. The fix
+                    # JSON-decodes the pathway_chain back into a list of
+                    # pathway dicts (matching the issue-spec API contract)
+                    # and passes the pathway_source through verbatim.
+                    "pathwayChain": _parse_pathway_chain_col(r.get("pathway_chain")),
+                    "pathwaySource": str(r.get("pathway_source", "") or ""),
                 })
     except UnicodeDecodeError as _ude:
         logger.error(
@@ -827,6 +916,12 @@ def _rank_impl(
         all_candidates = _filter_candidates_by_org(all_candidates, org_id_norm, org_private_drugs)
         total = len(all_candidates)
         page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
+        # TEAMMATE-7 v131: pathway_enrichment_available flag (issue spec API contract).
+        # True if ANY candidate in the page has a non-empty pathway_chain.
+        _pathway_enrichment_available = any(
+            bool(_c.get("pathwayChain")) for _c in page_candidates
+            if isinstance(_c, dict)
+        )
         return {
             "candidates": page_candidates,
             # P4-028 ROOT FIX: use timezone-aware UTC datetime (not deprecated
@@ -847,6 +942,11 @@ def _rank_impl(
             "count": len(page_candidates),
             "backend": "checkpoint",
             "orgId": org_id_norm,  # BE-043 v128: echo back for audit
+            # TEAMMATE-7 P2->P4 ROOT FIX (v131): pathway enrichment flag.
+            # The frontend's PathwayChain.tsx checks this flag to decide
+            # whether to render the pathway chain UI (or show an empty
+            # state with a "start Neo4j" hint).
+            "pathway_enrichment_available": _pathway_enrichment_available,
         }
 
     # Fallback: read the latest top_candidates_*.csv.
@@ -863,6 +963,8 @@ def _rank_impl(
             "count": 0,
             "note": "No RL output yet. Run `python run_4phase.py` to generate top_candidates_*.csv.",
             "orgId": org_id_norm,
+            # TEAMMATE-7 v131: no candidates -> no pathway enrichment.
+            "pathway_enrichment_available": False,
         }
 
     # BE-070 + INT-022: load ALL matching candidates with total count,
@@ -873,6 +975,12 @@ def _rank_impl(
     all_candidates = _filter_candidates_by_org(all_candidates, org_id_norm, org_private_drugs)
     total = len(all_candidates)
     page_candidates = all_candidates[offset:offset + limit] if limit > 0 else all_candidates
+    # TEAMMATE-7 v131: pathway_enrichment_available flag (issue spec API contract).
+    # True if ANY candidate in the page has a non-empty pathway_chain.
+    _pathway_enrichment_available = any(
+        bool(_c.get("pathwayChain")) for _c in page_candidates
+        if isinstance(_c, dict)
+    )
     return {
         "candidates": page_candidates,
         # P4-045: "service" matches frontend contract (not "rl_service")
@@ -887,6 +995,11 @@ def _rank_impl(
         "csvPath": str(csv_path),
         "backend": "csv",
         "orgId": org_id_norm,  # BE-043 v128: echo back for audit
+        # TEAMMATE-7 P2->P4 ROOT FIX (v131): pathway enrichment flag.
+        # The frontend's PathwayChain.tsx checks this flag to decide
+        # whether to render the pathway chain UI (or show an empty
+        # state with a "start Neo4j" hint).
+        "pathway_enrichment_available": _pathway_enrichment_available,
     }
 
 
