@@ -326,7 +326,7 @@ def _protein_sequence_feature(sequence: str, seed: int) -> np.ndarray:
     return feat
 
 
-def _drug_feature_from_smiles(smiles: str, name: str, seed: int) -> np.ndarray:
+def _drug_feature_from_smiles(smiles: str, name: str, seed: int, morgan_radius: int = 2) -> np.ndarray:
     """Compute a deterministic molecular-fingerprint-style feature.
 
     Primary path: call chemberta_encoder.encode_smiles (real ChemBERTa
@@ -338,6 +338,21 @@ def _drug_feature_from_smiles(smiles: str, name: str, seed: int) -> np.ndarray:
     feature vector. Two structurally similar SMILES will produce
     different but related vectors (hash collisions are spread across
     dimensions, so similar SMILES get correlated feature dimensions).
+
+    P3-014 ROOT FIX (Teammate 8 — hostile-auditor, RED TEAM):
+        The legacy ``AllChem.GetMorganFingerprintAsBitVect`` API is
+        DEPRECATED in RDKit 2024+ and will be REMOVED in a future
+        release. The new API is
+        ``rdFingerprintGenerator.GetMorganGenerator(radius=...,
+        fpSize=...).GetFingerprint(mol)``. The fix uses the new API
+        with a graceful fallback to the legacy API for older RDKit
+        versions.
+
+    P3-022 ROOT FIX (Teammate 8 — hostile-auditor, RED TEAM):
+        The Morgan fingerprint radius was HARDCODED to 2. The fix adds
+        the ``morgan_radius`` parameter (default 2 to preserve the
+        existing production behavior) and threads it through to the
+        RDKit fingerprint generator call.
     """
     target_dim = DEFAULT_FEATURE_DIMS["drug"]
     smiles_str = str(smiles or "").strip()
@@ -420,7 +435,7 @@ def _drug_feature_from_smiles(smiles: str, name: str, seed: int) -> np.ndarray:
     if smiles_str:
         try:
             from rdkit import Chem
-            from rdkit.Chem import AllChem
+            from rdkit.Chem import AllChem  # legacy fallback (P3-014)
         except ImportError:
             # P3-003: RDKit is a HARD dependency. If RDKit is not
             # installed, RAISE (no silent fallback to noise features).
@@ -434,6 +449,39 @@ def _drug_feature_from_smiles(smiles: str, name: str, seed: int) -> np.ndarray:
                 "drug-specific patterns. Install RDKit: "
                 "pip install rdkit>=2023.9.1."
             )
+        # P3-014 ROOT FIX: prefer the new rdFingerprintGenerator API
+        # (NOT deprecated in RDKit 2024+); fall back to legacy
+        # AllChem.GetMorganFingerprintAsBitVect only if the new module
+        # is unavailable (RDKit < 2023.03).
+        try:
+            from rdkit.Chem import rdFingerprintGenerator
+            _use_new_fp_api = True
+        except ImportError:
+            _use_new_fp_api = False
+            logger.debug(
+                "P3-014: rdFingerprintGenerator not available (RDKit < "
+                "2023.03). Falling back to legacy "
+                "AllChem.GetMorganFingerprintAsBitVect (deprecated in "
+                "RDKit 2024+, will be removed in a future release)."
+            )
+
+        # P3-014: helper that wraps both APIs.
+        def _gen_morgan_fp(_mol, _radius: int, _n_bits: int):
+            if _use_new_fp_api:
+                _gen = rdFingerprintGenerator.GetMorganGenerator(
+                    radius=_radius, fpSize=_n_bits
+                )
+                return _gen.GetFingerprint(_mol)
+            return AllChem.GetMorganFingerprintAsBitVect(_mol, _radius, _n_bits)
+
+        # P3-022: validate morgan_radius.
+        if not isinstance(morgan_radius, int) or morgan_radius < 1 or morgan_radius > 4:
+            raise ValueError(
+                f"P3-022: morgan_radius must be an int in [1, 4], got "
+                f"{morgan_radius!r}. ECFP standards: radius=1 (ECFP2), "
+                f"radius=2 (ECFP4, production default), radius=3 (ECFP6)."
+            )
+
         try:
             mol = Chem.MolFromSmiles(smiles_str)
             if mol is not None:
@@ -442,9 +490,12 @@ def _drug_feature_from_smiles(smiles: str, name: str, seed: int) -> np.ndarray:
                 # small target_dim, generate a 1024-bit fingerprint
                 # and XOR-fold down — direct small fingerprints lose
                 # too many substructure bits to hash collisions.
+                #
+                # P3-014: use the new rdFingerprintGenerator API (with legacy fallback).
+                # P3-022: use the configurable ``morgan_radius`` parameter (was hardcoded 2).
                 if target_dim >= 64:
                     _fp_bits = target_dim
-                    fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, _fp_bits)
+                    fp = _gen_morgan_fp(mol, morgan_radius, _fp_bits)
                     fp_arr = np.zeros(_fp_bits, dtype=np.float32)
                     fp_arr[np.array(fp.GetOnBits())] = 1.0
                     feat = fp_arr
@@ -454,7 +505,7 @@ def _drug_feature_from_smiles(smiles: str, name: str, seed: int) -> np.ndarray:
                     # substructure signal that a direct small fingerprint
                     # would lose to hash collisions.
                     _fp_bits = 1024
-                    fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, _fp_bits)
+                    fp = _gen_morgan_fp(mol, morgan_radius, _fp_bits)
                     fp_arr = np.zeros(_fp_bits, dtype=np.float32)
                     fp_arr[np.array(fp.GetOnBits())] = 1.0
                     # Fold: reshape to (target_dim, _fp_bits/target_dim)

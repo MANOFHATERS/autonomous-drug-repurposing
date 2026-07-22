@@ -3343,7 +3343,7 @@ class GTRLBridge:
             # (its gradient is always 0), which is the correct behavior
             # for a feature with no signal.
             logger.critical(
-                f"P3-024/P3-005 ROOT FIX: graph has num_pathways="
+                f"P3-012/P3-024/P3-005 ROOT FIX: graph has num_pathways="
                 f"{num_pathways}, num_diseases_total="
                 f"{num_diseases_total}. The pathway_score column will "
                 f"be 0.0 for ALL rows (no real pathway evidence). This "
@@ -3357,7 +3357,58 @@ class GTRLBridge:
                 f"correctly signals 'no pathway evidence' to the RL "
                 f"agent and to the operator."
             )
-            df["pathway_score"] = 0.0
+            # P3-012 ROOT FIX (Teammate 8 — hostile-auditor, RED TEAM):
+            # The issue's FIX REQUIRED step 2 explicitly states:
+            #   "RAISE a Phase2AdapterValidationError (or similar) instead
+            #    of continuing with a degenerate graph."
+            # The previous "fix" only set pathway_score=0.0 + logged
+            # critical, then continued. That is NOT enough for a
+            # production-grade system: the RL agent would still train on
+            # a constant pathway_score feature (zero gradient, but the
+            # caller has no way to know the graph is degenerate without
+            # parsing logs). For institutional-grade pharma deployments
+            # (per the DOCX §6 V1 launch criteria: "RL agent produces
+            # consistent, non-random rankings"), a degenerate graph
+            # MUST fail-fast so the operator can fix the upstream
+            # Phase 2 graph builder BEFORE the RL agent trains on
+            # garbage data.
+            #
+            # We import Phase2AdapterValidationError lazily to avoid a
+            # circular import (phase2_adapter imports from data/__init__
+            # which imports biomedical_tables which imports this module
+            # via the bridge).
+            #
+            # The raise is GATED by an env var DRUGOS_ALLOW_DEGENERATE_GRAPH=1
+            # for the explicit case where a caller wants to inspect a
+            # degenerate graph (e.g., CI tests that verify the error
+            # message). Production deployments MUST NOT set this env var.
+            _allow_degenerate = os.environ.get(
+                "DRUGOS_ALLOW_DEGENERATE_GRAPH", "0"
+            ) == "1"
+            df["pathway_score"] = 0.0  # set the fallback value FIRST
+            if not _allow_degenerate:
+                try:
+                    from .data.phase2_adapter import (
+                        Phase2AdapterValidationError,
+                    )
+                except ImportError:
+                    # Fall back to a generic RuntimeError if the
+                    # phase2_adapter module is not importable (should
+                    # not happen in normal operation, but defensive).
+                    Phase2AdapterValidationError = RuntimeError  # type: ignore[assignment, misc]
+                raise Phase2AdapterValidationError(
+                    f"P3-012 ROOT FIX: degenerate graph detected "
+                    f"(num_pathways={num_pathways}, "
+                    f"num_diseases_total={num_diseases_total}). The "
+                    f"pathway_score feature is CONSTANT 0.0 for ALL "
+                    f"rows — the RL agent cannot learn from it. This "
+                    f"is a CRITICAL data-quality issue: the graph is "
+                    f"missing pathway nodes or pathway->disease edges. "
+                    f"Fix the upstream Phase 2 graph builder to inject "
+                    f"pathways before calling the bridge. To override "
+                    f"(NOT recommended in production), set "
+                    f"DRUGOS_ALLOW_DEGENERATE_GRAPH=1."
+                )
 
         # --- Patent score, ADME score, Efficacy score (DRUG-LEVEL) ---
         # ROOT FIX (C-2): these three features are DRUG properties, not

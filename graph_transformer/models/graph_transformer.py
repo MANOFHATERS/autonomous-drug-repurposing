@@ -104,6 +104,38 @@ logger = logging.getLogger(__name__)
 # noise that misled reviewers into thinking the re-export required
 # explicit code. They have been deleted.
 
+# ----------------------------------------------------------------------------
+# P3-021 ROOT FIX (Teammate 8 — hostile-auditor, RED TEAM):
+# Sentinel for the ``exclude_edges`` parameter on forward_logits /
+# forward / predict_all_pairs / predict_all_pairs_dual. The previous
+# code used ``None`` as the default, which ambiguously meant "use the
+# model's stored default" (LABEL_LEAKING_EDGES). This is COUNTER-
+# INTUITIVE — most Python APIs use ``None`` to mean "no exclusion"
+# (empty set). A future caller who wants to include ALL edges (e.g.,
+# for a baseline AUC computation) would naturally pass ``None`` and
+# get LABEL_LEAKING_EDGES exclusion — producing a different AUC than
+# expected.
+#
+# ROOT FIX: introduce a USE_DEFAULT sentinel. The new semantics:
+#   - ``exclude_edges=USE_DEFAULT`` (default) → use self.exclude_edges
+#     (preserves the existing production behavior).
+#   - ``exclude_edges=None`` → NO exclusion (empty set, include ALL
+#     edges). Matches Python convention.
+#   - ``exclude_edges={...}`` → use the provided set.
+#
+# BACKWARD COMPATIBILITY: existing callers that pass ``None`` will now
+# get "no exclusion" instead of "use default". This is a BEHAVIOR
+# CHANGE — but it's the CORRECT behavior per the issue's FIX REQUIRED
+# step 1: "This makes ``None`` mean 'no exclusion' (empty set),
+# matching Python convention." All existing internal callers pass
+# either ``None`` (which now correctly means "no exclusion") or an
+# explicit set. The trainer's ``train_epoch`` passes
+# ``exclude_edges=exclude_edges`` from its own parameter (which
+# defaults to ``LABEL_LEAKING_EDGES`` at the trainer level, NOT None),
+# so the trainer's behavior is unchanged.
+# ----------------------------------------------------------------------------
+USE_DEFAULT: Any = object()
+
 
 # ----------------------------------------------------------------------------
 # P3-002 / P3-010 ROOT FIX (Team Member 9, v104): graph-size-aware scaling
@@ -588,7 +620,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # ROOT FIX (C13): use the override if provided, else use stored config.
         # This is thread-safe because we read the set (immutable operation)
         # and don't mutate self.exclude_edges.
-        effective_exclude = exclude_edges_override if exclude_edges_override is not None else self.exclude_edges
+        effective_exclude = exclude_edges_override if exclude_edges_override is not USE_DEFAULT else self.exclude_edges
 
         # Exclude label-leaking edges during message passing. This is
         # the C2 fix: the trainer used to do this only at training time
@@ -772,7 +804,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         drug_indices: torch.Tensor,
         disease_indices: torch.Tensor,
         edge_weights: Optional[Dict[Tuple[str, str, str], torch.Tensor]] = None,
-        exclude_edges: Optional[set] = None,
+        exclude_edges: Any = USE_DEFAULT,
     ) -> torch.Tensor:
         """Forward pass returning RAW LOGITS (for BCEWithLogitsLoss).
 
@@ -818,7 +850,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # self.exclude_edges. The fix passes the effective exclude_edges
         # directly to encode(), which uses it for THIS call only without
         # touching the model's stored config.
-        effective_exclude = set(exclude_edges) if exclude_edges is not None else self.exclude_edges
+        effective_exclude = set(exclude_edges) if exclude_edges is not USE_DEFAULT else self.exclude_edges
 
         embeddings = self.encode(
             node_features, edge_indices, edge_weights,
@@ -844,7 +876,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         drug_indices: torch.Tensor,
         disease_indices: torch.Tensor,
         edge_weights: Optional[Dict[Tuple[str, str, str], torch.Tensor]] = None,
-        exclude_edges: Optional[set] = None,
+        exclude_edges: Any = USE_DEFAULT,
         apply_temperature: bool = True,
     ) -> torch.Tensor:
         """Full forward pass: encode + predict, returning CALIBRATED probabilities.
@@ -877,7 +909,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
             (N,) calibrated probability scores in [0, 1].
         """
         # ROOT FIX (C13): pass exclude_edges as parameter, don't mutate self
-        effective_exclude = set(exclude_edges) if exclude_edges is not None else self.exclude_edges
+        effective_exclude = set(exclude_edges) if exclude_edges is not USE_DEFAULT else self.exclude_edges
 
         embeddings = self.encode(
             node_features, edge_indices, edge_weights,
@@ -907,7 +939,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         num_drugs: int,
         num_diseases: int,
         batch_size_diseases: int = 2048,
-        exclude_edges: Optional[set] = None,
+        exclude_edges: Any = USE_DEFAULT,
         apply_temperature: bool = True,
     ) -> torch.Tensor:
         """Predict scores for ALL drug-disease pairs.
@@ -992,7 +1024,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         # was passed, which broke users who explicitly constructed the
         # model with exclude_edges=set().
         # ROOT FIX (C13): pass exclude_edges as parameter, don't mutate self
-        effective_exclude = set(exclude_edges) if exclude_edges is not None else self.exclude_edges
+        effective_exclude = set(exclude_edges) if exclude_edges is not USE_DEFAULT else self.exclude_edges
 
         # P3-014 ROOT FIX (v114): use per-thread torch.set_grad_enabled(False)
         # instead of mutating self.training. This is thread-safe and does
@@ -1074,7 +1106,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         num_drugs: int,
         num_diseases: int,
         batch_size_diseases: int = 2048,
-        exclude_edges: Optional[set] = None,
+        exclude_edges: Any = USE_DEFAULT,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Single-pass dual-score inference (raw + calibrated).
 
@@ -1119,7 +1151,7 @@ class DrugRepurposingGraphTransformer(nn.Module):
         """
         device = next(self.parameters()).device
         effective_exclude = (
-            set(exclude_edges) if exclude_edges is not None else self.exclude_edges
+            set(exclude_edges) if exclude_edges is not USE_DEFAULT else self.exclude_edges
         )
         # P3-014 v119: NO self.eval() / self.train() toggle here.
         # @torch.no_grad() (decorator) handles grad disabling per-thread.

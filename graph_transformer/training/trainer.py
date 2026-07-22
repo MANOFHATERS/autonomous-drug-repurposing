@@ -938,15 +938,116 @@ class GraphTransformerTrainer:
                 labels.cpu().float(),
             )
             sampler = RandomSampler(dataset, generator=self._gen)
-            loader = DataLoader(
-                dataset,
-                sampler=sampler,
-                batch_size=batch_size,
-                num_workers=4,
-                pin_memory=(self.device != "cpu"),
-                persistent_workers=True,
-                drop_last=False,
+            # P3-013 ROOT FIX (Teammate 8 — hostile-auditor, RED TEAM):
+            # The audit found that ``persistent_workers=True`` leaks
+            # worker subprocesses across epochs when the DataLoader is
+            # LOCAL to ``train_epoch`` (it goes out of scope at the end
+            # of the method, but the 4 persistent workers may not be
+            # reaped before the next epoch spawns new ones). Over 500
+            # epochs of fit(), each epoch created a NEW DataLoader with
+            # 4 persistent workers; on a 4 GB Airflow worker this OOMs
+            # after ~20 epochs.
+            #
+            # ROOT FIX (issue FIX REQUIRED step 2): cache the DataLoader
+            # as ``self._cached_loader`` keyed by (dataset_id, batch_size)
+            # and REUSE it across epochs. ``persistent_workers=True`` is
+            # SAFE when the SAME loader is reused (the workers stay alive
+            # for the lifetime of the cached loader, which is the trainer
+            # lifetime). When a new dataset/batch_size is used, we
+            # explicitly shut down the old loader's workers via
+            # ``_shutdown_cached_loader_workers`` before creating the new
+            # one. This eliminates the leak while keeping the
+            # prefetching performance benefit.
+            #
+            # ADDITIONAL SAFETY (issue FIX REQUIRED step 3): memory
+            # monitor. Each epoch logs the process RSS; if RSS grows
+            # >2x over the first epoch's RSS, raise a RuntimeError so
+            # the operator knows the worker is leaking memory.
+            cache_key = (
+                id(dataset),
+                int(batch_size),
+                int(self._gen.initial_seed()) if hasattr(self._gen, "initial_seed") else 0,
             )
+            cached = getattr(self, "_cached_loader", None)
+            cached_key = getattr(self, "_cached_loader_key", None)
+            if cached is None or cached_key != cache_key:
+                # Different dataset or batch_size — shut down the old
+                # loader's workers (if any) before creating the new one.
+                if cached is not None:
+                    try:
+                        # DataLoader._iterator._workers is the list of
+                        # worker processes. Calling _shutdown_workers()
+                        # (PyTorch 1.9+) terminates them cleanly.
+                        shutdown = getattr(cached, "_shutdown_workers", None)
+                        if callable(shutdown):
+                            shutdown()
+                        else:
+                            # Older PyTorch: iterate the iterator to
+                            # exhaustion, which triggers worker shutdown.
+                            it = getattr(cached, "_iterator", None)
+                            if it is not None:
+                                it._shutdown_workers()  # type: ignore[attr-defined]
+                    except Exception as _shutdown_err:
+                        logger.warning(
+                            "P3-013: failed to shut down previous "
+                            "DataLoader workers cleanly: %s. They will "
+                            "be reaped by GC.", _shutdown_err,
+                        )
+                loader = DataLoader(
+                    dataset,
+                    sampler=sampler,
+                    batch_size=batch_size,
+                    num_workers=4,
+                    pin_memory=(self.device != "cpu"),
+                    persistent_workers=True,  # safe now: cached + reused
+                    drop_last=False,
+                )
+                self._cached_loader = loader
+                self._cached_loader_key = cache_key
+            else:
+                loader = cached
+                # IMPORTANT: reset the sampler's generator state to the
+                # current self._gen state so each epoch gets a different
+                # shuffle. The cached loader's sampler holds a reference
+                # to self._gen, but PyTorch caches the iterator's
+                # generator state. We must invalidate the cached iterator
+                # so the next iteration creates a fresh one with the
+                # current generator state.
+                loader._iterator = None  # type: ignore[attr-defined]
+            # P3-013: memory monitor — log RSS per epoch and raise if
+            # RSS grows >2x over the first epoch's RSS.
+            try:
+                import resource as _resource
+                _rss_kb = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+                # On Linux ru_maxrss is in KB; on macOS it's in bytes.
+                # Normalize to MB for human-readable logs.
+                _rss_mb = _rss_kb / 1024.0 if _rss_kb < 10_000_000 else _rss_kb / (1024.0 * 1024.0)
+            except Exception:
+                _rss_mb = 0.0
+            if not hasattr(self, "_first_epoch_rss_mb"):
+                self._first_epoch_rss_mb = _rss_mb
+                logger.info(
+                    "P3-013: first-epoch RSS = %.1f MB. Will raise if "
+                    "RSS exceeds 2x this value (%.1f MB) in subsequent "
+                    "epochs (DataLoader worker leak detector).",
+                    _rss_mb, 2.0 * _rss_mb,
+                )
+            else:
+                _threshold = 2.0 * self._first_epoch_rss_mb
+                if _rss_mb > _threshold and self._first_epoch_rss_mb > 0:
+                    raise RuntimeError(
+                        f"P3-013 ROOT FIX: RSS grew from "
+                        f"{self._first_epoch_rss_mb:.1f} MB to "
+                        f"{_rss_mb:.1f} MB (>2x). The DataLoader worker "
+                        f"pool is leaking memory. This is the exact "
+                        f"failure mode P3-013 mandates failing fast on. "
+                        f"Investigate the trainer's DataLoader caching "
+                        f"logic or set num_workers=0 as a workaround."
+                    )
+                logger.debug(
+                    "P3-013: epoch RSS = %.1f MB (threshold %.1f MB).",
+                    _rss_mb, _threshold,
+                )
             total_loss = 0.0
             n_batches = 0
             for d_idx, ds_idx, batch_labels in loader:

@@ -469,7 +469,95 @@ class HeterogeneousMultiHeadAttention(nn.Module):
             if edge_idx_check.numel() > 0:  # True iff this edge type has >= 1 edge
                 active_edge_type_count += 1
         active_count = max(1, active_edge_type_count)
+        # P3-018 ROOT FIX (Teammate 8 — hostile-auditor, RED TEAM):
+        # The audit found that the GLOBAL ``cross_type_norm`` (a single
+        # scalar 1/sqrt(active_count) applied to ALL target nodes)
+        # is SCIENTIFICALLY WRONG per HGT (Wang et al. 2019). A HUB node
+        # receiving messages from 7 edge types and a LEAF node receiving
+        # from 1 edge type BOTH got divided by 1/sqrt(7). The hub's total
+        # message was 7 * (1/sqrt(7)) * |V| ≈ 2.65 * |V|, while the leaf's
+        # was 1 * (1/sqrt(7)) * |V| ≈ 0.378 * |V|. The hub was dominated
+        # by edge messages; the leaf was dominated by the self-loop. This
+        # is the OPPOSITE of per-node HGT normalization, which divides
+        # each node's total by sqrt(num_incoming_edge_types_for_that_node).
+        #
+        # ROOT FIX: compute PER-NODE incoming-edge-type count via a
+        # scatter_add on a (N,) tensor. For each edge type, we scatter
+        # a 1 onto the target node indices. After all edge types are
+        # processed, ``per_node_incoming_edge_type_count[i]`` = the
+        # number of distinct edge types that send messages to node i.
+        # The per-node cross-type normalization is then
+        # ``1/sqrt(per_node_incoming_edge_type_count + 1)`` — the +1
+        # accounts for the self-loop (which always sends 1 message).
+        #
+        # This makes hub and leaf nodes COMPARABLE: a hub receiving
+        # from 7 edge types + self-loop gets divided by sqrt(8), while
+        # a leaf receiving from 1 edge type + self-loop gets divided
+        # by sqrt(2). The hub's total message is bounded by
+        # (7+1) * (1/sqrt(8)) * |V| = sqrt(8) * |V| ≈ 2.83 * |V|, and
+        # the leaf's is (1+1) * (1/sqrt(2)) * |V| = sqrt(2) * |V| ≈ 1.41 * |V|.
+        # The ratio is sqrt(4) = 2x (hub gets 2x the message magnitude
+        # of a leaf), which reflects the hub's higher information content
+        # — the standard HGT behavior.
+        #
+        # We still keep the GLOBAL ``cross_type_norm`` for BACKWARD
+        # COMPATIBILITY with the existing scatter_add loop below (which
+        # applies it to every edge type's messages). The PER-NODE norm
+        # is applied ADDITIONALLY after the scatter_add, dividing each
+        # node's accumulated message by sqrt(per_node_count + 1) /
+        # sqrt(active_count) — the ratio that "converts" the global
+        # norm into the per-node norm. This avoids rewriting the entire
+        # scatter_add loop (which would be a much larger diff and would
+        # break trained checkpoints that depend on the exact message
+        # accumulation order).
         cross_type_norm = 1.0 / math.sqrt(active_count)
+        # P3-018: compute per-node incoming-edge-type count.
+        per_node_incoming_edge_type_count = torch.zeros(
+            N, dtype=torch.float32, device=device
+        )
+        for (_src_t, _rel_t, _tgt_t), _ei in edge_indices.items():
+            if _ei.numel() == 0:
+                continue
+            _tgt_offset = type_offsets.get(_tgt_t, 0)
+            _tgt_count = node_embeddings.get(_tgt_t)
+            if _tgt_count is None:
+                continue
+            _tgt_indices = _ei[1] + _tgt_offset
+            # Use ones so scatter_add accumulates the count of edge
+            # types per target node. We add 1 ONCE per edge type
+            # (regardless of how many edges of that type hit the node)
+            # by scatter_add-ing a per-edge-type unique marker.
+            _ones = torch.ones(
+                _tgt_indices.shape[0], dtype=torch.float32, device=device
+            )
+            # Mark each target node that receives from this edge type.
+            # We use scatter_add then clamp to 1 (so a node receiving
+            # 5 edges of the same type still counts as 1 edge type).
+            _per_type_marker = torch.zeros(
+                N, dtype=torch.float32, device=device
+            )
+            _per_type_marker.scatter_add_(0, _tgt_indices, _ones)
+            _per_type_marker = (_per_type_marker > 0).float()
+            per_node_incoming_edge_type_count += _per_type_marker
+        # P3-018: per-node normalization factor.
+        # ``1/sqrt(per_node_count + 1)`` — the +1 accounts for the self-loop.
+        # We then DIVIDE by the global ``cross_type_norm`` (1/sqrt(active_count))
+        # to "undo" the global norm that was already applied in the
+        # scatter_add loop, and MULTIPLY by the per-node norm. The
+        # resulting per-node adjustment factor is:
+        #   sqrt(active_count) / sqrt(per_node_count + 1)
+        # For a hub node (count=7, active_count=7): factor = sqrt(7)/sqrt(8) ≈ 0.935
+        # For a leaf node (count=1, active_count=7): factor = sqrt(7)/sqrt(2) ≈ 1.871
+        # The leaf's messages get AMPLIFIED (it was under-weighted by
+        # the global norm), and the hub's get slightly attenuated
+        # (it was over-weighted). This is the CORRECT HGT behavior.
+        _per_node_adjustment = torch.sqrt(
+            torch.tensor(float(active_count), dtype=torch.float32, device=device)
+        ) / torch.sqrt(per_node_incoming_edge_type_count + 1.0)
+        # Avoid division by zero for nodes with no incoming edges
+        # (per_node_count = 0 → factor = sqrt(active_count)/sqrt(1) =
+        # sqrt(active_count), which is the "all self-loop" case).
+        # The factor is well-defined for all nodes (no NaN).
 
         # ROOT FIX (FORENSIC-AUDIT-I05): self-loops via a SEPARATE projection
         # with a LEARNABLE weight. The previous code applied ``out_proj`` to
@@ -511,6 +599,12 @@ class HeterogeneousMultiHeadAttention(nn.Module):
         # proportionally more edge signal, which is correct — they have
         # more information to aggregate).
         messages = messages + self_loop_messages * self.self_loop_weight
+        # P3-018: save the self-loop portion so we can apply the per-node
+        # adjustment ONLY to the edge messages (NOT to the self-loop).
+        # The self-loop is the node's OWN identity signal — it must be
+        # independent of how many edge types send messages to this node
+        # (see the P3-013 comment above for the full rationale).
+        _self_loop_portion = self_loop_messages * self.self_loop_weight
 
         # Process each edge type
         # P3-039 ROOT FIX (comment accuracy): the previous comment claimed
@@ -654,6 +748,29 @@ class HeterogeneousMultiHeadAttention(nn.Module):
                     tgt_nodes.unsqueeze(-1).expand_as(weighted_V_flat),
                     weighted_V_flat * gate * cross_type_norm,  # V90 BUG #17: dynamic norm
                 )
+
+        # P3-018 ROOT FIX (Teammate 8 — hostile-auditor, RED TEAM):
+        # Apply the PER-NODE cross-type normalization to the edge-message
+        # accumulator. The scatter_add loop above applied the GLOBAL
+        # ``cross_type_norm`` to every edge message. We now MULTIPLY the
+        # edge-message accumulator by ``_per_node_adjustment`` to convert
+        # the global norm into the per-node norm:
+        #   final_edge_message[i] = (sum_of_edge_messages[i] * global_norm)
+        #                          * (sqrt(active_count) / sqrt(per_node_count[i] + 1))
+        #                        = sum_of_edge_messages[i] / sqrt(per_node_count[i] + 1)
+        # which is the CORRECT HGT per-node normalization.
+        #
+        # IMPORTANT: we apply this ONLY to the edge messages, NOT to the
+        # self-loop messages. The self-loop portion (saved in
+        # ``_self_loop_portion`` above) is the node's OWN identity signal
+        # and must NOT be scaled by per_node_count (see the P3-013 comment
+        # at line 587: "remove cross_type_norm from self-loops").
+        #
+        # At this point ``messages`` = ``_self_loop_portion`` + edge_msgs.
+        # We extract the edge-only portion, apply the per-node adjustment,
+        # then add the self-loop portion back.
+        _edge_only = messages - _self_loop_portion
+        messages = _self_loop_portion + _edge_only * _per_node_adjustment.unsqueeze(-1)
 
         # ROOT FIX (FORENSIC-AUDIT-I05): output projection applied ONCE
         # (not twice). The previous code applied out_proj to self-loop
