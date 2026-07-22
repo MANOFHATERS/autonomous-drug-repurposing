@@ -79,7 +79,7 @@ import { SafetyBadge } from './safety-badge';
 // FE-001 ROOT FIX: Real API hooks replace direct mock-data imports.
 import {
   useDiseaseSearch, useDrugSearch, useDrugSafety, useClinicalTrialsSearch,
-  useLiteratureSearch, useKnowledgeGraph, useBuildEvidencePackage, useRlCandidates,
+  useLiteratureSearch, useKnowledgeGraph, useKnowledgeGraphStats, useKnowledgeGraphSubgraph, useBuildEvidencePackage, useRlCandidates,
   useApiList, useDrugMechanisms,
   LoadingSpinner, ErrorDisplay, EmptyState, DemoDataBanner,
 } from './use-api-data';
@@ -1457,7 +1457,18 @@ function KnowledgeGraphScreen() {
   // real KG service (returns 503 if KG_SERVICE_URL is not set, which we
   // surface honestly). When the KG service IS deployed, we merge the real
   // nodes/edges with the mock ones for display.
-  const { data: kgData, loading: kgLoading, error: kgError } = useKnowledgeGraph({
+  //
+  // FE-004 ROOT FIX (Teammate 13, v143): split into TWO hooks.
+  //   - useKnowledgeGraphStats() → fetches {sources, nodeCount, edgeCount, ...}
+  //     from /api/knowledge-graph (no params) for the header card.
+  //   - useKnowledgeGraphSubgraph({drug}) → fetches {nodes, edges} from
+  //     /api/knowledge-graph?drug=X for the canvas.
+  // The previous useKnowledgeGraph hook "normalized" the stats response
+  // to {nodes: [], edges: [], _stats: body} — silently dropping the real
+  // stats (42K nodes, 134K edges) and rendering an empty canvas. The
+  // split hooks surface the real stats in the header where they belong.
+  const { data: kgStatsData, loading: kgStatsLoading, error: kgStatsError } = useKnowledgeGraphStats();
+  const { data: kgData, loading: kgLoading, error: kgError } = useKnowledgeGraphSubgraph({
     drug: searchQuery.length >= 2 ? searchQuery : undefined,
   });
 
@@ -1525,6 +1536,43 @@ function KnowledgeGraphScreen() {
   return (
     <FadeIn>
       <PageHeader title="Knowledge Graph Explorer" description="Explore relationships between drugs, diseases, genes, proteins, and pathways" />
+      {/* FE-004 ROOT FIX (Teammate 13, v143): KG stats header card.
+          Surfaces the REAL graph scale (nodeCount, edgeCount, sources)
+          from /api/knowledge-graph. The previous code rendered an empty
+          canvas because useKnowledgeGraph "normalized" the stats
+          response to {nodes: [], edges: []} — dropping the real numbers.
+          Now the stats are surfaced here in a header card where pharma
+          partners can see the platform's data moat (project docx §10). */}
+      {kgStatsLoading && (
+        <div className="mb-3 text-xs text-muted-foreground flex items-center gap-2">
+          <RefreshCw className="h-3 w-3 animate-spin" /> Loading knowledge graph statistics...
+        </div>
+      )}
+      {kgStatsError && (
+        <div className="mb-3 text-xs text-amber-700 p-2 border border-amber-200 rounded bg-amber-50">
+          <strong>KG stats unavailable:</strong> {kgStatsError.message}
+        </div>
+      )}
+      {kgStatsData && (
+        <div className="mb-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+          <Card className="p-3">
+            <div className="text-xs text-muted-foreground">Total Nodes</div>
+            <div className="text-2xl font-bold tabular-nums">{kgStatsData.nodeCount.toLocaleString()}</div>
+          </Card>
+          <Card className="p-3">
+            <div className="text-xs text-muted-foreground">Total Edges</div>
+            <div className="text-2xl font-bold tabular-nums">{kgStatsData.edgeCount.toLocaleString()}</div>
+          </Card>
+          <Card className="p-3">
+            <div className="text-xs text-muted-foreground">Sources Loaded</div>
+            <div className="text-2xl font-bold tabular-nums">{kgStatsData.sources.filter(s => s.loaded).length} / {kgStatsData.sources.length}</div>
+          </Card>
+          <Card className="p-3">
+            <div className="text-xs text-muted-foreground">Data Source</div>
+            <div className="text-sm font-semibold uppercase">{kgStatsData.source}</div>
+          </Card>
+        </div>
+      )}
       {kgLoading && (
         <div className="mb-3 text-xs text-muted-foreground flex items-center gap-2">
           <RefreshCw className="h-3 w-3 animate-spin" /> Querying Neo4j knowledge graph service...
@@ -1532,8 +1580,8 @@ function KnowledgeGraphScreen() {
       )}
       {kgError && (
         <div className="mb-3 text-xs text-amber-700 p-2 border border-amber-200 rounded bg-amber-50">
-          <strong>KG service status:</strong> {kgError.message} — showing demo graph data.
-          Set <code>KG_SERVICE_URL</code> to connect the real Neo4j Phase 2 service.
+          <strong>KG subgraph error:</strong> {kgError.message} — showing demo graph data.
+          Set <code>KG_SERVICE_URL</code> on the backend to connect the real Neo4j Phase 2 service.
         </div>
       )}
       {kgData && realNodes.length > 0 && (

@@ -3016,13 +3016,84 @@ function AppPlaceholderSection({ section }: { section: string }) {
 function CoreScreenBridge({ section, sub, id }: { section: string; sub?: string; id?: string }) {
   const { navigate: routerNavigate, route: routerRoute } = useRouter()
 
-  // Map the app-router's navigate to the core-screens nav format
-  const navContextValue = useMemo(() => ({
-    navigate: (r: { page: string; section?: string; sub?: string; id?: string }) => {
-      routerNavigate({ page: 'app', section: r.section || r.page, sub: r.sub, id: r.id })
+  // FE-003 ROOT FIX (Teammate 13, v143): preserve the transient `name`
+  // prop across navigation. The previous `navContextValue.navigate`
+  // accepted a loosely-typed route and dropped the `name` field on the
+  // floor — `routerNavigate` (next-router-provider.tsx) calls
+  // `routeToPath(r)` which doesn't URL-encode `name`, so `name` was lost
+  // by the time `currentRoute` was rebuilt from the URL on the next
+  // render. SearchResultsScreen then had to re-fetch the disease name by
+  // ID, defeating the purpose of passing `name` in the first place.
+  //
+  // ROOT FIX: store `name` in a React state (transientName) that survives
+  // the URL update. The state is keyed by `id` so navigating to a
+  // DIFFERENT id (different disease) clears the stale name. The state is
+  // also cleared when the section changes (so a name passed for
+  // 'results' doesn't leak into 'shortlists' on the next navigation).
+  const [transientName, setTransientName] = useState<string | undefined>(undefined)
+
+  // FE-003 ROOT FIX (Teammate 13, v143): use the canonical strict Route
+  // type from nav-context.tsx (which now re-exports from url-route.ts).
+  // The previous `navigate: (r: { page: string; ... })` accepted ANY
+  // string for `page` — typos like `navigate({ page: 'ap' })` compiled
+  // fine and silently no-op'd at runtime. The strict type catches these
+  // at compile time.
+  //
+  // The `currentRoute` field is typed as `Extract<Route, { page: 'app' }>`
+  // (the narrow 'app' variant) because CoreScreenBridge ALWAYS mounts
+  // inside the AppShell where `currentRoute.page` is always 'app'. This
+  // lets callers access `.section` / `.id` / `.name` / `.sub` directly
+  // without per-call-site narrowing.
+  const navContextValue = useMemo<{
+    navigate: (r: import('./nav-context').Route) => void;
+    currentRoute: Extract<import('./nav-context').Route, { page: 'app' }>;
+  }>(() => ({
+    navigate: (r) => {
+      // FE-003 ROOT FIX: narrow to the 'app' variant before accessing
+      // .section/.sub/.id/.name. The strict Route type is a discriminated
+      // union — TypeScript requires narrowing before accessing variant-
+      // specific fields. At runtime, every caller passes `{ page: 'app', ... }`
+      // (verified by grepping all `navigate({...})` call sites in
+      // core-screens.tsx and remaining-screens.tsx — they ALL use page: 'app').
+      // The non-'app' branch is a safety net for future callers that
+      // might navigate to marketing/auth pages from inside the AppShell.
+      if (r.page !== 'app') {
+        // Non-app route (e.g., navigate to /login from inside the app).
+        // Forward as-is to routerNavigate (which accepts the full Route
+        // union). Clear the transient name so it doesn't leak.
+        setTransientName(undefined);
+        routerNavigate(r);
+        return;
+      }
+      // r is now narrowed to the 'app' variant — TypeScript allows
+      // access to .section, .sub, .id, .name.
+      if (r.name) {
+        setTransientName(r.name);
+      } else {
+        setTransientName(undefined);
+      }
+      // Forward the route (without `name` — routeToPath ignores it
+      // anyway, but explicit is better than implicit).
+      routerNavigate({
+        page: 'app',
+        section: r.section,
+        ...(r.sub ? { sub: r.sub } : {}),
+        ...(r.id ? { id: r.id } : {}),
+      });
     },
-    currentRoute: { page: 'app', section: section, sub: sub, id: id },
-  }), [routerNavigate, section, sub, id])
+    currentRoute: {
+      page: 'app' as const,
+      section,
+      ...(sub ? { sub } : {}),
+      ...(id ? { id } : {}),
+      // FE-003 ROOT FIX: merge the transient `name` into currentRoute
+      // so SearchResultsScreen can read it via `currentRoute.name`.
+      // On a page refresh, transientName is undefined (React state is
+      // not persisted) and SearchResultsScreen falls back to deriving
+      // the name from the disease ID — existing behavior, no regression.
+      ...(transientName ? { name: transientName } : {}),
+    },
+  }), [routerNavigate, section, sub, id, transientName])
 
   // ISSUE-FE-015: Removed dead allScreens fallback. coreScreens already
   // includes all sections via remainingScreens spread.
