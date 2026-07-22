@@ -98,7 +98,7 @@ module.exports = {
   // ESM-only deps" — Jest will pass them through as-is (Node handles them
   // natively in newer versions, or they have their own CJS fallback).
   transformIgnorePatterns: [
-    "/node_modules/(?!(next|@prisma/client|@radix-ui|lucide-react|@tanstack|framer-motion|recharts|next-themes|next-intl|@dnd-kit|react-syntax-highlighter|react-markdown|@mdxeditor|embla-carousel|react-day-picker|vaul|cmdk|input-otp|sonner|zustand|zod|@hookform|react-hook-form|class-variance-authority|clsx|tailwind-merge|tw-animate-css|csv-parse|date-fns|react-resizable-panels|sharp))",
+    "/node_modules/(?!(next|@prisma/client|@radix-ui|lucide-react|@tanstack|framer-motion|recharts|next-themes|react-markdown|vaul|cmdk|input-otp|sonner|zustand|zod|@hookform|react-hook-form|class-variance-authority|clsx|tailwind-merge|tw-animate-css|csv-parse|date-fns|sharp))",
   ],
   testTimeout: 60000,
   // v118 IN-066: collect coverage from src/ (excluding test files + type defs).

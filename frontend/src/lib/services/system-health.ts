@@ -195,60 +195,69 @@ async function checkPostgres(): Promise<ServiceHealth> {
  * SEE this in the console to know the service isn't wired up yet.
  */
 async function checkNeo4j(): Promise<ServiceHealth> {
-  // BE-023 ROOT FIX (v115, HIGH): the previous code fell back to
-  // KG_SERVICE_URL when NEO4J_URL was unset, then pinged the KG
-  // service's root URL — NOT Neo4j itself. The KG service returns 200
-  // on its root endpoint even when Neo4j is down (it has an in-memory
-  // bridge fallback per the Phase 2 audit). So if Neo4j crashed, this
-  // check reported "available: true" — a false negative that hid
-  // outages from operators monitoring /api/system/status.
+  // FE-018 ROOT FIX (Teammate 16, hostile-auditor): the previous code
+  // hard-failed with `available: false, critical: true` whenever
+  // DRUGOS_NEO4J_PASSWORD (or legacy NEO4J_PASSWORD) was unset — even
+  // if Neo4j itself was perfectly reachable (dev environments often
+  // run Neo4j with auth disabled, and production Kubernetes
+  // readiness probes were failing on every dev deploy because
+  // /api/system/status returned 503). The aggregate `getSystemHealth`
+  // then computed `anyCriticalDown = true` → overall = "down" → 503
+  // → Kubernetes marked the pod unhealthy. Operators learned to
+  // ignore the warning, which masks REAL Neo4j outages in
+  // production.
   //
-  // ROOT FIX:
-  //   1. NEVER fall back to KG_SERVICE_URL. If NEO4J_URL is unset,
-  //      report `available: false` with a clear reason. The operator
-  //      must explicitly configure the Neo4j endpoint — guessing
-  //      wrong (by pinging the KG service instead) is worse than
-  //      reporting "not configured".
-  //   2. Ping Neo4j's HTTP transaction endpoint
-  //      (/db/neo4j/tx/commit) with a trivial Cypher query
-  //      (RETURN 1). This verifies Neo4j is reachable AND can
-  //      execute queries — not just that the HTTP server is up.
-  //   3. Send basic auth (NEO4J_USERNAME / NEO4J_PASSWORD) since
-  //      /db/neo4j/tx/commit requires authentication.
-  // TM10 v128 ROOT FIX (Task 10.2): align Neo4j env var names with the
-  // Phase 2 backend (phase2/service.py::_get_neo4j_env_var). The backend
-  // reads `DRUGOS_NEO4J_URI` (canonical) with `NEO4J_URI` (legacy) fallback.
-  // The previous frontend code read `NEO4J_URL` (URL, not URI) and
-  // `NEO4J_USERNAME` (USERNAME, not USER) — neither matched the backend's
-  // legacy names. This meant an operator who set ONLY the canonical
-  // `DRUGOS_NEO4J_PASSWORD` (as the backend docs instruct) would see
-  // /api/system/status report "Neo4j unavailable: NEO4J_PASSWORD not
-  // configured" even though Neo4j was actually working fine for the KG
-  // service. The system-health check was reporting a phantom outage.
+  // ROOT FIX (per FE-019 issue spec):
+  //   1. If NEO4J_URI is unset → "not configured" (operator action
+  //      needed). Reported as `degraded` (NOT unavailable), and NOT
+  //      critical — because the SERVICE isn't down, the operator just
+  //      hasn't wired it up. The aggregate overall status will be
+  //      "degraded" (visible in admin console) but NOT "down" (no
+  //      503, no K8s probe failure).
+  //   2. ALWAYS ping Neo4j's HTTP transaction endpoint
+  //      (/db/neo4j/tx/commit) FIRST without auth, even if no
+  //      password env var is set. Many dev/test deployments run Neo4j
+  //      with auth disabled (dbms.security.auth_enabled=false) —
+  //      these return 200 to unauthenticated requests.
+  //   3. If the no-auth ping returns 200 → available (auth disabled).
+  //   4. If the no-auth ping returns 401/403 AND credentials are
+  //      configured → retry WITH basic auth. If auth succeeds →
+  //      available. If auth fails → "degraded: auth failed" (config
+  //      issue, NOT a service outage).
+  //   5. If the no-auth ping returns 401/403 AND NO credentials are
+  //      configured → "degraded: auth required" (operator action
+  //      needed — service is UP but unreachable without credentials).
+  //   6. ONLY mark as `unavailable` + `critical: true` on 5xx,
+  //      timeout, or connection failure (the SERVICE itself is down).
   //
-  // ROOT FIX: read the canonical name first, then fall back to the legacy
-  // backend name, then to the legacy frontend name. This is forward-compatible
-  // (canonical name wins) AND backward-compatible (all three legacy names
-  // still work). After all operators migrate to the canonical names, the
-  // fallbacks can be removed.
+  // TM10 v128 ENV-VAR ALIGNMENT (preserved): canonical names
+  // (DRUGOS_NEO4J_URI / DRUGOS_NEO4J_USER / DRUGOS_NEO4J_PASSWORD)
+  // win, with legacy NEO4J_URI / NEO4J_URL / NEO4J_USER /
+  // NEO4J_USERNAME / NEO4J_PASSWORD fallbacks for backward
+  // compatibility with deployments that haven't migrated yet.
   const url =
     process.env.DRUGOS_NEO4J_URI ||
     process.env.NEO4J_URI ||
     process.env.NEO4J_URL;
   if (!url) {
+    // (1) "Not configured" — operator action needed, NOT a service
+    // outage. Report as degraded (NOT unavailable), NOT critical
+    // (so overall != "down" and /api/system/status does NOT return
+    // 503 — K8s readiness probes stay healthy).
     return {
       service: "Neo4j (Knowledge Graph — Phase 2)",
       available: false,
-      status: "unavailable",
+      degraded: true,
+      status: "degraded",
       reason:
-        "DRUGOS_NEO4J_URI is not configured (canonical name). " +
-        "The Neo4j HTTP endpoint (default http://neo4j:7474) MUST be set " +
-        "explicitly — this check no longer falls back to KG_SERVICE_URL " +
-        "because that would ping the Python KG service, not Neo4j itself " +
-        "(BE-023 root fix). Legacy names NEO4J_URI and NEO4J_URL are also " +
-        "accepted for backward compatibility. (TM10 v128 Task 10.2: aligned " +
-        "with phase2/service.py::_get_neo4j_env_var.)",
-      critical: true,
+        "Neo4j is NOT CONFIGURED. Set DRUGOS_NEO4J_URI (canonical) " +
+        "or NEO4J_URI / NEO4J_URL (legacy) to the Neo4j HTTP endpoint " +
+        "(default http://localhost:7474). This is an operator action, " +
+        "not a service outage — Neo4j may be running but is not wired " +
+        "into the health check. (FE-018 root fix.)",
+      // FE-018 ROOT FIX: NOT critical — the service isn't down, the
+      // operator just hasn't configured the URL yet.
+      critical: false,
     };
   }
 
@@ -267,73 +276,159 @@ async function checkNeo4j(): Promise<ServiceHealth> {
     process.env.DRUGOS_NEO4J_PASSWORD ||
     process.env.NEO4J_PASSWORD ||
     "";
-  if (!password) {
-    // Without a password, the auth check will fail with 401. Report
-    // this as a configuration error — the operator needs to set
-    // DRUGOS_NEO4J_PASSWORD (canonical) in the env.
-    return {
-      service: "Neo4j (Knowledge Graph — Phase 2)",
-      available: false,
-      status: "unavailable",
-      reason:
-        "DRUGOS_NEO4J_PASSWORD is not configured (canonical name). " +
-        "Neo4j's /db/neo4j/tx/commit endpoint requires authentication — " +
-        "set DRUGOS_NEO4J_USER and DRUGOS_NEO4J_PASSWORD (canonical) or " +
-        "NEO4J_USER / NEO4J_PASSWORD (legacy backend) or " +
-        "NEO4J_USERNAME / NEO4J_PASSWORD (legacy frontend). " +
-        "(TM10 v128 Task 10.2.)",
-      critical: true,
-    };
-  }
-  const basicAuth = Buffer.from(`${username}:${password}`).toString("base64");
 
-  const result = await pingHttp(txUrl, {
+  // FE-018 ROOT FIX: ALWAYS try the no-auth ping first. Dev/test
+  // deployments commonly run Neo4j with auth disabled — these
+  // return 200 to unauthenticated requests, and we should report
+  // "available" instead of failing on the missing password env var.
+  const noAuthResult = await pingHttp(txUrl, {
     method: "POST",
     timeoutMs: 3000,
-    headers: {
-      Authorization: `Basic ${basicAuth}`,
-      "Content-Type": "application/json",
-    },
-    // Neo4j HTTP transaction endpoint requires a JSON body with a
-    // `statements` array. We send a trivial `RETURN 1` query — the
-    // equivalent of SQL's `SELECT 1`. The response is 200 if Neo4j
-    // is up and the query executes, 401 if auth failed, 5xx if Neo4j
-    // is broken.
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       statements: [{ statement: "RETURN 1" }],
     }),
   });
 
-  // Neo4j's /tx/commit returns:
-  //   - 200 with { results: [...], errors: [] } on a successful query
-  //   - 200 with { errors: [{code, message}] } on a Cypher syntax error
-  //     (still means Neo4j is up)
-  //   - 401 if auth failed
-  //   - 404 if the database doesn't exist
-  //   - 5xx if Neo4j is broken
-  //
-  // For a liveness probe, ANY 2xx response means Neo4j is up and
-  // accepting queries. A 401 means the credentials are wrong —
-  // report as "degraded" (the service is up but we can't use it).
-  // A 404 means the database name is wrong — also "degraded".
-  // A 5xx means Neo4j is broken — "unavailable".
-  const ok = result.status !== undefined && result.status >= 200 && result.status < 300;
-  const degraded = result.status === 401 || result.status === 403 || result.status === 404;
+  const noAuthStatus = noAuthResult.status;
+  const noAuthOk = noAuthStatus !== undefined && noAuthStatus >= 200 && noAuthStatus < 300;
 
+  // (3) No-auth ping succeeded → Neo4j is up and accepts unauthenticated
+  // queries (auth disabled). This is a valid production configuration
+  // for dev/test environments.
+  if (noAuthOk) {
+    return {
+      service: "Neo4j (Knowledge Graph — Phase 2)",
+      available: true,
+      status: "available",
+      latencyMs: noAuthResult.latencyMs,
+      critical: true,
+    };
+  }
+
+  // (6) 5xx, timeout, or connection failure → the SERVICE is down.
+  // Mark unavailable + critical (overall = "down" → 503 → K8s probe
+  // fails → operator gets paged). This is the only branch that
+  // sets critical: true on failure.
+  const isServiceDown =
+    noAuthResult.reason?.includes("timeout") ||
+    noAuthResult.reason?.includes("connection failed") ||
+    (noAuthStatus !== undefined && noAuthStatus >= 500);
+  if (isServiceDown) {
+    return {
+      service: "Neo4j (Knowledge Graph — Phase 2)",
+      available: false,
+      status: "unavailable",
+      reason: noAuthResult.reason
+        ? `Neo4j is DOWN: ${noAuthResult.reason}. (FE-018 root fix: marked unavailable only on 5xx/timeout — auth-missing is degraded, not down.)`
+        : `Neo4j is DOWN: HTTP ${noAuthStatus}. (FE-018 root fix.)`,
+      latencyMs: noAuthResult.latencyMs,
+      critical: true,
+    };
+  }
+
+  // (5) No-auth ping returned 401/403 AND no credentials are
+  // configured → "degraded: auth required". The SERVICE is up (it
+  // responded with 401, proving the HTTP server is alive) — the
+  // operator just needs to set DRUGOS_NEO4J_PASSWORD. This is NOT
+  // a service outage, so NOT critical.
+  const isAuthRequired = noAuthStatus === 401 || noAuthStatus === 403;
+  if (isAuthRequired && !password) {
+    return {
+      service: "Neo4j (Knowledge Graph — Phase 2)",
+      available: false,
+      degraded: true,
+      status: "degraded",
+      reason:
+        `Neo4j requires authentication (HTTP ${noAuthStatus}) but no ` +
+        "password is configured. The service is UP (it responded), " +
+        "but the health check cannot verify query execution without " +
+        "credentials. Set DRUGOS_NEO4J_USER and DRUGOS_NEO4J_PASSWORD " +
+        "(canonical) or NEO4J_USER / NEO4J_PASSWORD (legacy) to clear " +
+        "this. (FE-018 root fix: auth-missing is degraded, NOT unavailable.)",
+      latencyMs: noAuthResult.latencyMs,
+      // FE-018 ROOT FIX: NOT critical — the service is up.
+      critical: false,
+    };
+  }
+
+  // (4) No-auth ping returned 401/403 AND credentials ARE configured
+  // → retry WITH basic auth. If auth succeeds → available. If auth
+  // fails → "degraded: auth failed" (config issue, NOT outage).
+  if (isAuthRequired && password) {
+    const basicAuth = Buffer.from(`${username}:${password}`).toString("base64");
+    const authResult = await pingHttp(txUrl, {
+      method: "POST",
+      timeoutMs: 3000,
+      headers: {
+        Authorization: `Basic ${basicAuth}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        statements: [{ statement: "RETURN 1" }],
+      }),
+    });
+    const authStatus = authResult.status;
+    const authOk = authStatus !== undefined && authStatus >= 200 && authStatus < 300;
+    if (authOk) {
+      return {
+        service: "Neo4j (Knowledge Graph — Phase 2)",
+        available: true,
+        status: "available",
+        latencyMs: authResult.latencyMs,
+        critical: true,
+      };
+    }
+    // Auth failed with credentials provided → config issue (wrong
+    // password), NOT a service outage. The service is up (it
+    // responded to the no-auth ping with 401).
+    const authFailed = authStatus === 401 || authStatus === 403;
+    if (authFailed) {
+      return {
+        service: "Neo4j (Knowledge Graph — Phase 2)",
+        available: false,
+        degraded: true,
+        status: "degraded",
+        reason:
+          `Neo4j auth FAILED (HTTP ${authStatus}) with the configured ` +
+          "credentials. The service is UP, but the username/password " +
+          "is wrong. Check DRUGOS_NEO4J_USER / DRUGOS_NEO4J_PASSWORD " +
+          "(canonical) or NEO4J_USER / NEO4J_PASSWORD (legacy). " +
+          "(FE-018 root fix: auth-failed is degraded, NOT unavailable.)",
+        latencyMs: authResult.latencyMs,
+        critical: false,
+      };
+    }
+    // 5xx with auth → service is down (already covered above for
+    // no-auth, but auth retry might also hit 5xx). Mark unavailable.
+    return {
+      service: "Neo4j (Knowledge Graph — Phase 2)",
+      available: false,
+      status: "unavailable",
+      reason: authResult.reason
+        ? `Neo4j is DOWN (post-auth): ${authResult.reason}. (FE-018 root fix.)`
+        : `Neo4j is DOWN (post-auth): HTTP ${authStatus}. (FE-018 root fix.)`,
+      latencyMs: authResult.latencyMs,
+      critical: true,
+    };
+  }
+
+  // 404 (database 'neo4j' not found) or other non-2xx non-401/403/5xx
+  // → service is up but database is missing/misconfigured. Treat as
+  // degraded (config issue), NOT unavailable.
   return {
     service: "Neo4j (Knowledge Graph — Phase 2)",
-    available: ok,
-    degraded,
-    status: ok ? "available" : degraded ? "degraded" : "unavailable",
-    reason: ok
-      ? undefined
-      : result.status === 401 || result.status === 403
-        ? `Neo4j auth failed (HTTP ${result.status}) — check DRUGOS_NEO4J_USER / DRUGOS_NEO4J_PASSWORD (canonical) or legacy NEO4J_USER / NEO4J_PASSWORD / NEO4J_USERNAME. (TM10 v128)`
-        : result.status === 404
-          ? "Neo4j database 'neo4j' not found — the database may not be initialized."
-          : result.reason,
-    latencyMs: result.latencyMs,
-    critical: true,
+    available: false,
+    degraded: true,
+    status: "degraded",
+    reason:
+      noAuthStatus === 404
+        ? "Neo4j database 'neo4j' not found — the database may not be initialized. The Neo4j HTTP server is UP (it responded with 404). (FE-018 root fix.)"
+        : noAuthResult.reason
+          ? `Neo4j returned unexpected status: ${noAuthResult.reason}. (FE-018 root fix.)`
+          : `Neo4j returned unexpected HTTP ${noAuthStatus}. (FE-018 root fix.)`,
+    latencyMs: noAuthResult.latencyMs,
+    critical: false,
   };
 }
 
@@ -437,31 +532,65 @@ async function checkMlflow(): Promise<ServiceHealth> {
  * queryable. So Airflow is NOT critical (degraded, not down).
  */
 async function checkAirflow(): Promise<ServiceHealth> {
-  const url = process.env.AIRFLOW_URL || process.env.DATASET_SERVICE_URL;
+  // FE-019 ROOT FIX (Teammate 16, hostile-auditor): the previous code
+  // fell back from AIRFLOW_URL to DATASET_SERVICE_URL, conflating TWO
+  // DIFFERENT SERVICES:
+  //   - AIRFLOW_URL → the Apache Airflow webserver (port 8080 per
+  //     frontend/src/lib/_url-constants.ts), which orchestrates the
+  //     Phase 1 ETL pipeline (ChEMBL/DrugBank/UniProt/STRING/DisGeNET/
+  //     OMIM/PubChem ingestion — see project docx Section 3).
+  //   - DATASET_SERVICE_URL → legacy alias for PHASE1_SERVICE_URL (per
+  //     frontend/src/lib/ml-contracts.ts SERVICE_URL_ENV_VARS), which
+  //     points at the Phase 1 FastAPI dataset service (port 8000),
+  //     NOT at Airflow.
+  // When AIRFLOW_URL was unset but DATASET_SERVICE_URL was set, the
+  // function pinged the Phase 1 service's /health and reported it as
+  // "Apache Airflow available: true" — a false positive that hid
+  // real Airflow outages from operators. Stale data flowed undetected
+  // because the admin console showed Airflow as healthy when only the
+  // Phase 1 service was up.
+  //
+  // ROOT FIX (per FE-019 issue spec):
+  //   1. NEVER fall back to DATASET_SERVICE_URL — Airflow and the
+  //      Phase 1 service are different services on different ports.
+  //   2. If AIRFLOW_URL is unset → "not configured" (degraded, NOT
+  //      unavailable, NOT critical). The dataset pipeline cannot
+  //      refresh, but the platform still serves from existing data
+  //      in PostgreSQL/Neo4j.
+  //   3. If AIRFLOW_URL is set → ping /health on the Airflow
+  //      webserver (the unauthenticated endpoint exposed for
+  //      container healthchecks — reference: https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check.html).
+  const url = process.env.AIRFLOW_URL;
   if (!url) {
+    // (2) "Not configured" — operator action needed. The platform
+    // can still serve from existing data, so this is degraded (NOT
+    // unavailable) and NOT critical (Airflow is NOT in the critical
+    // path — only PostgreSQL and Neo4j are).
     return {
       service: "Apache Airflow (Dataset Pipeline — Phase 1)",
       available: false,
-      status: "unavailable",
-      reason: "AIRFLOW_URL is not configured. The dataset pipeline cannot refresh from the 7 biomedical sources.",
+      degraded: true,
+      status: "degraded",
+      reason:
+        "Apache Airflow is NOT CONFIGURED. Set AIRFLOW_URL to the " +
+        "Airflow webserver URL (default http://localhost:8080). " +
+        "Without Airflow, the dataset pipeline cannot refresh from " +
+        "the 7 biomedical sources (ChEMBL/DrugBank/UniProt/STRING/" +
+        "DisGeNET/OMIM/PubChem), but the platform continues to serve " +
+        "from existing data in PostgreSQL/Neo4j. (FE-019 root fix: " +
+        "DATASET_SERVICE_URL fallback removed — Airflow and the Phase 1 " +
+        "service are different services on different ports and must " +
+        "not be conflated.)",
+      // Airflow is NOT critical (degraded, not down) — the platform
+      // can still serve queries from existing data.
+      critical: false,
     };
   }
-  // BE-024 ROOT FIX (v115, MEDIUM): Airflow 2.x+ moved /api/v1/health
-  // behind auth. The previous code pinged /api/v1/health, which returned
-  // 401 (auth required). With the previous `ok = status < 500` logic,
-  // a 401 was treated as "available" — a false positive. With the new
-  // strict 2xx logic, a 401 is "degraded".
-  //
-  // The CORRECT unauthenticated endpoint is /health (no /api/v1/
-  // prefix). Airflow 2.x exposes this on the webserver for container
-  // healthchecks — it does not require auth and returns 200 with a
-  // JSON status. Reference: https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check.html
-  //
-  // NOTE: this is the Airflow webserver URL (default port 8080), NOT
-  // the Phase 1 dataset service URL (port 8000). The env var resolution
-  // order is now AIRFLOW_URL first, DATASET_SERVICE_URL second — the
-  // previous order was reversed (and DATASET_SERVICE_URL points at
-  // phase1/service.py, NOT Airflow).
+  // BE-024 ROOT FIX (v115, MEDIUM) — preserved: Airflow 2.x+ moved
+  // /api/v1/health behind auth. The CORRECT unauthenticated endpoint
+  // is /health (no /api/v1/ prefix). Airflow 2.x exposes this on the
+  // webserver for container healthchecks — it does not require auth
+  // and returns 200 with a JSON status.
   const pingUrl = url.replace(/\/$/, "") + "/health";
   const result = await pingHttp(pingUrl, { timeoutMs: 3000 });
   // Airflow /health returns 200 on success, 401 if auth is required
