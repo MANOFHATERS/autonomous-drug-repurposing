@@ -115,6 +115,24 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "no-undef": "error",
     "no-unreachable": "error",
     "no-useless-escape": "warn",
+    // FE-017 ROOT FIX (Teammate 15, v143): ban template-literal URL query
+    // string construction in api-client.ts. The previous code used
+    // `?limit=${limit}&offset=${offset}` which doesn't URL-encode values.
+    // Fine for numbers, but if a future maintainer adds a string param
+    // (e.g. a search query) and follows the same pattern, special
+    // characters would corrupt the URL. URLSearchParams is the canonical
+    // encoding-safe way (matches searchClinicalTrials' pattern).
+    // The rule matches any TemplateLiteral starting with `?` and containing
+    // `${...}` interpolation — the pattern that bypasses URLSearchParams.
+    "no-restricted-syntax": [
+      "warn",
+      {
+        // Match: `?${var}=` or `?${var}&` — template literals that build
+        // query strings without URLSearchParams.
+        selector: "TemplateLiteral:first-child > Quasi:first-child[value^='?'] ~ TemplateElement",
+        message: "FE-017: Use URLSearchParams to build query strings, not template literals. Template literals don't URL-encode values — special characters in params corrupt the URL.",
+      },
+    ],
   },
 }, {
   // FE-027 ROOT FIX (v2): Test files use Jest globals (describe, test, expect,

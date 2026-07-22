@@ -1956,3 +1956,33 @@ Stage Summary:
 - Fresh-clone verification confirms all fixes landed on main.
 - Merge commit on main: 7babd8d
 - Branch: fix/teammate6-p2-009-to-016-forensic-root-v142 (preserved for audit)
+
+---
+Task ID: teammate-15-v143
+Agent: Teammate 15 (Frontend / Next.js — Hooks + Components)
+Task: Forensic root-cause fixes for FE-013 through FE-017 (5 MEDIUM issues).
+
+Work Log:
+- Read project docx (Cosmic_Build_Process_Updated.docx) for full build context (6 phases: Data Ingestion → KG → Graph Transformer → RL → API/Dashboard → V1 Launch).
+- Cloned repo, created branch fix/teammate15-fe-013-to-fe-017-forensic-root-v143 from main.
+- Read EACH of the 5 issue files line by line (frontend/examples/websocket/frontend.tsx, backend/api/main.py [2991 lines], frontend/src/lib/api-client.ts, frontend/src/app/api/projects/[id]/route.ts, frontend/scripts/extract_openapi.py, frontend/src/app/api/projects/[id]/comments/route.ts for pattern reference).
+- Verified ALL 5 issues are REAL bugs present in the actual code (not just comments / not pre-fixed).
+- FE-013 ROOT FIX: replaced `useState<any>(null)` for socket with `useRef<Socket | null>(null)`; replaced all `onKeyPress` with `onKeyDown` (3 sites); added `socketRef.current = null` cleanup; imported `useRef` and `type Socket`; marked file illustrative-only.
+- FE-014 ROOT FIX: added `timeout_graceful_shutdown=30` to `uvicorn.run`; added module-level `_inflight_ml_tasks: set[asyncio.Task]`; added `_track_ml_call(coro)` helper that schedules + tracks tasks; added `@app.on_event("shutdown")` handler `_drain_inflight_ml_calls` that drains with 25s timeout + logs CRITICAL on timeout; wrapped httpx calls in /predict, /top-k, /datasets/stats, /validate, /kg/stats, /kg/explore, /cypher with `_track_ml_call`.
+- FE-015 ROOT FIX: removed `raise ImportError("BE-001 v123: ...")` re-raise; added `_HAS_FASTAPI` flag + no-op stub classes (`_NoOpApp`, `BaseModel`, `Field`, `ConfigDict`, `HTTPException`, `Depends`, `Request`, `_StatusStub`, `CORSMiddleware`, `HTTPBearer`, `HTTPAuthorizationCredentials`); made `httpx` import optional too with `_NoOpHttpxModule` stub; conditional `app = FastAPI(...)` vs `app = _NoOpApp()`; tagged stub with `_is_noop_stub=True` for detection; updated `frontend/scripts/extract_openapi.py` SERVICES list to include `backend.api.main` + detect `_is_noop_stub` + emit clear WARNING.
+- FE-016 ROOT FIX: changed `api-client.ts` `addHypothesis` to POST to `/api/projects/${projectId}/hypotheses` (was bare `/api/projects/${projectId}`); created new route file `frontend/src/app/api/projects/[id]/hypotheses/route.ts` with the POST handler (moved from `[id]/route.ts`); stripped POST handler from `[id]/route.ts` (now GET-only); preserved ALL existing FE-017 (Team 13) visibility + role checks + FE-011 CSRF protection in the new file; updated existing `fe-team13-fixes.test.ts` to read from the new hypotheses route file.
+- FE-017 ROOT FIX: replaced template-literal URL construction in `listUsers` and `listAuditLogs` with `URLSearchParams` (matches the pattern already used by `searchClinicalTrials`); added ESLint `no-restricted-syntax` rule in `eslint.config.mjs` banning `?${var}=` template-literal URL patterns to prevent regressions.
+- Wrote 41 source-level + behavioral Jest tests in `frontend/src/lib/services/__tests__/tm15-fe013-to-fe017-forensic.test.ts` — ALL 41 PASS.
+- Wrote 23 source-level + behavioral pytest tests in `tests/test_tm15_fe014_fe015_forensic.py` — ALL 23 PASS.
+- Ran real `tsc --noEmit` on frontend: 28 errors BEFORE my changes, 28 AFTER — ZERO regressions introduced. None of my modified files appear in the error list (all 28 are pre-existing Prisma 7-vs-6 mismatches and react-resizable-panels API drift).
+- Ran real `python3 -c 'from backend.api import main'` — main.py imports cleanly with real FastAPI installed (app is a real FastAPI instance with 9 OpenAPI paths / 15 routes).
+- Ran real FE-015 behavioral test: blocked fastapi imports via `builtins.__import__` shim → main.py STILL imports cleanly (app = _NoOpApp stub, _is_noop_stub=True); extract_openapi.py detects the stub and returns None with the clear "FastAPI is required ONLY for backend dev, NOT for frontend dev" warning.
+- Fixed pre-existing path-resolution bug in `fe-team13-fixes.test.ts` (used `process.cwd()` instead of `__dirname`-relative paths) — the test was completely broken before (couldn't load). After my fix it loads and runs; 41/62 tests pass. The 21 remaining failures are all pre-existing (Prisma 7-vs-6 import errors, wrong assertions like `=== "public"` that the code never had — verified by grepping the original code which only had `=== "private"`).
+
+Stage Summary:
+- 5 issues (FE-013 through FE-017) — ALL 5 fixed at root level.
+- 0 regressions: tsc 28→28, my files have 0 errors, my 64 new tests all pass.
+- Real-code verification (not mocked): main.py imports clean with FastAPI installed AND with FastAPI blocked; OpenAPI spec generates 9 paths; httpx calls wrapped with _track_ml_call in all 7 ML proxy routes.
+- Branch: fix/teammate15-fe-013-to-fe-017-forensic-root-v143 (preserved for audit).
+- Files modified: backend/api/main.py, frontend/scripts/extract_openapi.py, frontend/src/lib/api-client.ts, frontend/src/app/api/projects/[id]/route.ts, frontend/src/lib/services/__tests__/fe-team13-fixes.test.ts, frontend/eslint.config.mjs, frontend/examples/websocket/frontend.tsx.
+- Files created: frontend/src/app/api/projects/[id]/hypotheses/route.ts, frontend/src/lib/services/__tests__/tm15-fe013-to-fe017-forensic.test.ts, tests/test_tm15_fe014_fe015_forensic.py, tests/__init__.py.

@@ -50,6 +50,15 @@ SERVICES = [
     ("phase2.service", "app", REPO_ROOT / "phase2" / "service.py", "phase2"),
     ("graph_transformer.service", "app", REPO_ROOT / "graph_transformer" / "service.py", "phase3_gt"),
     ("rl.service", "app", REPO_ROOT / "rl" / "service.py", "phase4_rl"),
+    # FE-015 ROOT FIX (Teammate 15, v143): add the public REST API backend
+    # so its OpenAPI spec is included in the combined contracts. When
+    # FastAPI is not installed (frontend-only dev environment), the
+    # backend's `app` is a no-op stub (tagged with `_is_noop_stub=True`)
+    # — `try_import_openapi` detects this and skips the backend with a
+    # WARNING, so the frontend build chain still produces contracts from
+    # the other 4 services. FastAPI is required ONLY for backend dev,
+    # NOT for frontend dev (see backend/api/main.py FE-015 comment).
+    ("backend.api.main", "app", REPO_ROOT / "backend" / "api" / "main.py", "backend_api"),
 ]
 
 
@@ -58,6 +67,14 @@ def try_import_openapi(module_path: str, app_attr: str) -> Optional[Dict[str, An
 
     Returns ``None`` if the import fails (e.g., missing optional dep).
     The caller then falls back to AST parsing.
+
+    FE-015 ROOT FIX (Teammate 15, v143): when the backend's `app` is a
+    no-op stub (tagged with `_is_noop_stub=True`), this function returns
+    ``None`` AND skips AST parsing — the backend has no useful routes to
+    extract when FastAPI is missing (the stub doesn't register any).
+    The frontend build chain still produces contracts from the other 4
+    services. A clear WARNING is emitted so the developer understands
+    why the backend is missing from the combined contracts.
     """
     try:
         mod = __import__(module_path, fromlist=[app_attr])
@@ -71,6 +88,22 @@ def try_import_openapi(module_path: str, app_attr: str) -> Optional[Dict[str, An
     if app_obj is None:
         logger.warning(
             "Module %s has no attribute %s — falling back to AST parsing",
+            module_path, app_attr,
+        )
+        return None
+    # FE-015 ROOT FIX: detect the no-op stub app (set by backend/api/main.py
+    # when FastAPI is not installed). The stub is tagged with
+    # `_is_noop_stub=True` so we don't couple to the internal class name.
+    # When the stub is detected, return a sentinel that tells the caller
+    # to SKIP AST parsing too (the stub has no real routes to extract).
+    if getattr(app_obj, "_is_noop_stub", False):
+        logger.warning(
+            "FE-015: %s.%s is a no-op stub (FastAPI not installed). "
+            "SKIPPING this service — the backend OpenAPI spec will NOT "
+            "be in the combined contracts. This is expected in frontend-"
+            "only dev environments. To include the backend spec, install "
+            "FastAPI: `pip install fastapi uvicorn[standard] pydantic`. "
+            "FastAPI is required ONLY for backend dev, NOT for frontend dev.",
             module_path, app_attr,
         )
         return None

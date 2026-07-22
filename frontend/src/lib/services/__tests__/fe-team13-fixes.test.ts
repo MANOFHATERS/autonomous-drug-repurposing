@@ -1,13 +1,32 @@
 /**
  * FE-010 through FE-023 root-fix verification tests.
  * Team Member 13 — Frontend - API Routes (Critical Integration).
+ *
+ * FE-016 ROOT FIX (Teammate 15, v143): the POST handler for hypotheses was
+ * MOVED from `app/api/projects/[id]/route.ts` to
+ * `app/api/projects/[id]/hypotheses/route.ts`. The POST-related assertions
+ * in the FE-017 describe block now read from the hypotheses route file.
+ *
+ * FE-015 ROOT FIX (Teammate 15, v143): path resolution now uses
+ * `__dirname`-relative paths (not `process.cwd()`) so the tests work
+ * regardless of where Jest is invoked from.
  */
 
 import { readFileSync, existsSync } from "fs";
-import { join } from "path";
+import { join, dirname, resolve } from "path";
+import { fileURLToPath } from "url";
 
-const FRONTEND_ROOT = join(process.cwd(), "src");
-const FRONTEND_PRISMA = join(process.cwd(), "prisma");
+// Resolve paths relative to THIS test file (not process.cwd()) so the
+// tests work regardless of where Jest is invoked from.
+// This file is at: frontend/src/lib/services/__tests__/fe-team13-fixes.test.ts
+// FRONTEND_ROOT = frontend/src/
+// FRONTEND_PRISMA = frontend/prisma/
+const __filename_ts = typeof __filename !== "undefined"
+  ? __filename
+  : fileURLToPath(import.meta.url);
+const THIS_DIR = dirname(__filename_ts);
+const FRONTEND_ROOT = resolve(THIS_DIR, "../../../..", "src");
+const FRONTEND_PRISMA = resolve(THIS_DIR, "../../../..", "prisma");
 
 function readSrc(relPath: string): string {
   const full = join(FRONTEND_ROOT, relPath);
@@ -208,14 +227,20 @@ describe("FE-016: MFA challenge token replay protection", () => {
 
 // FE-017: Project endpoints enforce visibility + role
 describe("FE-017: Project endpoints enforce visibility + role", () => {
+  // FE-016 ROOT FIX (Teammate 15, v143): the POST handler was MOVED from
+  // `app/api/projects/[id]/route.ts` to `app/api/projects/[id]/hypotheses/route.ts`.
+  // The GET handler stays in `[id]/route.ts`. The role/visibility checks
+  // for POST now live in the hypotheses route file.
   const projectRoute = readSrc("app/api/projects/[id]/route.ts");
+  const hypothesesRoute = readSrc("app/api/projects/[id]/hypotheses/route.ts");
   test("GET /api/projects/[id] checks project.visibility", () => {
     expect(projectRoute).toMatch(/project\.visibility === "private"/);
     expect(projectRoute).toMatch(/project\.visibility === "public"/);
   });
-  test("POST /api/projects/[id] checks OrganizationMember.role", () => {
-    expect(projectRoute).toMatch(/PROJECT_WRITE_ROLES/);
-    expect(projectRoute).toMatch(/organizationMember\.findFirst/);
+  test("POST /api/projects/[id]/hypotheses checks OrganizationMember.role", () => {
+    // FE-016: POST handler is now in hypotheses/route.ts.
+    expect(hypothesesRoute).toMatch(/PROJECT_WRITE_ROLES/);
+    expect(hypothesesRoute).toMatch(/organizationMember\.findFirst/);
   });
   test("comments route ignores client-supplied authorName (FE-073)", () => {
     const commentsRoute = readSrc("app/api/projects/[id]/comments/route.ts");
