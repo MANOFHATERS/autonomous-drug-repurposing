@@ -7301,6 +7301,50 @@ def step11_train_transe(
     # structurally unverifiable.
     test_triples = (test_h, test_r, test_t)
 
+    # P2-003 ROOT FIX (Teammate 5, forensic, root-level): early-skip
+    # when val_triples is empty. The train_transe function now RAISES
+    # ``TransETrainingError`` when ``val_triples is None`` (or empty)
+    # AND ``test_triples`` is provided — because the DOCX V1 launch
+    # criterion requires held-out AUC, which requires a best model
+    # selected by validation AUC, which requires val_triples. Without
+    # this early-skip, step11 would call train_transe, train_transe
+    # would raise, and step11 would crash — losing the rest of the
+    # pipeline output. The early-skip returns a structured
+    # ``{"skipped": True, "reason": "no_val_triples"}`` so the V1
+    # launch criteria check can detect the skip and report it cleanly.
+    #
+    # The previous behavior: train_transe silently returned a
+    # TrainingHistory with ``best_val_auc=-1.0`` and
+    # ``model_sha256=""`` (no checkpoint saved), and step11 reported
+    # ``{"skipped": False, "best_val_auc": -1.0, "model_saved": False}``.
+    # A future maintainer reading ``best_val_auc=-1.0`` could interpret
+    # it as "no AUC available, skip the check" rather than "AUC check
+    # failed" — silently shipping a V1 launch with NO trained model.
+    # The DOCX ">0.85 AUC on held-out pairs" criterion was unverifiable.
+    if len(val_idx_list) == 0:
+        logger.warning(
+            "Step 11 SKIPPED: val_triples is empty (no validation split "
+            "could be built from %d triples). The DOCX V1 launch "
+            "criterion ('>0.85 AUC on held-out drug-disease pairs') "
+            "REQUIRES val_triples to select the best model and compute "
+            "held-out AUC. The P2-003 root fix in train_transe now "
+            "REFUSES to train without val_triples — step11 returns "
+            "{'skipped': True, 'reason': 'no_val_triples'} so the V1 "
+            "launch criteria check can detect the skip and report it "
+            "cleanly. (P2-003 root fix)",
+            len(heads),
+        )
+        return {
+            "skipped": True,
+            "reason": "no_val_triples",
+            "num_triples": int(len(heads)),
+            "num_train_triples": int(len(train_idx_list)),
+            "num_val_triples": 0,
+            "num_test_triples": int(len(test_idx_list)),
+            "num_entities": num_entities,
+            "num_relations": len(rel_types),
+        }
+
     # Build entity_type_lookup: {global_entity_idx: entity_type_str}.
     # NegativeSampler uses this to corrupt tails with entities of the
     # SAME type as the original tail (type-constrained negative sampling).
@@ -7762,6 +7806,17 @@ def step11_train_transe(
         "test_auc": getattr(history, "test_auc", -1.0),
         "model_sha256": getattr(history, "model_sha256", ""),
         "model_saved": bool(getattr(history, "model_sha256", "")),
+        # P2-003 ROOT FIX (Teammate 5): surface the training_succeeded
+        # flag so downstream _check_v1_launch_criteria can REFUSE to
+        # sign off on a V1 launch when training silently failed. The
+        # previous code only surfaced ``model_saved`` (bool of
+        # ``model_sha256``) — but a maintainer reading
+        # ``best_val_auc=-1.0`` could interpret it as "no AUC
+        # available" rather than "AUC check failed". The explicit
+        # ``training_succeeded`` flag makes the failure mode
+        # unambiguous: when False, the history is INVALID and the V1
+        # launch criteria check MUST refuse to sign off.
+        "training_succeeded": bool(getattr(history, "training_succeeded", False)),
         "num_train_triples": int(len(train_idx)),
         "num_val_triples": int(len(val_idx)),
         "num_test_triples": int(len(test_idx)),

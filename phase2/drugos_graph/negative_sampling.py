@@ -2507,10 +2507,43 @@ class KGNegativeSampler:
         self,
         total_negatives: Optional[int] = None,
         *,
+        # P2-007 ROOT FIX (Teammate 5, forensic, root-level): ``relation_idx``
+        # is now a REQUIRED parameter. The previous signature had
+        # ``relation_idx: Optional[int] = None`` and the body at the
+        # known-positive filter site used
+        # ``_r_idx = int(relation_idx) if relation_idx is not None else 0``.
+        # When a caller (e.g. the legacy single-pool path in train_transe)
+        # invoked ``combined_sampling`` without ``relation_idx``, the
+        # filter checked ``((h_idx, 0, t_idx)) in _known_all`` — but the
+        # rejection set contains triples with their REAL relation indices.
+        # A true positive triple ``(h, real_rel>0, t)`` in the rejection
+        # set was NOT filtered out by the ``(h, 0, t)`` check, so it
+        # appeared as a "negative" sample. This produced FALSE NEGATIVES
+        # (positives sampled as negatives) that structurally corrupted
+        # TransE training.
+        #
+        # ROOT FIX: make ``relation_idx`` required (no default). When a
+        # caller genuinely cannot determine the relation (e.g. a generic
+        # unit-test helper), they MUST pass ``relation_idx=0`` explicitly
+        # AND set the ``allow_relation_idx_zero=True`` opt-in flag (which
+        # logs a CRITICAL warning so the operator knows the filter is
+        # only catching (h, 0, t) triples, not (h, real_rel, t) triples).
+        # This makes the API honest: callers cannot silently get the
+        # broken default behavior — they must explicitly acknowledge it.
         relation_idx: Optional[int] = None,
         head_type: Optional[str] = None,
         tail_type: Optional[str] = None,
         rng: Optional[Any] = None,
+        # P2-007: explicit opt-in flag for callers that intentionally
+        # pass ``relation_idx=0`` (the legacy Compound/Disease treats
+        # relation). When False (default), passing ``relation_idx=0`` is
+        # treated as "did not pass a real relation_idx" and raises
+        # ``ValueError`` — because the known-positive filter would only
+        # catch ``(h, 0, t)`` triples, missing ``(h, real_rel>0, t)``
+        # triples (the original P2-007 bug). When True, the caller
+        # acknowledges this limitation and the call proceeds with a
+        # CRITICAL log.
+        allow_relation_idx_zero: bool = False,
         **_extra: Any,
     ) -> List[Dict[str, Any]]:
         """Generate negative samples, optionally constrained by edge type.
@@ -2563,17 +2596,43 @@ class KGNegativeSampler:
         a fresh RNG seeded from ``config.seed + 1`` (mirroring the
         ``_eval_rng`` pattern used by the random-fallback path).
 
+        P2-007 ROOT FIX (Teammate 5, forensic): ``relation_idx`` is
+        now REQUIRED. The known-positive filter at the sampling loop
+        uses ``int(relation_idx)`` to build the ``(h, r, t)`` lookup
+        key against ``self._rejection_set``. When ``relation_idx`` is
+        None (the previous default), the filter fell back to
+        ``_r_idx=0``, which only catches ``(h, 0, t)`` triples —
+        missing ``(h, real_rel>0, t)`` triples in the rejection set.
+        This produced false negatives (positives sampled as negatives)
+        that structurally corrupted TransE training. ROOT FIX: raise
+        ``ValueError`` when ``relation_idx is None`` so callers MUST
+        pass an explicit value. Callers that intentionally want the
+        legacy ``relation_idx=0`` behavior (e.g. the Compound/Disease
+        single-pool path) must set ``allow_relation_idx_zero=True``
+        to acknowledge the limitation.
+
         Args:
             total_negatives: Total number of negative samples to generate.
                 If None, uses ``self.num_negatives``.
-            relation_idx: Optional relation index — used to look up
-                head/tail types via ``self.relation_to_types`` (if set).
+            relation_idx: REQUIRED — relation index used to look up
+                head/tail types via ``self.relation_to_types`` AND to
+                build the ``(h, r, t)`` key for the known-positive
+                filter. Must NOT be None (P2-007 root fix).
             head_type: Explicit head entity type (overrides relation lookup).
             tail_type: Explicit tail entity type (overrides relation lookup).
             rng: Optional numpy Generator to use for sampling. Defaults
                 to ``self._rng`` (training-time behavior). Pass a fresh
                 ``np.random.default_rng(seed)`` for evaluation to keep
                 eval RNG state independent of training RNG state.
+            allow_relation_idx_zero: Opt-in flag for callers that
+                intentionally pass ``relation_idx=0`` (the legacy
+                Compound/Disease treats relation). When False (default),
+                ``relation_idx=0`` raises ``ValueError`` because the
+                known-positive filter would only catch ``(h, 0, t)``
+                triples, missing ``(h, real_rel>0, t)`` triples (the
+                original P2-007 bug). When True, the call proceeds with
+                a CRITICAL log so the operator knows the filter is
+                limited.
 
         Returns:
             List of negative-sample dicts with keys:
@@ -2584,10 +2643,71 @@ class KGNegativeSampler:
                 - ``evidence_type``: str
                 - ``head_type``: str (the type used for head sampling)
                 - ``tail_type``: str (the type used for tail sampling)
+
+        Raises:
+            ValueError: If ``relation_idx is None`` (P2-007 root fix) OR
+                if ``relation_idx == 0`` and ``allow_relation_idx_zero``
+                is False (the legacy silent-default path is forbidden).
         """
         n = int(total_negatives) if total_negatives else self.num_negatives
         if n <= 0:
             return []
+
+        # P2-007 ROOT FIX (Teammate 5): enforce that relation_idx is
+        # provided. The previous signature defaulted to None, which
+        # caused the known-positive filter at the sampling loop to
+        # silently use _r_idx=0 (missing (h, real_rel>0, t) triples in
+        # the rejection set). The fix makes this a hard error so
+        # callers MUST pass an explicit value.
+        if relation_idx is None:
+            raise ValueError(
+                "KGNegativeSampler.combined_sampling: ``relation_idx`` is "
+                "REQUIRED (P2-007 root fix). The previous signature "
+                "defaulted to None, which caused the known-positive "
+                "filter to silently use _r_idx=0 — missing "
+                "(h, real_rel>0, t) triples in the rejection set and "
+                "producing false negatives (positives sampled as "
+                "negatives) that structurally corrupted TransE training. "
+                "Pass the actual relation index of the positive triple "
+                "being corrupted. If you genuinely want the legacy "
+                "Compound/Disease treats-relation behavior (relation_idx=0), "
+                "pass relation_idx=0 AND allow_relation_idx_zero=True to "
+                "acknowledge the known-positive filter limitation."
+            )
+        # P2-007: also forbid relation_idx=0 without the explicit opt-in.
+        # relation_idx=0 corresponds to the first relation in the
+        # relation_embeddings table — historically "treats" — but the
+        # filter at the sampling loop only catches (h, 0, t) triples,
+        # missing (h, real_rel>0, t) triples in the rejection set. The
+        # opt-in flag forces the caller to acknowledge this limitation.
+        if int(relation_idx) == 0 and not allow_relation_idx_zero:
+            raise ValueError(
+                "KGNegativeSampler.combined_sampling: relation_idx=0 is "
+                "FORBIDDEN without allow_relation_idx_zero=True (P2-007 "
+                "root fix). relation_idx=0 corresponds to the first "
+                "relation (historically 'treats'), but the known-positive "
+                "filter at the sampling loop only catches (h, 0, t) "
+                "triples in the rejection set — missing (h, real_rel>0, t) "
+                "triples. This produced false negatives that structurally "
+                "corrupted TransE training. If you genuinely want the "
+                "legacy Compound/Disease treats-relation behavior, pass "
+                "allow_relation_idx_zero=True to acknowledge the filter "
+                "limitation (a CRITICAL log will be emitted)."
+            )
+        if int(relation_idx) == 0 and allow_relation_idx_zero:
+            logger.critical(
+                "P2-007 LEGACY PATH: KGNegativeSampler.combined_sampling "
+                "called with relation_idx=0 AND allow_relation_idx_zero=True. "
+                "The known-positive filter at the sampling loop will only "
+                "catch (h, 0, t) triples in the rejection set — missing "
+                "(h, real_rel>0, t) triples. This means true positives "
+                "with non-zero relation indices may appear as negatives "
+                "(false negatives), structurally corrupting TransE "
+                "training. This path is kept ONLY for the legacy "
+                "Compound/Disease single-pool caller in train_transe; "
+                "production code should use per-relation sampling with "
+                "the actual relation_idx."
+            )
 
         # Resolve head/tail types from relation_idx if explicit types
         # were not provided.
@@ -2857,14 +2977,22 @@ class KGNegativeSampler:
         # criterion was unverifiable from this code.
         #
         # Fix: actually filter against ``self.known_triples``. We use
-        # ``relation_idx`` (defaulting to 0 only when the caller
-        # genuinely doesn't know — but every caller in train_transe
-        # now passes the correct relation_idx, so this default is
-        # defensive only) to build the (h, r, t) lookup key. We also
+        # ``relation_idx`` (REQUIRED as of P2-007 root fix — callers
+        # MUST pass the actual relation index of the positive triple
+        # being corrupted) to build the (h, r, t) lookup key. We also
         # filter against ALL known triples regardless of relation
         # (defensive: a (h, t) pair that appears under ANY relation
         # is still a false negative for type-constrained sampling).
-        _r_idx = int(relation_idx) if relation_idx is not None else 0
+        #
+        # P2-007 ROOT FIX (Teammate 5): the previous line was
+        # ``_r_idx = int(relation_idx) if relation_idx is not None else 0``
+        # which silently defaulted to 0 when relation_idx was None —
+        # missing (h, real_rel>0, t) triples in the rejection set and
+        # producing false negatives. The P2-007 fix at the top of this
+        # function now GUARANTEES relation_idx is not None (raises
+        # ValueError otherwise), so we can use ``int(relation_idx)``
+        # directly without the silent-default fallback.
+        _r_idx = int(relation_idx)
         # v36 ROOT FIX (Chain 9): use the COMBINED rejection set
         # (train triples + held-out val/test triples) instead of just
         # ``known_triples``. This prevents the sampler from producing

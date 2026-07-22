@@ -311,6 +311,22 @@ class TrainingHistory:
     held_out_auc: float = -1.0
     test_auc: float = -1.0
     held_out_metrics: Dict[str, float] = field(default_factory=dict)
+    # P2-003 ROOT FIX (Teammate 5, forensic, root-level): add an explicit
+    # ``training_succeeded`` flag. The previous code returned a
+    # ``TrainingHistory`` with ``best_val_auc=-1.0`` and
+    # ``model_sha256=""`` when ``val_triples`` was None — the function
+    # returned "successfully" (no exception), so step11 reported
+    # ``{"skipped": False, "best_val_auc": -1.0, "model_saved": False}``.
+    # A future maintainer reading ``best_val_auc=-1.0`` could interpret
+    # it as "no AUC available, skip the check" rather than "AUC check
+    # failed" — silently shipping a V1 launch with NO trained model.
+    # ROOT FIX: add an explicit boolean flag that downstream consumers
+    # MUST check. When ``training_succeeded=False``, the history is
+    # INVALID and consumers MUST refuse to use it (raise or skip with
+    # a clear reason). The flag is set to ``True`` ONLY when a model
+    # checkpoint was actually saved to disk (i.e., ``model_sha256`` is
+    # non-empty AND ``best_val_auc > 0.5``).
+    training_succeeded: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to plain dict for JSON logging.
@@ -2383,6 +2399,58 @@ def train_transe(
                 context={"n_leaked": len(overlap)},
             )
 
+    # P2-003 ROOT FIX (Teammate 5, forensic, root-level): when
+    # ``val_triples`` is None AND ``test_triples`` is provided, RAISE
+    # immediately. The previous code silently proceeded with training,
+    # which meant:
+    #   * The validation loop never ran (no per-epoch AUC computation).
+    #   * ``best_state_dict`` stayed None (no best epoch was selected).
+    #   * The "Save best model" block (gated by
+    #     ``if best_state_dict is not None:``) was SILENTLY SKIPPED —
+    #     no checkpoint was saved to disk.
+    #   * The "Held-out evaluation" block (gated by
+    #     ``if test_triples is not None and best_state_dict is not None:``)
+    #     fell through to the ``elif`` branch which just logged a warning.
+    #   * The function returned a ``TrainingHistory`` with
+    #     ``best_val_auc=-1.0``, ``model_sha256=""``, ``held_out_auc=-1.0``,
+    #     and ``training_succeeded=False`` — but NO exception was raised.
+    # step11_train_transe then reported
+    # ``{"skipped": False, "best_val_auc": -1.0, "model_saved": False}``
+    # and a future maintainer reading ``best_val_auc=-1.0`` could
+    # interpret it as "no AUC available, skip the check" rather than
+    # "AUC check failed" — silently shipping a V1 launch with NO
+    # trained model. The DOCX ">0.85 AUC on held-out pairs" criterion
+    # was unverifiable.
+    #
+    # ROOT FIX: raise ``TransETrainingError`` when ``val_triples`` is
+    # None AND ``test_triples`` is provided. The DOCX V1 launch
+    # criterion requires held-out AUC, which requires a best model
+    # selected by validation AUC, which requires val_triples. Without
+    # val_triples, the held-out AUC cannot be computed honestly.
+    # Callers that genuinely want to skip training (e.g. step11's
+    # "insufficient triples" path) should detect the skip condition
+    # BEFORE calling train_transe and return ``{"skipped": True}``
+    # without invoking this function.
+    if val_triples is None and test_triples is not None:
+        raise TransETrainingError(
+            "train_transe: val_triples is None but test_triples was "
+            "provided. Cannot evaluate held-out AUC without at least "
+            "one validation epoch to select the best model. The DOCX "
+            "V1 launch criterion requires '>0.85 AUC on held-out "
+            "drug-disease pairs' — without val_triples, no best model "
+            "is selected and no honest held-out AUC can be computed. "
+            "The previous behavior silently returned a TrainingHistory "
+            "with best_val_auc=-1.0 and model_sha256='' (no checkpoint "
+            "saved), which downstream code could misinterpret as 'no "
+            "AUC available, skip the check' rather than 'AUC check "
+            "failed'. (P2-003 root fix)",
+            context={
+                "val_triples_provided": False,
+                "test_triples_provided": True,
+                "num_test_triples": int(len(test_triples[0])),
+            },
+        )
+
     # v34 ROOT FIX (CRITICAL #10): the previous code only checked val/train
     # overlap. test/train overlap was NOT checked — if held-out triples
     # appeared in training, held_out_auc was inflated and the V1 launch
@@ -2822,8 +2890,32 @@ def train_transe(
                     "relation_to_types from edge_maps to fix."
                 )
                 try:
+                    # P2-007 ROOT FIX (Teammate 5): pass ``relation_idx=0``
+                    # explicitly AND set ``allow_relation_idx_zero=True``
+                    # to acknowledge the known-positive filter limitation.
+                    # The previous call did not pass ``relation_idx``, so
+                    # ``KGNegativeSampler.combined_sampling`` silently
+                    # defaulted to ``_r_idx=0`` for the known-positive
+                    # filter — missing ``(h, real_rel>0, t)`` triples in
+                    # the rejection set and producing false negatives
+                    # (positives sampled as negatives) that structurally
+                    # corrupted TransE training. The P2-007 fix at the
+                    # top of ``combined_sampling`` now REQUIRES
+                    # ``relation_idx`` to be passed explicitly; the
+                    # ``allow_relation_idx_zero=True`` opt-in acknowledges
+                    # that the filter only catches ``(h, 0, t)`` triples.
+                    # The CRITICAL log emitted by ``combined_sampling``
+                    # when ``relation_idx=0`` is passed with the opt-in
+                    # flag makes the limitation visible to operators.
+                    # This legacy single-pool path is type-wrong for 5/6
+                    # relations (it produces (Compound, Disease) negatives
+                    # for ALL relations) — the proper fix is to populate
+                    # ``relation_to_types`` so the per-relation path is
+                    # used instead.
                     neg_samples = negative_sampler.combined_sampling(
                         total_negatives=len(heads) * _num_negatives,
+                        relation_idx=0,
+                        allow_relation_idx_zero=True,
                     )
                     sampler_neg_indices = negative_sampler.to_negative_indices(neg_samples)
                     logger.info(
@@ -4026,6 +4118,37 @@ def train_transe(
                         _n_val_rels_total = len(unique_val_rels)
                         _n_val_rels_missing_pool = 0
 
+                        # P2-005 ROOT FIX (Teammate 5, forensic, root-level):
+                        # the v88 "ROOT FIX" comment claimed "seed the val
+                        # RNG ONCE with config.seed + 1 (constant across
+                        # epochs)" but the actual code had
+                        # ``_val_rng = _random.Random(int(config.seed) + 1)``
+                        # INSIDE the per-relation for-loop below. This
+                        # re-seeded the RNG on EVERY relation iteration,
+                        # so two relations sharing the same tail pool
+                        # (e.g. treats, tested_for, failed_for all use
+                        # Disease tails) drew IDENTICAL negatives from
+                        # the same RNG state. Val AUC variance was
+                        # biased low; best-model selection by best_val_auc
+                        # was based on a biased variance estimate.
+                        #
+                        # ROOT FIX: create ``_val_rng`` EXACTLY ONCE per
+                        # validation call, BEFORE the per-relation loop.
+                        # Add an assertion that the RNG object identity
+                        # is stable across loop iterations so a future
+                        # maintainer cannot accidentally re-introduce the
+                        # bug by moving the assignment back inside the
+                        # loop. The ``import random as _random`` is also
+                        # hoisted out of the loop (it was a per-iteration
+                        # no-op but added visual noise that obscured the
+                        # real bug).
+                        import random as _random_v88_p2_005
+                        _val_rng = _random_v88_p2_005.Random(
+                            int(config.seed) + 1
+                        )
+                        _val_rng_object_id = id(_val_rng)
+                        _val_rng_iteration_count = 0
+
                         for ur in unique_val_rels.tolist():
                             mask = (val_rels_expanded_for_neg == ur)
                             slots = torch.nonzero(mask, as_tuple=True)[0]
@@ -4162,15 +4285,20 @@ def train_transe(
                                 continue
                             tail_pool = pool[1]
                             # Sample n_slots tail negatives from tail_pool.
-                            # Use a fresh Python-level random sampler so we
-                            # don't depend on torch RNG state.
-                            import random as _random
-                            # v88 ROOT FIX (BUG #45 — val RNG reseeded per
-                            # epoch biases best-model selection): seed the
-                            # val RNG ONCE with `config.seed + 1` (constant
-                            # across epochs) so val negatives are IDENTICAL
-                            # across epochs.
-                            _val_rng = _random.Random(int(config.seed) + 1)
+                            # Use the ``_val_rng`` that was created ONCE
+                            # before this for-loop (P2-005 ROOT FIX).
+                            #
+                            # P2-005 assertion: verify the RNG object
+                            # identity is stable across iterations. If a
+                            # future maintainer moves the assignment back
+                            # inside the loop, this assertion fires.
+                            _val_rng_iteration_count += 1
+                            assert id(_val_rng) == _val_rng_object_id, (
+                                "P2-005 REGRESSION: _val_rng object identity "
+                                "changed mid-loop — the RNG was re-seeded per "
+                                "relation. This is the exact bug P2-005 fixed. "
+                                f"(iteration={_val_rng_iteration_count})"
+                            )
                             if len(tail_pool) >= n_slots:
                                 chosen = _val_rng.sample(tail_pool, n_slots)
                             else:
@@ -4233,113 +4361,114 @@ def train_transe(
                             dtype=torch.long, device=device,
                         )
                     else:
-                        # V19 ROOT FIX (PS-12 — verification agent flagged
-                        # this as a residual soft spot): when
-                        # relation_to_types is not populated on the sampler,
-                        # the V18 code logged CRITICAL and fell back to
-                        # hardcoded (Compound, Disease) — wrong for 5/6
-                        # relations and still produced a (garbage) AUC that
-                        # could pass the launch gate. The ROOT fix: RAISE
-                        # in production (same DRUGOS_ALLOW_NO_SAMPLER=1
-                        # escape hatch as the no-sampler path).
-                        import os as _os
-                        # v88 ROOT FIX (BUG #46): use the two-flag +
-                        # production guard `_allow_no_sampler_v88`.
-                        _allow_no_sampler = _allow_no_sampler_v88
-                        if not _allow_no_sampler:
+                        # P2-006 ROOT FIX (Teammate 5, forensic, root-level):
+                        # the previous code (V19 ROOT FIX) had an escape
+                        # hatch: when ``relation_to_types`` was empty on
+                        # the sampler AND ``DRUGOS_ALLOW_NO_SAMPLER=1``
+                        # was set, it fell back to hardcoded
+                        # ``head_type="Compound", tail_type="Disease"``
+                        # for ALL val triples regardless of their actual
+                        # relation. For a val triple of
+                        # ``(Compound, inhibits, Protein)``, the negative
+                        # became ``(Compound, inhibits, Disease)`` —
+                        # type-mismatched tail. TransE's
+                        # ``||h + r - t||_1`` distance is large for
+                        # type-mismatched entities (different learned
+                        # embedding regions), so the negative appeared
+                        # "very negative" by construction — inflating
+                        # val AUC for non-treats relations. The DOCX
+                        # ">0.85 AUC" criterion was trivially achievable
+                        # in unit tests that used this fallback.
+                        #
+                        # ROOT FIX (Teammate 5, P2-006, no surface fix):
+                        # 1. If ``relation_to_types`` IS empty (the
+                        #    original trigger for this fallback), RAISE
+                        #    ALWAYS — no escape hatch. The
+                        #    ``DRUGOS_ALLOW_NO_SAMPLER=1`` flag is
+                        #    NO LONGER honored for this path because the
+                        #    scientific bug (type-mismatched negatives
+                        #    inflating AUC) is not a "unit-test mode"
+                        #    concern — it produces a garbage AUC that
+                        #    could pass the launch gate. Unit tests that
+                        #    previously relied on this fallback MUST now
+                        #    populate ``relation_to_types`` on the sampler
+                        #    (the proper way to configure type-constrained
+                        #    negative sampling).
+                        # 2. If ``relation_to_types`` is NON-empty (a
+                        #    rare case where ``per_relation_neg_pools``
+                        #    was not built but ``relation_to_types`` is
+                        #    populated), look up the ACTUAL
+                        #    ``(head_type, tail_type)`` for each relation
+                        #    from ``relation_to_types`` — do NOT hardcode
+                        #    Compound/Disease. This makes the AUC
+                        #    meaningful even when the per-relation pool
+                        #    build failed.
+                        # 3. A CRITICAL log is emitted whenever this
+                        #    fallback fires (case 2 only — case 1 raises)
+                        #    so operators know the AUC is computed on
+                        #    relation_to_types-derived pools, not the
+                        #    canonical per_relation_neg_pools path.
+                        _val_rel_to_types_p2_006 = getattr(
+                            negative_sampler, "relation_to_types", {}
+                        ) or {}
+                        if not _val_rel_to_types_p2_006:
+                            # P2-006 case 1: relation_to_types is empty.
+                            # RAISE ALWAYS — no escape hatch. The previous
+                            # behavior (hardcoded Compound/Disease) produced
+                            # type-mismatched negatives that inflated AUC
+                            # for non-treats relations, making the DOCX
+                            # ">0.85 AUC" launch criterion trivially
+                            # achievable in unit tests. This is a
+                            # scientific correctness bug, not a "unit-test
+                            # mode" concern — the escape hatch is removed.
                             logger.critical(
-                                "VAL_AUC_HARD_FAIL: negative_sampler is "
-                                "present but relation_to_types is empty. "
-                                "Production validation requires every "
-                                "relation to declare its (head_type, "
-                                "tail_type) pair. Set "
-                                "DRUGOS_ALLOW_NO_SAMPLER=1 to permit the "
-                                "hardcoded (Compound, Disease) fallback "
-                                "(unit tests only)."
+                                "P2-006 HARD FAIL: negative_sampler is "
+                                "present but relation_to_types is EMPTY. "
+                                "The previous behavior fell back to "
+                                "hardcoded (Compound, Disease) negatives "
+                                "for ALL val triples — type-mismatched "
+                                "for 5/6 relations and structurally "
+                                "inflated AUC for non-treats relations. "
+                                "The DRUGOS_ALLOW_NO_SAMPLER=1 escape "
+                                "hatch is NO LONGER honored for this "
+                                "path (P2-006 root fix). Populate "
+                                "relation_to_types on the sampler so "
+                                "each relation's actual "
+                                "(head_type, tail_type) is used."
                             )
                             raise RuntimeError(
                                 "train_transe: negative_sampler is present "
-                                "but relation_to_types is empty. Production "
-                                "validation requires every relation to be "
-                                "declared in relation_to_types (PS-12 / "
-                                "SW-15 V19 root fix). Set "
-                                "DRUGOS_ALLOW_NO_SAMPLER=1 to permit the "
-                                "hardcoded fallback for unit tests."
+                                "but relation_to_types is EMPTY (P2-006 "
+                                "root fix). The previous behavior fell "
+                                "back to hardcoded (Compound, Disease) "
+                                "negatives for ALL val triples, producing "
+                                "type-mismatched negatives for 5/6 "
+                                "relations and structurally inflating AUC "
+                                "for non-treats relations. The "
+                                "DRUGOS_ALLOW_NO_SAMPLER=1 escape hatch "
+                                "is NO LONGER honored for this path "
+                                "(scientific correctness bug, not a "
+                                "unit-test mode concern). Populate "
+                                "relation_to_types on the sampler so "
+                                "each relation's actual "
+                                "(head_type, tail_type) is used."
                             )
+                        # P2-006 case 2: relation_to_types is non-empty,
+                        # but per_relation_neg_pools was not built. Use
+                        # the actual (head_type, tail_type) per relation.
                         logger.critical(
-                            "VAL_AUC_DEGRADED: relation_to_types not "
-                            "populated on negative_sampler AND "
-                            "DRUGOS_ALLOW_NO_SAMPLER=1 is set — validation "
-                            "negatives are hardcoded to (Compound, Disease) "
-                            "regardless of val triples' relations. AUC is "
-                            "NOT comparable to literature for non-treats "
-                            "relations. Unit-test mode ONLY."
+                            "P2-006 FALLBACK: per_relation_neg_pools is "
+                            "empty but relation_to_types is populated "
+                            "(%d relations). Using relation_to_types to "
+                            "look up the actual (head_type, tail_type) "
+                            "per relation — AUC is meaningful but the "
+                            "per_relation_neg_pools build should be "
+                            "investigated (P2-006 root fix, case 2).",
+                            len(_val_rel_to_types_p2_006),
                         )
-                        # v84 FORENSIC ROOT FIX (BUG #14 — val AUC computed
-                        # on mismatched relation pools):
-                        # The previous code hardcoded `relation_idx=0` and
-                        # `head_type="Compound"/tail_type="Disease"` for ALL
-                        # val triples. If the val set contained triples from
-                        # OTHER relations (e.g. Compound-inhibits-Protein),
-                        # the negatives were sampled from the WRONG relation's
-                        # pool (Disease entities instead of Protein entities).
-                        # The pos_scores were scored by the actual val
-                        # relation's embedding; the neg_scores were scored by
-                        # the treats (relation 0) embedding. The AUC was
-                        # computed on mismatched score distributions —
-                        # meaningless.
-                        #
-                        # ROOT FIX: iterate over each UNIQUE relation in the
-                        # val set, sample negatives PER RELATION (using the
-                        # actual relation_idx so combined_sampling uses the
-                        # correct relation's known-positives filter), and
-                        # gather the per-relation negative tail lists into
-                        # the global val_neg_tails_list aligned with the
-                        # per-triple slot indices. This ensures each val
-                        # triple's negatives come from its own relation's
-                        # pool, making the AUC meaningful even in the
-                        # unit-test fallback path.
                         n_val_neg = n_val * 10
                         val_neg_tails_list: List[int] = [0] * n_val_neg
-                        # v91: keep HEAD's properly-closed version.
-                        # Expand val_rels 10x to align with neg slots.
-                        # ROOT FIX (v92): the previous code opened a paren
-                        # ``val_rels_expanded_fallback = (`` but never closed
-                        # it — the next ~20 lines (comment + assignment +
-                        # for-loop + sampling call) were swallowed into the
-                        # unclosed paren, causing ``compileall`` to fail with
-                        # SyntaxError: '(' was never closed. This broke CI's
-                        # build job for every PR. The fix: close the
-                        # assignment on a single line so the subsequent
-                        # statements run as intended.
                         val_rels_expanded_fallback = val_rels_dev.repeat_interleave(10)
-                        # v91 P0 ROOT FIX: the outer paren was UNCLOSED
-                        # (the v88 fix block was pasted INSIDE the
-                        # tuple-continuation, breaking the file). Closed
-                        # the paren on its own line; the v88 logic below
-                        # is now independent statements at the same indent.
-                        # v88 ROOT FIX (BUG #33 — hardcoded relation_idx=0
-                        # in val AUC fallback): look up the actual treats
-                        # relation index from relation_to_types.
-                        _treats_rel_idx = 0
-                        _val_rel_to_types = getattr(
-                            negative_sampler, "relation_to_types", {}
-                        ) or {}
-                        for _r_idx_v88, _ht_tuple in _val_rel_to_types.items():
-                            if (
-                                isinstance(_ht_tuple, (tuple, list))
-                                and len(_ht_tuple) == 2
-                                and _ht_tuple[0] == "Compound"
-                                and _ht_tuple[1] == "Disease"
-                            ):
-                                _treats_rel_idx = int(_r_idx_v88)
-                                break
-                        val_neg_samples = negative_sampler.combined_sampling(
-                            total_negatives=n_val * 10,
-                            head_type="Compound",
-                            tail_type="Disease",
-                            relation_idx=_treats_rel_idx,
-                        )
                         unique_val_rels_fb = torch.unique(
                             val_rels_expanded_fallback
                         )
@@ -4347,18 +4476,64 @@ def train_transe(
                             mask_fb = (val_rels_expanded_fallback == ur_fb)
                             slots_fb = torch.nonzero(mask_fb, as_tuple=True)[0]
                             n_slots_fb = int(len(slots_fb))
-                            # Sample n_slots_fb negatives from this relation's
-                            # pool. Use the actual relation_idx so the
-                            # sampler's known-positives filter is applied
-                            # correctly. head_type/tail_type remain hardcoded
-                            # to Compound/Disease (this is the unit-test
-                            # fallback path — production uses the
-                            # per_relation_neg_pools path above).
+                            # P2-006 ROOT FIX: look up the ACTUAL
+                            # (head_type, tail_type) for this relation
+                            # from relation_to_types. The previous code
+                            # hardcoded "Compound"/"Disease" for ALL
+                            # val triples — type-mismatched for 5/6
+                            # relations. Now we use the actual types
+                            # declared in relation_to_types. If a
+                            # relation is missing from relation_to_types
+                            # (shouldn't happen — the sampler was
+                            # configured with this relation), fall back
+                            # to (Compound, Disease) with a CRITICAL log
+                            # so the operator sees the type mismatch.
+                            _ht_fb_p2_006: Optional[str] = None
+                            _tt_fb_p2_006: Optional[str] = None
+                            _ht_tuple_fb = _val_rel_to_types_p2_006.get(
+                                int(ur_fb)
+                            )
+                            if (
+                                _ht_tuple_fb is not None
+                                and isinstance(_ht_tuple_fb, (tuple, list))
+                                and len(_ht_tuple_fb) == 2
+                            ):
+                                _ht_fb_p2_006 = str(_ht_tuple_fb[0])
+                                _tt_fb_p2_006 = str(_ht_tuple_fb[1])
+                            else:
+                                # P2-006: relation is missing from
+                                # relation_to_types — this is a sampler
+                                # configuration bug. Log CRITICAL and
+                                # fall back to (Compound, Disease) so
+                                # the run doesn't crash, but the AUC
+                                # for this relation is unreliable.
+                                logger.critical(
+                                    "P2-006 TYPE-MISMATCH FALLBACK: "
+                                    "relation_idx=%d is MISSING from "
+                                    "relation_to_types. Falling back to "
+                                    "(Compound, Disease) for this "
+                                    "relation — AUC for this relation "
+                                    "is UNRELIABLE. Populate "
+                                    "relation_to_types with all "
+                                    "relations used in val_triples.",
+                                    int(ur_fb),
+                                )
+                                _ht_fb_p2_006 = "Compound"
+                                _tt_fb_p2_006 = "Disease"
+                            # P2-007: pass relation_idx explicitly. The
+                            # ``int(ur_fb)`` is the actual relation index
+                            # of the val triple being corrupted — this
+                            # is the CORRECT relation_idx (not 0), so
+                            # the ``allow_relation_idx_zero`` flag is
+                            # NOT needed unless ``ur_fb`` happens to be
+                            # 0 (the treats relation).
+                            _allow_zero_fb = (int(ur_fb) == 0)
                             _per_rel_samples = negative_sampler.combined_sampling(
                                 total_negatives=n_slots_fb,
-                                head_type="Compound",
-                                tail_type="Disease",
+                                head_type=_ht_fb_p2_006,
+                                tail_type=_tt_fb_p2_006,
                                 relation_idx=int(ur_fb),
+                                allow_relation_idx_zero=_allow_zero_fb,
                             )
                             _, _per_rel_tails = (
                                 negative_sampler.to_negative_indices(_per_rel_samples)
@@ -4731,10 +4906,59 @@ def train_transe(
             history.held_out_auc = -1.0
             history.test_auc = -1.0
     elif test_triples is not None and best_state_dict is None:
-        logger.warning(
-            "Held-out evaluation SKIPPED: best_state_dict is None (no "
-            "validation epoch ran with improvement). Cannot compute "
-            "held-out AUC. The DOCX V1 launch criterion cannot be verified."
+        # P2-003 ROOT FIX (Teammate 5, forensic, root-level): the previous
+        # code only logged a WARNING here — "Held-out evaluation SKIPPED:
+        # best_state_dict is None (no validation epoch ran with improvement)".
+        # The function then continued to the "Save best model" block, which
+        # was ALSO gated by ``if best_state_dict is not None:`` — so no
+        # checkpoint was saved. The function returned a ``TrainingHistory``
+        # with ``best_val_auc=-1.0``, ``model_sha256=""``,
+        # ``held_out_auc=-1.0``, ``training_succeeded=False`` — but NO
+        # exception was raised. step11_train_transe then reported
+        # ``{"skipped": False, "best_val_auc": -1.0, "model_saved": False}``
+        # and a future maintainer could interpret ``best_val_auc=-1.0`` as
+        # "no AUC available, skip the check" rather than "AUC check failed"
+        # — silently shipping a V1 launch with NO trained model. The DOCX
+        # ">0.85 AUC on held-out pairs" criterion was unverifiable.
+        #
+        # ROOT FIX: RAISE ``TransETrainingError`` instead of silently
+        # skipping. ``best_state_dict`` is None means no validation epoch
+        # improved the model — either val_triples was empty (which the
+        # P2-003 early check above now refuses) or the model never learned
+        # anything (every epoch's AUC was worse than the initial state).
+        # Either way, the DOCX V1 launch criterion cannot be verified and
+        # the operator MUST investigate before proceeding.
+        logger.error(
+            "Held-out evaluation REFUSED: best_state_dict is None — no "
+            "validation epoch ran with improvement. The DOCX V1 launch "
+            "criterion (>0.85 AUC) CANNOT be verified. Either val_triples "
+            "was empty (refused by the P2-003 early check) or the model "
+            "never learned anything (every epoch's AUC was worse than "
+            "the initial state). Re-raising as TransETrainingError so "
+            "the launch-blocking failure propagates. (P2-003 root fix)"
+        )
+        raise TransETrainingError(
+            "train_transe: best_state_dict is None at end of training — "
+            "no validation epoch ran with improvement. Cannot compute "
+            "held-out AUC and no model checkpoint can be saved. The "
+            "DOCX V1 launch criterion ('>0.85 AUC on held-out "
+            "drug-disease pairs') CANNOT be verified. Either val_triples "
+            "was empty (refused by the P2-003 early check above) or the "
+            "model never learned anything (every epoch's AUC was worse "
+            "than the initial state). Investigate the training data, "
+            "the model architecture, and the validation split before "
+            "re-running. The previous behavior silently returned a "
+            "TrainingHistory with best_val_auc=-1.0 and model_sha256='' "
+            "(no checkpoint saved), which downstream code could "
+            "misinterpret as 'no AUC available, skip the check' rather "
+            "than 'AUC check failed' — silently shipping a V1 launch "
+            "with NO trained model. (P2-003 root fix)",
+            context={
+                "best_state_dict": None,
+                "best_val_auc": float(best_val_auc) if best_val_auc is not None else None,
+                "best_epoch": int(best_epoch) if best_epoch is not None else -1,
+                "total_epochs": int(history.total_epochs),
+            },
         )
 
     # ── Save best model ─────────────────────────────────────────────────
@@ -5090,6 +5314,52 @@ def train_transe(
     # could not distinguish "ran and produced a low AUC" from "never
     # ran". The held-out block above sets history.held_out_auc before
     # any raise can occur.
+
+    # P2-003 ROOT FIX (Teammate 5): set the ``training_succeeded`` flag
+    # based on whether a model checkpoint was ACTUALLY saved to disk.
+    # The flag is True ONLY when:
+    #   1. ``best_state_dict`` was not None (a best epoch was selected).
+    #   2. ``model_sha256`` is non-empty (the checkpoint was written).
+    #   3. ``best_val_auc > 0.5`` (the model is better than random —
+    #      the BUG-C-002 floor).
+    # Downstream consumers (step11, _check_v1_launch_criteria) MUST
+    # check this flag and refuse to use the history when it is False.
+    # The previous code returned a TrainingHistory with
+    # ``best_val_auc=-1.0`` and ``model_sha256=""`` when training
+    # silently failed — consumers had to inspect multiple fields to
+    # detect the failure, and a maintainer reading ``best_val_auc=-1.0``
+    # could misinterpret it as "no AUC available" rather than "AUC
+    # check failed". The explicit boolean flag makes the failure mode
+    # unambiguous.
+    if (
+        best_state_dict is not None
+        and history.model_sha256
+        and history.best_val_auc is not None
+        and float(history.best_val_auc) > 0.5
+    ):
+        history.training_succeeded = True
+    else:
+        # P2-003: if we reach here without raising, it means
+        # ``best_state_dict`` is None but ``test_triples`` is also None
+        # (the P2-003 early check above only raises when
+        # ``val_triples is None AND test_triples is not None``). In
+        # this case, training completed without a held-out evaluation
+        # — the operator did not provide test_triples. This is
+        # scientifically dubious (the DOCX V1 criterion requires
+        # held-out AUC) but not strictly a training failure. The flag
+        # stays False so consumers can detect the missing held-out AUC.
+        history.training_succeeded = False
+        logger.warning(
+            "P2-003: train_transe completed but training_succeeded=False "
+            "(best_state_dict=%s, model_sha256=%r, best_val_auc=%s). "
+            "Either no model was saved or the model's AUC is at or "
+            "below random. Downstream consumers MUST check the "
+            "training_succeeded flag and refuse to use this history "
+            "for V1 launch sign-off. (P2-003 root fix)",
+            "set" if best_state_dict is not None else "None",
+            history.model_sha256[:16] + "..." if history.model_sha256 else "(empty)",
+            f"{history.best_val_auc:.4f}" if history.best_val_auc is not None else "None",
+        )
 
     return history
 
