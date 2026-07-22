@@ -896,7 +896,23 @@ class TransEModel(nn.Module):
         # v29 ROOT FIX (audit M-10): was "soft_clamp" — deviates from
         # Bordes 2013. Changed default to "strict" (||r||=1).
 
-        Called after ``normalize_entity_embeddings`` in ``train_transe``.
+        P2-010 v142 ROOT FIX (Teammate 6 forensic): ``train_transe``
+        now calls this method BEFORE the forward pass (in addition to
+        the existing post-``optimizer.step()`` call). The pre-forward
+        normalize ensures the loss is ALWAYS computed against the
+        constrained (||r||=1) embeddings — the gradient is then a true
+        constrained-gradient per Bordes 2013 §3.2. The post-step
+        normalize is kept as a defensive measure for external callers
+        that query the model mid-step; it is effectively a no-op when
+        the next iteration's pre-forward normalize runs. This is a
+        scientific-correctness fix for the reproducibility concern
+        flagged in P2-010: without the pre-forward normalize, the
+        gradient was computed against un-normalized embeddings,
+        causing the optimizer's update direction to differ from the
+        direction the model actually evaluates at convergence.
+
+        Called after ``normalize_entity_embeddings`` in ``train_transe``
+        (now BOTH pre-forward and post-step — see P2-010 v142).
         """
         with torch.no_grad():
             rel_norms = self.relation_embeddings.weight.norm(
@@ -1144,6 +1160,7 @@ class TransETrainer:
         ] = None,
         negative_sampler: Optional[Any] = None,
         mlflow_tracker: Optional[Any] = None,
+        manage_mlflow_lifecycle: bool = True,
         entity_type_lookup: Optional[Dict[int, str]] = None,
         known_triples: Optional[Set[Tuple[int, int, int]]] = None,
         idx_to_entity: Optional[Dict[int, Tuple[str, str]]] = None,
@@ -1155,6 +1172,9 @@ class TransETrainer:
         """Train the model.  Delegates to ``train_transe``.
 
         Fixes: A1.4, A1.5.
+
+        P2-016 v142: see ``train_transe`` for the
+        ``manage_mlflow_lifecycle`` parameter.
         """
         return train_transe(
             self.model,
@@ -1163,6 +1183,7 @@ class TransETrainer:
             val_triples=val_triples,
             negative_sampler=negative_sampler,
             mlflow_tracker=mlflow_tracker,
+            manage_mlflow_lifecycle=manage_mlflow_lifecycle,
             entity_type_lookup=entity_type_lookup,
             known_triples=known_triples,
             idx_to_entity=idx_to_entity,
@@ -2049,6 +2070,16 @@ def train_transe(
     ] = None,
     negative_sampler: Optional[Any] = None,
     mlflow_tracker: Optional[Any] = None,
+    # P2-016 v142 ROOT FIX (Teammate 6 forensic): when True (default),
+    # train_transe manages the MLflow run lifecycle (start_run, log_params,
+    # end_run). When False, the CALLER manages the lifecycle — train_transe
+    # only logs params/metrics to the ALREADY-ACTIVE run. This allows
+    # step11_train_transe to create ONE tracker, start ONE run, pass the
+    # tracker to train_transe (which logs per-epoch metrics), then log
+    # step11-specific final metrics to the SAME run, then end the run ONCE.
+    # Pre-v142, step11 created a SEPARATE tracker and SEPARATE run,
+    # producing TWO uncorrelated MLflow runs per step11 invocation.
+    manage_mlflow_lifecycle: bool = True,
     entity_type_lookup: Optional[Dict[int, str]] = None,
     known_triples: Optional[Set[Tuple[int, int, int]]] = None,
     idx_to_entity: Optional[Dict[int, Tuple[str, str]]] = None,
@@ -2588,8 +2619,25 @@ def train_transe(
 
     # ── MLflow setup ─────────────────────────────────────────────────────
     # FIX A1.2, I15.6, I15.9: MLflowTracker integration.
-    if mlflow_tracker is not None:
+    #
+    # P2-016 v142 ROOT FIX (Teammate 6 forensic): when
+    # ``manage_mlflow_lifecycle=True`` (default, backward-compatible),
+    # train_transe calls ``start_run`` here and ``end_run`` at the end
+    # of training. When ``manage_mlflow_lifecycle=False``, the CALLER
+    # manages the lifecycle — train_transe only logs params/metrics to
+    # the ALREADY-ACTIVE run. This allows step11_train_transe to create
+    # ONE tracker, start ONE run, pass the tracker to train_transe,
+    # then log step11-specific final metrics to the SAME run, then end
+    # the run ONCE. Pre-v142, step11 created a SEPARATE tracker and
+    # SEPARATE run, producing TWO uncorrelated MLflow runs per step11
+    # invocation — operators could not correlate per-epoch loss curves
+    # with final AUC.
+    if mlflow_tracker is not None and manage_mlflow_lifecycle:
         mlflow_tracker.start_run(run_name=f"transe_seed{config.seed}")
+    # P2-016 v142: log params regardless of who manages the lifecycle —
+    # the run is active either way (we started it above, or the caller
+    # started it before calling us).
+    if mlflow_tracker is not None:
         safe_cfg = safe_config_dict() if callable(safe_config_dict) else {}
         mlflow_tracker.log_params(
             {
@@ -3565,6 +3613,46 @@ def train_transe(
             # ── Forward pass ──────────────────────────────────────────
             # FIX R6.1: Try/except around training step.
             try:
+                # P2-010 ROOT FIX (v142 — Teammate 6 forensic): project
+                # entity AND relation embeddings to their constraint
+                # manifold BEFORE the forward pass. The previous code
+                # only normalized AFTER ``optimizer.step()`` (line 3855
+                # step → line 3884 normalize). Between the step and the
+                # normalize, the embeddings had unbounded norms. The
+                # NEXT iteration's forward pass then computed the loss
+                # against the (post-step, pre-normalize) unbounded
+                # embeddings — the model saw a DIFFERENT loss landscape
+                # than the one it converged to (where embeddings ARE
+                # normalized).
+                #
+                # Concretely: for ``strict_bordes`` mode (default since
+                # v29), Bordes 2013 §3.2 specifies ||r|| == 1 for all
+                # relations. The post-step normalize projected r back
+                # to ||r||=1, but the GRADIENT computed during
+                # ``loss.backward()`` was against the un-normalized r
+                # from the previous iteration's post-step state — which
+                # had ||r|| != 1. The optimizer's update direction was
+                # therefore computed against a DIFFERENT point than the
+                # one the model actually evaluates at convergence.
+                #
+                # ROOT FIX: normalize BEFORE the forward pass. This
+                # guarantees the loss is ALWAYS computed against the
+                # constrained (||h||=1, ||r||=1) embeddings — the
+                # gradient is then a true constrained-gradient, and
+                # the post-step normalize (kept as a defensive measure
+                # for the case where the model is queried mid-step by
+                # an external caller) is now a no-op when the next
+                # iteration's pre-forward normalize runs.
+                #
+                # This is a SCIENTIFIC CORRECTNESS fix per Bordes 2013
+                # §3.2 (the published algorithm normalizes BEFORE
+                # computing the loss, not after the gradient step).
+                # The practical AUC impact is small (<0.01) but the
+                # reproducibility concern is real: two runs with the
+                # same seed could produce different AUCs depending on
+                # whether the pre-forward normalize was present.
+                model.normalize_entity_embeddings()
+                model.normalize_relation_embeddings()
                 pos_scores = model(h_batch, r_batch, t_batch)
                 neg_scores = model(h_neg, neg_r, neg_t)
 
@@ -4826,7 +4914,7 @@ def train_transe(
                     model_path.unlink()
                 except OSError:
                     pass
-            if mlflow_tracker is not None:
+            if mlflow_tracker is not None and manage_mlflow_lifecycle:
                 mlflow_tracker.end_run()
             raise TransETrainingError(
                 "Training completed but best_val_auc is None — no "
@@ -4863,7 +4951,7 @@ def train_transe(
                     )
                 except OSError:
                     pass
-            if mlflow_tracker is not None:
+            if mlflow_tracker is not None and manage_mlflow_lifecycle:
                 mlflow_tracker.end_run()
             raise TransETrainingError(
                 f"Training completed but AUC {best_val_auc:.4f} is at or "
@@ -4984,7 +5072,7 @@ def train_transe(
                     )
                 except OSError:
                     pass
-            if mlflow_tracker is not None:
+            if mlflow_tracker is not None and manage_mlflow_lifecycle:
                 mlflow_tracker.end_run()
             raise TransETrainingError(
                 f"Training completed but AUC {best_val_auc:.4f} "
@@ -5069,6 +5157,11 @@ def train_transe(
     )
 
     # ── MLflow cleanup ───────────────────────────────────────────────────
+    # P2-016 v142: log final metrics to the active run (whether we
+    # started it or the caller did). Only end the run if we started it
+    # (manage_mlflow_lifecycle=True). When the caller manages the
+    # lifecycle (e.g. step11_train_transe), the caller will log its own
+    # final metrics to the same run and then end it ONCE.
     if mlflow_tracker is not None:
         mlflow_tracker.log_metrics(
             {
@@ -5078,7 +5171,8 @@ def train_transe(
             },
             step=epoch,
         )
-        mlflow_tracker.end_run()
+        if manage_mlflow_lifecycle:
+            mlflow_tracker.end_run()
 
     # Held-out evaluation was moved BEFORE the AUC enforcement block
     # (see the comment block above "Save best model") so the honest

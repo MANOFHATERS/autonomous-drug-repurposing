@@ -961,14 +961,42 @@ class PyGBuilder(GraphBuilderProtocol):
                             f"DRUGOS_ALLOW_XAVIER_FALLBACK=1 to explicitly "
                             f"opt in (with a WARNING). (task 109 root fix, v111)"
                         )
-                    self.logger.warning(
-                        f"  {node_type}: {num_nodes:,} nodes, "
-                        f"WARNING — falling back to RANDOM Xavier features "
-                        f"(DRUGOS_ALLOW_XAVIER_FALLBACK=1). This is for "
-                        f"dev/CI only. In production this branch RAISES "
-                        f"(task 109 root fix). Provide node_features or "
-                        f"feature_provider to silence."
+                    # P2-012 v142 ROOT FIX (Teammate 6 forensic): the
+                    # previous code logged at WARNING level regardless of
+                    # environment. The issue (P2-012) requires CRITICAL
+                    # in production so the message surfaces in every log
+                    # aggregator's default view (Datadog, CloudWatch, Loki
+                    # all filter WARNING by default). In production, an
+                    # Xavier fallback means the Graph Transformer is
+                    # training on noise — predictions are scientifically
+                    # meaningless and patient safety is compromised. This
+                    # is a CRITICAL patient-safety degradation that must
+                    # page the on-call engineer immediately.
+                    _is_production = (
+                        os.environ.get("DRUGOS_ENVIRONMENT", "").lower()
+                        == "production"
                     )
+                    _xavier_log_msg = (
+                        f"  {node_type}: {num_nodes:,} nodes, "
+                        f"FALLING BACK to RANDOM Xavier features "
+                        f"(DRUGOS_ALLOW_XAVIER_FALLBACK=1). In production, "
+                        f"this means the Graph Transformer is training on "
+                        f"NOISE — predictions are scientifically meaningless "
+                        f"and patient safety is compromised. Provide "
+                        f"node_features (pre-computed ChemBERTa/ESM2 "
+                        f"embeddings) OR a feature_provider callable. "
+                        f"Production deployments MUST set DRUGOS_USE_CHEMBERTA=1 "
+                        f"(default) AND ensure all compounds have SMILES "
+                        f"strings so the chemberta_encoder can produce "
+                        f"real embeddings. (P2-012 v142)"
+                    )
+                    if _is_production:
+                        # CRITICAL in production: pages on-call, surfaces
+                        # in every aggregator's default view.
+                        self.logger.critical(_xavier_log_msg)
+                    else:
+                        # WARNING in dev/CI: visible but doesn't page.
+                        self.logger.warning(_xavier_log_msg)
                     weight = torch.empty(num_nodes, feat_dim)
                     torch.nn.init.xavier_uniform_(weight)
                     # v84 FORENSIC ROOT FIX (BUG #10 — NaN / dead nodes
