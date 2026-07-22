@@ -49,6 +49,7 @@ USAGE
 from __future__ import annotations
 
 import logging
+import os
 from datetime import timedelta
 from functools import wraps
 from typing import Any, Callable, TypeVar
@@ -213,10 +214,47 @@ def retry_on_db_deadlock(func: F) -> F:
 
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        max_retries = 5
+        # P1-044 FORENSIC ROOT FIX (Teammate 3 -- hostile-auditor pass):
+        #   The previous code had ``max_retries = 5`` with exponential
+        #   backoff (5s, 10s, 20s, 40s, 60s + jitter up to 1.5x). Total
+        #   wait: up to ~3.4 min (not 10 min as the issue claimed, but
+        #   still significant). If the Airflow task was already near its
+        #   ``execution_timeout``, the decorator's retries could push it
+        #   OVER the timeout -- the task was killed mid-retry, and the
+        #   deadlock was NOT resolved. The operator saw a timeout error
+        #   instead of a deadlock error, making debugging harder.
+        #
+        #   ROOT FIX (two-pronged):
+        #     1. Reduce ``max_retries`` from 5 to 3 (per the issue's
+        #        alternative suggestion). This cuts the max wait from
+        #        ~3.4 min to ~1 min (5s + 10s + 20s + jitter).
+        #     2. Add a DEADLINE check via env var
+        #        ``P1_DEADLOCK_RETRY_DEADLINE_SECONDS`` (default: 120s).
+        #        Before each sleep, check if
+        #        ``time.monotonic() + jittered_delay < deadline``. If the
+        #        sleep would exceed the deadline, log and raise IMMEDIATELY
+        #        instead of sleeping -- the operator sees the deadlock
+        #        error before the task times out.
+        #     3. Set ``deadline = None`` to disable the check (legacy
+        #        behavior, useful for tests).
+        max_retries = 3  # P1-044: was 5, reduced to 3.
         base_delay_seconds = 5.0  # 5s base (shorter than Airflow's 5min
         # because this is in-process retry, not task-level)
         max_delay_seconds = 300.0  # 5min cap (matches P1-033 recommendation)
+        # P1-044: deadline for the total retry sequence. If the deadline
+        # is exceeded, the decorator raises immediately instead of sleeping.
+        # Set via env var so operators can tune it per-task. Default: 120s
+        # (2 min) which is well under most Airflow execution_timeouts.
+        # Set to 0 to disable the deadline check (legacy behavior).
+        _deadline_env = os.environ.get("P1_DEADLOCK_RETRY_DEADLINE_SECONDS", "120")
+        try:
+            _deadline_seconds = float(_deadline_env)
+        except (ValueError, TypeError):
+            _deadline_seconds = 120.0
+        _deadline = (
+            time.monotonic() + _deadline_seconds
+            if _deadline_seconds > 0 else None
+        )
         last_exc: BaseException | None = None
         for attempt in range(max_retries + 1):
             try:
@@ -227,8 +265,8 @@ def retry_on_db_deadlock(func: F) -> F:
                 last_exc = exc
                 if attempt == max_retries:
                     logger.error(
-                        "P1-033 retry_on_db_deadlock: exhausted %d retries "
-                        "for DB deadlock: %s",
+                        "P1-033/P1-044 retry_on_db_deadlock: exhausted %d "
+                        "retries for DB deadlock: %s",
                         max_retries,
                         exc,
                     )
@@ -238,19 +276,39 @@ def retry_on_db_deadlock(func: F) -> F:
                 raw_delay = base_delay_seconds * (2 ** attempt)
                 capped_delay = min(raw_delay, max_delay_seconds)
                 jittered_delay = capped_delay * random.uniform(0.5, 1.5)
+                # P1-044: deadline check. If the sleep would exceed the
+                # deadline, raise immediately so the operator sees the
+                # deadlock error (not a timeout error).
+                if _deadline is not None:
+                    now = time.monotonic()
+                    if now + jittered_delay >= _deadline:
+                        logger.error(
+                            "P1-044 retry_on_db_deadlock: deadline "
+                            "(%.1fs) would be exceeded by sleep %.1fs. "
+                            "Raising immediately so the operator sees "
+                            "the deadlock error before the task times "
+                            "out. Attempt %d/%d. Set "
+                            "P1_DEADLOCK_RETRY_DEADLINE_SECONDS=0 to "
+                            "disable this check.",
+                            _deadline_seconds, jittered_delay,
+                            attempt + 1, max_retries,
+                        )
+                        raise
                 logger.warning(
-                    "P1-033 retry_on_db_deadlock: DB deadlock detected "
-                    "(attempt %d/%d): %s. Retrying in %.1fs with jitter.",
+                    "P1-033/P1-044 retry_on_db_deadlock: DB deadlock "
+                    "detected (attempt %d/%d): %s. Retrying in %.1fs "
+                    "with jitter. Deadline: %.1fs remaining.",
                     attempt + 1,
                     max_retries,
                     exc,
                     jittered_delay,
+                    (_deadline - time.monotonic()) if _deadline else -1.0,
                 )
                 time.sleep(jittered_delay)
         # Should be unreachable -- the loop either returns or raises.
         if last_exc is not None:
             raise last_exc
-        raise RuntimeError("P1-033 retry_on_db_deadlock: unreachable state")
+        raise RuntimeError("P1-033/P1-044 retry_on_db_deadlock: unreachable state")
 
     return wrapper  # type: ignore[return-value]
 
@@ -373,9 +431,44 @@ def _extract_http_status(exc: BaseException) -> int | None:
             if _last is not None and hasattr(_last, "exception"):
                 try:
                     _inner = _last.exception()
-                except Exception:
-                    # Some Future-like objects raise if the result is not
-                    # yet available. Treat as "no inner exception".
+                except (RuntimeError, AttributeError, ValueError) as _inner_exc:
+                    # P1-037 FORENSIC ROOT FIX (Teammate 3 -- hostile-auditor pass):
+                    #   The previous code had a broad ``except Exception``
+                    #   here. This SWALLOWED real bugs (e.g. a tenacity
+                    #   internal AttributeError from a malformed Future
+                    #   subclass, or a TypeError from a custom RetryError
+                    #   with a non-callable ``exception`` attribute). The
+                    #   broad except turned every bug into a silent
+                    #   "no inner exception" -> the 4xx error was NOT
+                    #   detected -> ``is_http_4xx_error`` returned False
+                    #   -> ``fail_fast_on_http_4xx`` re-raised the
+                    #   RetryError -> Airflow retried it (defeating the
+                    #   entire fail-fast policy).
+                    #
+                    #   ROOT FIX: catch ONLY the specific exceptions that
+                    #   ``Future.exception()`` is documented to raise when
+                    #   the result is not yet available:
+                    #     - ``RuntimeError`` (covers
+                    #       ``concurrent.futures.InvalidStateError`` which
+                    #       is a subclass of RuntimeError in Python 3.8+;
+                    #       raised when the Future is not done).
+                    #     - ``AttributeError`` (covers the case where the
+                    #       object has ``last_attempt`` but the inner
+                    #       object lacks ``exception`` -- a custom Future
+                    #       subclass or a mock that doesn't fully implement
+                    #       the Future protocol).
+                    #     - ``ValueError`` (covers some custom Future
+                    #       implementations that raise ValueError for
+                    #       invalid state).
+                    #   Any OTHER exception (TypeError, KeyError, etc.)
+                    #   indicates a real bug in tenacity or the caller's
+                    #   exception object and should PROPAGATE so the
+                    #   operator sees it.
+                    #
+                    #   Treat these specific exceptions as "no inner
+                    #   exception available" and continue the unwrap loop.
+                    #   The cycle guard at the top of the loop prevents
+                    #   infinite recursion.
                     _inner = None
                 if _inner is not None:
                     # Advance _current to the inner exception and continue

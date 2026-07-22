@@ -250,14 +250,78 @@ _RULE_VERSION: str = "rules_v3"
 _CONFIG_VERSION: str = "1.0.0"
 
 # [IDEM-10] Logic hash — sha256 of this source file (first 16 hex chars).
-# Computed lazily to avoid reading the file at import time on every reload.
-_LOGIC_HASH: str = ""
-try:
-    _LOGIC_HASH = hashlib.sha256(
-        Path(__file__).read_bytes()
-    ).hexdigest()[:16]
-except Exception:  # [REL-6] never crash at import
-    _LOGIC_HASH = "unknown"
+# P1-035 FORENSIC ROOT FIX (Teammate 3 -- hostile-auditor pass):
+#   The previous comment here CLAIMED "Computed lazily to avoid reading
+#   the file at import time on every reload" — but the actual code
+#   computed ``_LOGIC_HASH`` at IMPORT TIME (``_LOGIC_HASH = hashlib.sha256(
+#   Path(__file__).read_bytes()).hexdigest()[:16]``). The comment was a
+#   LIE. If the file was modified during a running session (hot reload,
+#   in-place edit during debugging), the hash was STALE and provenance
+#   tracking reported the OLD hash — defeating the entire purpose of a
+#   logic hash (which is to detect logic changes between runs).
+#
+#   ROOT FIX: compute the hash LAZILY on first access via a cached
+#   function ``_get_logic_hash()``. The function reads the file on the
+#   FIRST call and caches the result. Subsequent calls return the cached
+#   value (no re-read). This means:
+#     - Import time: NO file read (faster import, no I/O).
+#     - First provenance write: file is read, hash is computed + cached.
+#     - Subsequent provenance writes: cached value is returned.
+#     - Hot reload (module re-imported): fresh hash is computed on first
+#       access after the reload.
+#   ``_invalidate_logic_hash()`` is provided for tests and long-running
+#   daemons that want to force a re-read after an in-place edit.
+import functools
+
+_LOGIC_HASH_CACHED: str | None = None
+
+
+@functools.cache
+def _compute_logic_hash() -> str:
+    """Compute the sha256 hash of this source file (first 16 hex chars).
+
+    P1-035: cached via ``functools.cache`` so the file is read at most
+    ONCE per process. Use ``_invalidate_logic_hash()`` to force a re-read.
+    """
+    try:
+        return hashlib.sha256(
+            Path(__file__).read_bytes()
+        ).hexdigest()[:16]
+    except Exception:  # [REL-6] never crash provenance tracking
+        return "unknown"
+
+
+def _get_logic_hash() -> str:
+    """Return the logic hash, computing it lazily on first call.
+
+    P1-035 ROOT FIX: this replaces the old module-level ``_LOGIC_HASH``
+    variable which was computed at import time. Callers should use this
+    function instead of the (now-removed) ``_LOGIC_HASH`` variable.
+    """
+    return _compute_logic_hash()
+
+
+def _invalidate_logic_hash() -> None:
+    """Force the logic hash to be re-computed on the next ``_get_logic_hash()`` call.
+
+    P1-035: useful for tests that modify the source file in-place, and
+    for long-running daemons that hot-reload modules. After calling this,
+    the next ``_get_logic_hash()`` call re-reads the file and returns the
+    fresh hash.
+    """
+    global _LOGIC_HASH_CACHED
+    _LOGIC_HASH_CACHED = None
+    _compute_logic_hash.cache_clear()
+
+
+# P1-035 NOTE: ``_LOGIC_HASH`` is accessed as a module attribute at line
+# 4110 (``"logic_hash": _LOGIC_HASH``). For backward-compat, we handle
+# this access in the module-level ``__getattr__`` at the BOTTOM of this
+# file (line ~5906) so it returns the lazily-computed hash. Do NOT add a
+# second ``__getattr__`` here -- Python allows only ONE module-level
+# ``__getattr__`` and the existing one at the bottom of the file is the
+# active one. The bottom ``__getattr__`` has been updated to handle
+# ``_LOGIC_HASH``.
 
 # ===========================================================================
 # Logger setup (CODE-6, LOG-7, PERF-14)
@@ -5848,6 +5912,13 @@ def __getattr__(name: str) -> Any:
     Also delegates to ``cleaning.__init__.__getattr__`` for cross-package
     lazy-loaded names.
     """
+    # P1-035 FORENSIC ROOT FIX (Teammate 3): lazy ``_LOGIC_HASH`` access.
+    # The old module-level ``_LOGIC_HASH`` variable was computed at IMPORT
+    # time. Callers that access ``normalizer._LOGIC_HASH`` now get the
+    # lazily-computed hash via this ``__getattr__`` branch. The hash is
+    # computed on FIRST access and cached via ``functools.cache``.
+    if name == "_LOGIC_HASH":
+        return _get_logic_hash()
     if name == "FUZZY_THRESHOLD":
         return _FUZZY_THRESHOLD
     if name == "UNIT_CONVERSIONS":

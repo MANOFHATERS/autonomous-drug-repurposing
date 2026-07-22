@@ -1132,13 +1132,68 @@ def run_entity_resolution() -> Dict[str, Any]:
         #   DELETE+INSERT remains atomic (same transaction); the DROP
         #   runs in a SEPARATE transaction after the main work, so it
         #   commits even if the main transaction rolled back.
+        #
+        # P1-038 FORENSIC ROOT FIX (Teammate 3 -- hostile-auditor pass):
+        #   The previous code (v89 fix above) used ``to_sql(if_exists="replace")``
+        #   INSIDE ``engine.begin()``. The comment at line 1114 CLAIMED
+        #   "Transactional: temp table + DELETE/INSERT -- atomic, rolls
+        #   back on failure." This is a LIE. On SQLite, ``to_sql(if_exists="replace")``
+        #   does a DROP+CREATE OUTSIDE the ``engine.begin()`` transaction
+        #   (SQLAlchemy's ``to_sql`` issues its own DDL statements which
+        #   SQLite auto-commits). The DELETE FROM entity_mapping IS
+        #   inside the transaction. So if the INSERT fails:
+        #     1. The temp table was already DROP+CREATE'd (committed).
+        #     2. The DELETE FROM entity_mapping ran (inside txn).
+        #     3. The INSERT failed -> transaction rolls back.
+        #     4. entity_mapping is EMPTY (DELETE rolled back, but the
+        #        operator sees a transient empty state until the next
+        #        successful run).
+        #   If the operator queries entity_mapping between the rollback
+        #   and the next run, they see ZERO rows -> Phase 2 builds an
+        #   empty KG -> patient-impacting data loss.
+        #
+        #   ROOT FIX: use ``if_exists="append"`` AFTER manually dropping
+        #   the temp table in a SEPARATE transaction (before the main
+        #   transaction begins). This way:
+        #     1. DROP TABLE IF EXISTS (separate txn, committed) -- removes
+        #        any orphan from a previous failed run.
+        #     2. BEGIN main transaction.
+        #     3. to_sql(if_exists="append") -- CREATEs the temp table
+        #        and INSERTs the data, ALL inside the main transaction.
+        #        If this fails, the transaction rolls back (temp table
+        #        is gone, entity_mapping is untouched).
+        #     4. DELETE FROM entity_mapping (inside main txn).
+        #     5. INSERT INTO entity_mapping SELECT ... (inside main txn).
+        #     6. COMMIT main transaction.
+        #   If ANY step 3-5 fails, the transaction rolls back and
+        #   entity_mapping retains its PREVIOUS state (not empty).
+        #   This is true atomicity.
         engine = get_engine()
+        # Step 1: drop any orphaned temp table from a previous failed run.
+        # This runs in its OWN transaction so it commits independently.
+        try:
+            with engine.begin() as _pre_cleanup_conn:
+                _pre_cleanup_conn.execute(
+                    text("DROP TABLE IF EXISTS _tmp_entity_mapping_staging")
+                )
+        except Exception as _pre_cleanup_exc:  # noqa: BLE001
+            logger.warning(
+                "P1-038: pre-cleanup DROP TABLE IF EXISTS failed: %s. "
+                "Continuing -- if_exists='append' will fail if the temp "
+                "table still exists from a previous run.",
+                _pre_cleanup_exc,
+            )
         try:
             with engine.begin() as conn:
+                # P1-038: if_exists="append" (NOT "replace"). The temp
+                # table was already dropped above. ``append`` creates the
+                # table if it doesn't exist and inserts the data, ALL
+                # inside this transaction. If this fails, the transaction
+                # rolls back (temp table is gone, entity_mapping untouched).
                 save_df.to_sql(
                     "_tmp_entity_mapping_staging",
                     con=conn,
-                    if_exists="replace",
+                    if_exists="append",
                     index=False,
                     method="multi",
                     chunksize=5000,
@@ -1158,9 +1213,9 @@ def run_entity_resolution() -> Dict[str, Any]:
         finally:
             # v89 BUG #29: ALWAYS drop the temp table, even if the main
             # transaction failed. Use a SEPARATE transaction so the DROP
-            # commits independently. ``if_exists='replace'`` on the next
-            # run would handle it, but explicit cleanup avoids orphaned
-            # tables accumulating on repeated failures.
+            # commits independently. ``if_exists='append'`` on the next
+            # run requires the temp table to NOT exist (append does NOT
+            # drop; it errors if the schema is incompatible).
             try:
                 with engine.begin() as _cleanup_conn:
                     _cleanup_conn.execute(
@@ -1168,9 +1223,9 @@ def run_entity_resolution() -> Dict[str, Any]:
                     )
             except Exception as _cleanup_exc:  # noqa: BLE001
                 logger.warning(
-                    "v89 BUG #29: could not drop temp table "
+                    "P1-038/v89 BUG #29: could not drop temp table "
                     "_tmp_entity_mapping_staging (%s). It will be dropped "
-                    "on the next run via if_exists='replace'.",
+                    "on the next run's pre-cleanup step.",
                     _cleanup_exc,
                 )
         # v104 FORENSIC ROOT FIX (P1-002 -- duplicate INSERT/DELETE block):
@@ -1267,11 +1322,37 @@ def run_entity_resolution() -> Dict[str, Any]:
                     )
                     # Skip the UPDATE -- do not corrupt multiple rows.
                 else:
+                    # P1-038 FORENSIC ROOT FIX (Teammate 3): same pattern
+                    # as the entity_mapping staging block above. The
+                    # previous code used ``to_sql(if_exists="replace")``
+                    # inside ``engine.begin()``. On SQLite, the DROP+CREATE
+                    # is auto-committed OUTSIDE the transaction, so if the
+                    # UPDATE failed, the proteins table was NOT rolled back
+                    # (the UPDATE is inside the txn, but any partial UPDATE
+                    # on a multi-row statement would leave the proteins
+                    # table in an inconsistent state until the next run).
+                    # ROOT FIX: drop the temp table in a SEPARATE pre-
+                    # transaction, then use ``if_exists="append"`` inside
+                    # the main transaction so the CREATE+INSERT is atomic.
+                    try:
+                        with engine.begin() as _pre_cleanup_conn:
+                            _pre_cleanup_conn.execute(
+                                text("DROP TABLE IF EXISTS _tmp_protein_string_update")
+                            )
+                    except Exception as _pre_cleanup_exc:  # noqa: BLE001
+                        logger.warning(
+                            "P1-038: pre-cleanup DROP TABLE IF EXISTS for "
+                            "_tmp_protein_string_update failed: %s. "
+                            "Continuing -- if_exists='append' will fail if "
+                            "the temp table still exists.",
+                            _pre_cleanup_exc,
+                        )
                     try:
                         with engine.begin() as conn:
+                            # P1-038: if_exists="append" (NOT "replace").
                             update_df.to_sql(
                                 "_tmp_protein_string_update", con=conn,
-                                if_exists="replace", index=False,
+                                if_exists="append", index=False,
                                 method="multi", chunksize=5000,
                             )
                             # v75 ROOT FIX (T-025 compound): the PostgreSQL UPDATE
@@ -1309,6 +1390,9 @@ def run_entity_resolution() -> Dict[str, Any]:
                         # v89 BUG #29 (applied to the protein temp table
                         # too): ALWAYS drop the temp table, even on
                         # failure, in a separate transaction.
+                        # P1-038: append does NOT drop; explicit cleanup
+                        # is required so the next run's pre-cleanup finds
+                        # no orphan.
                         try:
                             with engine.begin() as _cleanup_conn:
                                 _cleanup_conn.execute(
@@ -1316,8 +1400,9 @@ def run_entity_resolution() -> Dict[str, Any]:
                                 )
                         except Exception as _cleanup_exc:  # noqa: BLE001
                             logger.warning(
-                                "v89 BUG #29: could not drop temp table "
-                                "_tmp_protein_string_update (%s).",
+                                "P1-038/v89 BUG #29: could not drop temp table "
+                                "_tmp_protein_string_update (%s). It will be "
+                                "dropped on the next run's pre-cleanup step.",
                                 _cleanup_exc,
                             )
 

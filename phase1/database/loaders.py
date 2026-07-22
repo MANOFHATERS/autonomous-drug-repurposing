@@ -1557,6 +1557,29 @@ def _pre_validate_proteins(
                     stacklevel=2,
                 )
 
+            # P1-040 FORENSIC ROOT FIX (Teammate 3): validate
+            # ``chembl_target_id`` (if present and non-empty). If the value
+            # is malformed, log a WARNING and set it to NULL -- do NOT
+            # quarantine the whole record. The protein is still loadable
+            # (it has a valid uniprot_id); the malformed ChEMBL target ID
+            # is silently dropped but the operator sees the warning.
+            # This matches the sequence-validation pattern above (line 1538).
+            ctid = record.get("chembl_target_id")
+            if ctid is not None and str(ctid).strip():
+                try:
+                    # Import locally to avoid a circular import at module
+                    # load time (models.py imports from loaders.py for
+                    # some validators -- this breaks the cycle).
+                    from database.models import _validate_chembl_target_id
+                    record["chembl_target_id"] = _validate_chembl_target_id(ctid)
+                except ValueError as _ctid_exc:
+                    logger.warning(
+                        "%s: invalid chembl_target_id for %s -- setting "
+                        "to None. Error: %s",
+                        operation, uid, _ctid_exc,
+                    )
+                    record["chembl_target_id"] = None
+
             valid.append(record)
 
         except ValueError as e:
@@ -2434,6 +2457,15 @@ def bulk_upsert_proteins(
             # fields; stale NULL values would defeat the feature pipeline.
             "function",
             "subcellular_location",
+            # P1-040 FORENSIC ROOT FIX (Teammate 3): ``chembl_target_id``
+            # must be in ``updatable_cols`` so a subsequent ChEMBL refresh
+            # that adds/changes a target's ChEMBL ID is persisted on
+            # CONFLICT/UPDATE. Without this, the column would be INSERTed
+            # on first load but NEVER updated -- meaning a ChEMBL release
+            # that remapped a target's ID would leave the stale old ID in
+            # the proteins table, breaking Drug->Protein edge resolution
+            # for the affected targets.
+            "chembl_target_id",
         ]
         # gene_name still accepted for backward compat but not updatable
         # (will be inserted on new rows but never updated)

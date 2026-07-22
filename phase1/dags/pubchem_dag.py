@@ -6,7 +6,7 @@ batch-queries the PubChem PUG REST API for properties, and bulk-updates
 the ``drugs`` table with retrieved molecular data.
 
 Can be triggered independently or as part of the master pipeline.
-Schedule: every Saturday at 08:00 UTC (cron ``0 8 * * 6`` — P1-047 root fix).
+Schedule: every Saturday at 12:00 UTC (cron ``0 12 * * 6`` — P1-032 root fix).
 v49 ROOT FIX (Compound-4 -- Sunday Morning Pile-Up): was previously
 ``0 8 * * 0`` (Sunday 08:00 UTC) which overlapped the master DAG
 window (Sunday 02:00 UTC, 8h timeout). Moved to Wednesday to
@@ -202,7 +202,31 @@ def run_pubchem() -> None:
     # write to the ``drugs`` table, causing DB contention. ROOT FIX: move
     # PubChem to Saturday 08:00 UTC (3 hours after STRING at Sat 05:00 --
     # no overlap). Saturday NEVER collides with the master's Sunday window.
-    schedule="0 8 * * 6",  # Every Saturday at 08:00 UTC (P1-047 root fix)
+    #
+    # P1-032 FORENSIC ROOT FIX (Teammate 3 -- PubChem/STRING Saturday overlap):
+    #   The P1-047 fix moved PubChem to Saturday 08:00 UTC, but STRING's
+    #   4GB PPI download (Sat 05:00 UTC) can legitimately take 3-4 hours
+    #   (cold cache, slow mirror). If STRING runs past 08:00 UTC, it
+    #   OVERLAPS with PubChem. Both DAGs share the same PostgreSQL
+    #   connection pool and write to overlapping tables (STRING writes
+    #   protein_protein_interactions + proteins; PubChem reads proteins
+    #   and writes drugs). The overlap causes DB contention and possible
+    #   deadlocks on the proteins table.
+    #
+    #   AUDIT VERIFICATION (hostile-auditor pass): the prior comment
+    #   claimed "3 hours after STRING -- no overlap". This is FALSE.
+    #   STRING's download window is 05:00-09:00 UTC (4h timeout per
+    #   string_dag.py). PubChem at 08:00 is INSIDE STRING's window.
+    #   The 3-hour gap is the START time gap, not a no-overlap guarantee.
+    #
+    #   ROOT FIX: move PubChem to Saturday 12:00 UTC. This gives a 3-hour
+    #   buffer AFTER STRING's max end time (09:00). PubChem's 4h timeout
+    #   (12:00-16:00 UTC) ends well before the master DAG (Sunday 02:00
+    #   UTC). No collision with any other standalone DAG (chembl Wed 04:00,
+    #   drugbank Mon 03:00, uniprot Fri 04:00, disgenet Mon 02:00, omim
+    #   Thu 07:00). This is the only truly empty window in the weekly
+    #   schedule.
+    schedule="0 12 * * 6",  # Every Saturday at 12:00 UTC (P1-032 root fix)
     start_date=datetime(2024, 1, 1),
     catchup=False,
     max_active_runs=1,

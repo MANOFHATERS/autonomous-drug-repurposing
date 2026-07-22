@@ -107,8 +107,20 @@ def _validate_source(
         return issues
 
     # Read the CSV (no dtype coercion yet — we check actual dtypes below).
+    # P1-033 FORENSIC ROOT FIX (Teammate 3): pass ``compression="infer"``
+    # EXPLICITLY. pandas auto-detects gzip from the .gz extension by default,
+    # but the default behavior is an implementation detail that could change
+    # in a future pandas release. Explicit ``compression="infer"`` makes the
+    # intent clear and protects against:
+    #   1. A future pandas release changing the default to ``compression=None``
+    #      (which would read .gz files as raw binary garbage).
+    #   2. Files with non-standard extensions (e.g. ``.csv.gzip`` instead of
+    #      ``.csv.gz``) where auto-detection heuristics may fail.
+    # ``compression="infer"`` tells pandas to infer the compression from the
+    # filename extension (.gz → gzip, .bz2 → bz2, .zip → zip, .xz → xz),
+    # which is the same as the default behavior but now self-documenting.
     try:
-        df = pd.read_csv(path)
+        df = pd.read_csv(path, compression="infer")
     except pd.errors.EmptyDataError:
         issues.append(ValidationIssue(
             source=spec.key,
