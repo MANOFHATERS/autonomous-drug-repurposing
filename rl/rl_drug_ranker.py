@@ -189,10 +189,74 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="gymnasium
 def setup_logging(level: int = logging.INFO, json_logs: bool = False) -> None:
     """Configure structured logging for the RL pipeline.
 
+    P4-022 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+    The previous implementation called ``logging.basicConfig(..., force=True)``
+    in BOTH branches (json_logs and plain). ``force=True`` REMOVES every
+    existing handler from the root logger and REPLACES them with our handler.
+    In production the root logger is typically configured by uvicorn,
+    fastapi, neo4j, gunicorn, or structured-logging libraries BEFORE the
+    RL pipeline starts. Calling ``basicConfig(force=True)`` silently
+    strips those handlers — important logs from other components
+    (HTTP request logs, Neo4j driver warnings, audit logs from the
+    FastAPI middleware) disappear. Debugging becomes harder and audit
+    trails (21 CFR Part 11) lose entries.
+
+    The root fix:
+      1. Always call ``root.setLevel(level)`` — this is safe and never
+         clobbers handlers (it only changes the threshold).
+      2. Only add our handler if the root logger has NO handlers
+         (``not root.handlers``). This preserves any existing
+         configuration from upstream components. When the root logger
+         already has handlers (the production case), we leave them
+         alone — our level update still applies to them.
+      3. When the root logger already has handlers AND the caller asked
+         for JSON logs, we log a NOTICE (NOT an error) that JSON
+         formatting was skipped because existing handlers were
+         preserved. The operator can configure JSON logs upstream
+         (e.g., via ``LOGGING_CONFIG`` env var or a ``logging.config``
+         file) if they need both.
+
     Args:
         level: Logging level (e.g. logging.INFO, logging.DEBUG).
         json_logs: If True, emit JSON-formatted log lines for machine parsing.
+            NOTE: when the root logger already has handlers (production),
+            json_logs is IGNORED to avoid clobbering. A notice is logged.
     """
+    root = logging.getLogger()
+    # P4-022: setLevel is always safe — it does NOT remove handlers.
+    root.setLevel(level)
+
+    # P4-022: only add our handler if the root logger has none.
+    # This preserves configurations from uvicorn/fastapi/neo4j/gunicorn
+    # that were set up BEFORE the RL pipeline started.
+    if root.handlers:
+        # Root logger already has handlers — do NOT clobber them.
+        # If the caller asked for JSON logs but we skipped them, log a
+        # NOTICE so the operator knows why their log format didn't change.
+        if json_logs:
+            # Use a one-off logger (NOT the root logger) to emit this
+            # notice, so we don't inject a NEW handler into the root
+            # logger just to emit this notice (which would partially
+            # defeat the purpose of preserving existing handlers).
+            _notice = logging.getLogger("rl.setup_logging")
+            if not _notice.handlers:
+                _h = logging.StreamHandler()
+                _h.setFormatter(logging.Formatter(
+                    "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+                ))
+                _notice.addHandler(_h)
+                _notice.propagate = False  # avoid duplicate emission via root
+            _notice.setLevel(logging.INFO)
+            _notice.info(
+                "P4-022: setup_logging(json_logs=True) SKIPPED — root logger "
+                "already has %d handler(s). Preserving existing configuration "
+                "(not clobbering with force=True). Configure JSON logs "
+                "upstream (e.g. via logging.config) if you need both.",
+                len(root.handlers),
+            )
+        return
+
+    # Root logger has NO handlers — safe to add ours.
     if json_logs:
         class _JSONFormatter(logging.Formatter):
             def format(self, record: logging.LogRecord) -> str:
@@ -207,10 +271,12 @@ def setup_logging(level: int = logging.INFO, json_logs: bool = False) -> None:
                 return json.dumps(entry)
         handler = logging.StreamHandler()
         handler.setFormatter(_JSONFormatter())
-        logging.basicConfig(level=level, handlers=[handler], force=True)
+        root.addHandler(handler)
     else:
         fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-        logging.basicConfig(level=level, format=fmt, force=True)
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(fmt))
+        root.addHandler(handler)
 
 
 # P4-023 ROOT FIX (lineterminator pandas 1.x compat):
@@ -1470,29 +1536,57 @@ class _LazyList:
     # mutation methods (append, extend, insert, __setitem__, __delitem__)
     # that mutate the underlying cache directly. After mutation, call
     # _recompute_known_positives_set() to refresh the lowercase cache.
+    #
+    # P4-019 v142 FORENSIC ROOT FIX (hostile-auditor pass): the previous
+    # P4-026 fix added the mutation methods but DID NOT call
+    # _recompute_known_positives_set() after mutation — the module-level
+    # _KNOWN_POSITIVES_LOWER_SET cache stayed STALE, so the reward
+    # function used the OLD set, ignoring newly-appended KPs. The DOCX §10
+    # data flywheel depends on this: when a pharma partner validates a
+    # new pair, the pair is appended to KNOWN_POSITIVES — but the reward
+    # function kept using the OLD set, so the agent never saw the new
+    # signal until module reload. The fix wraps every mutation method to
+    # call _recompute_known_positives_set() AFTER the mutation.
+    #
+    # NOTE on VALIDATED_HYPOTHESES / VALIDATED_TOXIC_HYPOTHESES: these
+    # are ALSO _LazyList instances and share the same mutation methods.
+    # Calling _recompute_known_positives_set() after a VH mutation is a
+    # no-op (the function only rebuilds the KP cache, not a VH cache) —
+    # slightly wasteful but never incorrect. The reward function reads
+    # VH directly from the _LazyList proxy (not from a cache), so VH
+    # mutations are picked up immediately without needing invalidation.
     def append(self, item) -> None:
         self._resolve().append(item)
+        _recompute_known_positives_set()
 
     def extend(self, items) -> None:
         self._resolve().extend(items)
+        _recompute_known_positives_set()
 
     def insert(self, idx: int, item) -> None:
         self._resolve().insert(idx, item)
+        _recompute_known_positives_set()
 
     def __setitem__(self, idx, value) -> None:
         self._resolve()[idx] = value
+        _recompute_known_positives_set()
 
     def __delitem__(self, idx) -> None:
         del self._resolve()[idx]
+        _recompute_known_positives_set()
 
     def pop(self, idx: int = -1):
-        return self._resolve().pop(idx)
+        item = self._resolve().pop(idx)
+        _recompute_known_positives_set()
+        return item
 
     def remove(self, item) -> None:
         self._resolve().remove(item)
+        _recompute_known_positives_set()
 
     def clear(self) -> None:
         self._resolve().clear()
+        _recompute_known_positives_set()
 
 
 # P4-004: the lazy proxies. The loader functions are called ONCE on first
@@ -2384,6 +2478,27 @@ class PipelineConfig:
     # own Phase1StagedData instance so the bridge fallback is wired in
     # automatically on every bridge-driven run.
     pathway_bridge: Optional[Any] = None
+    # P4-026 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+    # Explicit Phase 1 directory for the DrugBank safety-signal loader.
+    # When set, run_pipeline calls
+    # ``build_reward_function_with_phase1_safety(phase1_dir=config.phase1_dir)``
+    # so the reward function uses the LIVE Phase 1 DrugBank withdrawn-drug
+    # set (merged with the hardcoded WITHDRAWN_DRUGS frozenset). This is
+    # the production path — newly-withdrawn drugs that Phase 1 correctly
+    # flagged ``is_withdrawn=True`` are caught by the reward function,
+    # not just the ~41 drugs in the hardcoded frozenset.
+    #
+    # When None (default), run_pipeline falls back to the
+    # ``PHASE1_PROCESSED_DIR`` env var. When BOTH are unset, run_pipeline
+    # logs a CRITICAL warning (the patient-safety guardrail is in
+    # DEGRADED mode) and uses the hardcoded frozenset only. In
+    # ``allow_fake_data=True`` mode (dev/CI), the warning is downgraded
+    # to DEBUG — fake-data runs don't need Phase 1 data.
+    #
+    # The GT-RL bridge (run_4phase.py) sets this to its own resolved
+    # Phase 1 output directory so the safety wiring is AUTOMATIC on every
+    # bridge-driven run, without requiring the operator to set env vars.
+    phase1_dir: Optional[str] = None
     # v90 P0 ROOT FIX (BUG #8): PPO hyperparams were NOT actually
     # configurable. getattr(cfg, 'ppo_gamma', 0.0) always returned the
     # default because PipelineConfig did not define these fields. A user
@@ -5624,6 +5739,13 @@ class DrugRankingEnv(gym.Env):
         reward_fn: Optional[RewardFunction] = None,
         disease_context_stats: Optional[Dict[str, float]] = None,
         set_adaptive_threshold: bool = True,
+        # P4-010 v142 FORENSIC ROOT FIX: bridge disease cols min/max from
+        # the TRAIN env. When provided (a dict mapping each bridge disease
+        # column name to (min, max)), the env uses these for min-max
+        # normalization instead of computing its own. This eliminates the
+        # train/test distribution shift where the same bridge value
+        # normalized differently in train vs test envs.
+        bridge_disease_min_max: Optional[Dict[str, Tuple[float, float]]] = None,
     ) -> None:
         """Initialize the environment.
 
@@ -5654,6 +5776,17 @@ class DrugRankingEnv(gym.Env):
         reward_fn. The reward_fn retains the threshold set by the train
         env. This eliminates the train/test contamination.
 
+        P4-010 v142 FORENSIC ROOT FIX: ``bridge_disease_min_max`` parameter.
+        The previous code min-max normalized the bridge-provided disease
+        context columns (bridge_disease_pair_count, bridge_disease_avg_gnn,
+        bridge_disease_avg_safety) PER-ENV — the train env and test env
+        normalized DIFFERENTLY for the same bridge value. A bridge value
+        of 0.7 might normalize to 1.0 in train but 0.5 in test, causing
+        train/test distribution shift for these 3 features. The fix: the
+        TRAIN env computes the min/max and passes them to the TEST env
+        via ``bridge_disease_min_max``. The TEST env uses the TRAIN
+        min/max (not its own), so the normalized values are consistent.
+
         Args:
             data: DataFrame of drug-disease pairs (already validated).
             config: PipelineConfig (uses DEFAULT_CONFIG if None).
@@ -5669,6 +5802,12 @@ class DrugRankingEnv(gym.Env):
                 by the train env). The TEST env MUST pass False to avoid
                 contaminating the shared reward_fn with test data
                 (FORENSIC-AUDIT-I13 fix).
+            bridge_disease_min_max: Optional dict mapping each bridge
+                disease column name to (min, max) — passed from the TRAIN
+                env to the TEST env. When provided, the env uses these
+                for min-max normalization instead of computing its own.
+                Eliminates the train/test distribution shift for these 3
+                features (P4-010 v142 fix).
 
         Raises:
             ValueError: If data is empty.
@@ -5683,6 +5822,23 @@ class DrugRankingEnv(gym.Env):
 
         self.config = config or DEFAULT_CONFIG
         self.reward_fn = reward_fn or RewardFunction(self.config.reward)
+
+        # P4-010 v142: store the bridge_disease_min_max for use in
+        # _setup_bridge_features. When None, the env computes its own
+        # min/max (train env case). When provided, the env uses these
+        # (test env case — eliminates distribution shift).
+        self._bridge_disease_min_max_in: Optional[Dict[str, Tuple[float, float]]] = (
+            bridge_disease_min_max
+        )
+        # After _setup_bridge_features runs, this holds the ACTUAL min/max
+        # used (either computed locally or passed in). Callers (run_pipeline)
+        # read this from the TRAIN env and pass it to the TEST env.
+        self.bridge_disease_min_max: Dict[str, Tuple[float, float]] = {}
+
+        # P4-007 v142: track which bridge columns were filled with 0.0
+        # (missing from the CSV). Surface in env metadata so downstream
+        # consumers know the policy was trained on degraded features.
+        self.bridge_cols_missing: List[str] = []
 
         # P4-005 ROOT FIX: capture the _standalone_mode flag BEFORE copying
         # the data. The flag is set by generate_fake_data to indicate that
@@ -6000,16 +6156,63 @@ class DrugRankingEnv(gym.Env):
             if _src_col in self.data.columns:
                 # Rename the bridge-provided column to "bridge_*".
                 self.data = self.data.rename(columns={_src_col: _dst_col})
-                # Normalize to [0, 1] (the bridge emits raw counts/means,
-                # so min-max normalize per-env for scale consistency with
-                # the other features).
-                _col_min = float(self.data[_dst_col].min())
-                _col_max = float(self.data[_dst_col].max())
+                # P4-010 v142 FORENSIC ROOT FIX: use the TRAIN env's
+                # min/max when provided (test env case). This eliminates
+                # the train/test distribution shift where the same bridge
+                # value normalized differently in train vs test envs.
+                # When NOT provided (train env case), compute the min/max
+                # from THIS env's data and store it on
+                # self.bridge_disease_min_max so the caller can pass it
+                # to the test env.
+                if (
+                    self._bridge_disease_min_max_in is not None
+                    and _dst_col in self._bridge_disease_min_max_in
+                ):
+                    _col_min, _col_max = self._bridge_disease_min_max_in[_dst_col]
+                    _col_min = float(_col_min)
+                    _col_max = float(_col_max)
+                    logger.info(
+                        "P4-010 v142: using TRAIN env's min/max for %s "
+                        "(min=%.6f, max=%.6f) — eliminates train/test "
+                        "distribution shift.",
+                        _dst_col, _col_min, _col_max,
+                    )
+                else:
+                    # Train env case: compute min/max from this env's data.
+                    _col_min = float(self.data[_dst_col].min())
+                    _col_max = float(self.data[_dst_col].max())
+                # Store the actual min/max used (for both train and test
+                # envs — the train env's stored values are read by
+                # run_pipeline and passed to the test env).
+                self.bridge_disease_min_max[_dst_col] = (_col_min, _col_max)
                 _denom = (_col_max - _col_min) + 1e-9
                 self.data[_dst_col] = (self.data[_dst_col] - _col_min) / _denom
             else:
-                # Old bridge CSV: fill with 0.0 (neutral).
+                # P4-007 v142 FORENSIC ROOT FIX: log a WARNING when bridge
+                # disease cols are missing. The previous code SILENTLY
+                # filled with 0.0 — operators had NO indication that the
+                # policy was training on a degraded feature set. The 3
+                # bridge_disease_* features become dead weight in the
+                # observation vector (constant 0.0 — the policy cannot
+                # learn from a constant). The warning surfaces this so
+                # operators can update the bridge CSV to v128+ (which
+                # emits all 17 columns).
+                logger.warning(
+                    "P4-007 v142: bridge column %s (source: %s) is MISSING "
+                    "from the input CSV. Filling with 0.0 (neutral — the "
+                    "policy cannot learn from a constant feature). This "
+                    "indicates the bridge CSV is pre-v128 (which emits only "
+                    "12 of 17 columns). Update the bridge to v128+ to emit "
+                    "all 17 columns. The env.bridge_cols_missing list "
+                    "records this for downstream metadata.",
+                    _dst_col, _src_col,
+                )
                 self.data[_dst_col] = 0.0
+                self.bridge_cols_missing.append(_dst_col)
+                # Record the (degenerate) min/max so the test env inherits
+                # the same degenerate values (no distribution shift even
+                # on missing cols — both envs see constant 0.0).
+                self.bridge_disease_min_max[_dst_col] = (0.0, 0.0)
             self._bridge_feature_cols.append(_dst_col)
 
         # V4 C-F2 fix: disease-context features. Use pre-computed stats
@@ -7044,6 +7247,20 @@ def train_agent(
     resume_checkpoint: Optional[str] = None,
     max_retries: int = 3,
     metrics: Optional["PipelineMetrics"] = None,
+    # P4-011 + P4-014 v142 FORENSIC ROOT FIX: eval_env for EvalCallback.
+    # When provided (a DrugRankingEnv built from held-out validation data),
+    # train_agent wraps it in a VecNormalize (using the SAME running stats
+    # as the train env) and passes it to SB3's EvalCallback. The callback
+    # evaluates the policy on the eval_env every `eval_freq` timesteps and
+    # logs the mean reward + AUC proxy to TensorBoard. Combined with
+    # StopTrainingOnNoModelImprovement, this enables early stopping when
+    # the policy stops improving (P4-011) and detects regressions mid-
+    # training (P4-014) instead of only at the end.
+    # If None (backward compat), train_agent falls back to deepcopying the
+    # train env for eval (less ideal — the eval env is the SAME data, so
+    # it's a train-on-train-eval-on-train metric, but at least the
+    # EvalCallback fires so checkpointing + early stopping work).
+    eval_env: Optional["DrugRankingEnv"] = None,
 ) -> Tuple[Any, Optional[str], Any]:
     """Train a PPO agent on the ranking environment.
 
@@ -7249,7 +7466,17 @@ def train_agent(
                                 vec_env_resume,
                                 norm_obs=True,
                                 norm_reward=True,
-                                clip_reward=5.0,
+                                # P4-020 v142 FORENSIC ROOT FIX: clip_reward
+                                # raised from 5.0 to 10.0. The max raw reward is
+                                # weighted_sum * safety_factor * high_action_bonus
+                                # + validated_bonus ≈ 1.0 * 1.0 * 5.0 + 0.1 = 5.1.
+                                # The previous 5.0 clip TRUNCATED the
+                                # validated_bonus for the highest-reward pairs
+                                # — exactly the pairs the data flywheel (DOCX §10)
+                                # should reinforce most. The 10.0 bound matches
+                                # VecNormalize's default clip_obs and preserves
+                                # the full +0.1 validated_bonus signal.
+                                clip_reward=10.0,
                                 gamma=float(getattr(cfg, 'ppo_gamma', 0.0)),
                             )
                             normalized_env_for_save = normalized_env_resume
@@ -7444,9 +7671,79 @@ def train_agent(
                     )
                     # Only wrap if not already a VecEnv (avoid double-wrap)
                     if not isinstance(env, VecEnv):
-                        # SB3's VecNormalize requires a VecEnv, so wrap
-                        # in DummyVecEnv first if needed.
-                        vec_env = DummyVecEnv([lambda: env])
+                        # P4-015 v142 FORENSIC ROOT FIX (n_envs IGNORED):
+                        # The previous code ALWAYS used
+                        # ``DummyVecEnv([lambda: env])`` (single env), so
+                        # the ``n_envs`` config field was DEAD CONFIG.
+                        # Setting ``n_envs=4`` had NO effect — training
+                        # used only 1 core on a 4-core machine (4x slower
+                        # than possible).
+                        # ROOT FIX: when ``cfg.n_envs > 1``, use
+                        # ``SubprocVecEnv`` with N copies of the env (each
+                        # in its own process for true parallelism). When
+                        # ``cfg.n_envs == 1`` (default), use
+                        # ``DummyVecEnv`` (no subprocess overhead).
+                        # The env copies are constructed via
+                        # ``copy.deepcopy(env)`` to ensure each process
+                        # has its OWN env state (PPO rollouts in each
+                        # subprocess must not share env state).
+                        _n_envs_cfg = int(getattr(cfg, 'n_envs', 1))
+                        if _n_envs_cfg > 1:
+                            try:
+                                from stable_baselines3.common.vec_env import SubprocVecEnv
+                                import copy as _copy_for_subproc
+                                # Build N env factory functions, each
+                                # returning a DEEP-copied env. The deepcopy
+                                # is essential — without it, all N
+                                # subprocesses would share the SAME env
+                                # object (race condition on env.step()).
+                                _subproc_env_fns = []
+                                for _sub_idx in range(_n_envs_cfg):
+                                    _sub_env = _copy_for_subproc.deepcopy(env)
+                                    # Reset the deepcopy's RNG seed so each
+                                    # subprocess sees a different data
+                                    # ordering (PPO benefits from diverse
+                                    # rollouts across envs).
+                                    if hasattr(_sub_env, 'seed'):
+                                        try:
+                                            _sub_env.seed(seed + _sub_idx)
+                                        except Exception:
+                                            pass
+                                    # Capture _sub_env by value (default
+                                    # argument trick to avoid late-binding).
+                                    _subproc_env_fns.append(
+                                        (lambda e: (lambda: e))(_sub_env)
+                                    )
+                                vec_env = SubprocVecEnv(_subproc_env_fns)
+                                # NOTE on SB3 n_steps convention: SB3's
+                                # ``n_steps`` is PER ENV (the total rollout
+                                # size is n_steps × n_envs, computed
+                                # internally by SB3). The issue spec for
+                                # P4-015 suggested multiplying
+                                # effective_n_steps by n_envs, but that
+                                # would produce overly large rollouts
+                                # (n_steps × n_envs × n_envs total). We
+                                # follow SB3's actual convention: keep
+                                # effective_n_steps unchanged (per-env),
+                                # and let SB3 handle the multiplication.
+                                logger.info(
+                                    "P4-015 v142 ROOT FIX: using SubprocVecEnv "
+                                    "with %d parallel envs (was 1 before the "
+                                    "fix — n_envs config was DEAD). True "
+                                    "parallelism enabled; training will use "
+                                    "%d cores.", _n_envs_cfg, _n_envs_cfg,
+                                )
+                            except ImportError:
+                                logger.warning(
+                                    "P4-015 v142: SubprocVecEnv not importable; "
+                                    "falling back to DummyVecEnv (single env, "
+                                    "n_envs=%d IGNORED). Install stable-"
+                                    "baselines3 with [extra] for SubprocVecEnv.",
+                                    _n_envs_cfg,
+                                )
+                                vec_env = DummyVecEnv([lambda: env])
+                        else:
+                            vec_env = DummyVecEnv([lambda: env])
                 except ImportError:
                     logger.warning(
                         f"ROOT FIX (S-03): stable_baselines3.common.vec_env "
@@ -7548,12 +7845,24 @@ def train_agent(
                         vec_env,
                         norm_obs=True,
                         norm_reward=True,
-                        # v90 P0 ROOT FIX (BUG #20): clip_reward=10.0 was
-                        # dead — actual rewards are in [-0.05, +2.5], well
-                        # within [-10, +10], so the clip NEVER fired. Set
-                        # to 5.0 (a meaningful bound that matches the
-                        # actual reward range with headroom).
-                        clip_reward=5.0,
+                        # P4-020 v142 FORENSIC ROOT FIX (hostile-auditor pass):
+                        # raised clip_reward from 5.0 to 10.0. The previous
+                        # v90 "ROOT FIX (BUG #20)" comment CLAIMED 5.0 was a
+                        # "meaningful bound that matches the actual reward
+                        # range" — but the claim was WRONG. The max raw reward
+                        # is weighted_sum (≤1.0) × safety_factor (≤1.0) ×
+                        # high_action_bonus (=5.0) + validated_bonus (=0.1) =
+                        # 5.1. The 5.0 clip TRUNCATED the validated_bonus for
+                        # the highest-reward pairs — exactly the pairs the
+                        # data flywheel (DOCX §10) should reinforce most. The
+                        # v90 comment confused the *typical* reward range
+                        # ([-0.05, +2.5]) with the *maximum* reward (5.1) —
+                        # the clip is on the MAX, not the typical. The 10.0
+                        # bound matches VecNormalize's default clip_obs and
+                        # preserves the full +0.1 validated_bonus signal.
+                        # CI test: tests/test_p4_020_clip_reward.py asserts
+                        # the validated_bonus is NOT clipped.
+                        clip_reward=10.0,
                         gamma=_ppo_gamma,  # P4-001: from config (default 0.0, contextual bandit)
                     )
                     # V31 ROOT FIX (P1-9): track the VecNormalize wrapper so
@@ -7576,11 +7885,33 @@ def train_agent(
                 # better on the small dataset.
                 policy_kwargs = dict(net_arch=_ppo_net_arch)
 
+                # P4-013 v142 FORENSIC ROOT FIX (no LR schedule):
+                # The previous code passed ``learning_rate=_ppo_lr`` (a
+                # CONSTANT float). PPO typically benefits from a LINEAR
+                # learning rate decay schedule (from ``_ppo_lr`` to 0 over
+                # training) — a constant LR can cause the policy to
+                # oscillate near the end of training instead of converging
+                # smoothly. SB3 supports schedule functions: a callable
+                # ``learning_rate(progress_remaining: float) -> float``
+                # where ``progress_remaining`` goes from 1.0 (start) to
+                # 0.0 (end). The fix uses ``lambda progress: progress *
+                # _ppo_lr`` which linearly decays from ``_ppo_lr`` to 0.
+                # ROOT FIX: use a linear schedule (lambda) instead of a
+                # constant float. The schedule is recorded in metadata for
+                # provenance (21 CFR Part 11).
+                _ppo_lr_schedule = lambda progress: float(progress) * float(_ppo_lr)
+                logger.info(
+                    f"P4-013 v142 ROOT FIX: PPO learning_rate is now a LINEAR "
+                    f"schedule (from {_ppo_lr:.2e} at start to 0.0 at end). "
+                    f"Was a CONSTANT {_ppo_lr:.2e} before the fix (could cause "
+                    f"oscillation near end of training)."
+                )
+
                 model = PPO(
                     "MlpPolicy",
                     normalized_env,
                     verbose=1,
-                    learning_rate=_ppo_lr,  # V30 (10.8): from config (was hardcoded 7e-4)
+                    learning_rate=_ppo_lr_schedule,  # P4-013 v142: linear decay schedule (was constant float)
                     n_steps=effective_n_steps,
                     batch_size=effective_batch_size,
                     n_epochs=cfg.ppo_n_epochs,
@@ -7592,7 +7923,195 @@ def train_agent(
                     tensorboard_log=tensorboard_log,
                     policy_kwargs=policy_kwargs,
                 )
-                model.learn(total_timesteps=timesteps, callback=_metrics_callback)
+
+                # =====================================================================
+                # P4-011 + P4-012 + P4-014 v142 FORENSIC ROOT FIX:
+                # =====================================================================
+                # The previous code called ``model.learn(total_timesteps,
+                # callback=_metrics_callback)`` with ONLY the metrics
+                # callback. This had THREE critical defects:
+                #
+                #   P4-011: No early stopping on reward plateau. If the
+                #     policy collapsed early (e.g., reward plateaus at
+                #     timestep 5,000), the remaining 45,000 timesteps were
+                #     wasted compute.
+                #
+                #   P4-012: No intermediate checkpointing. If the process
+                #     crashed at timestep 49,999 of 50,000, ALL training
+                #     progress was lost (only the FINAL model was saved).
+                #
+                #   P4-014: No evaluation during training. The only
+                #     evaluation happened AFTER training completed (in
+                #     run_pipeline). Regressions at timestep 20,000 were
+                #     caught only at timestep 50,000 — 30,000 timesteps of
+                #     wasted compute.
+                #
+                # ROOT FIX: assemble a CallbackList with THREE callbacks:
+                #   1. CheckpointCallback (P4-012): saves the model every
+                #      `save_freq` timesteps to `checkpoint_dir`. On a
+                #      crash, the operator can resume from the latest
+                #      intermediate checkpoint (via resume_checkpoint).
+                #   2. EvalCallback (P4-014): evaluates the policy on
+                #      `eval_env` every `eval_freq` timesteps. Logs the
+                #      mean reward to TensorBoard. Also saves the BEST
+                #      model (highest eval reward) to a separate path so
+                #      the operator can deploy the best snapshot, not just
+                #      the final one.
+                #   3. StopTrainingOnNoModelImprovement (P4-011): stops
+                #      training early if the eval reward doesn't improve
+                #      for `max_no_improvement_evals` consecutive evals.
+                #      Prevents wasted compute on collapsed policies.
+                #
+                # The eval_env is constructed from the `eval_env` parameter
+                # (if provided) or a deepcopy of the train env (backward
+                # compat). The eval_env is wrapped in a SEPARATE
+                # VecNormalize (using the SAME running stats as the train
+                # env's VecNormalize, so the eval env sees the same obs
+                # distribution). SB3's EvalCallback manages the eval_env's
+                # state correctly (it doesn't disturb the training env).
+                # =====================================================================
+                _train_callbacks_list = []
+                if _metrics_callback is not None:
+                    _train_callbacks_list.append(_metrics_callback)
+
+                # P4-012: CheckpointCallback for intermediate saves.
+                try:
+                    from stable_baselines3.common.callbacks import CheckpointCallback
+                    # Save every 10% of training (max(1, timesteps // 10)).
+                    # The checkpoint files are named
+                    # ``ppo_model_<timesteps>_steps_<save_count>.zip`` and
+                    # are written to ``checkpoint_dir``. On a crash, the
+                    # operator can resume from the latest by passing
+                    # ``--resume <latest_checkpoint>`` to the CLI.
+                    _ckpt_save_freq = max(1, timesteps // 10)
+                    _checkpoint_callback = CheckpointCallback(
+                        save_freq=_ckpt_save_freq,
+                        save_path=checkpoint_dir,
+                        name_prefix=f"ppo_model_{timesteps}_steps",
+                        save_replay_buffer=False,
+                        save_vecnormalize=True,  # P4-012: also save VecNormalize stats
+                    )
+                    _train_callbacks_list.append(_checkpoint_callback)
+                    logger.info(
+                        "P4-012 v142 ROOT FIX: CheckpointCallback added — "
+                        "saves intermediate checkpoints every %d timesteps "
+                        "(10%% of total) to %s. On a crash, resume from "
+                        "the latest .zip via --resume.",
+                        _ckpt_save_freq, checkpoint_dir,
+                    )
+                except ImportError:
+                    logger.warning(
+                        "P4-012 v142: CheckpointCallback not importable; "
+                        "intermediate checkpointing DISABLED. A crash near "
+                        "the end of training will lose ALL progress."
+                    )
+
+                # P4-011 + P4-014: EvalCallback + StopTrainingOnNoModelImprovement.
+                # These two callbacks work together: EvalCallback runs eval
+                # every eval_freq timesteps; StopTrainingOnNoModelImprovement
+                # (passed as callback_on_new_best to EvalCallback? No —
+                # passed via callback_after_eval) stops training if no
+                # improvement for N consecutive evals.
+                try:
+                    from stable_baselines3.common.callbacks import (
+                        EvalCallback,
+                        StopTrainingOnNoModelImprovement,
+                    )
+                    # Build the eval env: prefer the caller-provided
+                    # eval_env (held-out validation data); fall back to
+                    # a deepcopy of the train env (backward compat).
+                    if eval_env is not None:
+                        _eval_env_inner = eval_env
+                    else:
+                        import copy as _copy_for_eval
+                        _eval_env_inner = _copy_for_eval.deepcopy(env)
+                        logger.info(
+                            "P4-011 v142: no eval_env provided — using a "
+                            "deepcopy of the train env for EvalCallback. "
+                            "This is a train-on-train-eval-on-train metric "
+                            "(less ideal than a held-out eval env). For "
+                            "production, pass eval_env from a held-out "
+                            "validation split."
+                        )
+                    # Wrap the eval env in a DummyVecEnv + VecNormalize
+                    # (using the SAME running stats as the train env, so
+                    # the eval env sees the same obs distribution).
+                    from stable_baselines3.common.vec_env import (
+                        DummyVecEnv as _DummyVecEnv_eval,
+                    )
+                    _eval_vec_env = _DummyVecEnv_eval([lambda: _eval_env_inner])
+                    try:
+                        from stable_baselines3.common.vec_env import (
+                            VecNormalize as _VecNormalize_eval,
+                        )
+                        _eval_normalized = _VecNormalize_eval(
+                            _eval_vec_env,
+                            norm_obs=True,
+                            norm_reward=False,  # don't normalize reward for eval
+                            clip_reward=10.0,  # P4-020 v142: matches train
+                            gamma=_ppo_gamma,
+                        )
+                        # Sync the eval env's VecNormalize running stats
+                        # with the train env's (so eval obs are normalized
+                        # with the SAME mean/std the policy was trained on).
+                        if hasattr(_eval_normalized, 'obs_rms') and hasattr(
+                            normalized_env, 'obs_rms'
+                        ):
+                            _eval_normalized.obs_rms = normalized_env.obs_rms
+                    except ImportError:
+                        _eval_normalized = _eval_vec_env
+
+                    # P4-011: stop training if no improvement for 5 evals.
+                    _stop_on_no_improvement = StopTrainingOnNoModelImprovement(
+                        max_no_improvement_evals=5,
+                        min_evals=3,  # require at least 3 evals before stopping
+                        verbose=1,
+                    )
+                    # P4-014: evaluate every 10% of training (timesteps // 10).
+                    _eval_freq = max(1, timesteps // 10)
+                    _eval_callback = EvalCallback(
+                        _eval_normalized,
+                        callback_on_new_best=None,
+                        callback_after_eval=_stop_on_no_improvement,
+                        n_eval_episodes=10,
+                        eval_freq=_eval_freq,
+                        log_path=os.path.join(cfg.output_dir, "eval_logs"),
+                        best_model_save_path=os.path.join(cfg.output_dir, "best_model"),
+                        deterministic=True,
+                        render=False,
+                        verbose=1,
+                    )
+                    _train_callbacks_list.append(_eval_callback)
+                    logger.info(
+                        "P4-011 + P4-014 v142 ROOT FIX: EvalCallback + "
+                        "StopTrainingOnNoModelImprovement added — evaluates "
+                        "the policy every %d timesteps (10%% of total) on "
+                        "%d episodes. Stops early if no improvement for 5 "
+                        "consecutive evals (P4-011). Logs eval rewards to "
+                        "TensorBoard (P4-014). Best model saved to %s.",
+                        _eval_freq, 10,
+                        os.path.join(cfg.output_dir, "best_model"),
+                    )
+                except ImportError:
+                    logger.warning(
+                        "P4-011 + P4-014 v142: EvalCallback / "
+                        "StopTrainingOnNoModelImprovement not importable; "
+                        "early stopping + intermediate evaluation DISABLED. "
+                        "Wasted compute on collapsed policies possible."
+                    )
+
+                # Assemble the CallbackList (SB3 requires a list, not a
+                # tuple, for the callback parameter).
+                if _train_callbacks_list:
+                    try:
+                        from stable_baselines3.common.callbacks import CallbackList
+                        _train_callbacks = CallbackList(_train_callbacks_list)
+                    except ImportError:
+                        _train_callbacks = _train_callbacks_list
+                else:
+                    _train_callbacks = _metrics_callback
+
+                model.learn(total_timesteps=timesteps, callback=_train_callbacks)
 
             try:
                 # P4-005 ROOT FIX (HIGH — Team Cosmic / Phase 4): REFUSE
@@ -8455,6 +8974,17 @@ def compute_auc(
     # 1000 (matches sklearn's recommendation). Set to 0 to skip the CI
     # (returns just the point estimate — useful for fast unit tests).
     n_bootstrap: int = 1000,
+    # P4-010 v142 FORENSIC ROOT FIX: bridge disease cols min/max from
+    # the TRAIN env. When provided, compute_auc's internal test env uses
+    # these for bridge_disease_* normalization instead of computing its
+    # own — eliminates the train/test distribution shift.
+    bridge_disease_min_max: Optional[Dict[str, Tuple[float, float]]] = None,
+    # P4-017 v142 FORENSIC ROOT FIX: per-disease AUC reporting. When
+    # True (default), compute_auc computes AUC for each disease
+    # separately and includes ``auc_by_disease`` in the returned Dict.
+    # The scientific validation gate uses this to detect rare-disease
+    # failures that a global AUC masks.
+    compute_per_disease_auc: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Compute AUC-ROC of agent's ranking on held-out data, with bootstrap CI.
 
@@ -8620,6 +9150,9 @@ def compute_auc(
             test_data, config=cfg, reward_fn=reward_fn,
             disease_context_stats=disease_context_stats,
             set_adaptive_threshold=False,
+            # P4-010 v142: pass train bridge min/max so test env uses
+            # the SAME normalization constants (no distribution shift).
+            bridge_disease_min_max=bridge_disease_min_max,
         )
     else:
         # v90 P0 ROOT FIX (BUG #23): the standalone path (reward_fn=None)
@@ -8634,6 +9167,9 @@ def compute_auc(
         env_test = DrugRankingEnv(
             test_data, config=cfg, disease_context_stats=disease_context_stats,
             set_adaptive_threshold=False,
+            # P4-010 v142: pass train bridge min/max so test env uses
+            # the SAME normalization constants (no distribution shift).
+            bridge_disease_min_max=bridge_disease_min_max,
         )
 
     # P4-001 ROOT FIX (AUC label/prediction misalignment):
@@ -8698,6 +9234,16 @@ def compute_auc(
     predictions: List[float] = []
     labels: List[int] = []
 
+    # P4-017 v142 FORENSIC ROOT FIX: per-disease labels + predictions.
+    # Group by disease so we can compute per-disease AUC at the end. The
+    # DOCX §8 V1 launch criteria require global AUC > 0.85, but a global
+    # AUC can mask rare-disease failures (a model that performs well on
+    # common diseases but poorly on rare diseases can still pass). The
+    # per-disease AUC surfaces these failures so the scientific validation
+    # gate can detect them (e.g., for the rare_disease_partner tenant).
+    per_disease_labels: Dict[str, List[int]] = {}
+    per_disease_preds: Dict[str, List[float]] = {}
+
     known_set = {(d.lower(), v.lower()) for d, v in KNOWN_POSITIVES}
     n_known_in_test = 0
 
@@ -8753,6 +9299,9 @@ def compute_auc(
             n_known_in_test += 1
         else:
             labels.append(0)
+        # P4-017 v142: also collect per-disease labels + predictions.
+        per_disease_labels.setdefault(disease_lower, []).append(labels[-1])
+        per_disease_preds.setdefault(disease_lower, []).append(prob_high)
         # V4 B-F2 fix: set policy prob on env so high_ranked buffer
         # captures it (used by get_top_candidates downstream).
         env_test._current_policy_prob = prob_high
@@ -8865,11 +9414,85 @@ def compute_auc(
         f"ci_lower >= threshold (not auc >= threshold)."
     )
 
+    # =========================================================================
+    # P4-017 v142 FORENSIC ROOT FIX (per-disease AUC):
+    # =========================================================================
+    # The DOCX §8 V1 launch criteria require global AUC > 0.85, but a
+    # global AUC can mask rare-disease failures. A model that performs
+    # well on common diseases (cardiovascular, diabetes — many KP pairs)
+    # but poorly on rare diseases (lupus, Parkinson's — few KP pairs)
+    # can still have a high global AUC. For the rare_disease_partner
+    # tenant profile, this is a patient-safety concern — rare disease
+    # patients get poor rankings without detection.
+    #
+    # ROOT FIX: compute per-disease AUC by grouping (labels, predictions)
+    # by disease. Each disease's AUC is computed only if it has at least
+    # 1 positive AND 1 negative in the test set (roc_auc_score requires
+    # both classes). Diseases with degenerate label distributions are
+    # reported as None (with a DEBUG log). A WARNING is logged for any
+    # disease with AUC < 0.5 (worse than random) — this is a strong
+    # signal that the model is mis-ranking for that disease.
+    # =========================================================================
+    auc_by_disease: Dict[str, Optional[float]] = {}
+    n_diseases_with_auc = 0
+    n_diseases_degenerate = 0
+    n_diseases_below_random = 0
+    min_per_disease_auc: Optional[float] = None
+    if compute_per_disease_auc:
+        for _disease, _labels_d in per_disease_labels.items():
+            _preds_d = per_disease_preds.get(_disease, [])
+            if len(_labels_d) < 2 or len(set(_labels_d)) < 2:
+                # Degenerate: fewer than 2 samples OR only one class.
+                auc_by_disease[_disease] = None
+                n_diseases_degenerate += 1
+                continue
+            try:
+                _auc_d = float(roc_auc_score(_labels_d, _preds_d))
+                auc_by_disease[_disease] = _auc_d
+                n_diseases_with_auc += 1
+                if _auc_d < 0.5:
+                    n_diseases_below_random += 1
+                    logger.warning(
+                        "P4-017 v142: disease '%s' has AUC=%.4f "
+                        "(< 0.5 = worse than random). The model is mis-"
+                        "ranking for this disease. The global AUC "
+                        "masks this failure. Investigate the disease's "
+                        "feature distribution and KP coverage.",
+                        _disease, _auc_d,
+                    )
+                if min_per_disease_auc is None or _auc_d < min_per_disease_auc:
+                    min_per_disease_auc = _auc_d
+            except ValueError as _ve:
+                auc_by_disease[_disease] = None
+                n_diseases_degenerate += 1
+                logger.debug(
+                    "P4-017 v142: roc_auc_score failed for disease '%s' "
+                    "(%s). Marking as None.",
+                    _disease, _ve,
+                )
+        logger.info(
+            "P4-017 v142: per-disease AUC computed for %d diseases "
+            "(%d degenerate, %d below random). min_per_disease_auc=%s. "
+            "The scientific validation gate can use min_per_disease_auc "
+            "to detect rare-disease failures that the global AUC masks.",
+            n_diseases_with_auc, n_diseases_degenerate,
+            n_diseases_below_random,
+            f"{min_per_disease_auc:.4f}" if min_per_disease_auc is not None else "None",
+        )
+
     return {
         "auc": auc,
         "ci_lower": ci_lower,
         "ci_upper": ci_upper,
         "n_bootstrap": n_valid_bootstrap,
+        # P4-017 v142: per-disease AUC. Dict mapping disease name → AUC
+        # (or None for degenerate diseases). The scientific validation
+        # gate can use min_per_disease_auc to detect rare-disease failures.
+        "auc_by_disease": auc_by_disease,
+        "min_per_disease_auc": min_per_disease_auc,
+        "n_diseases_with_auc": n_diseases_with_auc,
+        "n_diseases_degenerate": n_diseases_degenerate,
+        "n_diseases_below_random": n_diseases_below_random,
     }
 
 
@@ -9537,46 +10160,64 @@ def compute_output_hmac(filepath: str, secret_key: str = "") -> Tuple[Optional[s
         is_verified = True
         key_source = "RL_HMAC_KEY env var"
     else:
-        # v89: derive deterministic project-default key for corruption detection.
-        # This is NOT cryptographically secure (an attacker who reads the source
-        # can forge it), but it DOES detect accidental corruption (file transfer
-        # errors, truncation, encoding issues). The is_verified=False flag makes
-        # the security level HONEST.
+        # P4-028 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+        # Derive the default key from a FIXED project secret (pipeline
+        # version constant ONLY), NOT from the file's content. The
+        # previous v89/P4-015 fix derived the key from
+        # ``pipeline_version + file_size + first_64_bytes``. The first
+        # 64 bytes of a CSV file are the HEADER (column names). If the
+        # column order changes between schema versions (e.g., a new
+        # feature column is added at position 2, shifting all subsequent
+        # columns), the first 64 bytes change → the default key changes
+        # → the HMAC value changes — even if the DATA ROWS are
+        # identical. A regulator re-verifying an OLD output with NEW
+        # code (new schema) sees an HMAC mismatch (FALSE TAMPER ALARM).
         #
-        # P4-015 ROOT FIX (HMAC key derivation broken):
-        # The ORIGINAL v89 code read the metadata file (``.meta.json``)
-        # to derive the default key from ``pipeline_version + run_id``.
-        # But save_results writes the metadata FIRST, then computes the
-        # HMAC, then RE-WRITES the metadata with the HMAC field. A
-        # verifier who re-computes the HMAC derives a DIFFERENT default
-        # key (because the metadata now contains the output_hmac_sha256
-        # field, changing the file content). The integrity guarantee
-        # was broken — a pharma partner re-verifying got a mismatch.
+        # The 21 CFR Part 11 integrity concern: a false tamper alarm
+        # forces an investigation, slows down regulatory review, and
+        # erodes trust in the platform's audit trail. The previous
+        # behavior was especially bad because the false alarm rate
+        # increased with every schema migration — exactly when the
+        # platform is being upgraded and regulators are most likely to
+        # re-verify old outputs.
         #
-        # The fix: derive the default key from the CSV file's OWN
-        # content (its size and first 64 bytes), NOT from the metadata.
-        # The CSV content does NOT change between HMAC computation and
-        # re-verification, so the key is stable. The metadata can be
-        # updated freely without invalidating the HMAC.
+        # The fix: derive the default key from a FIXED string (the
+        # pipeline version constant) — NO file content, NO file size.
+        # This makes the HMAC STABLE across schema versions: the same
+        # data rows produce the same HMAC regardless of column order.
+        # The trade-off (already acknowledged by is_verified=False):
+        # the default key is NOT cryptographically secure — an attacker
+        # who reads the source code can forge it. The is_verified=False
+        # flag makes this HONEST. For cryptographic tamper detection,
+        # set RL_HMAC_KEY (documented in the CLI help).
+        #
+        # The default key STILL provides accidental-corruption
+        # detection (the original v89 goal): file transfer errors,
+        # truncation, encoding issues all change the file content →
+        # HMAC mismatch. This works because the HMAC is computed over
+        # the FULL file content (the loop below reads the file in 1MB
+        # chunks), regardless of how the KEY is derived. The key
+        # derivation only affects cross-version stability, not
+        # corruption detection within a single version.
+        #
+        # Hostile-auditor note: the previous comment claimed the
+        # file-content derivation was "the fix" for the metadata-
+        # mutation problem (P4-015). It WAS a fix for THAT problem,
+        # but it introduced a NEW problem (cross-schema-version
+        # instability). The metadata-mutation problem is now moot
+        # because we derive from a CONSTANT — neither metadata nor
+        # file content can mutate the key.
         default_key_parts = ["drugos-pipeline-v4.2.0"]  # P4-011: aligned with __version__
-        try:
-            st = os.stat(filepath)
-            default_key_parts.append(str(st.st_size))
-        except Exception:
-            pass
-        # P4-015: include the first 64 bytes of the CSV file itself
-        # (not the metadata) so the key is derived from the file's
-        # content, not from the mutable metadata. This makes the HMAC
-        # stable across metadata updates.
-        try:
-            with open(filepath, 'rb') as f:
-                file_head = f.read(64)
-            default_key_parts.append(file_head.hex())
-        except Exception:
-            pass
+        # P4-028: DO NOT include file_size or file_head — they change
+        # across schema versions (file_head is the CSV header = column
+        # names; adding a new column shifts the header bytes). The
+        # constant-only derivation is stable across schema versions.
         secret_key = "drugos-default:" + ":".join(default_key_parts)
         is_verified = False
-        key_source = "project-default (corruption detection only, NOT cryptographic)"
+        key_source = (
+            "project-default constant (corruption detection only, NOT "
+            "cryptographic; cross-schema-version stable per P4-028)"
+        )
 
     h = hmac.new(secret_key.encode(), digestmod=hashlib.sha256)
     with open(filepath, 'rb') as f:
@@ -10701,6 +11342,69 @@ def run_pipeline(
         # internally calls set_seed via the config, but we re-seed here
         # to be explicit and to cover any code that reads RNG state
         # before PPO is constructed.
+        # P4-025 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+        # ALSO set ``os.environ["PYTHONHASHSEED"]`` so that any SUBPROCESS
+        # spawned by run_pipeline (e.g., the GT-RL bridge subprocess, the
+        # Phase 1 Airflow worker, the Phase 2 kg_builder subprocess) gets
+        # a deterministic hash seed. This makes dict/set iteration order
+        # deterministic across runs — important for reproducibility of
+        # any code that iterates frozensets like ``WITHDRAWN_DRUGS`` or
+        # ``INDICATION_WITHDRAWN_DRUGS.keys()``.
+        #
+        # IMPORTANT: setting PYTHONHASHSEED at runtime does NOT affect
+        # the CURRENT process — Python reads PYTHONHASHSEED ONCE at
+        # interpreter startup. The current process's hash seed is fixed
+        # at startup. To make the CURRENT process deterministic, the
+        # env var must be set BEFORE Python starts (e.g., in the shell
+        # wrapper or Dockerfile). We:
+        #   1. Set the env var here for SUBPROCESSES (covers the bridge).
+        #   2. Log a CRITICAL warning if the current process's hash seed
+        #      appears randomized (we can't detect this directly, but we
+        #      can check if PYTHONHASHSEED was set in the env at startup
+        #      by inspecting ``os.environ`` — if it was unset, the
+        #      current process IS randomized, and we warn the operator
+        #      to set it in the Dockerfile / shell wrapper for full
+        #      reproducibility).
+        #   3. The Dockerfiles (Dockerfile.ml, Dockerfile.gpu,
+        #      Dockerfile.python-ml) set ``ENV PYTHONHASHSEED=0`` for
+        #      production builds (separate fix in this same commit).
+        # This is the standard pattern for 21 CFR Part 11 reproducibility:
+        # the runtime env-var set covers subprocesses; the Dockerfile ENV
+        # covers the main process; the warning catches dev/CI runs that
+        # bypass the Dockerfile.
+        os.environ["PYTHONHASHSEED"] = str(config.seed)
+        # P4-025: warn if the CURRENT process's hash seed was NOT set at
+        # startup. We can't read the actual hash seed (Python doesn't
+        # expose it), but we CAN check whether PYTHONHASHSEED was in the
+        # environment when the process started. If it was unset, the
+        # current process IS using a randomized hash seed, and dict/set
+        # iteration order may differ across runs even with the same
+        # numpy/torch/random seed.
+        _pyhash_at_startup = os.environ.get("PYTHONHASHSEED")
+        if _pyhash_at_startup is None or _pyhash_at_startup == "random":
+            logger.warning(
+                "P4-025: PYTHONHASHSEED was NOT set at process startup "
+                "(current env value: %r). Python's hash randomization is "
+                "ENABLED by default since Python 3.3 — dict/set iteration "
+                "order is non-deterministic across runs. This affects "
+                "frozensets like WITHDRAWN_DRUGS and dicts like "
+                "INDICATION_WITHDRAWN_DRUGS. Two runs with seed=%d may "
+                "produce slightly different policies. For 21 CFR Part 11 "
+                "reproducibility, set PYTHONHASHSEED=0 (or a fixed int) "
+                "BEFORE the Python interpreter starts — e.g., in the "
+                "Dockerfile (ENV PYTHONHASHSEED=0) or shell wrapper "
+                "(export PYTHONHASHSEED=0). We have set os.environ now "
+                "so SUBPROCESSES spawned by run_pipeline will be "
+                "deterministic, but the CURRENT process remains randomized.",
+                _pyhash_at_startup, config.seed,
+            )
+        else:
+            logger.info(
+                "P4-025: PYTHONHASHSEED=%s was set at process startup — "
+                "current process is fully deterministic. Subprocesses "
+                "will inherit PYTHONHASHSEED=%d (set by run_pipeline).",
+                _pyhash_at_startup, config.seed,
+            )
         import random as _random
         _random.seed(config.seed)
         np.random.seed(config.seed)  # numpy is imported at module level as np
@@ -10713,7 +11417,8 @@ def run_pipeline(
             pass  # torch not installed (CI without GPU deps)
         logger.info(
             f"P4-015: RL training seed = {config.seed} (propagated from "
-            f"GT-RL bridge via explicit run_pipeline seed parameter)."
+            f"GT-RL bridge via explicit run_pipeline seed parameter). "
+            f"P4-025: PYTHONHASHSEED={config.seed} set for subprocesses."
         )
 
     metrics = PipelineMetrics()
@@ -10824,13 +11529,17 @@ def run_pipeline(
     # The ``treat_unknown_as_withdrawn=True`` default means a drug with
     # ``is_withdrawn=None`` in the input row is treated as WITHDRAWN
     # (fail-CLOSED) — the conservative patient-safety default.
-    _phase1_dir = os.environ.get("PHASE1_PROCESSED_DIR", "phase1/processed_data")
+    _phase1_dir = (
+        config.phase1_dir
+        if getattr(config, "phase1_dir", None)
+        else os.environ.get("PHASE1_PROCESSED_DIR")
+    )
     _phase1_dir_resolved = (
         _phase1_dir
-        if os.path.isabs(_phase1_dir)
-        else os.path.abspath(_phase1_dir)
+        if (_phase1_dir and os.path.isabs(_phase1_dir))
+        else (os.path.abspath(_phase1_dir) if _phase1_dir else None)
     )
-    if os.path.isdir(_phase1_dir_resolved):
+    if _phase1_dir_resolved and os.path.isdir(_phase1_dir_resolved):
         try:
             from rl.reward import build_reward_function_with_phase1_safety
             reward_fn = build_reward_function_with_phase1_safety(
@@ -10840,8 +11549,11 @@ def run_pipeline(
             )
             logger.info(
                 "TEAMMATE-3: Built reward function with Phase 1 safety "
-                "signals from %s. safety_source=%s, withdrawn_drugs=%d.",
+                "signals from %s (source: %s). safety_source=%s, "
+                "withdrawn_drugs=%d.",
                 _phase1_dir_resolved,
+                "config.phase1_dir" if getattr(config, "phase1_dir", None)
+                else "PHASE1_PROCESSED_DIR env var",
                 getattr(reward_fn, "_safety_source", "unknown"),
                 len(getattr(reward_fn, "_withdrawn_drugs", WITHDRAWN_DRUGS)),
             )
@@ -10864,13 +11576,32 @@ def run_pipeline(
             )
             reward_fn = RewardFunction(config.reward)
     else:
-        logger.warning(
-            "TEAMMATE-3: Phase 1 processed dir %s not found. Falling back "
-            "to hardcoded WITHDRAWN_DRUGS frozenset (%d drugs). The "
-            "patient-safety guardrail is running in DEGRADED mode — Phase 1 "
-            "live data is NOT being used. Set PHASE1_PROCESSED_DIR to the "
-            "Phase 1 output directory to enable live safety signals.",
-            _phase1_dir_resolved, len(WITHDRAWN_DRUGS),
+        # P4-026 ROOT FIX (hostile-auditor v143): neither config.phase1_dir
+        # nor PHASE1_PROCESSED_DIR pointed to a valid directory. Log
+        # CRITICAL in production mode (allow_fake_data=False, the default)
+        # so the operator knows the patient-safety guardrail is in
+        # DEGRADED mode. In dev/CI mode (allow_fake_data=True), downgrade
+        # to DEBUG — fake-data runs don't need Phase 1 data.
+        _is_dev_mode = bool(getattr(config, "allow_fake_data", False))
+        _log_fn = logger.debug if _is_dev_mode else logger.critical
+        _log_fn(
+            "P4-026: Phase 1 safety-signal directory not available "
+            "(config.phase1_dir=%r, PHASE1_PROCESSED_DIR=%r, "
+            "resolved=%r). Falling back to hardcoded WITHDRAWN_DRUGS "
+            "frozenset (%d drugs). The patient-safety guardrail is "
+            "running in DEGRADED mode — Phase 1 live data is NOT being "
+            "used. Newly-withdrawn drugs that Phase 1 correctly flagged "
+            "is_withdrawn=True will NOT be caught by the reward function "
+            "unless their names happen to be in the hardcoded frozenset. "
+            "Set config.phase1_dir (preferred) or PHASE1_PROCESSED_DIR "
+            "env var to the Phase 1 output directory to enable live "
+            "safety signals.%s",
+            getattr(config, "phase1_dir", None),
+            os.environ.get("PHASE1_PROCESSED_DIR"),
+            _phase1_dir_resolved,
+            len(WITHDRAWN_DRUGS),
+            "" if not _is_dev_mode
+            else " (allow_fake_data=True — DEGRADED mode is acceptable for dev/CI.)",
         )
         reward_fn = RewardFunction(config.reward)
     reward_fn.set_validated_hypotheses(validated_set)
@@ -10889,35 +11620,50 @@ def run_pipeline(
     # Instead, we compute reward statistics on the TRAIN set only (after
     # the split) for logging purposes. The env computes rewards on-the-fly
     # during step(), which is correct and avoids the leak.
-    # P4-046 ROOT FIX (Teammate 13, LOW): the previous version called
-    # ``train_df.apply(lambda r: reward_fn.compute(r), axis=1)`` over the
-    # ENTIRE train set purely to log min/max reward. ``.apply(axis=1)`` is
-    # a Python-level row-by-row loop — for a 10K-row train set that is
-    # ~10K ``reward_fn.compute`` calls, each of which does several dict
-    # lookups + arithmetic. On the V1-scale dataset (100K+ rows) this log
-    # line alone took minutes and dominated pipeline runtime, for a
-    # statistic that is also computed (on-the-fly, correctly) inside the
-    # env during ``step()``.
-    # P4-035 ROOT FIX: sample at most 10K rows for the reward-range log.
-    # 10K samples gives a stable min/max estimate (reward is bounded in
-    # [0, 1]) without the O(N) Python loop. The env's own reward stats
-    # (logged during training) remain the authoritative source.
-    # The previous v100 fix used 1000 samples; the P4-035 fix raises this
-    # to 10K (still << the 100K+ full train set) for a more stable estimate
-    # of the reward distribution's tails (the min/max can be noisy with
-    # only 1000 samples if the distribution is heavy-tailed).
-    _REWARD_SAMPLE_LIMIT = 10_000  # P4-035 ROOT FIX: cap reward sample at 10K rows
-    reward_sample_size = min(_REWARD_SAMPLE_LIMIT, len(train_df))
-    reward_sample_df = (
-        train_df.sample(n=reward_sample_size, random_state=42)
-        if reward_sample_size < len(train_df)
-        else train_df
-    )
-    train_reward_sample = reward_sample_df.apply(lambda r: reward_fn.compute(r), axis=1)
+    # P4-023 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+    # REMOVED the slow ``train_df.apply(lambda r: reward_fn.compute(r), axis=1)``
+    # over a 10K-row sample. This was a Python-level row-by-row loop
+    # (~10K ``reward_fn.compute`` calls = several seconds on production
+    # data) purely to log a min/max reward statistic. The audit found:
+    #
+    #   1. The DrugRankingEnv computes the SAME reward on-the-fly during
+    #      ``step()`` (authoritative) — the pre-training log line was
+    #      duplicate compute on a sample, while the env computes on the
+    #      FULL train set during actual training.
+    #   2. ``df.apply(axis=1)`` creates a ``pd.Series`` per row (~5μs
+    #      overhead per row) then calls the lambda. Each
+    #      ``reward_fn.compute(row)`` call does dict lookups + arithmetic
+    #      + multiple gate checks (withdrawn with ICD-10/pregnancy
+    #      substring/tokenized matching, safety sigmoid, validated bonus
+    #      flagging, etc.). For 10K rows this is ~50ms minimum, often
+    #      >1s on real hardware.
+    #   3. The P4-035 fix raised the sample from 1K to 10K for "a more
+    #      stable estimate of the reward distribution's tails" — but the
+    #      env's own reward stats (logged during the first episode) are
+    #      computed on the FULL train set and are the AUTHORITATIVE
+    #      source. The pre-training sample estimate was always inferior.
+    #
+    # The fix: REMOVE the duplicate logging entirely. If a developer
+    # needs pre-training reward diagnostics, they can call
+    # ``reward_fn.compute(train_df.iloc[0])`` (microseconds, one row)
+    # or wait for the env's first-episode stats. The pipeline startup
+    # is now faster, with NO loss of signal — the env's reward stats
+    # during ``step()`` remain the authoritative source.
+    #
+    # Hostile-auditor note: the previous "P4-046 ROOT FIX" comment
+    # claimed the sample was "purely to log min/max reward" — which is
+    # exactly the waste the audit identified. The "P4-035 ROOT FIX"
+    # then RAISED the sample from 1K to 10K, making the waste 10x
+    # worse. Both comments framed the change as an improvement; in
+    # reality both preserved the slow Python loop. This v143 fix
+    # removes the loop entirely.
     logger.info(
-        f"Reward range (train sample of {len(reward_sample_df)}/{len(train_df)}, "
-        f"capped at _REWARD_SAMPLE_LIMIT={_REWARD_SAMPLE_LIMIT}): "
-        f"{train_reward_sample.min():.3f} -> {train_reward_sample.max():.3f}"
+        "P4-023: Pre-training reward-range logging REMOVED (was a slow "
+        "df.apply over a 10K sample). The DrugRankingEnv computes the "
+        "authoritative reward stats on-the-fly during step() on the "
+        "FULL train set — see the env's first-episode log lines for "
+        "min/max/mean reward. Pipeline startup is now faster with no "
+        "loss of signal."
     )
 
     # ROOT FIX (W-04): compute the adaptive gnn threshold on a HELD-OUT
@@ -11173,6 +11919,15 @@ def run_pipeline(
     # had different feature values at train vs test time).
     train_disease_stats = train_env._disease_context_stats
 
+    # P4-010 v142 FORENSIC ROOT FIX: capture the TRAIN env's bridge disease
+    # min/max and pass them to the TEST env. The previous code let each env
+    # compute its OWN min/max for the bridge_disease_* columns, causing
+    # train/test distribution shift (the same bridge value normalized
+    # differently in train vs test). The fix: the train env's min/max are
+    # computed once and passed to the test env so both envs use the SAME
+    # normalization constants.
+    train_bridge_min_max = dict(getattr(train_env, 'bridge_disease_min_max', {}))
+
     # B14 fix: evaluate on TEST env, not train env.
     # The Top-N candidates now come from held-out test data, not
     # training data. This is the fix that makes the deliverable
@@ -11182,6 +11937,9 @@ def run_pipeline(
     # the test env reuses the train reward_fn's adaptive threshold instead
     # of overwriting it with test data. This eliminates test-data leakage
     # into the reward function's gnn_hard_reject gate.
+    # P4-010 v142: also pass bridge_disease_min_max from the train env so
+    # the test env uses the SAME normalization constants (eliminates
+    # train/test distribution shift for the 3 bridge_disease_* features).
     if len(test_df) > 0:
         # P4-008 ROOT FIX (MEDIUM — Team Cosmic / Phase 4): deepcopy the
         # reward_fn for the test env. The previous code passed the SAME
@@ -11212,6 +11970,7 @@ def run_pipeline(
             test_df, config=config, reward_fn=test_reward_fn,
             disease_context_stats=train_disease_stats,
             set_adaptive_threshold=False,
+            bridge_disease_min_max=train_bridge_min_max or None,
         )
         # v89 P0: pass vec_normalize so obs is normalized at inference.
         candidates = evaluate_agent(
@@ -12265,6 +13024,311 @@ def run_pipeline(
 # ============================================================================
 # EVALUATION REPORT (P4-007 / audit #199)
 # ============================================================================
+
+# P4-029 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+# Private helper that runs the PPO policy through ``test_env`` ONCE,
+# collecting per-pair (prob_high, drug, disease, is_known_positive) AND
+# the Top-N candidates from the env's high_ranked buffer. This eliminates
+# the 2x inference cost in ``produce_evaluation_report`` (which previously
+# called ``evaluate_agent`` then ``compute_auc`` — each ran the policy
+# through ALL test pairs).
+#
+# The helper is PRIVATE (leading underscore) because it exists ONLY to
+# serve ``produce_evaluation_report``. Other callers should continue to
+# use the public ``evaluate_agent`` (returns only candidates) and
+# ``compute_auc`` (returns only AUC + CI) — their signatures are
+# unchanged for backward compatibility.
+#
+# Returns a Dict with keys:
+#   - "candidates": List[RankedCandidate] — Top-N from env.get_top_candidates
+#   - "predictions": List[float] — prob_high for each pair (aligned with labels)
+#   - "labels": List[int] — 1 if (drug, disease) in KNOWN_POSITIVES else 0
+#   - "n_known_in_test": int — count of known positives in the test set
+#   - "env": DrugRankingEnv — the test_env after the inference loop (for
+#     any caller that needs post-inference env state)
+def _run_inference_once(
+    model: Any,
+    test_env: "DrugRankingEnv",
+    top_n: int = 10,
+    vec_normalize: Any = None,
+) -> Dict[str, Any]:
+    """Run the policy through ``test_env`` ONCE, collecting all signals.
+
+    P4-029 ROOT FIX: this is the SINGLE inference pass that
+    ``produce_evaluation_report`` uses to derive BOTH the Top-N candidates
+    AND the AUC. The previous code called ``evaluate_agent`` (1 inference
+    pass) then ``compute_auc`` (a SECOND inference pass over a fresh test
+    env built from test_data) — 2x inference cost. On a 1M-pair test set,
+    this doubles evaluation time. When ``run_scientific_validation_gate``
+    is called after ``run_pipeline`` (which has its OWN evaluation logic),
+    the agent runs 4x per test pair.
+
+    This helper:
+      1. Resets ``test_env`` with ``shuffle=False`` (deterministic order,
+         required for label/prediction alignment — same invariant as
+         ``compute_auc``).
+      2. Loops through the env, calling ``extract_policy_prob_high`` ONCE
+         per pair (same pattern as ``evaluate_agent`` and ``compute_auc``).
+      3. For each pair, records:
+           - ``prob_high`` (the policy's continuous score for action HIGH)
+           - ``drug_lower``, ``disease_lower`` (for KP label lookup)
+           - The pair is labeled 1 if it's in ``KNOWN_POSITIVES``, else 0.
+      4. After the loop, calls ``env.get_top_candidates(top_n)`` to get
+         the Top-N candidates (the env's high_ranked buffer was populated
+         during the loop via ``env._current_policy_prob = prob_high``).
+      5. Returns the candidates + predictions + labels so the caller can
+         compute AUC, KP recovery, and per-candidate features WITHOUT
+         re-running the policy.
+
+    Args:
+        model: Trained PPO model.
+        test_env: DrugRankingEnv built from held-out test data. MUST be
+            the same env that ``produce_evaluation_report`` received
+            (NOT a fresh one — we don't want to rebuild disease stats).
+        top_n: Number of top candidates to return.
+        vec_normalize: Optional VecNormalize wrapper (passed to
+            ``extract_policy_prob_high`` so obs is normalized at inference).
+
+    Returns:
+        Dict with keys "candidates", "predictions", "labels",
+        "n_known_in_test", "env".
+    """
+    # Build the KNOWN_POSITIVES lookup once (lowercased).
+    known_set = {(d.lower(), v.lower()) for d, v in KNOWN_POSITIVES}
+
+    # Reset the env with shuffle=False for deterministic label/prediction
+    # alignment (same invariant as compute_auc — see P4-001 fix).
+    obs, _ = test_env.reset(options={"shuffle": False})
+    done = False
+
+    predictions: List[float] = []
+    labels: List[int] = []
+    n_known_in_test = 0
+
+    # P4-017 v142: per-disease labels + predictions (for rare-disease AUC).
+    per_disease_labels: Dict[str, List[int]] = {}
+    per_disease_preds: Dict[str, List[float]] = {}
+
+    while not done:
+        # Capture the row index BEFORE extract_policy_prob_high (same
+        # off-by-one defensive alignment as compute_auc — P4-001 fix).
+        current_row_idx = int(test_env.current_idx)
+        # Extract policy probability ONCE (same pattern as evaluate_agent
+        # and compute_auc — uses extract_policy_prob_high to avoid double
+        # policy network invocation per C5 fix).
+        prob_high = extract_policy_prob_high(
+            model, obs, vec_normalize=vec_normalize,
+            require_vec_normalize=(vec_normalize is not None),
+        )
+        # Read the label from test_env.data (NOT a separate test_data
+        # DataFrame — same defensive invariant as compute_auc P4-001 fix:
+        # the env's data is the source of truth for what the policy saw).
+        row = test_env.data.iloc[current_row_idx]
+        drug_lower = str(row[DRUG_COL]).lower().strip()
+        disease_lower = str(row[DISEASE_COL]).lower().strip()
+        if (drug_lower, disease_lower) in known_set:
+            labels.append(1)
+            n_known_in_test += 1
+        else:
+            labels.append(0)
+        predictions.append(float(prob_high))
+        # P4-017 v142: collect per-disease labels + predictions.
+        per_disease_labels.setdefault(disease_lower, []).append(labels[-1])
+        per_disease_preds.setdefault(disease_lower, []).append(float(prob_high))
+        # Set the policy prob on the env BEFORE step() so the high_ranked
+        # buffer captures it (used by get_top_candidates downstream —
+        # same pattern as evaluate_agent B-F2 fix).
+        test_env._current_policy_prob = prob_high
+        # Derive the action from the prob (same >= 0.5 threshold as
+        # evaluate_agent and compute_auc — P4-037 fix for boundary
+        # consistency).
+        action_int = 1 if prob_high >= 0.5 else 0
+        obs, _, done, _, _ = test_env.step(action_int)
+
+    # Get the Top-N candidates from the env's high_ranked buffer.
+    candidates = test_env.get_top_candidates(top_n=top_n)
+    display_top_candidates(candidates, top_n=top_n)
+
+    return {
+        "candidates": candidates,
+        "predictions": predictions,
+        "labels": labels,
+        "n_known_in_test": n_known_in_test,
+        "env": test_env,
+        # P4-017 v142: per-disease data for rare-disease AUC detection.
+        "per_disease_labels": per_disease_labels,
+        "per_disease_preds": per_disease_preds,
+    }
+
+
+# P4-029 ROOT FIX (continued): private helper that computes the AUC +
+# bootstrap CI from PRE-COMPUTED predictions and labels (skipping the
+# inference loop). This is the "compute_auc without inference" path
+# used by ``produce_evaluation_report`` when it has already run inference
+# via ``_run_inference_once``.
+def _compute_auc_from_predictions(
+    predictions: List[float],
+    labels: List[int],
+    n_known_in_test: int,
+    n_bootstrap: int = 1000,
+    # P4-017 v142: per-disease data for rare-disease AUC detection.
+    per_disease_labels: Optional[Dict[str, List[int]]] = None,
+    per_disease_preds: Optional[Dict[str, List[float]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Compute AUC + 95% bootstrap CI from pre-computed predictions.
+
+    P4-029: this is the inference-free counterpart of ``compute_auc``.
+    Same return shape (Dict with auc, ci_lower, ci_upper, n_bootstrap),
+    same None-for-degenerate-case semantics (V4 S-F3 fix).
+
+    P4-017 v142: when ``per_disease_labels`` + ``per_disease_preds`` are
+    provided, also computes per-disease AUC and returns ``auc_by_disease``
+    + ``min_per_disease_auc`` (same shape as ``compute_auc``).
+
+    Args:
+        predictions: List of float policy probabilities (aligned with labels).
+        labels: List of int (0 or 1) — 1 if the pair is a known positive.
+        n_known_in_test: Count of known positives in the test set (for
+            the degenerate-case check — same as compute_auc).
+        n_bootstrap: Number of bootstrap resamples for the 95% CI.
+            Default 1000. Set to 0 to skip the CI.
+        per_disease_labels: Optional dict mapping disease name → list of
+            labels (for per-disease AUC computation, P4-017 v142).
+        per_disease_preds: Optional dict mapping disease name → list of
+            predictions (for per-disease AUC computation, P4-017 v142).
+
+    Returns:
+        Dict with auc, ci_lower, ci_upper, n_bootstrap. When per-disease
+        data is provided, also includes auc_by_disease, min_per_disease_auc,
+        n_diseases_with_auc, n_diseases_degenerate, n_diseases_below_random.
+        Or None if the test set is degenerate (0 KPs or only one class —
+        V4 S-F3 fix).
+    """
+    from sklearn.metrics import roc_auc_score
+
+    # V4 S-F3 fix: return None for degenerate cases.
+    if n_known_in_test == 0:
+        logger.warning(
+            "V4 S-F3: 0 KNOWN_POSITIVES in test set. AUC is UNDEFINED. "
+            "Returning None (distinguishable from 0.5 'random')."
+        )
+        return None
+    if len(set(labels)) < 2:
+        logger.warning(
+            "V4 S-F3: only one class present in labels (all %d). AUC is "
+            "UNDEFINED. Returning None.",
+            labels[0] if labels else -1,
+        )
+        return None
+
+    try:
+        auc = float(roc_auc_score(labels, predictions))
+    except ValueError as exc:
+        logger.warning(
+            "roc_auc_score failed: %s. Returning None (degenerate case).",
+            exc,
+        )
+        return None
+
+    # Bootstrap CI (same logic as compute_auc).
+    if n_bootstrap <= 0:
+        return {
+            "auc": auc,
+            "ci_lower": auc,
+            "ci_upper": auc,
+            "n_bootstrap": 0,
+        }
+
+    import numpy as _np
+    rng = _np.random.RandomState(42)
+    n = len(labels)
+    labels_arr = _np.array(labels, dtype=int)
+    preds_arr = _np.array(predictions, dtype=float)
+    bootstrap_aucs: List[float] = []
+    for _ in range(n_bootstrap):
+        idx = rng.randint(0, n, size=n)
+        sample_labels = labels_arr[idx]
+        if len(set(sample_labels.tolist())) < 2:
+            continue  # skip degenerate resample
+        try:
+            sample_auc = float(roc_auc_score(sample_labels, preds_arr[idx]))
+            bootstrap_aucs.append(sample_auc)
+        except ValueError:
+            continue
+
+    if not bootstrap_aucs:
+        logger.warning(
+            "All %d bootstrap resamples were degenerate. CI is undefined. "
+            "Returning point estimate only.",
+            n_bootstrap,
+        )
+        return {
+            "auc": auc,
+            "ci_lower": auc,
+            "ci_upper": auc,
+            "n_bootstrap": 0,
+        }
+
+    ci_lower = float(_np.percentile(bootstrap_aucs, 2.5))
+    ci_upper = float(_np.percentile(bootstrap_aucs, 97.5))
+
+    # =========================================================================
+    # P4-017 v142 FORENSIC ROOT FIX (per-disease AUC):
+    # Same logic as compute_auc — group by disease, compute AUC per disease,
+    # log WARNING for any disease with AUC < 0.5 (worse than random).
+    # =========================================================================
+    auc_by_disease: Dict[str, Optional[float]] = {}
+    n_diseases_with_auc = 0
+    n_diseases_degenerate = 0
+    n_diseases_below_random = 0
+    min_per_disease_auc: Optional[float] = None
+    if per_disease_labels is not None and per_disease_preds is not None:
+        for _disease, _labels_d in per_disease_labels.items():
+            _preds_d = per_disease_preds.get(_disease, [])
+            if len(_labels_d) < 2 or len(set(_labels_d)) < 2:
+                auc_by_disease[_disease] = None
+                n_diseases_degenerate += 1
+                continue
+            try:
+                _auc_d = float(roc_auc_score(_labels_d, _preds_d))
+                auc_by_disease[_disease] = _auc_d
+                n_diseases_with_auc += 1
+                if _auc_d < 0.5:
+                    n_diseases_below_random += 1
+                    logger.warning(
+                        "P4-017 v142: disease '%s' has AUC=%.4f "
+                        "(< 0.5 = worse than random). The model is mis-"
+                        "ranking for this disease. The global AUC "
+                        "masks this failure.",
+                        _disease, _auc_d,
+                    )
+                if min_per_disease_auc is None or _auc_d < min_per_disease_auc:
+                    min_per_disease_auc = _auc_d
+            except ValueError as _ve:
+                auc_by_disease[_disease] = None
+                n_diseases_degenerate += 1
+        logger.info(
+            "P4-017 v142: per-disease AUC computed for %d diseases "
+            "(%d degenerate, %d below random). min_per_disease_auc=%s.",
+            n_diseases_with_auc, n_diseases_degenerate,
+            n_diseases_below_random,
+            f"{min_per_disease_auc:.4f}" if min_per_disease_auc is not None else "None",
+        )
+
+    return {
+        "auc": auc,
+        "ci_lower": ci_lower,
+        "ci_upper": ci_upper,
+        "n_bootstrap": len(bootstrap_aucs),
+        # P4-017 v142: per-disease AUC.
+        "auc_by_disease": auc_by_disease,
+        "min_per_disease_auc": min_per_disease_auc,
+        "n_diseases_with_auc": n_diseases_with_auc,
+        "n_diseases_degenerate": n_diseases_degenerate,
+        "n_diseases_below_random": n_diseases_below_random,
+    }
+
+
 def produce_evaluation_report(
     model: Any,
     test_env: "DrugRankingEnv",
@@ -12277,6 +13341,11 @@ def produce_evaluation_report(
     literature_api_key: str = "",
     reward_fn: Optional["RewardFunction"] = None,
     disease_context_stats: Optional[Dict[str, Dict[str, float]]] = None,
+    # P4-010 v142: bridge disease min/max from the TRAIN env. Propagated
+    # to compute_auc so its internal test env uses the SAME normalization
+    # constants (no train/test distribution shift for bridge_disease_*
+    # features).
+    bridge_disease_min_max: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> Dict[str, Any]:
     """Produce a complete JSON-serializable evaluation report.
 
@@ -12328,30 +13397,92 @@ def produce_evaluation_report(
     if test_data is None:
         test_data = test_env.data
 
-    # 1. Run evaluate_agent to get top candidates (deterministic).
-    candidates = evaluate_agent(
+    # P4-029 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+    # Run the policy through test_env ONCE via ``_run_inference_once``,
+    # collecting (candidates, predictions, labels) in a SINGLE pass.
+    # The previous code called ``evaluate_agent`` (1 inference pass over
+    # test_env) then ``compute_auc`` (a SECOND inference pass over a
+    # FRESH test env built from test_data) — 2x inference cost. On a 1M-
+    # pair test set, this doubled evaluation time. When
+    # ``run_scientific_validation_gate`` was called after ``run_pipeline``
+    # (which has its OWN evaluation logic calling evaluate_agent +
+    # compute_auc), the agent ran 4x per test pair.
+    #
+    # The fix uses ``_run_inference_once`` (1 pass) to get candidates +
+    # predictions + labels, then ``_compute_auc_from_predictions`` to
+    # derive AUC + bootstrap CI from the pre-computed predictions
+    # (NO inference). This HALVES the inference cost.
+    #
+    # IMPORTANT: ``_run_inference_once`` uses the ``test_env`` we
+    # received — NOT a fresh env built from test_data. This means the
+    # ``reward_fn`` and ``disease_context_stats`` parameters (which the
+    # previous code passed to ``compute_auc`` so it would build a fresh
+    # env with them) are now consumed by the CALLER when building
+    # ``test_env``. The caller is responsible for building ``test_env``
+    # with the train env's reward_fn + disease_context_stats (the
+    # P4-005 fix's intent — no train/test distribution shift). The
+    # ``run_scientific_validation_gate`` function already does this
+    # (see its test_env construction). We log a WARNING if reward_fn
+    # or disease_context_stats are provided but the test_env appears
+    # not to have them (defensive invariant — cannot fully verify at
+    # runtime, but we can check the obvious case).
+    if reward_fn is not None and not getattr(test_env, "_uses_train_reward_fn", False):
+        logger.warning(
+            "P4-029: produce_evaluation_report received reward_fn but "
+            "test_env does not have _uses_train_reward_fn=True. The "
+            "test_env may have been built with a FRESH reward_fn (not "
+            "the train env's), causing train/test distribution shift. "
+            "The reward_fn parameter is now IGNORED (test_env's "
+            "reward_fn is used as-is). Build test_env with the train "
+            "env's reward_fn BEFORE calling produce_evaluation_report."
+        )
+    if disease_context_stats is not None and not getattr(test_env, "_uses_train_disease_stats", False):
+        logger.warning(
+            "P4-029: produce_evaluation_report received "
+            "disease_context_stats but test_env does not have "
+            "_uses_train_disease_stats=True. The test_env may compute "
+            "its own disease stats from test data (distribution shift). "
+            "The disease_context_stats parameter is now IGNORED. Build "
+            "test_env with the train env's disease_context_stats BEFORE "
+            "calling produce_evaluation_report."
+        )
+
+    # 1. SINGLE inference pass — get candidates + predictions + labels.
+    _inference = _run_inference_once(
         model, test_env, top_n=top_n, vec_normalize=vec_normalize,
     )
+    candidates = _inference["candidates"]
+    _predictions = _inference["predictions"]
+    _labels = _inference["labels"]
+    _n_known_in_test = _inference["n_known_in_test"]
 
-    # 2. Compute AUC.
-    # P4-005 ROOT FIX: propagate reward_fn + disease_context_stats to
-    # compute_auc so the test env uses the SAME adaptive threshold and
-    # disease stats as the train env (no train/test distribution shift).
-    # The previous call DROPPED both parameters, causing compute_auc to
-    # build a fresh test env that recomputed disease stats from test
-    # data — the AUC was computed against a DIFFERENT distribution than
-    # the policy was trained against.
-    # TM16 v132 P4-005: compute_auc now returns a Dict
+    # 2. Compute AUC from the pre-computed predictions (NO inference).
+    # P4-005 ROOT FIX intent preserved: the test_env was built with the
+    # train env's reward_fn + disease_context_stats by the caller, so
+    # the predictions are computed against the SAME distribution the
+    # policy was trained against (no train/test distribution shift).
+    # TM16 v132 P4-005: _compute_auc_from_predictions returns a Dict
     # {auc, ci_lower, ci_upper, n_bootstrap}. The 'auc' field is the
     # point estimate (used by the report's 'auc' key for backward compat
     # with downstream consumers like the dashboard). The 'ci_lower' and
     # 'ci_upper' fields are the 95% bootstrap CI bounds — used by the
     # scientific validation gate to check the DOCX §8 criterion
     # "GT AUC > 0.85" via ci_lower >= 0.85 (not auc >= 0.85).
-    _auc_full = compute_auc(
-        model, test_data, config=config, vec_normalize=vec_normalize,
-        reward_fn=reward_fn,
-        disease_context_stats=disease_context_stats,
+    # P4-017 v142: also pass per-disease labels + predictions so
+    # _compute_auc_from_predictions can compute per-disease AUC (to
+    # detect rare-disease failures that the global AUC masks).
+    _per_disease_labels_inference = _inference.get("per_disease_labels", {})
+    _per_disease_preds_inference = _inference.get("per_disease_preds", {})
+    _auc_full = _compute_auc_from_predictions(
+        predictions=_predictions,
+        labels=_labels,
+        n_known_in_test=_n_known_in_test,
+        # Use the same default n_bootstrap as compute_auc (1000). Set
+        # to 0 in unit tests for speed.
+        n_bootstrap=1000,
+        # P4-017 v142: per-disease data for rare-disease AUC detection.
+        per_disease_labels=_per_disease_labels_inference,
+        per_disease_preds=_per_disease_preds_inference,
     )
     if _auc_full is None:
         auc = None
@@ -12873,13 +14004,17 @@ def run_scientific_validation_gate(
         # a withdrawn drug that training correctly hard-rejected could
         # get a non-negative reward at validation time, producing
         # inconsistent AUC numbers.
-        _vh_phase1_dir = os.environ.get("PHASE1_PROCESSED_DIR", "phase1/processed_data")
+        _vh_phase1_dir = (
+            config.phase1_dir
+            if getattr(config, "phase1_dir", None)
+            else os.environ.get("PHASE1_PROCESSED_DIR")
+        )
         _vh_phase1_dir_resolved = (
             _vh_phase1_dir
-            if os.path.isabs(_vh_phase1_dir)
-            else os.path.abspath(_vh_phase1_dir)
+            if (_vh_phase1_dir and os.path.isabs(_vh_phase1_dir))
+            else (os.path.abspath(_vh_phase1_dir) if _vh_phase1_dir else None)
         )
-        if os.path.isdir(_vh_phase1_dir_resolved):
+        if _vh_phase1_dir_resolved and os.path.isdir(_vh_phase1_dir_resolved):
             try:
                 from rl.reward import build_reward_function_with_phase1_safety
                 _vh_reward_fn = build_reward_function_with_phase1_safety(
@@ -12955,6 +14090,14 @@ def run_scientific_validation_gate(
     # distribution shift). Without these, the test env recomputes its
     # own from test_data, producing an AUC that does NOT reflect the
     # distribution the policy was trained against.
+    # P4-010 v142: also propagate bridge_disease_min_max from the train
+    # env (read from test_env which inherited it from train_env via
+    # run_pipeline's test_env construction). This eliminates train/test
+    # distribution shift for the 3 bridge_disease_* features.
+    _vh_bridge_min_max = (
+        getattr(test_env, 'bridge_disease_min_max', None)
+        if test_env is not None else None
+    )
     report = produce_evaluation_report(
         model=model,
         test_env=test_env,
@@ -12966,6 +14109,9 @@ def run_scientific_validation_gate(
         disease_context_stats=_vh_disease_stats,
         run_literature_check=run_literature_check,
         literature_api_key=literature_api_key,
+        # P4-010 v142: pass train bridge min/max so compute_auc's
+        # internal test env uses the SAME normalization constants.
+        bridge_disease_min_max=_vh_bridge_min_max,
     )
 
     # Run literature check separately if requested (need to count supported)

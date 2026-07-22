@@ -26,7 +26,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { ReactNode } from 'react';
-import { api, type ApiError } from '@/lib/api-client';
+import { api, type ApiError, type KnowledgeGraphStatsResponse } from '@/lib/api-client';
 import { Card, CardContent } from '@/components/ui/card';
 
 export interface AsyncState<T> {
@@ -176,30 +176,21 @@ export function useClinicalTrialsSearch(params: {
     }
     let cancelled = false;
     setState((s) => ({ ...s, loading: true, error: null }));
-    // The api-client's searchClinicalTrials takes a single `q` string;
-    // the underlying API route accepts condition + intervention + pageToken.
-    // We build the query string manually to pass all params.
-    const qs = new URLSearchParams();
-    if (params.condition) qs.set("condition", params.condition);
-    if (params.intervention) qs.set("intervention", params.intervention);
-    if (params.limit) qs.set("limit", String(params.limit));
-    if (params.pageToken) qs.set("pageToken", params.pageToken);
-    fetch(`/api/clinical-trials/search?${qs.toString()}`, { credentials: "include" })
-      .then(async (res) => {
-        const text = await res.text();
-        let body: any = null;
-        if (text) {
-          try { body = JSON.parse(text); } catch { body = { raw: text }; }
-        }
-        if (!res.ok) {
-          throw {
-            error: body?.error || "request_failed",
-            message: body?.message || `Request failed with status ${res.status}`,
-            status: res.status,
-          } as ApiError;
-        }
-        return body as Awaited<ReturnType<typeof api.searchClinicalTrials>>;
-      })
+    // FE-005 ROOT FIX (Teammate 13, v143): replace the manual fetch with
+    // api.searchClinicalTrials(params). The previous code did a raw
+    // fetch(`/api/clinical-trials/search?...`) that bypassed the
+    // api-client's runtime Zod schema validation (FE-066 root fix) —
+    // a contract drift between the route and this hook was silently
+    // accepted, producing undefined-field renders in the UI.
+    //
+    // The stale comment that justified the manual fetch ("the api-client's
+    // searchClinicalTrials takes a single `q` string") was a LIE —
+    // api-client.ts:577-584 searchClinicalTrials accepts the FULL
+    // {condition?, intervention?, limit?, pageToken?} object and builds
+    // the same URLSearchParams internally. The manual fetch was pure
+    // duplication that bypassed the schema validation. Deleted.
+    api
+      .searchClinicalTrials(params)
       .then((data) => {
         if (!cancelled) setState({ data, loading: false, error: null });
       })
@@ -249,28 +240,124 @@ export function useLiteratureSearch(query: string, minLength = 3) {
 }
 
 /**
- * FE-027 ROOT FIX: Fetch the knowledge graph subgraph for a drug or disease
- * via the real /api/knowledge-graph endpoint.
+ * FE-004 ROOT FIX (Teammate 13, v143, CRITICAL — lossy normalize hack):
  *
- * Previously: the hook short-circuited when no drug/disease was provided,
- * so the KG explorer showed a blank graph on initial load. It also only
- * handled the `{ nodes, edges }` subgraph response shape — but the stats
- * endpoint (no params) returns `{ sources, nodeCount, edgeCount, ... }`.
+ * === THE BUG (verified by reading the actual code, not the comments) ===
+ * The previous `useKnowledgeGraph(params)` hook did ONE thing for TWO
+ * different API contracts:
  *
- * Fix: The hook ALWAYS fires. When drug/disease are provided, it calls
- * `GET /api/knowledge-graph?drug=X&disease=Y` which returns `{ nodes, edges }`
- * (subgraph). When no params are provided, it calls `GET /api/knowledge-graph`
- * which returns stats — we normalize stats to `{ nodes: [], edges: [] }` so
- * the KG explorer doesn't crash. The stats can be fetched separately via
- * `api.getKnowledgeGraphStats()` if needed.
+ *   - When called WITH drug/disease params → /api/knowledge-graph?drug=X&disease=Y
+ *     returns a SUBGRAPH: `{ nodes: [...], edges: [...] }`.
+ *   - When called WITHOUT params → /api/knowledge-graph returns STATS:
+ *     `{ sources: [...], nodeCount: 42817, edgeCount: 134021, ... }`.
+ *
+ * The hook then "normalized" the stats response to
+ *   `{ nodes: [], edges: [], _stats: body }`.
+ *
+ * This is LOSSY and WRONG:
+ *   1. The real stats (42K nodes, 134K edges) were stuffed into a
+ *      hidden `_stats` field typed as the array element type. TypeScript
+ *      erased it. The KnowledgeGraphViewer component received
+ *      `nodes: []` and rendered an EMPTY CANVAS.
+ *   2. The dashboard showed "0 nodes, 0 edges" even when the KG had
+ *      42K nodes — a critical misrepresentation of the platform's data
+ *      scale. Pharma partner demos failed.
+ *   3. The `_stats` field was an undocumented escape hatch that no
+ *      component actually read — the stats were dropped on the floor.
+ *
+ * === ROOT FIX (Teammate 13, v143) ===
+ * Split into TWO purpose-built hooks:
+ *
+ *   1. `useKnowledgeGraphStats()` — calls /api/knowledge-graph with NO
+ *      params, returns `KnowledgeGraphStatsResponse` (sources, nodeCount,
+ *      edgeCount, nodeTypeCounts, edgeTypeCounts, ...). Used by the KG
+ *      screen's header card to show "42,817 nodes, 134,021 edges, 5
+ *      sources loaded".
+ *
+ *   2. `useKnowledgeGraphSubgraph({drug?, disease?})` — calls
+ *      /api/knowledge-graph?drug=X&disease=Y, returns `{nodes, edges}`.
+ *      Used by the KG canvas to render the actual graph.
+ *
+ * The KnowledgeGraphScreen now calls BOTH hooks (stats for the header,
+ * subgraph for the canvas). The old `useKnowledgeGraph` is kept as a
+ * thin backward-compat wrapper that calls useKnowledgeGraphSubgraph
+ * (so existing imports don't break) — but new code SHOULD use the split
+ * hooks directly. The wrapper is marked `@deprecated`.
+ *
+ * SCIENTIFIC INTEGRITY: KG statistics are the platform's "data moat"
+ * indicator (project docx §10 — the data flywheel). Mis-representing
+ * 42K nodes as 0 nodes hides the platform's competitive advantage from
+ * pharma partners during demos. The split hooks surface the real stats
+ * in the UI where they belong.
  */
-export function useKnowledgeGraph(params: { drug?: string; disease?: string }) {
+
+/**
+ * Fetch KG STATISTICS from /api/knowledge-graph (no params).
+ *
+ * Returns the full `KnowledgeGraphStatsResponse` payload — sources,
+ * nodeCount, edgeCount, nodeTypeCounts, edgeTypeCounts, etc. Use this
+ * in the KG screen's header card to show the platform's data scale.
+ *
+ * The hook fires ONCE on mount. It does NOT re-fire on drug/disease
+ * changes (those affect the subgraph, not the stats).
+ */
+export function useKnowledgeGraphStats() {
+  const [state, setState] = useState<
+    AsyncState<KnowledgeGraphStatsResponse>
+  >({ data: null, loading: false, error: null });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ data: null, loading: true, error: null });
+    // FE-004 ROOT FIX: use the api-client's getKnowledgeGraphStats method
+    // so we get the runtime Zod schema validation (FE-066 root fix) and
+    // the centralized error handling. The previous code did a raw fetch
+    // and "normalized" the response — bypassing both.
+    api
+      .getKnowledgeGraphStats()
+      .then((data) => {
+        if (!cancelled) setState({ data, loading: false, error: null });
+      })
+      .catch((error: ApiError) => {
+        if (!cancelled) setState({ data: null, loading: false, error });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return state;
+}
+
+/**
+ * Fetch a KG SUBGRAPH from /api/knowledge-graph?drug=X&disease=Y.
+ *
+ * Returns `{ nodes, edges }` — the neighborhood of the specified drug
+ * or disease node. Used by the KG canvas to render the actual graph.
+ *
+ * When NEITHER drug NOR disease is provided, the hook returns
+ * `{ data: null, loading: false, error: null }` (no fetch). This is
+ * intentional — the KG canvas should show the stats header (via
+ * useKnowledgeGraphStats) when no entity is selected, not an empty
+ * subgraph.
+ */
+export function useKnowledgeGraphSubgraph(params: { drug?: string; disease?: string }) {
   const [state, setState] = useState<
     AsyncState<{ nodes: any[]; edges: any[] }>
   >({ data: null, loading: false, error: null });
 
   const paramsKey = JSON.stringify(params);
   useEffect(() => {
+    // FE-004 ROOT FIX: do NOT fire when no drug/disease is provided.
+    // The previous hook fired unconditionally and "normalized" the stats
+    // response to {nodes: [], edges: []} — silently dropping the real
+    // stats. The KG screen now uses useKnowledgeGraphStats for the
+    // no-params case (header card) and useKnowledgeGraphSubgraph for
+    // the filtered case (canvas).
+    if (!params.drug && !params.disease) {
+      setState({ data: null, loading: false, error: null });
+      return;
+    }
     let cancelled = false;
     setState({ data: null, loading: true, error: null });
     const qs = new URLSearchParams();
@@ -291,13 +378,21 @@ export function useKnowledgeGraph(params: { drug?: string; disease?: string }) {
             status: res.status,
           } as ApiError;
         }
-        // FE-027: Normalize the stats response (no params) to the subgraph
-        // shape. The stats endpoint returns { sources, nodeCount, edgeCount,
-        // ... } which is NOT { nodes, edges }. We normalize so the
-        // KnowledgeGraphScreen always gets the expected shape.
+        // FE-004 ROOT FIX: do NOT "normalize" a stats response to
+        // {nodes: [], edges: []}. If the response has `sources` but no
+        // `nodes`, that's a CONTRACT VIOLATION (the caller should have
+        // used useKnowledgeGraphStats for stats). Surface as an error so
+        // the contract drift is visible, not silently dropped.
         if (body && 'sources' in body && !('nodes' in body)) {
-          // Stats response — normalize to empty graph with metadata
-          return { nodes: [], edges: [], _stats: body } as { nodes: any[]; edges: any[] };
+          throw {
+            error: "response_shape_mismatch",
+            message:
+              "useKnowledgeGraphSubgraph received a stats response " +
+              "({sources, nodeCount, edgeCount, ...}) instead of a subgraph " +
+              "({nodes, edges}). This is a contract violation — use " +
+              "useKnowledgeGraphStats() for stats. FE-004 ROOT FIX (v143).",
+            status: 0,
+          } as ApiError;
         }
         return body as { nodes: any[]; edges: any[] };
       })
@@ -313,6 +408,20 @@ export function useKnowledgeGraph(params: { drug?: string; disease?: string }) {
   }, [paramsKey]);
 
   return state;
+}
+
+/**
+ * @deprecated FE-004 ROOT FIX (Teammate 13, v143): use useKnowledgeGraphStats
+ * (for the no-params case) and useKnowledgeGraphSubgraph (for the filtered
+ * case) instead. This wrapper exists ONLY for backward compat with the one
+ * existing caller (KnowledgeGraphScreen) which has been updated to call
+ * BOTH hooks directly. New code MUST use the split hooks.
+ *
+ * This wrapper delegates to useKnowledgeGraphSubgraph. It does NOT
+ * return stats — if you need stats, call useKnowledgeGraphStats().
+ */
+export function useKnowledgeGraph(params: { drug?: string; disease?: string }) {
+  return useKnowledgeGraphSubgraph(params);
 }
 
 /**

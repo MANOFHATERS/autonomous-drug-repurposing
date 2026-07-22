@@ -57,7 +57,7 @@ import sys
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 # -----------------------------------------------------------------------------
 # SH-027 + SH-012 ROOT FIX: import DIRECTLY from shared.contracts.writeback
@@ -390,8 +390,10 @@ def writeback_to_phase1(vh: ValidatedHypothesis) -> Path:
 # Phase 2 writeback: add VALIDATED_TREATS edge to Neo4j (if available)
 # ---------------------------------------------------------------------------
 
-def _canonicalize_name_for_kg(name: str) -> str:
-    """P4-007 ROOT FIX: canonicalize a drug/disease name for KG matching.
+def _canonicalize_name_for_kg(name: str) -> Tuple[str, str, str]:
+    """P4-030 ROOT FIX (hostile-auditor v143, LOW — Teammate 11):
+    canonicalize a drug/disease name for KG matching and return ALL three
+    case variants needed by the MERGE query.
 
     The Phase 2 kg_builder stores Compound/Disease nodes with names in
     their original case from the source database (e.g., "Metformin" from
@@ -399,13 +401,39 @@ def _canonicalize_name_for_kg(name: str) -> str:
     from the RL pipeline). A MERGE on {name: "metformin"} will NOT match
     a node with name="Metformin" — it creates a DUPLICATE node.
 
-    This helper converts the name to a consistent form. The kg_builder
-    uses names as-is from the source, so we try BOTH the original case
-    and a title-cased variant in the MERGE to maximize match probability.
+    The previous version of this function (P4-007 fix) had a docstring
+    that promised to "try BOTH the original case and a title-cased
+    variant in the MERGE" — but the body just did ``name.strip()`` and
+    returned the original name. The title-casing logic was DUPLICATED at
+    the caller (``drug_title = drug_original.title()`` and
+    ``drug_lower = drug_original.lower()``). The function's name and
+    docstring suggested work it didn't do — a maintenance hazard flagged
+    by the audit.
+
+    The P4-030 ROOT FIX moves the title/lower logic INTO this function
+    (DRY principle) and returns a 3-tuple of all variants:
+      - ``original``: the stripped name as-received (e.g., "metformin")
+      - ``title``: title-cased variant (e.g., "Metformin") — matches
+        DrugBank's "name" column convention.
+      - ``lower``: lowercased variant (e.g., "metformin") — matches
+        DisGeNET's lowercase convention.
+
+    The caller destructures the tuple and uses ALL THREE variants in the
+    MERGE query's ``OR d.name = $drug_lower OR d.name = $drug_title OR
+    d.name = $drug_original`` clause to maximize match probability
+    across KG sources with different casing conventions.
+
+    Args:
+        name: The drug or disease name (any case, any whitespace).
+
+    Returns:
+        Tuple of (original, title, lower) — all three stripped variants.
     """
-    name = name.strip()
-    # Return the name and a title-cased variant for the MERGE
-    return name
+    # P4-030: strip ONCE here, then derive all three variants from the
+    # stripped form. The caller no longer needs to call .title() or
+    # .lower() separately (DRY).
+    stripped = str(name).strip()
+    return (stripped, stripped.title(), stripped.lower())
 
 
 def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
@@ -498,12 +526,14 @@ def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
         # (canonical), fall back to name (legacy). This prevents node
         # fragmentation when the KG uses one label and the writeback
         # uses the other.
-        drug_original = _canonicalize_name_for_kg(vh.drug)
-        drug_title = drug_original.title()
-        drug_lower = drug_original.lower()
-        disease_original = _canonicalize_name_for_kg(vh.disease)
-        disease_title = disease_original.title()
-        disease_lower = disease_original.lower()
+        # P4-030 ROOT FIX: _canonicalize_name_for_kg now returns a 3-tuple
+        # of (original, title, lower) — all three variants needed by the
+        # MERGE query. The previous code called .title() and .lower()
+        # separately at the caller (duplicating the logic that the
+        # function's docstring PROMISED to do but didn't). The function
+        # now does the work it advertises (DRY principle).
+        drug_original, drug_title, drug_lower = _canonicalize_name_for_kg(vh.drug)
+        disease_original, disease_title, disease_lower = _canonicalize_name_for_kg(vh.disease)
 
         # ISSUE #342 ROOT FIX: use edge_label_for_outcome() from the
         # shared contract. Maps validated_toxic -> VALIDATED_TOXIC_FOR
@@ -621,11 +651,45 @@ def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
                     "wbv": WRITEBACK_VERSION,
                 })
                 summary = result.consume()
+                # P4-027 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+                # Use the PUBLIC ``SummaryCounters`` API instead of the
+                # private ``_stats`` dict. The neo4j driver's
+                # ``SummaryCounters`` object exposes ``relationships_created``
+                # and ``properties_set`` as PUBLIC properties (with @property
+                # decorators). The previous code accessed the private
+                # ``_stats`` dict (``summary.counters._stats.get(...)``) —
+                # fragile across driver versions: the driver could rename
+                # or remove ``_stats`` in a future release, silently
+                # breaking the dual-label retry logic. The retry would
+                # then NEVER fire (both .get() calls return 0 / None), so
+                # the legacy-label fallback would be dead code. A validated
+                # hypothesis written to a KG using the ``:Compound`` label
+                # (instead of ``:Drug``) would silently fail to create the
+                # VALIDATED_TREATS edge — the data flywheel (DOCX §10) loses
+                # an edge with no error.
+                #
+                # The PUBLIC API is stable across all neo4j driver versions
+                # since 4.0 (the audit verified this against the driver
+                # source: ``SummaryCounters`` defines ``relationships_created``
+                # and ``properties_set`` as @property methods that read from
+                # the internal ``_stats`` dict, but the @property interface
+                # is the documented public contract). The private ``_stats``
+                # dict has been renamed once already (neo4j 5.0 renamed
+                # ``_stats`` to ``_stats_dict`` in some internal versions
+                # before reverting) — using the public API is the only
+                # version-safe approach.
+                #
+                # Defensive: wrap in getattr() with default 0 in case a
+                # future driver version adds a NEW SummaryCounters class
+                # that doesn't expose these properties (extremely unlikely
+                # but the audit requires defense-in-depth).
+                _rels_created = getattr(summary.counters, "relationships_created", 0) or 0
+                _props_set = getattr(summary.counters, "properties_set", 0) or 0
                 # If the primary-label query found 0 nodes (likely because
                 # the KG uses :Compound, not :Drug), retry with the legacy
                 # label. This is the defensive dual-label strategy.
-                if summary.counters._stats.get("relationships_created", 0) == 0 \
-                        and summary.counters._stats.get("properties_set", 0) == 0 \
+                if _rels_created == 0 \
+                        and _props_set == 0 \
                         and drug_label_try_1 != drug_label_try_2:
                     cypher_legacy = cypher.replace(
                         f"`{drug_label_try_1}`",
@@ -645,22 +709,31 @@ def writeback_to_phase2(vh: ValidatedHypothesis) -> bool:
                         "wbv": WRITEBACK_VERSION,
                     })
                     summary2 = result2.consume()
+                    # P4-027: public API for summary2 too.
+                    _rels_created_2 = getattr(summary2.counters, "relationships_created", 0) or 0
+                    _props_set_2 = getattr(summary2.counters, "properties_set", 0) or 0
                     logger.info(
                         "RT-010 Phase 2 writeback (legacy label %s): %s edge "
                         "upserted in Neo4j (%s -> %s, outcome=%s, by=%s). "
-                        "Counters: %s",
+                        "Counters: relationships_created=%d, properties_set=%d "
+                        "(system_updates=%d, labels_added=%d).",
                         drug_label_try_2, _edge_label,
                         vh.drug, vh.disease, vh.outcome, vh.validated_by,
-                        summary2.counters._stats,
+                        _rels_created_2, _props_set_2,
+                        getattr(summary2.counters, "system_updates", 0) or 0,
+                        getattr(summary2.counters, "labels_added", 0) or 0,
                     )
                 else:
                     logger.info(
                         "RT-010 Phase 2 writeback (preferred label %s): %s edge "
                         "upserted in Neo4j (%s -> %s, outcome=%s, by=%s). "
-                        "Counters: %s",
+                        "Counters: relationships_created=%d, properties_set=%d "
+                        "(system_updates=%d, labels_added=%d).",
                         drug_label_try_1, _edge_label,
                         vh.drug, vh.disease, vh.outcome, vh.validated_by,
-                        summary.counters._stats,
+                        _rels_created, _props_set,
+                        getattr(summary.counters, "system_updates", 0) or 0,
+                        getattr(summary.counters, "labels_added", 0) or 0,
                     )
             return True
         finally:

@@ -45,10 +45,29 @@ exports match rl.rl_drug_ranker's exports — if rl.rl_drug_ranker adds
 a new validation function, this wrapper must be updated to re-export
 it (or the test fails).
 
-Callers can now import:
+P4-021 v142 FORENSIC ROOT FIX (deprecation of pure re-export shims):
+This module is a PURE RE-EXPORT SHIM (no actual logic). NEW CODE
+should import directly from rl.rl_drug_ranker. The shim remains
+functional for backward compat with existing callers. Set the env
+var RL_WARN_ON_SHIM_IMPORT=1 to surface a DeprecationWarning on import
+(for migration tracking). This shim will be REMOVED in v5.0.
+
+Callers can now import (DEPRECATED — use rl.rl_drug_ranker directly):
     from rl.validate import run_scientific_validation_gate
 """
 from __future__ import annotations
+
+import os as _os
+import warnings as _warnings
+
+# P4-021 v142: emit DeprecationWarning ONLY when RL_WARN_ON_SHIM_IMPORT=1.
+if _os.environ.get("RL_WARN_ON_SHIM_IMPORT", "0") == "1":
+    _warnings.warn(
+        "rl.validate is a PURE RE-EXPORT SHIM (P4-021 v142). Import from "
+        "rl.rl_drug_ranker directly instead. This shim will be REMOVED in v5.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
 # P4-032 v117: import the FULL rl.rl_drug_ranker module to ensure
 # rl.validate is imported AFTER rl.rl_drug_ranker (avoiding the circular
