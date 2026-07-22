@@ -17,20 +17,35 @@ import type { NextConfig } from "next";
  * the Next.js internal routes) and is evaluated at build time so there
  * is no runtime overhead.
  *
- * This is defense-in-depth alongside the middleware CSP:
- *   - middleware.ts: applies the strict CSP with 'unsafe-inline' (needed
- *     for Next.js hydration) on dynamic routes.
- *   - next.config.ts headers(): applies the broader security header
- *     baseline (X-Frame-Options, X-Content-Type-Options, Referrer-Policy,
- *     HSTS, Permissions-Policy) to EVERY response, including static
- *     assets that bypass middleware.
+ * FE-008 ROOT FIX (Teammate 14, HIGH): the previous version of this
+ * file ALSO set a Content-Security-Policy header here. Two problems:
  *
- * The CSP here is a SECONDARY defense — it's looser than middleware's
- * (allows 'unsafe-inline' for both scripts and styles, which is what
- * Next.js requires without per-request nonces). The middleware's CSP
- * overrides this for dynamic routes. For static assets (JS/CSS files
- * served from /_next/static/), this CSP still applies — and since
- * those assets are same-origin, 'unsafe-inline' is irrelevant for them.
+ *   1. Next.js applies `headers()` from next.config.ts AFTER middleware.
+ *      That means the CSP set here OVERWRITES the per-request nonce-based
+ *      CSP that middleware.ts generates. The middleware's nonce is
+ *      silently thrown away, and the looser 'unsafe-inline' CSP from
+ *      here wins for every dynamic route. The nonce-based defense was
+ *      dead code.
+ *
+ *   2. The CSP here allowed `script-src 'self' 'unsafe-inline'` and
+ *      `connect-src 'self' https:` — both OWASP anti-patterns. A single
+ *      XSS injection (e.g., from a dangerouslySetInnerHTML elsewhere)
+ *      executes arbitrary JS, and an XSS payload can exfiltrate data
+ *      to any https:// URL.
+ *
+ * ROOT FIX:
+ *   - The CSP is now set ONLY in middleware.ts, which generates a fresh
+ *     32-byte nonce per request and uses `script-src 'self' 'nonce-<n>'`
+ *     (no 'unsafe-inline'). The middleware also restricts `connect-src`
+ *     to an explicit allowlist of upstream biomedical APIs.
+ *   - This file keeps the OTHER security headers (X-Frame-Options,
+ *     X-Content-Type-Options, Referrer-Policy, HSTS, Permissions-Policy)
+ *     because they don't depend on per-request state and are safe to
+ *     apply globally (including to static assets that bypass middleware).
+ *   - These headers do NOT conflict with middleware — middleware sets
+ *     its own values for them, and Next.js lets the middleware values
+ *     win when both are present (X-Frame-Options etc. are not
+ *     per-request, so the values match).
  */
 const securityHeaders = [
   {
@@ -53,27 +68,14 @@ const securityHeaders = [
     key: "Strict-Transport-Security",
     value: "max-age=63072000; includeSubDomains; preload",
   },
-  // Primary CSP — also enforced by middleware.ts for dynamic routes.
-  // 'unsafe-inline' is required for Next.js 16 hydration scripts and
-  // styled-components / Tailwind inline styles. A future hardening
-  // pass should replace 'unsafe-inline' with per-request nonces once
-  // Next.js 16's nonce support is wired up (see middleware.ts comment).
-  {
-    key: "Content-Security-Policy",
-    value: [
-      "default-src 'self'",
-      "script-src 'self' 'unsafe-inline'",
-      "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data: https:",
-      "font-src 'self' data:",
-      "connect-src 'self' https:",
-      "frame-ancestors 'none'",
-      "object-src 'none'",
-      "base-uri 'self'",
-      "form-action 'self'",
-      "upgrade-insecure-requests",
-    ].join("; "),
-  },
+  // FE-008 ROOT FIX: NO Content-Security-Policy header here. The CSP is
+  // owned by middleware.ts, which generates a per-request nonce. Setting
+  // a CSP here would either (a) overwrite the middleware's nonce-based
+  // CSP (because next.config.ts headers() run AFTER middleware) or
+  // (b) require 'unsafe-inline' (because next.config.ts cannot generate
+  // per-request nonces). Both options are worse than letting middleware
+  // own the CSP. See middleware.ts for the strict, nonce-based, explicit
+  // connect-src allowlist CSP.
 ];
 
 const nextConfig: NextConfig = {

@@ -266,105 +266,134 @@ export interface SafetyReport {
 // ---------------------------------------------------------------------------
 // ML / Phase 4 handoff types — ROOT FIX for FE-001/FE-002/FE-003
 // ---------------------------------------------------------------------------
+//
+// FE-010 ROOT FIX (Teammate 14, HIGH): the previous version of this
+// section hand-wrote DUPLICATE TypeScript interfaces for every ML
+// response shape (DatasetStatsResponse, KnowledgeGraphStatsResponse,
+// RlRankerResponse, RankedHypothesis, DatasetSourceStat, GraphSourceStat).
+//
+// These hand-written interfaces DRIFTED from the canonical Zod schemas
+// in ml-contracts.ts (the single source of truth). The audit found:
+//   - api-client said `source` is REQUIRED with a narrow enum
+//     ("dataset_service" | "local_checkpoint" | "none"); ml-contracts
+//     said it's an optional string. Type confusion.
+//   - api-client had NO `status` field; ml-contracts had it. The
+//     dataset-service.ts returns the ml-contracts version, then patches
+//     it to add `source="dataset_service"` if missing. The api-client
+//     type couldn't see the `status` field.
+//   - api-client's `RlRankerResponse.source` was
+//     `"rl_service" | "local_csv" | "none"` — but the actual Python
+//     service returns `"service"` (per P4-045 fix in rl/service.py).
+//     The stale api-client type caused the previous rl-ranker.ts to
+//     HARDCODE `source: "rl_service"` to satisfy the type, ignoring
+//     the real backend value (see rl-ranker.ts header comment for the
+//     forensic history).
+//
+// ROOT FIX: the api-client no longer hand-writes these types. It re-exports
+// the canonical Zod-derived types from ml-contracts.ts (for DatasetStats,
+// KgStats) and from rl-ranker.ts (for RlRankerResponse — the rl-ranker.ts
+// version is the enriched, consumer-facing type with the narrowed source
+// union that includes "service"). Callers that imported these names from
+// @/lib/api-client continue to work — the export names are preserved.
+//
+// The Zod schemas are ALSO wired into the request<T>() calls below so
+// FE-066 runtime validation fires on every ML response. Contract drift
+// between the Python services and the frontend is now caught at the
+// fetch boundary, not 10 layers deep in a React render.
 
-export interface RankedHypothesis {
-  drug: string;
-  disease: string;
-  rank?: number;
-  reward?: number;
-  policyProb?: number;
-  gnnScore?: number;
-  safetyScore?: number;
-  literatureSupport?: number;
-}
+// Re-export canonical ML types (Zod-derived — single source of truth).
+// The `export type` syntax ensures these are type-only imports: they
+// don't pull the Zod runtime into the client bundle unless the caller
+// explicitly imports the schema.
+export type {
+  DatasetStatsResponse,
+  DatasetSourceStat,
+  KgStatsResponse as KnowledgeGraphStatsResponse,
+  GraphSourceStat,
+  RankedHypothesis,
+} from "@/lib/ml-contracts";
 
-export interface RlRankerResponse {
-  candidates: RankedHypothesis[];
-  source: "rl_service" | "local_csv" | "none";
-  modelVersion?: string;
-  generatedAt: string;
-  count: number;
-  note?: string;
-  syncedHypotheses?: number;
-}
+// Re-export the enriched RL ranker response type (the rl-ranker.ts
+// version with the narrowed `source` union and the camelCase aliases).
+// The api-client previously hand-wrote a STALE version with
+// `source: "rl_service" | "local_csv" | "none"` — that version is
+// removed; this re-export is the canonical one.
+export type { RlRankerResponse } from "@/lib/services/rl-ranker";
 
-export interface DatasetSourceStat {
-  name: string;
-  loaded: boolean;
-  rowsLoaded?: number;
-  sha256?: string;
-}
+// Import the schemas we need for runtime validation (FE-066 wiring).
+import {
+  DatasetStatsResponseSchema,
+  KgStatsResponseSchema,
+  type DatasetStatsResponse,
+  type KgStatsResponse,
+} from "@/lib/ml-contracts";
+// FE-011 ROOT FIX (Teammate 14, HIGH): import response Zod schemas for
+// patents and evidence-package. These validate the route responses at
+// the fetch boundary so contract drift is caught immediately.
+import {
+  PatentSearchResponseSchema,
+  EvidencePackageBuildResponseSchema,
+  type PatentSearchResponse,
+  type EvidencePackageBuildResponse,
+} from "@/lib/response-schemas";
+// FE-011 ROOT FIX: import the canonical EvidencePackage type from
+// lib/services/evidence-package (the type the route ACTUALLY returns
+// in its `package` field). Renamed locally to `BuiltEvidencePackage`
+// to avoid a name collision with the `EvidencePackageSummary` interface
+// below (which is the DB row shape returned by listEvidencePackages).
+import type { EvidencePackage as BuiltEvidencePackage } from "@/lib/services/evidence-package";
 
-export interface DatasetStatsResponse {
-  sources: DatasetSourceStat[];
-  nodesLoaded: number;
-  edgesLoaded: number;
-  edgeTypesPresent: string[];
-  pipelineVersion?: string;
-  schemaVersion?: string;
-  bridgeVersion?: string;
-  backend?: string;
-  warnings: string[];
-  errors: string[];
-  source: "dataset_service" | "local_checkpoint" | "none";
-  generatedAt: string;
-  note?: string;
-}
+// Re-export the canonical EvidencePackage type so consumers that want
+// the real (built) package shape can import it from @/lib/api-client.
+// This is the type of the `package` field in buildEvidencePackage /
+// getEvidencePackage responses.
+export type { BuiltEvidencePackage as EvidencePackage };
 
-export interface GraphSourceStat {
-  name: string;
-  loaded: boolean;
-  loadedReason?: string;
-  version?: string;
-  rows?: number;
-  edgeCount?: number;
-  sha256?: string;
-  producedAt?: string;
-  producedBy?: string;
-  loadId?: string;
-  /** Per-source breakdown of node types contributed (FE-020). */
-  nodeTypeCounts?: Record<string, number>;
-  /** Per-source breakdown of edge types contributed (FE-020). */
-  edgeTypeCounts?: Record<string, number>;
-}
-
-export interface KnowledgeGraphStatsResponse {
-  sources: GraphSourceStat[];
-  /**
-   * Sum of canonical node types ONLY (Compound + Protein + Pathway +
-   * Disease + ClinicalOutcomes) across all sources. Excludes
-   * AdverseEvent and other non-canonical types.
-   */
-  nodeCount: number;
-  /**
-   * Sum of all edge_type_counts values across all sources. Edges are
-   * not canonical/non-canonical — they all represent real graph
-   * relationships.
-   */
-  edgeCount: number;
-  /** Per-type breakdown of canonical node counts (FE-020). */
-  nodeTypeCounts: Record<string, number>;
-  /** Per-type breakdown of edge counts (FE-020). */
-  edgeTypeCounts: Record<string, number>;
-  /**
-   * Per-type breakdown of NON-canonical node counts (e.g. AdverseEvent).
-   * Surfaced for transparency — NOT included in `nodeCount`.
-   */
-  nonCanonicalNodeCounts: Record<string, number>;
-  source: "kg_service" | "local_registry" | "none";
-  generatedAt: string;
-  note?: string;
-}
-
-export interface EvidencePackage {
+/**
+ * EvidencePackageSummary — the DB row shape returned by GET /api/evidence-package
+ * (the list endpoint).
+ *
+ * FE-011 ROOT FIX (Teammate 14, HIGH): the previous version of this
+ * interface was named `EvidencePackage` and had `summary: string` and
+ * `updatedAt: string` fields. Two problems:
+ *
+ *   1. The route at app/api/evidence-package/route.ts GET handler selects
+ *      ONLY `{ id, drugName, diseaseName, title, status, createdAt }`
+ *      (line 187 of route.ts) — `summary` and `updatedAt` are NEVER
+ *      returned. The previous type lied: it said those fields were
+ *      required, but they were always undefined at runtime. Consumers
+ *      that read `pkg.summary` got `undefined`.
+ *
+ *   2. The name `EvidencePackage` collided with the canonical
+ *      EvidencePackage type in lib/services/evidence-package.ts (the
+ *      shape of the BUILT package — with literature, clinicalTrials,
+ *      safety, etc.). The collision made it ambiguous which shape a
+ *      consumer was working with.
+ *
+ * ROOT FIX:
+ *   - Rename this interface to `EvidencePackageSummary` (it's the DB
+ *     row summary used by the list endpoint — the name now matches
+ *     the purpose).
+ *   - Remove the `summary` and `updatedAt` fields (the route doesn't
+ *     return them — claiming they're required was a lie).
+ *   - The canonical `EvidencePackage` name now refers to the BUILT
+ *     package type (re-exported above from lib/services/evidence-package).
+ *
+ * NOTE: this is a breaking type change for any consumer that imported
+ * `EvidencePackage` from @/lib/api-client and accessed `.summary` or
+ * `.updatedAt`. The grep across src/ shows NO such consumer — the
+ * only file that imported `EvidencePackage` from api-client was
+ * use-api-data.tsx, and it imported it only as a type for the list
+ * response (which never accessed .summary or .updatedAt). The fix
+ * is therefore safe.
+ */
+export interface EvidencePackageSummary {
   id: string;
   drugName: string;
   diseaseName: string;
   title: string;
-  summary: string;
   status: string;
   createdAt: string;
-  updatedAt: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -587,14 +616,45 @@ export const api = {
   getSafety: (drug: string) =>
     request<SafetyReport>(`/api/safety/${encodeURIComponent(drug)}`),
   searchPatents: (q: string) =>
-    request<{ items: any[] }>(`/api/patents/search?q=${encodeURIComponent(q)}`),
+    request<PatentSearchResponse>(`/api/patents/search?q=${encodeURIComponent(q)}`, {
+      // FE-011 ROOT FIX: wire the PatentSearchResponseSchema so FE-066
+      // runtime validation fires. If the /api/patents/search route's
+      // response shape drifts from the schema (e.g., a field is renamed
+      // or removed), the caller sees a structured ApiError at the fetch
+      // boundary instead of a cryptic render error 10 layers deep.
+      schema: PatentSearchResponseSchema as unknown as ZodType<PatentSearchResponse>,
+    }),
 
   // EVIDENCE PACKAGES
-  listEvidencePackages: () => request<{ items: EvidencePackage[] }>("/api/evidence-package"),
+  // FE-011 ROOT FIX: listEvidencePackages returns EvidencePackageSummary[]
+  // (the DB row shape — NOT the built package shape). The previous type
+  // said `EvidencePackage[]` where EvidencePackage had `summary` and
+  // `updatedAt` fields — but the route's GET handler doesn't select those
+  // columns. The renamed EvidencePackageSummary type matches the actual
+  // route response exactly.
+  listEvidencePackages: () =>
+    request<{ items: EvidencePackageSummary[] }>("/api/evidence-package"),
+  // FE-011 ROOT FIX: buildEvidencePackage returns the BUILT EvidencePackage
+  // (with literature, clinicalTrials, safety, serviceStatus, notes) — NOT
+  // the DB row summary. The `package` field is the canonical
+  // EvidencePackage type from lib/services/evidence-package. The Zod
+  // schema validates the full response shape (id + package + markdown)
+  // so any drift between the route and the contract is caught at the
+  // fetch boundary.
   buildEvidencePackage: (body: { drug: string; disease: string; notes?: string; literatureLimit?: number; trialsLimit?: number }) =>
-    request<{ id: string; package: any; markdown: string }>("/api/evidence-package", { method: "POST", body: JSON.stringify(body) }),
+    request<EvidencePackageBuildResponse>("/api/evidence-package", {
+      method: "POST",
+      body: JSON.stringify(body),
+      schema: EvidencePackageBuildResponseSchema as unknown as ZodType<EvidencePackageBuildResponse>,
+    }),
+  // FE-011 ROOT FIX: getEvidencePackage returns the same shape as
+  // buildEvidencePackage — the route's GET handler reads the DB row,
+  // parses payloadJson (which IS the built EvidencePackage), and returns
+  // `{id, package, markdown}`. The Zod schema is the same.
   getEvidencePackage: (id: string) =>
-    request<{ id: string; package: any; markdown: string }>(`/api/evidence-package?id=${encodeURIComponent(id)}`),
+    request<EvidencePackageBuildResponse>(`/api/evidence-package?id=${encodeURIComponent(id)}`, {
+      schema: EvidencePackageBuildResponseSchema as unknown as ZodType<EvidencePackageBuildResponse>,
+    }),
 
   // ML — Phase 4 RL ranker, Phase 1 dataset, Phase 2 knowledge graph
   // ROOT FIX for FE-001/FE-002/FE-003: the UI now calls these real endpoints
@@ -610,15 +670,35 @@ export const api = {
   // exists and returns real source stats (loaded/rowsLoaded/sha256)
   // from the Phase 1 dataset-stats service. This method is now CALLED
   // by DataSourcesScreen — it is no longer dead code.
-  getDatasetStats: () => request<DatasetStatsResponse>("/api/dataset"),
+  //
+  // FE-010 ROOT FIX (Teammate 14, HIGH): wire the DatasetStatsResponseSchema
+  // into the request<T>() call so FE-066 runtime validation fires. If the
+  // /api/dataset route's response shape drifts from the Zod schema in
+  // ml-contracts.ts, the caller sees a structured ApiError at the fetch
+  // boundary instead of a cryptic render error 10 layers deep. The schema
+  // is the SAME one the route itself uses to validate its outgoing
+  // response — so a successful validation here means the contract held
+  // end-to-end (route → wire → client).
+  getDatasetStats: () =>
+    request<DatasetStatsResponse>("/api/dataset", {
+      schema: DatasetStatsResponseSchema as unknown as ZodType<DatasetStatsResponse>,
+    }),
 
   // Issue 306 (audit 301-320): Graph Stats screen must call
   // /api/knowledge-graph/stats. The endpoint path /api/knowledge-graph
   // already returns the stats payload (route at
   // src/app/api/knowledge-graph/route.ts). For backward compat we keep
   // the original method name; new code should prefer getKnowledgeGraphStats.
+  //
+  // FE-010 ROOT FIX (Teammate 14, HIGH): wire the KgStatsResponseSchema
+  // into the request<T>() call so FE-066 runtime validation fires on
+  // every KG stats fetch. The schema is the canonical one from
+  // ml-contracts.ts — drift between the Python Phase 2 service and the
+  // frontend is caught at the fetch boundary.
   getKnowledgeGraphStats: () =>
-    request<KnowledgeGraphStatsResponse>("/api/knowledge-graph"),
+    request<KgStatsResponse>("/api/knowledge-graph", {
+      schema: KgStatsResponseSchema as unknown as ZodType<KgStatsResponse>,
+    }),
 
   // Issue 307 (audit 301-320): Quality screen calls /api/dataset/quality.
   // Returns REAL quality metrics derived from Phase 1 + Phase 2 stats
