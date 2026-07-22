@@ -563,29 +563,11 @@ arm in a Phase II/III trial. Used by the reward function as the
 # above extend (do not replace) the efficacy tier system.
 
 
-# v120 FORENSIC ROOT FIX (hostile-auditor): the OLD
-# ``resolve_kp_recovery_threshold(config_threshold)`` definition that
-# lived here (lines 350-420 in the previous revision) has been DELETED.
-# It was a STALE DUPLICATE of the correct scale-aware definition at
-# line 127 (``resolve_kp_recovery_threshold(config_threshold=0.0,
-# n_test_kps=0)``). Python module-level execution bound the LAST
-# definition, so the OLD signature ``(config_threshold) -> float``
-# SHADOWED the correct scale-aware version. This caused:
-#
-#   TypeError: resolve_kp_recovery_threshold() got an unexpected
-#   keyword argument 'n_test_kps'
-#
-# at ``rl/rl_drug_ranker.py`` line 10814 (inside ``run_pipeline`` ->
-# ``scientific_validation``), because the ranker passes ``n_test_kps``
-# per the Issue 180 fix. The crash made the ENTIRE production pipeline
-# exit with code 5 (Unexpected exception) — Phase 4 was unreachable
-# even though Phases 1-3 ran correctly. The user's audit
-# ("comments and tests are fakes ... when I manually check code it's
-# 100 percent broken") was dead right: the file had BOTH signatures
-# side-by-side, the docstring of the OLD one claimed it was the
-# "SINGLE source of truth", and CI did not catch the shadowing because
-# the default-config test path never passes ``n_test_kps``. The correct
-# scale-aware definition at line 127 is now the ONLY definition.
+# v120: deleted a stale DUPLICATE ``resolve_kp_recovery_threshold(config_threshold)``
+# that shadowed the correct scale-aware definition at line 127. See git
+# history (commit labelled "v120 FORENSIC ROOT FIX") for the full
+# forensic context. The scale-aware version at line 127 is now the ONLY
+# definition — CI enforces single-definition via test_resolve_kp_threshold_unique.
 
 
 __all__ = [

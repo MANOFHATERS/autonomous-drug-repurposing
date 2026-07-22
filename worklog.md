@@ -1956,3 +1956,38 @@ Stage Summary:
 - Fresh-clone verification confirms all fixes landed on main.
 - Merge commit on main: 7babd8d
 - Branch: fix/teammate6-p2-009-to-016-forensic-root-v142 (preserved for audit)
+
+Task ID: teammate11-p4-022-to-031-v143
+Agent: Teammate 11 (Phase 4 RL Ranker — Writeback + Misc)
+Task: Fix 10 assigned issues (P4-022 through P4-031) — 8 MEDIUM + 2 LOW severity. All defects found during forensic audit. Files: rl/rl_drug_ranker.py, rl/reward.py, rl/service.py, rl/scientific_thresholds.py, phase4/writeback.py, backend/api/main.py.
+
+Work Log (forensic verification phase — read code, not comments):
+- Read project docx (Cosmic_Build_Process_Updated.docx) — confirmed Phase 4 RL Ranker is the scope (Weeks 5-6 deliverable). RL agent ranks hypotheses by plausibility/safety/market using PPO. Output: top-K drug-disease candidates with safety flag, market context, biological pathway chain.
+- Cloned repo to /home/z/my-project/work/autonomous-drug-repurposing on branch fix/teammate11-p4-022-to-031-forensic-root-v143.
+- Forensic verification of each issue (read ACTUAL code at cited line ranges, not comments):
+
+  P4-022 (setup_logging force=True): CONFIRMED BUG. Lines 210, 213 of rl/rl_drug_ranker.py both use `logging.basicConfig(..., force=True)`. force=True removes ALL existing root logger handlers. Fix: use setLevel + addHandler with existence check.
+  
+  P4-023 (df.apply lambda slow reward sample): CONFIRMED BUG. Line 10916: `train_reward_sample = reward_sample_df.apply(lambda r: reward_fn.compute(r), axis=1)`. _REWARD_SAMPLE_LIMIT=10_000 (line 10909). Each reward_fn.compute call does dict lookups + arithmetic + multiple gate checks (withdrawn with ICD-10/pregnancy substring/tokenized matching, safety sigmoid, etc.). The env's step() computes the SAME reward on-the-fly authoritatively. Fix: REMOVE the duplicate slow logging entirely (issue option 2).
+  
+  P4-024 (org_id not passed to RL service): ALREADY FIXED. backend/api/main.py /top-k endpoint (line 1495+) uses `auth: AuthContext = Depends(verify_jwt)` + `org_id: str = Depends(verify_org_id)`. Passes org_id as BOTH query param (line 1639: `request_params = {"org_id": org_id}`) AND X-Org-Id header (line 1641). rl/service.py /rank endpoint REQUIRES org_id when RL_REQUIRE_AUTH=true (default, line 1375-1387). No code fix needed. Will add CI test to prevent regression.
+  
+  P4-025 (PYTHONHASHSEED not set): CONFIRMED BUG. Lines 10704-10711 of rl_drug_ranker.py seed _random, np.random, torch — but NOT os.environ["PYTHONHASHSEED"]. Python dict/set hash randomization (enabled since Py3.3) makes iteration order of frozensets like WITHDRAWN_DRUGS non-deterministic across runs. Fix: set os.environ["PYTHONHASHSEED"] at top of run_pipeline (covers subprocesses) + add ENV directive to Dockerfiles + log warning if current process has randomized seed.
+  
+  P4-026 (load_phase1_safety_signals NEVER CALLED): PARTIALLY FIXED. Lines 10833-10875 of rl/rl_drug_ranker.py DO call `build_reward_function_with_phase1_safety` when `os.path.isdir(_phase1_dir_resolved)`. BUT: (a) default path is relative `phase1/processed_data` which fails silently if cwd is wrong; (b) PipelineConfig has NO `phase1_dir` field — the issue requires this. Fix: add `phase1_dir: Optional[str] = None` to PipelineConfig; in run_pipeline prefer `config.phase1_dir` then env var; log CRITICAL if both unset and we're not in standalone mode.
+  
+  P4-027 (_stats private neo4j attr): CONFIRMED BUG. Lines 627, 628, 654, 663 of phase4/writeback.py access `summary.counters._stats.get("relationships_created", 0)` etc. — private attribute, fragile across neo4j driver versions. Fix: use public `summary.counters.relationships_created` and `summary.counters.properties_set` API.
+  
+  P4-028 (HMAC default key from file content): CONFIRMED BUG. Lines 9561-9577 of rl/rl_drug_ranker.py derive default HMAC key from `pipeline_version + file_size + first_64_bytes_of_file`. First 64 bytes = CSV header (column names). If column order changes (new feature column added), the key changes, HMAC changes — false tamper alarm across schema versions. Fix: derive default key from FIXED project secret (`pipeline_version` only, no file content).
+  
+  P4-029 (produce_evaluation_report runs agent twice): CONFIRMED BUG. Lines 12332 + 12351 of rl/rl_drug_ranker.py — produce_evaluation_report calls `evaluate_agent(model, test_env, ...)` (runs PPO on all test pairs) THEN `compute_auc(model, test_data, ...)` (runs PPO on all test pairs AGAIN). 2x inference cost. Fix: refactor to single inference pass — add `_run_inference_once` helper used by produce_evaluation_report only (preserve existing evaluate_agent / compute_auc signatures for other callers).
+  
+  P4-030 (_canonicalize_name_for_kg no-op): CONFIRMED BUG. Lines 393-408 of phase4/writeback.py — function docstring promises canonicalization + title-case variant, but body just does `name.strip()` and returns. Title-casing logic is duplicated at caller (lines 502-503). Fix: make function actually return tuple (original, title, lower); update caller to destructure; DRY.
+  
+  P4-031 (60-line historical comment): CONFIRMED BUG. Lines 566-588 of rl/scientific_thresholds.py — 60-line comment block describes a DELETED duplicate function. Maintenance burden. Fix: replace with 2-line summary referencing git history.
+
+Stage Summary:
+- 9 of 10 issues have REAL bugs requiring code fixes (P4-022, 023, 025, 026, 027, 028, 029, 030, 031).
+- P4-024 is ALREADY FIXED in code (verified by reading backend/api/main.py and rl/service.py). Will add regression test only.
+- Beginning root-cause fixes now (manual edits via Edit/MultiEdit, no scripts).
+
