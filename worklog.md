@@ -2091,3 +2091,42 @@ Stage Summary:
 - Scientific integrity: no score fabrication, no silent degradation, all error paths are auditable in logs
 - Next: push branch, merge to main, re-clone to verify fixes are present and code runs.
 
+
+---
+Task ID: teammate13-fe-001-to-fe-006
+Agent: Teammate 13 (Frontend — Next.js — Service URL + API client)
+Task: Fix 6 frontend issues (FE-001 to FE-006) from the forensic audit. CRITICAL: 4, HIGH: 2.
+
+Work Log:
+- Read project docx (Cosmic_Build_Process_Updated.docx) to understand the 4-phase architecture (Phase 1 dataset=8000, Phase 2 KG=8001, Phase 3 GT=8002, Phase 4 RL=8003, FastAPI backend=8004).
+- Cloned repo, checked out main (commit d86eb83), created branch fix/teammate13-fe-001-to-fe-006-forensic-root.
+- Read ACTUAL code (not comments) for all 6 issue files line-by-line. Confirmed every issue is REAL:
+  - FE-001: /api/predict route imports predictPairs from gt-inference.ts which calls mlFetch("/api/predict") — relative URL, server-side fetch fails with TypeError. FastAPI at port 8004 orphaned.
+  - FE-002: SERVICE_PORTS missing backend_fastapi port. .env.example says BACKEND_URL=http://localhost:8000 (collides with phase1_dataset) while main.py defaults to 8004.
+  - FE-003: two incompatible Route types — url-route.ts strict union (no name?) vs nav-context.tsx loose type (page: string, has name?).
+  - FE-004: useKnowledgeGraph "normalizes" stats response {sources, nodeCount: 42817, ...} to {nodes: [], edges: [], _stats: body} — drops real stats, renders empty canvas.
+  - FE-005: useClinicalTrialsSearch does manual fetch, bypassing api.searchClinicalTrials + FE-066 Zod validation. Stale comment lies about api-client taking "single q string".
+  - FE-006: getAbstract + getAbstractTruncated use raw fetch() — bypass monitoredFetch (no observability) and 429 retry logic.
+
+- Implemented 6 root-cause fixes:
+  - FE-001: rewrote /api/predict/route.ts and /api/top-k/route.ts to call DRUGOS_API_URL/predict and /top-k directly via mlFetch. Added buildForwardedAuthHeaders() for X-DrugOS-User-Id/Org-Id/Role forwarding. Returns 503 with buildServiceUrlHint when DRUGOS_API_URL unset.
+  - FE-002: added backend_fastapi: 8004 to SERVICE_PORTS. Added SERVICE_URL_ENV_VARS + SERVICE_ENV_VAR_NAMES maps. Added buildServiceUrlHint() helper. rl-ranker.ts now uses helper (no hardcoded port literals). Created lib/service-url-validator.ts that catches mis-configurations at startup. Wired via frontend/instrumentation.ts (Next.js startup hook).
+  - FE-003: added name?: string to url-route.ts 'app' variant. Deleted loose Route from nav-context.tsx (imports canonical). Typed currentRoute as Extract<Route, {page:'app'}>. app-router.tsx navigate now preserves name in transientName React state.
+  - FE-004: split useKnowledgeGraph into useKnowledgeGraphStats (returns KnowledgeGraphStatsResponse) + useKnowledgeGraphSubgraph (returns {nodes, edges}). Subgraph short-circuits when no params. KnowledgeGraphScreen now calls BOTH hooks and renders stats header card.
+  - FE-005: replaced manual fetch with api.searchClinicalTrials(params). Deleted stale comment.
+  - FE-006: replaced raw fetch() with fetchWithRetry() in getAbstract + getAbstractTruncated.
+
+- Wrote 38 regression tests (fe-001-to-006-team13-forensic-root-fixes.test.ts) that read ACTUAL code and assert each fix is present + each broken pattern is gone. All 38 tests pass.
+
+- Verification:
+  - npx tsc --noEmit: 28 pre-existing errors (Prisma 7 + react-resizable-panels + implicit-any in UNTOUCHED files). ZERO errors in my 14 modified files. Before my changes: 37 errors. After: 28 (my fixes resolved 9).
+  - npx jest fe-001-to-006-team13-forensic-root-fixes.test.ts: 38/38 pass.
+  - Runtime validator test: catches KG_SERVICE_URL=http://localhost:8002 as mis-configuration (8002 is GT, not KG).
+  - Re-cloned repo fresh from main: verified all 6 fixes landed (commit 6a388a1).
+
+Stage Summary:
+- 6 root-cause fixes implemented + 38 regression tests. All tests pass.
+- Files changed: 14 (11 modified, 3 new). 1599 insertions, 158 deletions.
+- Branch: fix/teammate13-fe-001-to-fe-006-forensic-root (pushed)
+- Merged to main (commit 6a388a1) — fresh clone confirms fixes landed.
+- Pre-existing TS errors (Prisma 7, react-resizable-panels) are OUT OF SCOPE per the user's instruction "Do not modify files outside the scope of your assigned issues unless the fix explicitly requires it." These errors existed BEFORE my changes and are not caused by my fixes.
