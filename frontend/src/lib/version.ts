@@ -1,57 +1,40 @@
 /**
  * Single source of truth for the application version.
  *
- * ROOT FIX for FE-037 (version inconsistency):
- * Previously the codebase had THREE different version strings:
- *   - package.json: "version": "0.2.0"
- *   - app-router.tsx:2390: "DrugOS v0.3.0"
- *   - app-shell.tsx:335:  "DrugOS v2.1.0"
+ * FE-025 ROOT FIX (Teammate 17 — hostile-auditor pass):
  *
- * Now every component imports `APP_VERSION` from this module. The value
- * is read from package.json at build time via a Next.js public runtime
- * config. We use `process.env.NEXT_PUBLIC_APP_VERSION` so the value is
- * inlined into the client bundle at build time.
+ * The previous implementation used BOTH `process.env.NEXT_PUBLIC_APP_VERSION`
+ * AND a static `import packageJson from "../../package.json"`. The static
+ * import works at BUILD time (webpack inlines the JSON), but it is fragile
+ * in standalone Docker deployments because:
  *
- * In dev, the value falls back to reading package.json synchronously.
+ *   1. The Dockerfile copies `.next/standalone`, `.next/static`, and
+ *      `public/` — it does NOT copy `package.json` into the standalone
+ *      output.
+ *   2. Any future refactor that defers the import to runtime (e.g. for
+ *      runtime version introspection) would crash the standalone server
+ *      with "Cannot find module '../../package.json'".
  *
- * BE-072 ROOT FIX (v115, LOW): the previous code imported package.json
- * via a relative path (`../../package.json`). This breaks if the build
- * runs from a different working directory (e.g., `next build` invoked
- * from a parent directory, or a Docker build with WORKDIR set
- * differently). The relative import resolved to a non-existent file
- * and the build crashed with "Cannot find module '../../package.json'".
+ * ROOT FIX (this file):
+ *   - We read ONLY from `process.env.NEXT_PUBLIC_APP_VERSION`.
+ *   - That env var is set at BUILD time by `next.config.ts` via the
+ *     `env` field (`NEXT_PUBLIC_APP_VERSION: packageJson.version`).
+ *     Next.js's DefinePlugin inlines the literal string into every
+ *     client bundle module that references `process.env.NEXT_PUBLIC_APP_VERSION`.
+ *   - No static JSON import is needed in this file — version.ts is
+ *     robust to cwd changes, standalone Docker builds, and runtime
+ *     introspection.
+ *   - If the env var is somehow unset (e.g. running the file outside
+ *     the Next.js build pipeline, like in a unit test), we fall back
+ *     to "0.0.0-unknown" rather than crashing.
  *
- * ROOT FIX: use `process.env.NEXT_PUBLIC_APP_VERSION` as the primary
- * source (Next.js inlines this at build time, robust to cwd changes).
- * Fall back to the static import only if the env var is unset (which
- * happens in `next dev` without an .env file). The static import uses
- * a try/catch via dynamic require so it doesn't crash if the file is
- * missing — instead, it falls back to "0.0.0-unknown".
+ * This is the canonical pattern recommended by the Next.js docs for
+ * exposing build-time constants to the client bundle.
  */
 
-// Primary source: build-time env var. Next.js inlines this into the
-// client bundle via webpack's DefinePlugin when set in .env.production.
-// This is robust to cwd changes because Next.js resolves the env file
-// relative to the project root (where next.config.ts lives), NOT
-// relative to the file that imports it.
-const ENV_VERSION = process.env.NEXT_PUBLIC_APP_VERSION;
+const ENV_VERSION: string | undefined = process.env.NEXT_PUBLIC_APP_VERSION;
 
-// Fallback: static import of package.json. This works in `next dev`
-// (no env file needed) and in `next build` (env file present, env var
-// wins). Next.js + TypeScript supports JSON imports via resolveJsonModule
-// (enabled in tsconfig.json) — the import is resolved at BUILD time by
-// webpack, so it's robust to runtime cwd changes. If the file is
-// missing at build time, the build fails with a clear error (which
-// is the correct behavior — a build without package.json is broken).
-//
-// BE-072: the previous code used `require()` which is forbidden by
-// the @typescript-eslint/no-require-imports lint rule. The fix uses
-// a static `import` (which is the modern, lint-compliant pattern).
-import packageJson from "../../package.json";
-
-const STATIC_VERSION: string | undefined = (packageJson as { version?: string }).version;
-
-export const APP_VERSION: string = ENV_VERSION || STATIC_VERSION || "0.0.0-unknown";
+export const APP_VERSION: string = ENV_VERSION || "0.0.0-unknown";
 export const APP_NAME: string = "DrugOS";
 export const APP_COPYRIGHT: string = `© ${new Date().getFullYear()}`;
 

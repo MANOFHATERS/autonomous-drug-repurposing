@@ -22,8 +22,12 @@ import {
 // is REMOVED entirely. There is no org-scoped path here anymore.
 import { requirePlatformAdmin } from "@/lib/auth/require-platform-admin";
 import { db } from "@/lib/db";
-import { getDatasetStats } from "@/lib/services/dataset-stats";
-import { getKnowledgeGraphStats } from "@/lib/services/knowledge-graph-stats";
+// FE-027 ROOT FIX (Teammate 17): import directly from the canonical
+// service modules — the `dataset-stats` and `knowledge-graph-stats`
+// shim files were pure re-export facades that added import-path
+// indirection without value. They have been deleted.
+import { getDatasetStats } from "@/lib/services/dataset-service";
+import { getKnowledgeGraphStats } from "@/lib/services/kg-service";
 
 /**
  * GET /api/admin/metrics

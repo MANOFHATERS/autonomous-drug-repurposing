@@ -14,12 +14,14 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 
-// ─── FE-020: knowledge-graph-stats.ts + registry.json schema ───────────────
+// ─── FE-020: kg-service.ts + registry.json schema ───────────────────────────
+// FE-027 ROOT FIX (Teammate 17): import directly from the canonical service
+// module. The `knowledge-graph-stats.ts` shim file has been deleted.
 
 import {
   getKnowledgeGraphStats,
   CANONICAL_NODE_TYPES,
-} from "../knowledge-graph-stats";
+} from "../kg-service";
 
 describe("FE-020: registry.json schema + knowledge-graph-stats.ts", () => {
   let tmpDir: string;
@@ -96,9 +98,11 @@ describe("FE-020: registry.json schema + knowledge-graph-stats.ts", () => {
   });
 });
 
-// ─── FE-021: dataset-stats.ts missing-file fallback ────────────────────────
+// ─── FE-021: dataset-service.ts missing-file fallback ──────────────────────
+// FE-027 ROOT FIX (Teammate 17): import directly from the canonical service
+// module. The `dataset-stats.ts` shim file has been deleted.
 
-import { getDatasetStats } from "../dataset-stats";
+import { getDatasetStats } from "../dataset-service";
 
 describe("FE-021: dataset-stats.ts no_data fallback", () => {
   const prevPath = process.env.DATASET_CHECKPOINT_PATH;

@@ -133,6 +133,23 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
         message: "FE-017: Use URLSearchParams to build query strings, not template literals. Template literals don't URL-encode values — special characters in params corrupt the URL.",
       },
     ],
+
+    // FE-023 ROOT FIX (Teammate 17): cap file length at 500 lines.
+    // Files longer than 500 lines are unmaintainable: slow HMR, slow
+    // type-checking, bundle bloat (no code splitting), cognitive load,
+    // and merge conflicts. The three monolithic files (core-screens.tsx,
+    // remaining-screens.tsx, app-router.tsx) were each 3000+ lines and
+    // have now been split into per-screen files under screens/.
+    //
+    // Set as "warn" rather than "error" so existing over-limit files in
+    // other teammates' swim-lanes don't block the build. New code MUST
+    // stay under 500 lines (skipBlankLines + skipComments so legitimate
+    // code-with-documentation isn't penalized).
+    "max-lines": ["warn", {
+      max: 500,
+      skipBlankLines: true,
+      skipComments: true,
+    }],
   },
 }, {
   // FE-027 ROOT FIX (v2): Test files use Jest globals (describe, test, expect,

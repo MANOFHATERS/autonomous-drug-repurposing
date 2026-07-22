@@ -1,4 +1,11 @@
 import type { NextConfig } from "next";
+// FE-025 ROOT FIX: read version from package.json ONCE, at build time, here
+// in next.config.ts. The value is inlined into the client bundle via the
+// `env` field below — so version.ts can read it from
+// `process.env.NEXT_PUBLIC_APP_VERSION` without a static package.json
+// import (which breaks in standalone Docker builds where package.json
+// is NOT copied into the standalone output).
+import packageJson from "./package.json";
 
 /**
  * BE-012 ROOT FIX (v115, HIGH): production security headers.
@@ -83,6 +90,16 @@ const nextConfig: NextConfig = {
   // Disable it locally if you just want `next dev` / `next start` to work without
   // copying the .next/standalone folder around.
   output: "standalone",
+  // FE-025 ROOT FIX: inline the app version at build time. Next.js replaces
+  // every occurrence of `process.env.NEXT_PUBLIC_APP_VERSION` in the client
+  // bundle with the literal string from package.json. This means version.ts
+  // no longer needs to `import packageJson from "../../package.json"` —
+  // which previously broke in `next start` standalone Docker builds where
+  // package.json is NOT copied into the standalone output (only `.next/standalone`,
+  // `.next/static`, and `public/` are copied per the Dockerfile).
+  env: {
+    NEXT_PUBLIC_APP_VERSION: packageJson.version,
+  },
   // FE-011/FE-012/FE-013 ROOT FIX: typescript.ignoreBuildErrors was previously
   // `true`, which let broken imports silently pass the build. Production-grade
   // code MUST fail the build on type errors.
