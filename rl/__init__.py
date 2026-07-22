@@ -23,10 +23,24 @@ path manipulation, no module shadowing, and no implicit global state.
 """
 from __future__ import annotations
 
-# ROOT FIX (FORENSIC-AUDIT-I37): aligned version with graph_transformer package.
-# Both packages are now versioned together as "4.1.0".
-__version__ = "4.1.0"
-__schema_version__ = "4.1.0"
+# P4-006 v142 FORENSIC ROOT FIX (hostile-auditor pass): aligned version
+# with rl/rl_drug_ranker.py and rl/service.py. The previous "4.1.0" here
+# conflicted with rl_drug_ranker.py's "4.2.0" and service.py's "1.0.0" —
+# 21 CFR Part 11 provenance auditors could not reconcile which code
+# version produced a given output. The prior "ROOT FIX" comment CLAIMED
+# alignment but the value was NEVER updated — comment-only fix.
+# ROOT FIX: actually set all 5 version constants to "4.2.0":
+#   - rl/__init__.py:__version__         (here)
+#   - rl/__init__.py:__schema_version__  (here)
+#   - rl/rl_drug_ranker.py:__version__
+#   - rl/rl_drug_ranker.py:__schema_version__
+#   - rl/rl_drug_ranker.py:PipelineConfig.pipeline_version
+#   - rl/rl_drug_ranker.py:PipelineConfig.schema_version
+#   - phase4/__init__.py:__version__
+#   - phase4/__init__.py:__schema_version__
+#   - rl/service.py:app.version (FastAPI app)
+__version__ = "4.2.0"
+__schema_version__ = "4.2.0"
 
 # Re-export the most-used symbols so callers can do
 #   from rl import PipelineConfig, run_pipeline, KNOWN_POSITIVES

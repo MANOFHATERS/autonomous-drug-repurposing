@@ -12,8 +12,12 @@ and version metadata for provenance tracking.
 """
 from __future__ import annotations
 
-__version__ = "4.1.0"
-__schema_version__ = "4.1.0"
+# P4-006 v142 FORENSIC ROOT FIX: aligned with rl/__init__.py,
+# rl/rl_drug_ranker.py, and rl/service.py — all 5 version constants
+# now hold "4.2.0" (was "4.1.0" here, conflicting with "4.2.0" in
+# rl_drug_ranker.py and "1.0.0" in service.py).
+__version__ = "4.2.0"
+__schema_version__ = "4.2.0"
 
 # Re-export public symbols from writeback.py so callers can do:
 #   from phase4 import write_validated_hypothesis

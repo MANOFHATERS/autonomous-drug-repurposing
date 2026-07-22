@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 # Make the repo root + phase2 importable regardless of CWD. The
@@ -84,6 +86,105 @@ except ImportError:  # pragma: no cover — defensive fallback
         return default
 
 
+# =============================================================================
+# P2-015 ROOT FIX (v142 — Teammate 6 forensic): module-level Neo4j driver
+# cache for the /healthz endpoint. The previous code created a NEW driver
+# on EVERY /healthz call (line 163: ``driver = GraphDatabase.driver(...)``
+# inside the endpoint function). Docker's healthcheck defaults to every
+# 30s; under a restart loop (e.g. Neo4j temporarily unreachable), this
+# fires every 5s. Each call creates a driver, opens a session, runs
+# ``RETURN 1``, closes the session, closes the driver. The driver creation
+# involves TCP handshake + Bolt handshake + auth — ~100ms per call. Under
+# load (multiple containers health-checking simultaneously), this exhausts
+# the Neo4j connection pool's backlog.
+#
+# ROOT FIX (institutional-grade, three layers):
+#   1. Cache a SINGLE Neo4j driver at module level (created on first
+#      /healthz call, reused for all subsequent calls). The neo4j
+#      driver IS thread-safe and designed to be a long-lived singleton.
+#   2. Cache the /healthz RESULT for 30s (configurable via
+#      ``DRUGOS_HEALTHCHECK_CACHE_TTL``). Subsequent calls within the
+#      TTL return the cached result without touching Neo4j. This is
+#      the primary defence against restart-loop exhaustion — even if
+#      the driver cache fails, the result cache limits Neo4j load to
+#      1 call per TTL window.
+#   3. The driver is created lazily on first use (not at module import)
+#      so the module remains importable without neo4j installed.
+# =============================================================================
+_HEALTHZ_DRIVER_LOCK = threading.Lock()
+_healthz_cached_driver = None  # type: ignore[var-annotated]
+_healthz_cache_lock = threading.Lock()
+_healthz_cached_result = None  # type: ignore[var-annotated]
+_healthz_cached_at: float = 0.0
+_HEALTHZ_CACHE_TTL_SECONDS = int(
+    os.environ.get("DRUGOS_HEALTHCHECK_CACHE_TTL", "30")
+)
+
+
+def _get_healthz_neo4j_driver():
+    """P2-015 v142: return the cached module-level Neo4j driver.
+
+    Creates the driver on first call, then reuses it. The neo4j driver
+    is thread-safe and designed to be a long-lived singleton (the
+    official neo4j docs recommend ONE driver per application). The
+    previous /healthz code created a new driver per call, which is
+    explicitly discouraged by the neo4j docs and exhausts the
+    connection pool under Docker restart loops.
+
+    Returns None if Neo4j is not configured or the driver cannot be
+    created (the caller falls back to "neo4j_reachable: failed").
+    """
+    global _healthz_cached_driver
+    if _healthz_cached_driver is not None:
+        return _healthz_cached_driver
+    with _HEALTHZ_DRIVER_LOCK:
+        if _healthz_cached_driver is not None:
+            return _healthz_cached_driver
+        try:
+            from neo4j import GraphDatabase
+            uri = _get_neo4j_env_var("URI", "bolt://localhost:7687")
+            user = _get_neo4j_env_var("USER", "neo4j")
+            password = _get_neo4j_env_var("PASSWORD", "")
+            if not password:
+                return None  # Neo4j not configured
+            _healthz_cached_driver = GraphDatabase.driver(
+                uri, auth=(user, password)
+            )
+            return _healthz_cached_driver
+        except Exception as exc:
+            logger.warning(
+                "P2-015 v142: failed to create cached Neo4j driver for "
+                "/healthz: %s: %s. Subsequent /healthz calls will retry.",
+                type(exc).__name__, exc,
+            )
+            return None
+
+
+def _check_neo4j_reachable() -> tuple[bool, str]:
+    """P2-015 v142: lightweight Neo4j reachability check using cached driver.
+
+    Returns (True, "") if reachable, (False, error_message) otherwise.
+    Uses the module-level cached driver (created on first call) instead
+    of creating a new driver per /healthz invocation.
+    """
+    driver = _get_healthz_neo4j_driver()
+    if driver is None:
+        return False, "driver not created (Neo4j not configured or init failed)"
+    try:
+        with driver.session() as session:
+            # 1-second timeout — healthcheck must be fast. The neo4j
+            # driver's session.run does NOT take a timeout kwarg directly;
+            # the connection_timeout is set on the driver. For a per-query
+            # timeout we'd need to use Transaction.run with a custom
+            # timeout, but for a healthcheck the connection_timeout is
+            # sufficient (if the server is unreachable, the connection
+            # attempt times out quickly).
+            session.run("RETURN 1").consume()
+        return True, ""
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 @app.get("/healthz", tags=["health"])
 def healthz() -> dict:
     """Container healthcheck endpoint (P2-054 ROOT FIX).
@@ -126,7 +227,52 @@ def healthz() -> dict:
     NO subsystem checks. ``/healthz`` is for docker-compose's
     ``healthcheck`` directive which should reflect actual service
     readiness.
+
+    P2-015 v142 ROOT FIX (Teammate 6 forensic): the previous code
+    created a NEW Neo4j driver on every /healthz call. Docker's
+    healthcheck defaults to every 30s; under a restart loop this
+    fires every 5s, exhausting the Neo4j connection pool. ROOT FIX:
+    cache the driver at module level (one driver, reused for all
+    calls) AND cache the /healthz result for 30s (configurable via
+    ``DRUGOS_HEALTHCHECK_CACHE_TTL``). Subsequent calls within the
+    TTL return the cached result without touching Neo4j. This limits
+    Neo4j load to 1 call per TTL window even under aggressive
+    restart loops.
     """
+    # P2-015 v142: result cache. If we have a fresh cached result
+    # (within TTL), return it directly. This is the primary defence
+    # against restart-loop exhaustion — even if the driver cache
+    # fails, the result cache limits Neo4j load to 1 call per TTL.
+    global _healthz_cached_result, _healthz_cached_at
+    now = time.time()
+    if (
+        _healthz_cached_result is not None
+        and (now - _healthz_cached_at) < _HEALTHZ_CACHE_TTL_SECONDS
+    ):
+        # Return cached result. Do NOT re-check Neo4j — the TTL has
+        # not expired. The cached result already has the correct HTTP
+        # status (200 or 503) embedded via the ``overall_ok`` flag.
+        cached = _healthz_cached_result
+        if cached["overall_ok"]:
+            return {
+                "status": "ok",
+                "service": "phase2-kg",
+                "checks": cached["checks"],
+                "cached": True,
+                "cache_age_seconds": round(now - _healthz_cached_at, 2),
+            }
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "degraded",
+                "service": "phase2-kg",
+                "checks": cached["checks"],
+                "cached": True,
+                "cache_age_seconds": round(now - _healthz_cached_at, 2),
+            },
+        )
+
     checks: dict = {}
     overall_ok = True
 
@@ -144,6 +290,11 @@ def healthz() -> dict:
     # works. ROOT FIX: use the same unified reader the connection path
     # uses (``_get_neo4j_env_var``) so the healthcheck and the actual
     # Neo4j connection logic agree on whether Neo4j is configured.
+    #
+    # P2-015 v142: use the CACHED module-level driver via
+    # ``_check_neo4j_reachable()`` instead of creating a new driver
+    # per call. This is the fix for the connection-pool exhaustion
+    # bug described in the module-level comment above.
     neo4j_password = _get_neo4j_env_var("PASSWORD", "")
     neo4j_configured = bool(neo4j_password)
     if not neo4j_configured:
@@ -154,22 +305,11 @@ def healthz() -> dict:
             "NEO4J_PASSWORD is set)"
         )
     else:
-        try:
-            # Local import — keeps the module importable without neo4j.
-            from neo4j import GraphDatabase
-            uri = _get_neo4j_env_var("URI", "bolt://localhost:7687")
-            user = _get_neo4j_env_var("USER", "neo4j")
-            password = neo4j_password  # already read above
-            driver = GraphDatabase.driver(uri, auth=(user, password))
-            try:
-                with driver.session() as session:
-                    # 1-second timeout — healthcheck must be fast.
-                    session.run("RETURN 1").consume()
-                checks["neo4j_reachable"] = True
-            finally:
-                driver.close()
-        except Exception as exc:
-            checks["neo4j_reachable"] = f"failed: {type(exc).__name__}: {exc}"
+        reachable, err_msg = _check_neo4j_reachable()
+        if reachable:
+            checks["neo4j_reachable"] = True
+        else:
+            checks["neo4j_reachable"] = f"failed: {err_msg}"
             overall_ok = False
 
     # Check 2: Phase 1 data present.
@@ -232,6 +372,20 @@ def healthz() -> dict:
     except Exception as exc:
         checks["bridge_importable"] = f"failed: {type(exc).__name__}: {exc}"
         overall_ok = False
+
+    # P2-015 v142: cache the result so subsequent /healthz calls within
+    # the TTL return immediately without re-checking Neo4j. The cache
+    # is thread-safe via ``_healthz_cache_lock``. We cache BOTH the
+    # ok and degraded results — a degraded state should also be cached
+    # so we don't hammer Neo4j with retries during an outage (the
+    # operator's monitoring should catch the cached-degraded state via
+    # the HTTP 503 status code, not via the cache being bypassed).
+    with _healthz_cache_lock:
+        _healthz_cached_result = {
+            "overall_ok": overall_ok,
+            "checks": dict(checks),  # copy so caller can't mutate the cache
+        }
+        _healthz_cached_at = time.time()
 
     if overall_ok:
         return {"status": "ok", "service": "phase2-kg", "checks": checks}

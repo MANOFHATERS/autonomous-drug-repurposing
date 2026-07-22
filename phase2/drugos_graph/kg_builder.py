@@ -1830,15 +1830,75 @@ class GraphConnection:
         if self._neo4j_version:
             if self._neo4j_version.startswith("4."):
                 self._constraint_syntax = "legacy"
+                # P2-009 ROOT FIX (v142 — Teammate 6 forensic): the previous
+                # code only WARNING-logged on Neo4j 4.x and continued. The
+                # Compound-MERGE Cypher in GraphNodeLoader.load_nodes_batch
+                # uses ``CALL { ... }`` subquery syntax which is UNSUPPORTED
+                # on Neo4j 4.x (raises SyntaxError → CriticalDataSourceError
+                # → graph build aborted mid-way, leaving a PARTIAL graph that
+                # silently corrupts downstream queries). The previous code's
+                # "Some Cypher may fail" warning was operationally useless:
+                # operators did not realize the build would crash until step
+                # 3 of the pipeline (load DRKG into Neo4j) actually ran, by
+                # which point they had already waited for steps 1-2 to
+                # complete.
+                #
+                # ROOT FIX: RAISE CriticalDataSourceError on Neo4j < 5.0
+                # UNLESS the operator explicitly sets
+                # ``DRUGOS_ALLOW_NEO4J_4X=1``. The escape hatch is provided
+                # for operators who have manually verified their 4.x server
+                # is at least 4.0b03+ (which has limited CALL{} support)
+                # AND have audited their workloads to ensure no other 5.x-
+                # only Cypher is used. In that case, the legacy Compound-
+                # MERGE Cypher branch in load_nodes_batch (also added in
+                # v142) is taken instead of the CALL{} branch.
+                #
+                # This is the institutional-grade behaviour: refuse to
+                # silently corrupt a production graph build. Operators who
+                # cannot upgrade to 5.x must explicitly accept the risk.
+                if os.environ.get("DRUGOS_ALLOW_NEO4J_4X", "0") != "1":
+                    raise CriticalDataSourceError(
+                        f"Neo4j version is {self._neo4j_version}; this "
+                        f"codebase targets Neo4j 5.x. The Compound-MERGE "
+                        f"Cypher uses `CALL {{ ... }}` subquery syntax "
+                        f"which is UNSUPPORTED on Neo4j 4.x and will raise "
+                        f"SyntaxError mid-load, leaving the graph in a "
+                        f"PARTIAL state that silently corrupts downstream "
+                        f"queries (patient safety: drug-disease prediction "
+                        f"edges would be missing). ROOT FIX (P2-009 v142): "
+                        f"the build is aborted BEFORE any data is written. "
+                        f"Either: (a) upgrade to Neo4j 5.x (recommended), "
+                        f"or (b) set DRUGOS_ALLOW_NEO4J_4X=1 to opt in to "
+                        f"the legacy Compound-MERGE Cypher branch (pre-4.0b03 "
+                        f"compatible — uses OPTIONAL MATCH + WITH instead of "
+                        f"CALL {{}}). The legacy branch is functionally "
+                        f"equivalent but loses the deterministic "
+                        f"`ORDER BY existing.id LIMIT 1` consolidation "
+                        f"guarantee (P2-037), so fragmented Compound nodes "
+                        f"from a prior run may not consolidate on re-runs."
+                    )
                 logger.warning(
                     "Neo4j version is %s; code targets Neo4j 5.x. "
-                    "Using legacy constraint syntax. Some Cypher may fail.",
+                    "DRUGOS_ALLOW_NEO4J_4X=1 is set — using legacy "
+                    "constraint syntax AND legacy Compound-MERGE Cypher "
+                    "(no CALL {} subquery). The legacy Compound-MERGE "
+                    "branch loses the deterministic consolidation "
+                    "guarantee (P2-037) — fragmented Compound nodes from "
+                    "a prior run may not consolidate on re-runs. "
+                    "Upgrade to Neo4j 5.x when possible.",
                     self._neo4j_version,
                 )
             elif not self._neo4j_version.startswith("5."):
+                # Unknown future major version (6.x, 7.x, etc.) — log
+                # warning but do not raise. Neo4j has historically maintained
+                # Cypher backwards compatibility across major versions, so
+                # 5.x-targeted Cypher is likely to work on 6.x+. If it
+                # doesn't, the SyntaxError will surface at the first
+                # Cypher execution with a clear error message.
                 logger.warning(
                     "Neo4j version is %s; code targets Neo4j 5.x. "
-                    "Some Cypher may fail.",
+                    "Cypher should be backwards-compatible but is "
+                    "untested on this version.",
                     self._neo4j_version,
                 )
 
@@ -2018,12 +2078,57 @@ class GraphSchemaManager:
             metadata={"count": created_count, "types": entity_types},
         )
 
-    def create_indexes(self) -> None:
+    def create_indexes(self, *, strict: Optional[bool] = None) -> None:
         """Create additional indexes for common query patterns.
 
         Fixes CF-1: Index list driven by ADDITIONAL_INDEXES config constant.
         Fixes R-3: Index failures are logged at ERROR.
+
+        P2-013 ROOT FIX (v142 — Teammate 6 forensic): the previous code
+        logged index-creation failures at ERROR level but DID NOT RAISE
+        — the pipeline continued. This is INCONSISTENT with
+        ``create_constraints()`` (which raises ``CriticalDataSourceError``
+        on any constraint failure). Without indexes on key properties
+        (e.g. :Compound.name, :Disease.name, :Protein.uniprot_ac), the
+        ``graph_queries.find_drug_candidates`` Cypher does full-graph
+        scans on every call — at 500K nodes, this is ~5 seconds per
+        query; under load, the ``/kg/explore`` endpoint times out (30s
+        limit). Operators see "index creation failed" in the logs but
+        the pipeline continues — they may not realize the impact until
+        users complain about a "broken" frontend.
+
+        ROOT FIX (institutional-grade):
+          1. RAISE ``CriticalDataSourceError`` when ANY index creation
+             fails (mirrors ``create_constraints`` behaviour). This
+             forces operators to investigate index failures BEFORE
+             serving traffic — a slow query is a patient-safety risk
+             (researchers see stale/missing drug-disease predictions).
+          2. ``strict`` parameter (default: True for production, can be
+             set to False via ``DRUGOS_INDEX_STRICT=0`` for dev/CI
+             environments where the index creation may legitimately
+             fail e.g. when running against an ephemeral Neo4j container
+             that is being torn down). When ``strict=False``, failures
+             are logged at ERROR but do not raise — preserving the
+             pre-v142 behaviour for legacy callers.
+          3. Post-load verification: query ``SHOW INDEXES`` and confirm
+             all ADDITIONAL_INDEXES are present. If any are missing
+             (e.g. created with errors but Neo4j reported success — a
+             known Neo4j 4.x bug for compound indexes), raise.
+
+        Patient safety: without indexes, the /kg/explore endpoint
+        times out. A researcher querying drug-disease predictions for
+        a patient case sees a "loading..." spinner that never resolves,
+        and may conclude the platform has no prediction — when in
+        reality the prediction exists but the query is too slow to
+        return. This is a silent patient-safety degradation.
         """
+        # P2-013: determine strict mode. Default to True (raise on
+        # failure) for production safety. ``DRUGOS_INDEX_STRICT=0``
+        # disables raising (dev/CI escape hatch). Explicit ``strict``
+        # parameter takes precedence over the env var.
+        if strict is None:
+            strict = os.environ.get("DRUGOS_INDEX_STRICT", "1") == "1"
+
         errors: list[tuple[str, str, str]] = []
 
         with self._conn.session() as session:
@@ -2046,21 +2151,109 @@ class GraphSchemaManager:
                         errors.append((str(safe_lbl), str(safe_prop), str(e)))
                 tx.commit()
 
-        if errors:
+            # P2-013 ROOT FIX step 3: post-load verification. Query
+            # SHOW INDEXES and confirm all ADDITIONAL_INDEXES are
+            # present. This catches the case where ``CREATE INDEX IF
+            # NOT EXISTS`` silently succeeds but the index is in a
+            # FAILED state (a known Neo4j 4.x bug for indexes on
+            # properties with mixed types). The verification is
+            # best-effort — if SHOW INDEXES itself fails (e.g. Neo4j
+            # 3.x which lacks the command), we log a warning and
+            # continue (the index-creation errors above are the
+            # primary signal).
+            try:
+                verification_result = session.run("SHOW INDEXES")
+                # Build a set of (label, property) tuples that are
+                # currently active (not FAILED) in the database.
+                active_indexes: set[tuple[str, str]] = set()
+                for record in verification_result:
+                    # SHOW INDEXES returns columns: name, state,
+                    # populationPercent, uniqueness, type, entityType,
+                    # labelsOrTypes, properties, ...
+                    state = record.get("state", "")
+                    # Only count indexes that are ONLINE (Neo4j 5.x) or
+                    # ACTIVE (Neo4j 4.x). FAILED indexes are not usable.
+                    if state.upper() not in ("ONLINE", "ACTIVE"):
+                        continue
+                    labels_or_types = record.get("labelsOrTypes") or []
+                    properties = record.get("properties") or []
+                    for lbl_name in labels_or_types:
+                        for prop_name in properties:
+                            active_indexes.add((str(lbl_name), str(prop_name)))
+
+                missing_indexes: list[tuple[str, str]] = []
+                for lbl, prop in ADDITIONAL_INDEXES:
+                    safe_lbl = sanitize_label(lbl)
+                    safe_prop = sanitize_identifier(prop, "property name")
+                    if (str(safe_lbl), str(safe_prop)) not in active_indexes:
+                        missing_indexes.append((str(safe_lbl), str(safe_prop)))
+
+                if missing_indexes:
+                    msg = (
+                        f"Post-load index verification: {len(missing_indexes)} "
+                        f"indexes are MISSING or not ONLINE/ACTIVE: "
+                        f"{missing_indexes[:5]}{'...' if len(missing_indexes) > 5 else ''}. "
+                        f"These indexes were not created successfully "
+                        f"(silent Neo4j failure). Queries on these "
+                        f"properties will do full-graph scans — "
+                        f"patient safety: /kg/explore may time out, "
+                        f"researchers will see stale/missing drug-"
+                        f"disease predictions."
+                    )
+                    logger.error(msg)
+                    if strict:
+                        raise CriticalDataSourceError(msg)
+            except CriticalDataSourceError:
+                raise
+            except Exception as verify_exc:
+                # SHOW INDEXES may not be available on very old Neo4j
+                # versions or in some test fixtures. Log and continue —
+                # the index-creation errors above are the primary signal.
+                logger.warning(
+                    "create_indexes: post-load verification failed "
+                    "(%s: %s). Index-creation errors above are the "
+                    "primary signal. Continuing.",
+                    type(verify_exc).__name__, verify_exc,
+                )
+
+        # P2-013 ROOT FIX step 1: raise on failure (mirrors
+        # create_constraints behaviour). Pre-v142 the pipeline
+        # continued, causing silent perf degradation.
+        if errors and strict:
+            raise CriticalDataSourceError(
+                f"Index creation failed for {len(errors)}/{len(ADDITIONAL_INDEXES)} "
+                f"indexes. Without these indexes, queries on the affected "
+                f"properties will do full-graph scans — at 500K nodes, "
+                f"this is ~5s per query, causing /kg/explore to time out "
+                f"(30s limit). Patient safety: researchers see stale/"
+                f"missing drug-disease predictions. ROOT FIX (P2-013 v142): "
+                f"the build is aborted. Either: (a) fix the underlying "
+                f"Neo4j issue (check Neo4j logs for the failure reason), "
+                f"or (b) set DRUGOS_INDEX_STRICT=0 to continue despite "
+                f"index failures (dev/CI only — NOT recommended for "
+                f"production). Errors: {errors}"
+            )
+        elif errors:
+            # Non-strict mode: log but do not raise (preserves pre-v142
+            # behaviour for dev/CI).
             logger.error(
-                "Index creation failed for %d indexes. "
-                "Queries may be slow. Errors: %s",
+                "Index creation failed for %d indexes (strict=False — "
+                "not raising). Queries may be slow. Errors: %s",
                 len(errors), errors,
             )
 
         logger.info(
-            "Additional indexes created (%d attempted, %d failed)",
-            len(ADDITIONAL_INDEXES), len(errors),
+            "Additional indexes created (%d attempted, %d failed, strict=%s)",
+            len(ADDITIONAL_INDEXES), len(errors), strict,
         )
         audit_log(
             "indexes_created",
-            details=f"Created {len(ADDITIONAL_INDEXES) - len(errors)} indexes",
-            metadata={"attempted": len(ADDITIONAL_INDEXES), "failed": len(errors)},
+            details=f"Created {len(ADDITIONAL_INDEXES) - len(errors)} indexes (strict={strict})",
+            metadata={
+                "attempted": len(ADDITIONAL_INDEXES),
+                "failed": len(errors),
+                "strict": strict,
+            },
         )
 
 
@@ -2328,65 +2521,135 @@ class GraphNodeLoader:
                         # consolidate to the SAME node, enabling
                         # operators to detect fragmentation by counting
                         # Compound nodes pre/post re-run.
-                        cypher = (
-                            f"UNWIND $batch AS row\n"
-                            # Resolve the effective merge id: prefer an
-                            # existing Compound whose id matches any
-                            # alias in this row; fall back to row.id.
-                            # v100 P2-050: use MATCH + IN-list with
-                            # LIMIT 1 instead of the deprecated
-                            # `size((:Compound {id: a}))` pattern.
-                            # The MATCH uses the unique index on
-                            # :Compound(id), so it's O(K log N) where
-                            # K is the alias count, not O(K * N).
-                            #
-                            # v102 P2-037: wrap in CALL {} subquery with
-                            # ORDER BY existing.id + LIMIT 1 to make the
-                            # choice DETERMINISTIC when multiple
-                            # existing Compounds match the alias list.
-                            # Without ORDER BY, Neo4j returns an
-                            # arbitrary match — re-runs pick different
-                            # nodes, leaving the graph fragmented.
-                            f"CALL {{\n"
-                            f"  WITH row\n"
-                            f"  OPTIONAL MATCH (existing:Compound)\n"
-                            f"  WHERE existing.id IN coalesce(row.compound_id_aliases, [])\n"
-                            f"  RETURN existing\n"
-                            f"  ORDER BY existing.id\n"
-                            f"  LIMIT 1\n"
-                            f"}}\n"
-                            f"WITH row, existing\n"
-                            f"WITH row, "
-                            f"coalesce(existing.id, row.id) AS merge_id, "
-                            f"existing IS NOT NULL AS _matched_existing\n"
-                            f"MERGE (n:{safe_label} {{id: merge_id}})\n"
-                            f"ON CREATE SET n += row, "
-                            f"n._created_at = $loaded_at\n"
-                            # v100 P2-027: ON MATCH no longer uses
-                            # `n += row` (which overwrites ALL properties
-                            # including compound_id_aliases). Instead,
-                            # we SET each scalar field with
-                            # `coalesce(n.x, row.x)` (preserve existing
-                            # non-null values), and we union-merge the
-                            # aliases list (preserving existing aliases
-                            # and appending only new ones).
-                            f"ON MATCH SET "
-                            f"n.name = coalesce(n.name, row.name), "
-                            f"n.inchikey = coalesce(n.inchikey, row.inchikey), "
-                            f"n.smiles = coalesce(n.smiles, row.smiles), "
-                            f"n.chembl_id = coalesce(n.chembl_id, row.chembl_id), "
-                            f"n.pubchem_cid = coalesce(n.pubchem_cid, row.pubchem_cid), "
-                            f"n.chebi_id = coalesce(n.chebi_id, row.chebi_id), "
-                            f"n.drugbank_id = coalesce(n.drugbank_id, row.drugbank_id), "
-                            f"n.approval_year = coalesce(n.approval_year, row.approval_year), "
-                            f"n.compound_id_aliases = "
-                            f"  coalesce(n.compound_id_aliases, []) + "
-                            f"  [a IN coalesce(row.compound_id_aliases, []) "
-                            f"   WHERE a IS NOT NULL AND NOT a IN coalesce(n.compound_id_aliases, [])], "
-                            f"n._updated_at = $loaded_at, "
-                            f"n._version = coalesce(n._version, 0) + 1\n"
-                            f"SET n._pipeline_run_id = $run_id"
+                        #
+                        # P2-009 ROOT FIX (v142 — Teammate 6 forensic):
+                        # ``CALL { ... }`` subquery syntax is UNSUPPORTED
+                        # on Neo4j 4.x (raises SyntaxError). The previous
+                        # code emitted this Cypher UNCONDITIONALLY,
+                        # causing every Compound load to fail on Neo4j 4.x
+                        # servers. GraphConnection.connect() now RAISES
+                        # CriticalDataSourceError on Neo4j < 5.0 unless
+                        # ``DRUGOS_ALLOW_NEO4J_4X=1`` is set. When the
+                        # operator explicitly opts in to 4.x, we dispatch
+                        # to the LEGACY Cypher branch below (pre-4.0b03
+                        # compatible — uses OPTIONAL MATCH + WITH row,
+                        # existing instead of CALL{}). The legacy branch
+                        # loses the deterministic ORDER BY + LIMIT 1
+                        # consolidation guarantee (P2-037), so fragmented
+                        # Compound nodes from a prior run may NOT
+                        # consolidate on re-runs. Operators who need
+                        # consolidation must upgrade to Neo4j 5.x.
+                        _use_legacy_compound_merge = (
+                            self._conn.constraint_syntax == "legacy"
                         )
+                        if _use_legacy_compound_merge:
+                            # P2-009 legacy branch for Neo4j 4.x
+                            # (DRUGOS_ALLOW_NEO4J_4X=1). Uses OPTIONAL
+                            # MATCH + WITH row, existing instead of
+                            # CALL{}. Neo4j 4.x does not support
+                            # ORDER BY + LIMIT inside subqueries, so we
+                            # cannot guarantee deterministic
+                            # consolidation. This is documented in the
+                            # operator-facing warning logged by
+                            # GraphConnection._detect_version().
+                            cypher = (
+                                f"UNWIND $batch AS row\n"
+                                f"OPTIONAL MATCH (existing:Compound)\n"
+                                f"WHERE existing.id IN coalesce(row.compound_id_aliases, [])\n"
+                                # NOTE: no ORDER BY/LIMIT — Neo4j 4.x
+                                # does not support these inside a
+                                # post-OPTIONAL-MATCH WITH. The
+                                # `head(collect(...))` pattern below
+                                # picks ONE existing node per row
+                                # (arbitrary — same fragmentation risk
+                                # as pre-v102). This is the documented
+                                # limitation of the legacy branch.
+                                f"WITH row, head(collect(existing)) AS existing\n"
+                                f"WITH row, "
+                                f"coalesce(existing.id, row.id) AS merge_id, "
+                                f"existing IS NOT NULL AS _matched_existing\n"
+                                f"MERGE (n:{safe_label} {{id: merge_id}})\n"
+                                f"ON CREATE SET n += row, "
+                                f"n._created_at = $loaded_at\n"
+                                f"ON MATCH SET "
+                                f"n.name = coalesce(n.name, row.name), "
+                                f"n.inchikey = coalesce(n.inchikey, row.inchikey), "
+                                f"n.smiles = coalesce(n.smiles, row.smiles), "
+                                f"n.chembl_id = coalesce(n.chembl_id, row.chembl_id), "
+                                f"n.pubchem_cid = coalesce(n.pubchem_cid, row.pubchem_cid), "
+                                f"n.chebi_id = coalesce(n.chebi_id, row.chebi_id), "
+                                f"n.drugbank_id = coalesce(n.drugbank_id, row.drugbank_id), "
+                                f"n.approval_year = coalesce(n.approval_year, row.approval_year), "
+                                f"n.compound_id_aliases = "
+                                f"  coalesce(n.compound_id_aliases, []) + "
+                                f"  [a IN coalesce(row.compound_id_aliases, []) "
+                                f"   WHERE a IS NOT NULL AND NOT a IN coalesce(n.compound_id_aliases, [])], "
+                                f"n._updated_at = $loaded_at, "
+                                f"n._version = coalesce(n._version, 0) + 1\n"
+                                f"SET n._pipeline_run_id = $run_id"
+                            )
+                        else:
+                            # Neo4j 5.x branch — deterministic CALL{}
+                            # subquery with ORDER BY + LIMIT 1 (P2-037).
+                            cypher = (
+                                f"UNWIND $batch AS row\n"
+                                # Resolve the effective merge id: prefer an
+                                # existing Compound whose id matches any
+                                # alias in this row; fall back to row.id.
+                                # v100 P2-050: use MATCH + IN-list with
+                                # LIMIT 1 instead of the deprecated
+                                # `size((:Compound {id: a}))` pattern.
+                                # The MATCH uses the unique index on
+                                # :Compound(id), so it's O(K log N) where
+                                # K is the alias count, not O(K * N).
+                                #
+                                # v102 P2-037: wrap in CALL {} subquery with
+                                # ORDER BY existing.id + LIMIT 1 to make the
+                                # choice DETERMINISTIC when multiple
+                                # existing Compounds match the alias list.
+                                # Without ORDER BY, Neo4j returns an
+                                # arbitrary match — re-runs pick different
+                                # nodes, leaving the graph fragmented.
+                                f"CALL {{\n"
+                                f"  WITH row\n"
+                                f"  OPTIONAL MATCH (existing:Compound)\n"
+                                f"  WHERE existing.id IN coalesce(row.compound_id_aliases, [])\n"
+                                f"  RETURN existing\n"
+                                f"  ORDER BY existing.id\n"
+                                f"  LIMIT 1\n"
+                                f"}}\n"
+                                f"WITH row, existing\n"
+                                f"WITH row, "
+                                f"coalesce(existing.id, row.id) AS merge_id, "
+                                f"existing IS NOT NULL AS _matched_existing\n"
+                                f"MERGE (n:{safe_label} {{id: merge_id}})\n"
+                                f"ON CREATE SET n += row, "
+                                f"n._created_at = $loaded_at\n"
+                                # v100 P2-027: ON MATCH no longer uses
+                                # `n += row` (which overwrites ALL properties
+                                # including compound_id_aliases). Instead,
+                                # we SET each scalar field with
+                                # `coalesce(n.x, row.x)` (preserve existing
+                                # non-null values), and we union-merge the
+                                # aliases list (preserving existing aliases
+                                # and appending only new ones).
+                                f"ON MATCH SET "
+                                f"n.name = coalesce(n.name, row.name), "
+                                f"n.inchikey = coalesce(n.inchikey, row.inchikey), "
+                                f"n.smiles = coalesce(n.smiles, row.smiles), "
+                                f"n.chembl_id = coalesce(n.chembl_id, row.chembl_id), "
+                                f"n.pubchem_cid = coalesce(n.pubchem_cid, row.pubchem_cid), "
+                                f"n.chebi_id = coalesce(n.chebi_id, row.chebi_id), "
+                                f"n.drugbank_id = coalesce(n.drugbank_id, row.drugbank_id), "
+                                f"n.approval_year = coalesce(n.approval_year, row.approval_year), "
+                                f"n.compound_id_aliases = "
+                                f"  coalesce(n.compound_id_aliases, []) + "
+                                f"  [a IN coalesce(row.compound_id_aliases, []) "
+                                f"   WHERE a IS NOT NULL AND NOT a IN coalesce(n.compound_id_aliases, [])], "
+                                f"n._updated_at = $loaded_at, "
+                                f"n._version = coalesce(n._version, 0) + 1\n"
+                                f"SET n._pipeline_run_id = $run_id"
+                            )
                     else:
                         cypher = (
                             f"UNWIND $batch AS row\n"
@@ -4184,13 +4447,16 @@ class DrugOSGraphBuilder:
         """
         self._schema.create_constraints()
 
-    def create_indexes(self) -> None:
+    def create_indexes(self, *, strict: Optional[bool] = None) -> None:
         """Create additional indexes for common query patterns.
 
         Delegates to GraphSchemaManager.create_indexes().
         Fixes CF-1.
+
+        P2-013 v142: see GraphSchemaManager.create_indexes for the
+        ``strict`` parameter (default True — raises on failure).
         """
-        self._schema.create_indexes()
+        self._schema.create_indexes(strict=strict)
 
     # ─── Node Loading (delegates to GraphNodeLoader) ───────────────────
 

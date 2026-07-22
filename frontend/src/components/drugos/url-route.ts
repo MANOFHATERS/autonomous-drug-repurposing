@@ -61,7 +61,29 @@ export type Route =
   | { page: 'onboarding-invite' }
   | { page: 'admin-approval' }
   | { page: 'account-locked' }
-  | { page: 'app'; section: string; sub?: string; id?: string };
+  // FE-003 ROOT FIX (Teammate 13, v143, CRITICAL — type-safety hole):
+  // The previous Route union had NO `name` field on the 'app' variant.
+  // core-screens.tsx:268 calls
+  //   `navigate({ page: 'app', section: 'results', id: diseaseId, name: diseaseName })`
+  // but the strict Route type rejected the `name` field at compile time,
+  // so callers either:
+  //   (a) imported `navigate` from `useDrugOSNav()` (nav-context.tsx),
+  //       which had a LOOSE Route type with `name?: string` — TypeScript
+  //       accepted the call but the loose `navigate: () => {}` default
+  //       silently dropped the name; OR
+  //   (b) imported `navigate` from `useRouter()` (next-router-provider.tsx),
+  //       which used the STRICT Route type — TypeScript rejected the call,
+  //       the build failed.
+  //
+  // ROOT FIX: add `name?: string` to the 'app' variant so the strict
+  // type accepts the call. `name` is a TRANSIENT prop — `routeToPath`
+  // does NOT URL-encode it (it's not part of the canonical URL). It is
+  // only used to pass the disease name from DiseaseSearchScreen to
+  // SearchResultsScreen in the same navigation flow, so SearchResultsScreen
+  // doesn't have to re-fetch the name by ID. On a page refresh, `name`
+  // is undefined and SearchResultsScreen falls back to deriving it from
+  // the disease ID (existing behavior, line 528 of core-screens.tsx).
+  | { page: 'app'; section: string; sub?: string; id?: string; name?: string };
 
 /** The set of literal page names allowed in the `p` query param. */
 const ALLOWED_PAGES = new Set<Route['page']>([

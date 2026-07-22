@@ -1844,6 +1844,7 @@ Stage Summary:
 - Next: install dependencies (fastapi, httpx, pyjwt, slowapi, sqlalchemy, pytest) and run real code tests: pytest backend/tests/integration/test_p4_to_be_top_k.py + rl/tests/integration/test_service_caches_bridge.py + py_compile main.py. Then commit, push, merge to main, re-clone to verify.
 
 ---
+
 Task ID: v142-forensic-verification
 Agent: Teammate 1 (Phase 1 — Data Ingestion)
 Task: Forensic verification of 15 Phase 1 issues (P1-001..P1-015). Hostile-auditor pass per audit mandate: "assume every comment is a lie, every test is fake". Read each affected file line-by-line, then write runtime tests that PROVE each fix is real (not just claimed-fixed in comments).
@@ -1883,3 +1884,249 @@ Stage Summary:
 - Fresh clone verification: 28/28 tests pass on the newly cloned main.
 - No regressions introduced in Phase 1 areas (existing test_all_18_issues.py: 12/17 pass; 5 failures are other teammates' scope).
 - Artifacts: tests/forensic_v142_teammate1/test_p1_forensic_v142.py, FORENSIC_VERIFICATION_V142.md
+
+---
+Task ID: teammate6-p2-009-to-016-v142
+Agent: Teammate 6 (Phase 2 — Knowledge Graph — Builder + Pipeline)
+Task: Fix 8 Phase 2 issues (P2-009 through P2-016) — RED TEAM forensic root-cause fixes.
+
+Work Log:
+- Read project docx (Cosmic_Build_Process_Updated.docx) to understand the
+  4-phase autonomous drug repurposing platform architecture.
+- Cloned repo, created branch fix/teammate6-p2-009-to-016-forensic-root-v142.
+- RED TEAM verification of all 8 issues by reading ACTUAL CODE at cited
+  line numbers (not comments, not test files). Found line drift from many
+  prior merges — re-located each broken code block via Grep then read
+  the actual code to verify.
+- Issue 1 (P2-009) CONFIRMED at kg_builder.py:2350 (not 2997).
+  Applied root fix: GraphConnection._detect_version() now RAISES
+  CriticalDataSourceError on Neo4j < 5.0 unless DRUGOS_ALLOW_NEO4J_4X=1.
+  Added legacy Compound-MERGE Cypher branch for 4.x operators.
+- Issue 2 (P2-010) CONFIRMED at transe_model.py:3855 step → 3884 normalize.
+  Applied root fix: added pre-forward normalize_entity/relation_embeddings()
+  so the loss is ALWAYS computed against constrained embeddings per
+  Bordes 2013 §3.2. Post-step normalize kept as defensive measure.
+- Issue 3 (P2-011) CONFIRMED at run_pipeline.py:6538 (step11) AND 9917
+  (run_full_pipeline). Applied root fix: replaced _set_global_seed(42)
+  with _set_global_seed() (no-arg, uses module SEED = DRUGOS_SEED env var).
+  Added assertion to detect SEED divergence.
+- Issue 4 (P2-012) PARTIALLY FIXED pre-v142. Completed root fix: promoted
+  Xavier fallback log to CRITICAL when DRUGOS_ENVIRONMENT=production
+  (was WARNING regardless of environment).
+- Issue 5 (P2-013) CONFIRMED at kg_builder.py:2049. Applied root fix:
+  create_indexes() now RAISES CriticalDataSourceError on failure (mirrors
+  create_constraints). Added strict parameter (default True; env override
+  DRUGOS_INDEX_STRICT=0). Added post-load SHOW INDEXES verification.
+- Issue 6 (P2-014) PARTIALLY FIXED pre-v142. Completed root fix:
+  MLflowTracker.__init__ now spawns a background daemon thread that calls
+  check_for_dangling_mlflow_runs() ONCE per process. Class-level
+  _startup_check_done flag prevents recursion. Env override
+  DRUGOS_MLFLOW_SKIP_STARTUP_CHECK=1 for unit tests.
+- Issue 7 (P2-015) CONFIRMED at kg_api.py:163. Applied root fix: module-
+  level Neo4j driver cache (_healthz_cached_driver) + result cache
+  (_healthz_cached_result) with 30s TTL (configurable via
+  DRUGOS_HEALTHCHECK_CACHE_TTL). _check_neo4j_reachable() helper replaces
+  per-call driver creation.
+- Issue 8 (P2-016) CONFIRMED at run_pipeline.py:7717. Applied root fix:
+  added manage_mlflow_lifecycle kwarg to train_transe (default True,
+  backward-compatible). step11 now creates ONE tracker, starts ONE run,
+  passes the tracker to train_transe (manage_mlflow_lifecycle=False),
+  logs step11-specific final metrics to the SAME run, ends ONCE.
+- Wrote 30 source-level RED TEAM verification tests
+  (phase2/tests/teammate6_p2_009_to_016_v142/test_p2_009_to_016_v142_root_fixes.py)
+  — these read ACTUAL CODE (not comments, not test stubs) to verify
+  each fix is present. All 30 PASS.
+- Wrote 8 real-code functional verification tests
+  (scripts/verify_v142_real_code.py) — these EXERCISE the fixed code
+  paths with controlled inputs (no mocks for code under test). All 8 PASS.
+- Ran adjacent existing tests for regressions: 142 passed, 1 skipped
+  (torch_geometric not installed — pre-existing), 0 failed.
+- Committed (f90d921), pushed branch, merged to main (7babd8d) with --no-ff.
+- Fresh-clone verification: cloned main into a new directory, ran the
+  30 source-level tests against the fresh clone — 30/30 PASS. Verified
+  all 8 fix markers (P2-009 through P2-016) are present in the fresh
+  clone's source code.
+
+Stage Summary:
+- 8 root-cause fixes applied (P2-009 to P2-016) — 6 MEDIUM, 2 LOW.
+- 6 files modified: kg_builder.py, transe_model.py, run_pipeline.py,
+  pyg_builder.py, mlflow_tracker.py, kg_api.py.
+- 869 insertions, 141 deletions across the 6 files.
+- 30 new source-level tests + 8 real-code functional tests — all PASS.
+- 0 regressions in adjacent existing tests (142 passed, 1 skipped).
+- Fresh-clone verification confirms all fixes landed on main.
+- Merge commit on main: 7babd8d
+- Branch: fix/teammate6-p2-009-to-016-forensic-root-v142 (preserved for audit)
+
+Task ID: teammate11-p4-022-to-031-v143
+Agent: Teammate 11 (Phase 4 RL Ranker — Writeback + Misc)
+Task: Fix 10 assigned issues (P4-022 through P4-031) — 8 MEDIUM + 2 LOW severity. All defects found during forensic audit. Files: rl/rl_drug_ranker.py, rl/reward.py, rl/service.py, rl/scientific_thresholds.py, phase4/writeback.py, backend/api/main.py.
+
+Work Log (forensic verification phase — read code, not comments):
+- Read project docx (Cosmic_Build_Process_Updated.docx) — confirmed Phase 4 RL Ranker is the scope (Weeks 5-6 deliverable). RL agent ranks hypotheses by plausibility/safety/market using PPO. Output: top-K drug-disease candidates with safety flag, market context, biological pathway chain.
+- Cloned repo to /home/z/my-project/work/autonomous-drug-repurposing on branch fix/teammate11-p4-022-to-031-forensic-root-v143.
+- Forensic verification of each issue (read ACTUAL code at cited line ranges, not comments):
+
+  P4-022 (setup_logging force=True): CONFIRMED BUG. Lines 210, 213 of rl/rl_drug_ranker.py both use `logging.basicConfig(..., force=True)`. force=True removes ALL existing root logger handlers. Fix: use setLevel + addHandler with existence check.
+  
+  P4-023 (df.apply lambda slow reward sample): CONFIRMED BUG. Line 10916: `train_reward_sample = reward_sample_df.apply(lambda r: reward_fn.compute(r), axis=1)`. _REWARD_SAMPLE_LIMIT=10_000 (line 10909). Each reward_fn.compute call does dict lookups + arithmetic + multiple gate checks (withdrawn with ICD-10/pregnancy substring/tokenized matching, safety sigmoid, etc.). The env's step() computes the SAME reward on-the-fly authoritatively. Fix: REMOVE the duplicate slow logging entirely (issue option 2).
+  
+  P4-024 (org_id not passed to RL service): ALREADY FIXED. backend/api/main.py /top-k endpoint (line 1495+) uses `auth: AuthContext = Depends(verify_jwt)` + `org_id: str = Depends(verify_org_id)`. Passes org_id as BOTH query param (line 1639: `request_params = {"org_id": org_id}`) AND X-Org-Id header (line 1641). rl/service.py /rank endpoint REQUIRES org_id when RL_REQUIRE_AUTH=true (default, line 1375-1387). No code fix needed. Will add CI test to prevent regression.
+  
+  P4-025 (PYTHONHASHSEED not set): CONFIRMED BUG. Lines 10704-10711 of rl_drug_ranker.py seed _random, np.random, torch — but NOT os.environ["PYTHONHASHSEED"]. Python dict/set hash randomization (enabled since Py3.3) makes iteration order of frozensets like WITHDRAWN_DRUGS non-deterministic across runs. Fix: set os.environ["PYTHONHASHSEED"] at top of run_pipeline (covers subprocesses) + add ENV directive to Dockerfiles + log warning if current process has randomized seed.
+  
+  P4-026 (load_phase1_safety_signals NEVER CALLED): PARTIALLY FIXED. Lines 10833-10875 of rl/rl_drug_ranker.py DO call `build_reward_function_with_phase1_safety` when `os.path.isdir(_phase1_dir_resolved)`. BUT: (a) default path is relative `phase1/processed_data` which fails silently if cwd is wrong; (b) PipelineConfig has NO `phase1_dir` field — the issue requires this. Fix: add `phase1_dir: Optional[str] = None` to PipelineConfig; in run_pipeline prefer `config.phase1_dir` then env var; log CRITICAL if both unset and we're not in standalone mode.
+  
+  P4-027 (_stats private neo4j attr): CONFIRMED BUG. Lines 627, 628, 654, 663 of phase4/writeback.py access `summary.counters._stats.get("relationships_created", 0)` etc. — private attribute, fragile across neo4j driver versions. Fix: use public `summary.counters.relationships_created` and `summary.counters.properties_set` API.
+  
+  P4-028 (HMAC default key from file content): CONFIRMED BUG. Lines 9561-9577 of rl/rl_drug_ranker.py derive default HMAC key from `pipeline_version + file_size + first_64_bytes_of_file`. First 64 bytes = CSV header (column names). If column order changes (new feature column added), the key changes, HMAC changes — false tamper alarm across schema versions. Fix: derive default key from FIXED project secret (`pipeline_version` only, no file content).
+  
+  P4-029 (produce_evaluation_report runs agent twice): CONFIRMED BUG. Lines 12332 + 12351 of rl/rl_drug_ranker.py — produce_evaluation_report calls `evaluate_agent(model, test_env, ...)` (runs PPO on all test pairs) THEN `compute_auc(model, test_data, ...)` (runs PPO on all test pairs AGAIN). 2x inference cost. Fix: refactor to single inference pass — add `_run_inference_once` helper used by produce_evaluation_report only (preserve existing evaluate_agent / compute_auc signatures for other callers).
+  
+  P4-030 (_canonicalize_name_for_kg no-op): CONFIRMED BUG. Lines 393-408 of phase4/writeback.py — function docstring promises canonicalization + title-case variant, but body just does `name.strip()` and returns. Title-casing logic is duplicated at caller (lines 502-503). Fix: make function actually return tuple (original, title, lower); update caller to destructure; DRY.
+  
+  P4-031 (60-line historical comment): CONFIRMED BUG. Lines 566-588 of rl/scientific_thresholds.py — 60-line comment block describes a DELETED duplicate function. Maintenance burden. Fix: replace with 2-line summary referencing git history.
+
+Stage Summary:
+- 9 of 10 issues have REAL bugs requiring code fixes (P4-022, 023, 025, 026, 027, 028, 029, 030, 031).
+- P4-024 is ALREADY FIXED in code (verified by reading backend/api/main.py and rl/service.py). Will add regression test only.
+- Beginning root-cause fixes now (manual edits via Edit/MultiEdit, no scripts).
+
+
+---
+Task ID: teammate11-p4-022-to-031-v143-COMPLETION
+Agent: Teammate 11 (Phase 4 RL Ranker — Writeback + Misc)
+Task: Final completion summary for P4-022..P4-031 forensic root fixes.
+
+Work Log:
+- All 10 assigned issues fixed with root-cause patches (9 real bugs + 1 already-fixed with regression test added).
+- 19 forensic regression tests written using AST to check EXECUTABLE code only (not comments, not strings). All 19 pass.
+- 8 real-code behavioral tests run: imports, runtime, behavioral. All pass.
+- python3 -m py_compile: all 4 modified files compile cleanly.
+- Pre-existing p4_team11 tests verified: 32 pass, 4 pre-existing failures (missing run_full_platform.py / run_real_pipeline.py / torch / pre-existing validated_hypotheses.csv) — confirmed NOT caused by my changes (git stash + re-run control).
+- Branch fix/teammate11-p4-022-to-031-forensic-root-v143 pushed.
+- Rebased on latest origin/main (Teammate 6 v142 had pushed in parallel) — worklog.md conflict resolved by keeping both entries.
+- Merged to main with --no-ff (merge commit f325494).
+- Fresh clone of main (verify_clone) — all 19 tests pass, confirming fixes are in main.
+
+Stage Summary:
+- 5 files modified: rl/rl_drug_ranker.py, rl/scientific_thresholds.py, phase4/writeback.py, worklog.md.
+- 1 file added: tests/p4_team11/test_p4_022_to_031_v143_root_fixes.py (1048 lines, 19 tests).
+- 1780 insertions, 142 deletions.
+- All fixes are ROOT-CAUSE (not surface-level): each fix addresses the underlying defect, not just the symptom.
+- Hostile-auditor methodology followed: read ACTUAL code at cited line ranges (not comments), verified each bug exists, applied minimal-change root fix, wrote AST-based regression tests that check EXECUTABLE code.
+- P4-024 was the only issue already fixed in code — verified by reading backend/api/main.py /top-k endpoint (uses verify_jwt + verify_org_id + passes org_id as query param AND X-Org-Id header). Added regression test only (no code change).
+---
+Task ID: TM7-v142
+Agent: hostile-auditor (Teammate 7 — Phase 3 P3-001 + P3-010 root fixes)
+Task: Fix the 2 remaining broken issues from the 11-issue Phase 3 audit list (P3-001 + P3-010). The other 9 issues (P3-002, P3-003, P3-004, P3-005, P3-006, P3-007, P3-008, P3-009, P3-011) were verified FIXED by reading the actual code line-by-line (not comments, not tests). Apply root-cause fix to the 2 broken issues, write verification tests, run real code, push branch, merge to main, re-clone to verify.
+
+Work Log:
+- Read project docx (Cosmic_Build_Process_Updated.docx) and the 11-issue P3 audit list (Pasted Content_1784693819182.txt). The 11 issues are scoped to Phase 3 (Graph Transformer) — Teammate 7's assignment.
+- Cloned repo with PAT auth (manoj.c@atraiuniversity.edu.in). Created branch fix/teammate7-p3-001-p3-010-root-cause-v142 off main (commit fa1676c).
+- Read ACTUAL CODE line-by-line (not comments, not tests) for ALL 11 issues. Verified status:
+  * P3-001 (requirements.txt bad versions): NOT FIXED. Lines 35, 52, 63 still declare pandas>=3.0.3, rdkit>=2026.3.4, scipy>=1.18.0 — all NON-EXISTENT on PyPI. The v122 IN-080 comment claimed the fix was applied; the actual pins were NOT.
+  * P3-002 (backend /predict hardcoded 0.5): FIXED by TM11-v141. /predict now calls GT service via httpx.AsyncClient. /ready probes GT_SERVICE_URL/health. /health is liveness-only.
+  * P3-003 (EDGE_TYPES count 19 vs 18, slicing): FIXED. EDGE_TYPES has 19 entries, FORWARD=EDGE_TYPES[:9], REVERSE=EDGE_TYPES[9:18], PPI=EDGE_TYPES[18:]. self_check() asserts len==19.
+  * P3-004 (LABEL_LEAKING_EDGES includes AE edges): FIXED. AE edges moved to SAFETY_SIGNAL_EDGES (separate frozenset). Bridge's _get_drug_ae_edges() returns SAFETY_SIGNAL_EDGES for val/test drugs (per-drug exclusion contract).
+  * P3-005 (no pathway explanations): FIXED. _get_pathway_explanation() in service.py (line 659) AND in gt_rl_bridge.py (line 5469). Uses ALL 4 drug→protein edge types. Wired into /predict response AND get_top_k_novel_predictions.
+  * P3-006 (version drift gt_v127 vs gt_v113): FIXED. MODEL_VERSION = f"gt_{__version__}" = "gt_4.1.0" used for BOTH Neo4j writeback AND API response (service.py lines 1093, 1099).
+  * P3-007 (weights_only=False security): FIXED. _torch_load_safe() tries weights_only=True first, registers PyG safe globals, falls back to weights_only=False with loud WARNING only if safe path fails.
+  * P3-008 (validated hypotheses in training data): FIXED. graph_builder.py line 1953-1958 does NOT inject validated_pairs as 'treats' edges. They are added to known_pairs (for EXCLUDING from novel predictions, NOT for training — training data comes from ('drug','treats','disease') edge index only).
+  * P3-009 (pathway_score uses only 2 of 4 edge types): FIXED. gt_rl_bridge.py line 3112-3117 uses ALL 4 forward drug→protein edge types: inhibits, activates, binds, modulates.
+  * P3-010 (MLflow register_model ignores stage, uses file:// URI): NOT FIXED. mlflow_integration.py line 220-225 still uses file:// URI and never calls transition_model_version_stage.
+  * P3-011 (calibration falls back to val-set split): FIXED. trainer.py lines 1977-2057 use explicit cal set if provided, else fall back to splitting TEST set 50/50 (NOT val set), else RAISE TemperatureCalibrationError. Bridge (gt_rl_bridge.py lines 1617-1680) splits test set 50/50 and passes cal half as explicit cal_drug_idx/cal_disease_idx/cal_labels to trainer.fit().
+
+ROOT FIXES APPLIED:
+- P3-001: graph_transformer/requirements.txt — replaced 4 non-existent/narrow pins:
+  * pandas>=3.0.3,<4.0 → pandas>=2.1.4,<3.0 (matches lock file)
+  * rdkit>=2026.3.4,<2027.0 → rdkit>=2024.3.1,<2025.0 (matches lock file)
+  * scipy>=1.18.0,<2.0 → scipy>=1.10,<2.0 (matches lock file)
+  * torch>=2.2.0,<2.3.0 → torch>=2.2.0,<2.6.0 (widened for security upgrades)
+  * torch-geometric>=2.8.0,<2.9.0 → torch-geometric>=2.5.0,<2.7.0 (matches lock file)
+  Aligned with graph_transformer/requirements.lock and root requirements.txt so dev/CI/prod install the SAME versions.
+
+- P3-010: graph_transformer/utils/mlflow_integration.py — 3 root-cause fixes:
+  1. start_run() now captures the STRING run_id (was storing the ActiveRun OBJECT, which broke f"runs:/{run_id}/..." URI formatting). Uses .info.run_id extraction with defensive fallback to mlflow.active_run().info.run_id.
+  2. register_model() now uses runs:/<run_id>/<basename> URI instead of file://<path>. The runs:/ URI works in distributed deployments (MLflow server doesn't need direct filesystem access). Falls back to file:// ONLY when no run_id is available (legacy callers), with a loud WARNING.
+  3. register_model() now ACTUALLY applies the stage parameter by calling transition_model_version_stage(name, version, stage) AFTER register_model returns. Captures the ModelVersion object, extracts .version, calls transition. Handles BOTH MLflow < 3.0 (top-level mlflow.transition_model_version_stage) AND MLflow 3.x+ (MlflowClient().transition_model_version_stage) — the top-level function was REMOVED in MLflow 3.x. Best-effort: if transition fails, logs WARNING (model is still registered, just not staged) — does NOT crash training.
+  4. Added _active_run attribute to keep the ActiveRun object alive (prevents premature garbage collection that could end the run).
+  5. end_run() now also clears _active_run to allow mlflow's internal cleanup to finalize the run's status.
+
+TESTS WRITTEN (12 new tests, all pass):
+- tests/team7_v142_p3_001_p3_010/test_p3_001_requirements_pins.py (6 tests):
+  * test_pandas_pin_exists_on_pypi — verifies pandas pin is 2.x (not 3.0.3)
+  * test_rdkit_pin_exists_on_pypi — verifies rdkit pin is 2024.x (not 2026.x)
+  * test_scipy_pin_exists_on_pypi — verifies scipy pin is 1.10-1.14 (not 1.18)
+  * test_torch_pin_not_excessively_narrow — verifies torch upper bound >= 2.4 (not <2.3.0)
+  * test_torch_geometric_pin_exists_on_pypi — verifies torch-geometric lower bound is 2.4-2.6 (not 2.8)
+  * test_pins_match_lock_file — verifies requirements.txt pins are consistent with requirements.lock (no dev/CI/prod drift)
+
+- tests/team7_v142_p3_001_p3_010/test_p3_010_mlflow_register_model.py (6 tests):
+  * test_register_model_uses_runs_uri_not_file_uri — verifies URI starts with runs:/, contains run_id + basename, does NOT have /artifacts/ prefix
+  * test_register_model_calls_transition_model_version_stage — verifies transition is called with the SAME stage + version as register_model
+  * test_register_model_handles_missing_version_gracefully — verifies no crash when register_model returns object without .version
+  * test_start_run_captures_string_run_id — verifies _run_id is a STRING (not ActiveRun object)
+  * test_register_model_falls_back_to_file_uri_when_no_run_id — verifies legacy path still works (with WARNING)
+  * test_trainer_save_checkpoint_calls_register_model_with_stage — source-level inspection of trainer
+
+REAL CODE VERIFICATION:
+- Installed dependencies: torch 2.13.0+cpu, torch-geometric, pandas, numpy, scipy, scikit-learn, rapidfuzz, mlflow 3.14.0, pyjwt, fastapi, httpx, pydantic.
+- python tests/team7_v142_p3_001_p3_010/test_p3_001_requirements_pins.py → 6/6 PASS
+- python tests/team7_v142_p3_001_p3_010/test_p3_010_mlflow_register_model.py → 6/6 PASS
+- python -m pytest tests/team7_v142_p3_001_p3_010/ -v → 12/12 PASS
+- python -m pytest tests/team7_v127_phase3_root_fixes/test_mlflow_tracking.py -v → 13/13 PASS (no regressions)
+- Smoke test: real MLflow sqlite tracking URI, real start_run + log_artifact + register_model + end_run cycle → all OK (no exceptions)
+- graph_transformer package imports cleanly: __version__="4.1.0", EDGE_TYPES count=19, self_check() all True
+
+Stage Summary:
+- Branch: fix/teammate7-p3-001-p3-010-root-cause-v142 (off main fa1676c)
+- Files modified: 2 (graph_transformer/requirements.txt, graph_transformer/utils/mlflow_integration.py)
+- Files created: 3 (tests/team7_v142_p3_001_p3_010/__init__.py, test_p3_001_requirements_pins.py, test_p3_010_mlflow_register_model.py)
+- Tests passing: 12/12 new tests + 13/13 existing MLflow tests (no regressions)
+- Real code verified: dependencies installed, real MLflow round-trip works, package imports cleanly
+- P3-001 (requirements.txt bad versions): FIXED (4 pins corrected to match lock file)
+- P3-010 (MLflow register_model ignores stage, file:// URI): FIXED (3 compound bugs addressed: string run_id, runs:/ URI, transition_model_version_stage actually called with version+stage)
+- MLflow 3.x compatibility: handled via dual-path (top-level transition for MLflow<3.0, MlflowClient for MLflow 3.x+)
+- Scientific integrity: no score fabrication, no silent degradation, all error paths are auditable in logs
+- Next: push branch, merge to main, re-clone to verify fixes are present and code runs.
+
+
+---
+Task ID: teammate13-fe-001-to-fe-006
+Agent: Teammate 13 (Frontend — Next.js — Service URL + API client)
+Task: Fix 6 frontend issues (FE-001 to FE-006) from the forensic audit. CRITICAL: 4, HIGH: 2.
+
+Work Log:
+- Read project docx (Cosmic_Build_Process_Updated.docx) to understand the 4-phase architecture (Phase 1 dataset=8000, Phase 2 KG=8001, Phase 3 GT=8002, Phase 4 RL=8003, FastAPI backend=8004).
+- Cloned repo, checked out main (commit d86eb83), created branch fix/teammate13-fe-001-to-fe-006-forensic-root.
+- Read ACTUAL code (not comments) for all 6 issue files line-by-line. Confirmed every issue is REAL:
+  - FE-001: /api/predict route imports predictPairs from gt-inference.ts which calls mlFetch("/api/predict") — relative URL, server-side fetch fails with TypeError. FastAPI at port 8004 orphaned.
+  - FE-002: SERVICE_PORTS missing backend_fastapi port. .env.example says BACKEND_URL=http://localhost:8000 (collides with phase1_dataset) while main.py defaults to 8004.
+  - FE-003: two incompatible Route types — url-route.ts strict union (no name?) vs nav-context.tsx loose type (page: string, has name?).
+  - FE-004: useKnowledgeGraph "normalizes" stats response {sources, nodeCount: 42817, ...} to {nodes: [], edges: [], _stats: body} — drops real stats, renders empty canvas.
+  - FE-005: useClinicalTrialsSearch does manual fetch, bypassing api.searchClinicalTrials + FE-066 Zod validation. Stale comment lies about api-client taking "single q string".
+  - FE-006: getAbstract + getAbstractTruncated use raw fetch() — bypass monitoredFetch (no observability) and 429 retry logic.
+
+- Implemented 6 root-cause fixes:
+  - FE-001: rewrote /api/predict/route.ts and /api/top-k/route.ts to call DRUGOS_API_URL/predict and /top-k directly via mlFetch. Added buildForwardedAuthHeaders() for X-DrugOS-User-Id/Org-Id/Role forwarding. Returns 503 with buildServiceUrlHint when DRUGOS_API_URL unset.
+  - FE-002: added backend_fastapi: 8004 to SERVICE_PORTS. Added SERVICE_URL_ENV_VARS + SERVICE_ENV_VAR_NAMES maps. Added buildServiceUrlHint() helper. rl-ranker.ts now uses helper (no hardcoded port literals). Created lib/service-url-validator.ts that catches mis-configurations at startup. Wired via frontend/instrumentation.ts (Next.js startup hook).
+  - FE-003: added name?: string to url-route.ts 'app' variant. Deleted loose Route from nav-context.tsx (imports canonical). Typed currentRoute as Extract<Route, {page:'app'}>. app-router.tsx navigate now preserves name in transientName React state.
+  - FE-004: split useKnowledgeGraph into useKnowledgeGraphStats (returns KnowledgeGraphStatsResponse) + useKnowledgeGraphSubgraph (returns {nodes, edges}). Subgraph short-circuits when no params. KnowledgeGraphScreen now calls BOTH hooks and renders stats header card.
+  - FE-005: replaced manual fetch with api.searchClinicalTrials(params). Deleted stale comment.
+  - FE-006: replaced raw fetch() with fetchWithRetry() in getAbstract + getAbstractTruncated.
+
+- Wrote 38 regression tests (fe-001-to-006-team13-forensic-root-fixes.test.ts) that read ACTUAL code and assert each fix is present + each broken pattern is gone. All 38 tests pass.
+
+- Verification:
+  - npx tsc --noEmit: 28 pre-existing errors (Prisma 7 + react-resizable-panels + implicit-any in UNTOUCHED files). ZERO errors in my 14 modified files. Before my changes: 37 errors. After: 28 (my fixes resolved 9).
+  - npx jest fe-001-to-006-team13-forensic-root-fixes.test.ts: 38/38 pass.
+  - Runtime validator test: catches KG_SERVICE_URL=http://localhost:8002 as mis-configuration (8002 is GT, not KG).
+  - Re-cloned repo fresh from main: verified all 6 fixes landed (commit 6a388a1).
+
+Stage Summary:
+- 6 root-cause fixes implemented + 38 regression tests. All tests pass.
+- Files changed: 14 (11 modified, 3 new). 1599 insertions, 158 deletions.
+- Branch: fix/teammate13-fe-001-to-fe-006-forensic-root (pushed)
+- Merged to main (commit 6a388a1) — fresh clone confirms fixes landed.
+- Pre-existing TS errors (Prisma 7, react-resizable-panels) are OUT OF SCOPE per the user's instruction "Do not modify files outside the scope of your assigned issues unless the fix explicitly requires it." These errors existed BEFORE my changes and are not caused by my fixes.
