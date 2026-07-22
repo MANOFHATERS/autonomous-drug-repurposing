@@ -26,6 +26,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { ReactNode } from 'react';
+import { RefreshCw, AlertCircle } from 'lucide-react';
 import { api, type ApiError, type KnowledgeGraphStatsResponse } from '@/lib/api-client';
 import { Card, CardContent } from '@/components/ui/card';
 
@@ -742,10 +743,6 @@ export function ErrorDisplay({ error, onRetry }: { error: ApiError; onRetry?: ()
     </div>
   );
 }
-
-// We import these here so the icons used by LoadingSpinner/ErrorDisplay are
-// always available without each screen importing them separately.
-import { RefreshCw, AlertCircle } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
 // FE-009 ROOT FIX: Generic hooks for admin/dashboard screens.

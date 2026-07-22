@@ -7,8 +7,11 @@
  * Run with: npx tsx scripts/verify-fe-020-to-028-runtime.ts
  */
 
-import { getKnowledgeGraphStats, CANONICAL_NODE_TYPES } from "../src/lib/services/knowledge-graph-stats";
-import { getDatasetStats } from "../src/lib/services/dataset-stats";
+// FE-027 ROOT FIX (Teammate 17): import directly from the canonical
+// service modules — the `dataset-stats` and `knowledge-graph-stats`
+// shim files have been deleted (pure re-export facades, no value).
+import { getKnowledgeGraphStats, CANONICAL_NODE_TYPES } from "../src/lib/services/kg-service";
+import { getDatasetStats } from "../src/lib/services/dataset-service";
 import { parseRlCsvContent, clearRlCsvCache, getRlCsvCacheState } from "../src/lib/services/rl-csv-cache";
 import { truncateAbstract } from "../src/lib/services/pubmed";
 import { isOpenfdaApiKeyConfigured } from "../src/lib/services/openfda";

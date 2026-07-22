@@ -1,13 +1,12 @@
 import { NextResponse } from "next/server";
 import { requireAuth, internalError, writeAuditLog } from "@/lib/api-helpers";
-// TM10 v128 ROOT FIX: import from the CANONICAL dataset-service.ts (HTTP-only).
-// The previous import from "@/lib/services/dataset-stats" worked functionally
-// (dataset-stats.ts is now a re-export shim), but it referenced a DEPRECATED
-// module name. This caused confusion for new developers and static-analysis
-// tools (IDE "go to definition" landed on the shim, not the real impl).
-// Importing the canonical module directly is the production-grade pattern.
+// FE-027 ROOT FIX (Teammate 17): import directly from the CANONICAL
+// service modules. The `dataset-stats` and `knowledge-graph-stats`
+// shim files were pure re-export facades that have been deleted.
+// Importing the canonical module directly is the production-grade pattern:
+// IDE "go to definition" lands on the real implementation, not a shim.
 import { getDatasetStats } from "@/lib/services/dataset-service";
-import { getKnowledgeGraphStats } from "@/lib/services/knowledge-graph-stats";
+import { getKnowledgeGraphStats } from "@/lib/services/kg-service";
 // BE-039 ROOT FIX: import CANONICAL_NODE_TYPES from lib/ml-contracts.ts
 // so there is a SINGLE source of truth for the canonical node type list.
 // The previous code redefined the list inline and included "Drug" —
