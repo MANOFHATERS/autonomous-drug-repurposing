@@ -243,8 +243,33 @@ CANONICAL_NON_HUMAN_GENE_SYMBOL_REGEX: re.Pattern[str] = re.compile(
 #   current OMIM entries). We use the scientifically-correct
 #   ``^[1-9][0-9]{5}$`` instead, combined with the [100100, 999999]
 #   numeric range check.
+#
+# P1-039 FORENSIC ROOT FIX (Teammate 3 -- hostile-auditor pass):
+#   The previous regex ``^(?:OMIM:)?[1-9][0-9]{5}$`` accepted
+#   ``100000``-``100099`` -- 6-digit numbers starting with 1 that are
+#   BELOW OMIM's first official phenotype MIM (``100100``). The
+#   ``validate_omim_mim()`` function (line 258) catches these via the
+#   numeric range check, BUT callers that use ONLY the regex (e.g.
+#   ``CANONICAL_OMIM_DISEASE_ID_REGEX.match()`` directly) accepted
+#   invalid MIMs. The audit found at least 3 call sites that used only
+#   the regex, silently passing ``100050`` through to the KG.
+#
+#   ROOT FIX: tighten the regex with a NEGATIVE LOOKAHEAD that rejects
+#   ``100000``-``100099`` (the ``1000`` prefix followed by exactly 2
+#   digits, i.e. ``100000``-``100099``). The lookahead ``(?!1000[0-9]{2}$)``
+#   rejects:
+#     - 100000 (1000 + 00) -> rejected ✓
+#     - 100099 (1000 + 99) -> rejected ✓
+#     - 100100 (1001 + 00) -> NOT rejected (prefix is 1001, not 1000) ✓
+#     - 999999, 600000, 200000 -> accepted ✓
+#
+#   This makes the regex SELF-SUFFICIENT -- callers using only the
+#   regex are now safe. The ``validate_omim_mim()`` function remains as
+#   defense-in-depth (it still does the numeric range check, which is
+#   now redundant but harmless and protects against future edge cases
+#   like 7-digit MIMs if OMIM ever expands).
 CANONICAL_OMIM_DISEASE_ID_REGEX: re.Pattern[str] = re.compile(
-    r"^(?:OMIM:)?[1-9][0-9]{5}$"
+    r"^(?:OMIM:)?(?!1000[0-9]{2}$)[1-9][0-9]{5}$"
 )
 
 # v104 P1-005: OMIM MIM numeric range -- SINGLE source of truth.

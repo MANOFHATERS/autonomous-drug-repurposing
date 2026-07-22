@@ -193,6 +193,39 @@ class _TokenBucket:
                 # token availability promptly after refill.
                 self._cond.wait(timeout=min(wait, 1.0))
 
+    def refund(self) -> None:
+        """Refund one token to the bucket (P1-043 ROOT FIX).
+
+        P1-043 FORENSIC ROOT FIX (Teammate 3 -- hostile-auditor pass):
+          The previous code called ``acquire()`` BEFORE the HTTP call.
+          If the call failed with a 429/5xx (retryable), the token was
+          CONSUMED but the call did not succeed. On retry, ANOTHER token
+          was consumed. A burst of 5xx errors (e.g. ChEMBL backend
+          outage) rapidly drained the bucket, throttling LEGITIMATE
+          calls from other workers after the outage resolved.
+
+          ROOT FIX: add a ``refund()`` method that puts one token back
+          into the bucket. The HTTP client calls ``refund()`` on every
+          retryable failure (429/5xx) so the retry does not consume an
+          extra token. The bucket is capped at ``capacity`` so refunds
+          beyond capacity are silently dropped (no overflow).
+
+        This method is idempotent -- calling it multiple times without
+        an intervening ``acquire()`` simply tops up the bucket to
+        ``capacity`` (no harm).
+        """
+        with self._cond:
+            now = time.monotonic()
+            elapsed = now - self._last_refill
+            self._tokens = min(
+                self.capacity, self._tokens + elapsed * self.rate
+            )
+            self._last_refill = now
+            # Add one token, capped at capacity.
+            self._tokens = min(self.capacity, self._tokens + 1.0)
+            # Wake up one waiter so it can re-check token availability.
+            self._cond.notify(n=1)
+
 
 class _CircuitBreaker:
     """P2-2 ROOT FIX: unified circuit breaker wrapping the base class.
@@ -635,12 +668,22 @@ class RateLimitedHttpClient:
                     self.metrics["api_calls_429"] += 1
                 else:
                     self.metrics["api_calls_5xx"] += 1
+                # P1-043 FORENSIC ROOT FIX (Teammate 3): REFUND the rate
+                # limiter token on retryable failure. The call did NOT
+                # succeed, so the token should NOT count against the
+                # rate budget. Without this refund, a burst of 5xx errors
+                # (ChEMBL backend outage) would drain the bucket and
+                # throttle LEGITIMATE calls from other workers after the
+                # outage resolves. The refund is capped at ``capacity``
+                # by the ``refund()`` method, so it never overflows.
+                self._rate_limiter.refund()
                 error = (
                     f"HTTP {resp.status_code} on {url}: "
                     f"{resp.text[:500]!r}"
                 )
                 logger.warning(
-                    "[chembl] HTTP %d on %s (retryable, attempt %d/%d)",
+                    "[chembl] HTTP %d on %s (retryable, attempt %d/%d) "
+                    "-- rate limiter token refunded (P1-043)",
                     resp.status_code,
                     url,
                     attempt,
@@ -705,8 +748,15 @@ class RateLimitedHttpClient:
 
             except RETRYABLE_EXCEPTIONS as exc:
                 error = f"{type(exc).__name__}: {exc}"
+                # P1-043 FORENSIC ROOT FIX (Teammate 3): REFUND the rate
+                # limiter token on connection errors / timeouts. The call
+                # did NOT succeed, so the token should NOT count against
+                # the rate budget. Same rationale as the 429/5xx refund
+                # above (line 679).
+                self._rate_limiter.refund()
                 logger.warning(
-                    "[chembl] Request exception on %s: %s (attempt %d/%d)",
+                    "[chembl] Request exception on %s: %s (attempt %d/%d) "
+                    "-- rate limiter token refunded (P1-043)",
                     url,
                     exc,
                     attempt,

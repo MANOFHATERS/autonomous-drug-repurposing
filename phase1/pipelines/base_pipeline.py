@@ -2314,13 +2314,42 @@ class BasePipeline(ABC):
             if lock_path and Path(lock_path).exists():
                 try:
                     Path(lock_path).unlink()
-                except OSError:
-                    pass
-        except (OSError, RuntimeError, ValueError):
+                except OSError as _unlink_exc:
+                    # P1-036 FORENSIC ROOT FIX (Teammate 3): the previous
+                    # code had a bare ``pass`` here, silently swallowing
+                    # the unlink failure. A stale lock file would remain,
+                    # and the next run would find it (FileLock treats a
+                    # stale lock file as a valid lock if the PID is dead,
+                    # but if the PID is alive it blocks). Log at WARNING
+                    # so the operator sees the orphaned lock file and can
+                    # investigate.
+                    logger.warning(
+                        "P1-036: could not remove lock file %s after "
+                        "release: %s. The lock was released but the file "
+                        "remains. Manually delete it if the next run "
+                        "hangs on lock acquisition.",
+                        lock_path, _unlink_exc,
+                    )
+        except (OSError, RuntimeError, ValueError) as _release_exc:
             # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
             # ``except Exception``. Lock release can fail with I/O or
             # runtime errors. Programming bugs now propagate.
-            pass
+            #
+            # P1-036 FORENSIC ROOT FIX (Teammate 3): the previous code
+            # had a bare ``pass`` here, silently swallowing the release
+            # failure. A lock that fails to release leaves the lock file
+            # on disk; the next run cannot acquire it and HANGS. Log at
+            # WARNING so the operator sees the failure and can manually
+            # remove the lock file before the next run.
+            logger.warning(
+                "P1-036: failed to release run lock %s: %s (%s). The "
+                "lock file may remain on disk. If the next pipeline run "
+                "hangs on lock acquisition, manually remove the lock "
+                "file at %s.",
+                getattr(lock, "lock_file", "<unknown>"),
+                type(_release_exc).__name__, _release_exc,
+                getattr(lock, "lock_file", "<unknown>"),
+            )
 
     # ------------------------------------------------------------------
     # Schema loading & validation (SCI-3.11, SCI-3.12)
@@ -4983,13 +5012,35 @@ class BasePipeline(ABC):
             if lock_path and Path(lock_path).exists():
                 try:
                     Path(lock_path).unlink()
-                except OSError:
-                    pass
-        except (OSError, RuntimeError, ValueError):
+                except OSError as _unlink_exc:
+                    # P1-036 FORENSIC ROOT FIX (Teammate 3): bare ``pass``
+                    # silently swallowed unlink failures. Log at WARNING
+                    # so the operator sees the orphaned lock file.
+                    logger.warning(
+                        "P1-036: could not remove lock file %s after "
+                        "release: %s. The lock was released but the file "
+                        "remains. Manually delete it if the next run "
+                        "hangs on lock acquisition.",
+                        lock_path, _unlink_exc,
+                    )
+        except (OSError, RuntimeError, ValueError) as _release_exc:
             # v85 FORENSIC ROOT FIX (BUG #51): narrowed from broad
             # ``except Exception``. Lock release can fail with I/O or
             # runtime errors. Programming bugs now propagate.
-            pass
+            #
+            # P1-036 FORENSIC ROOT FIX (Teammate 3): bare ``pass`` silently
+            # swallowed release failures. A stuck lock file would cause
+            # the next run to HANG on lock acquisition. Log at WARNING so
+            # the operator can intervene.
+            logger.warning(
+                "P1-036: failed to release file lock %s: %s (%s). The "
+                "lock file may remain on disk. If the next pipeline run "
+                "hangs on lock acquisition, manually remove the lock "
+                "file at %s.",
+                getattr(lock, "lock_file", "<unknown>"),
+                type(_release_exc).__name__, _release_exc,
+                getattr(lock, "lock_file", "<unknown>"),
+            )
 
     # ------------------------------------------------------------------
     # Cleaned data persistence (ARCH-1.3, IDEM-7.6, LIN-16.8)

@@ -134,6 +134,31 @@ if _configure_observability is not None:
     _configure_observability(app, service_name="phase1-dataset")
 
 
+def _resolve_csv_or_gz(pdir: Path, base_name: str) -> Path:
+    """Resolve a CSV path, falling back to .csv.gz if .csv doesn't exist.
+
+    P1-034 FORENSIC ROOT FIX (Teammate 3): the contract's aliases for
+    several sources (interactions, indications, string_ppi, disgenet_gda,
+    omim_gda) include ``.csv.gz`` variants. If only the .gz file exists,
+    a plain ``pdir / "drugbank_interactions.csv"`` path's ``.exists()``
+    check returns False, and the endpoint silently returns empty data.
+    ROOT FIX: try ``.csv`` first, then ``.csv.gz``. Returns the Path
+    that exists (or the .csv Path if neither exists, so the caller's
+    ``.exists()`` check returns False and the operator sees a clear
+    "file not found" error).
+
+    ``_open_csv_for_read`` already handles .gz transparently, so the
+    caller does NOT need to know which variant was resolved.
+    """
+    csv_path = pdir / base_name
+    if csv_path.exists():
+        return csv_path
+    gz_path = pdir / (base_name + ".gz")
+    if gz_path.exists():
+        return gz_path
+    return csv_path  # neither exists; return .csv path so caller's .exists() is False
+
+
 def _open_csv_for_read(path: Path):
     """Open a CSV file for reading, transparently handling .gz and UTF-8 BOM.
 
@@ -731,8 +756,10 @@ def _load_drug_mechanism(drug_name: str) -> Dict[str, Any]:
     """
     pdir = _processed_data_dir()
     drugbank_path = pdir / "drugbank_drugs.csv"
-    interactions_path = pdir / "drugbank_interactions.csv"
-    indications_path = pdir / "drugbank_indications.csv"
+    # P1-034: interactions_path and indications_path are now resolved with
+    # .csv/.csv.gz fallback INSIDE their respective blocks below (the .gz
+    # fallback needs to happen at use-time, not at function-entry, because
+    # the .csv path may not exist while the .gz path does).
 
     if not drugbank_path.exists():
         raise HTTPException(
@@ -782,7 +809,18 @@ def _load_drug_mechanism(drug_name: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Drug '{drug_name}' not found in DrugBank data.")
 
     # 2. Find targets (proteins) from drugbank_interactions.csv.
+    # P1-034 FORENSIC ROOT FIX (Teammate 3): the contract's aliases for
+    # ``interactions`` include ``drugbank_interactions.csv.gz``. If only
+    # the .gz file exists (e.g. STRING/DisGeNET pipelines write .gz by
+    # default, and DrugBank may follow suit in a future release), the
+    # previous ``interactions_path.exists()`` check returned False and the
+    # endpoint returned EMPTY targets — silently degrading the KG's
+    # Compound->Protein edges for that drug. ROOT FIX: use the new
+    # ``_resolve_csv_or_gz`` helper which checks ``.csv`` then ``.csv.gz``.
+    # ``_open_csv_for_read`` already handles .gz transparently (line 161),
+    # so the read path is correct; only the existence check was broken.
     targets: List[Dict[str, Any]] = []
+    interactions_path = _resolve_csv_or_gz(pdir, "drugbank_interactions.csv")
     if interactions_path.exists():
         try:
             # P1-014 ROOT FIX: same BOM-safe open as above.
@@ -801,7 +839,9 @@ def _load_drug_mechanism(drug_name: str) -> Dict[str, Any]:
             pass
 
     # 3. Find indications from drugbank_indications.csv.
+    # P1-034 FORENSIC ROOT FIX: same .csv/.csv.gz fallback as above.
     indications: List[str] = []
+    indications_path = _resolve_csv_or_gz(pdir, "drugbank_indications.csv")
     if indications_path.exists():
         try:
             # P1-014 ROOT FIX: same BOM-safe open as above.
@@ -943,8 +983,12 @@ def stats() -> Dict[str, Any]:
     # functions to invoke (the Compound->Disease loader was never
     # triggered because the edge type was missing from the manifest).
     edge_types: List[str] = []
-    drugbank_indications_path = pdir / "drugbank_indications.csv"
-    drugbank_interactions_path = pdir / "drugbank_interactions.csv"
+    # P1-034 FORENSIC ROOT FIX: use _resolve_csv_or_gz so .csv.gz files
+    # are detected. Previously, if only the .gz variant existed, the row
+    # count returned 0 and the edge type was never emitted — the KG
+    # builder then skipped the corresponding loader.
+    drugbank_indications_path = _resolve_csv_or_gz(pdir, "drugbank_indications.csv")
+    drugbank_interactions_path = _resolve_csv_or_gz(pdir, "drugbank_interactions.csv")
     drugbank_indications_rows = _count_csv_rows(drugbank_indications_path)
     drugbank_interactions_rows = _count_csv_rows(drugbank_interactions_path)
 

@@ -1761,6 +1761,54 @@ def _validate_output_impl() -> dict:
     # aliases). Verify the ID column (from ``get_required_id_column()``)
     # is present in the CSV header. Sources with ``None`` ID column
     # (multi-column composite keys) skip the header check.
+    #
+    # P1-031 + P1-042 FORENSIC ROOT FIX (Teammate 3 -- hostile-auditor pass):
+    #   The previous code (this block) appended a FAILURE for EVERY missing
+    #   source CSV. This had TWO problems:
+    #
+    #   P1-031: if both ChEMBL and DrugBank were skipped (e.g. operator
+    #   acknowledged degraded state), the code appended TWO redundant
+    #   failures (one per source) -- even though the operator had already
+    #   acknowledged the degraded state. The failures were REDUNDANT and
+    #   confused operators ("which one do I fix first?").
+    #
+    #   P1-042: the CSV-existence check is REDUNDANT with
+    #   ``_validate_phase1_contract`` (which calls
+    #   ``contracts.validate_output.validate_output_dir`` and checks
+    #   existence + columns + dtypes + min_rows). Both tasks run after
+    #   all loads, both fail on missing CSVs. The redundancy added noise
+    #   without catching anything new.
+    #
+    #   ROOT FIX (P1-031 + P1-042 combined):
+    #     1. DEMOTE the CSV-existence check from FAILURE to WARNING in
+    #        ``validate_output``. ``_validate_phase1_contract`` is the
+    #        authoritative existence checker (it has the full schema).
+    #        ``validate_output`` focuses on DATA QUALITY (SYNTH, ID format,
+    #        NULL rates, DPI-degraded) -- NOT existence.
+    #     2. Add an env var ``P1_ACKNOWLEDGED_MISSING_SOURCES`` (comma-
+    #        separated list of source keys the operator has acknowledged
+    #        as missing). Sources in this list are SKIPPED entirely (no
+    #        warning, no failure) -- the operator already knows.
+    #     3. This eliminates redundant failures (P1-031) and redundant
+    #        existence checks (P1-042) without losing any safety:
+    #        ``_validate_phase1_contract`` still fails hard on missing
+    #        required sources; ``validate_output`` still fails hard on
+    #        SYNTH/NULL/DPI-degraded data quality issues.
+    _acknowledged_missing = {
+        s.strip()
+        for s in _os.environ.get(
+            "P1_ACKNOWLEDGED_MISSING_SOURCES", ""
+        ).split(",")
+        if s.strip()
+    }
+    if _acknowledged_missing:
+        logger.info(
+            "validate_output: operator has acknowledged missing sources "
+            "via P1_ACKNOWLEDGED_MISSING_SOURCES: %s. These sources will "
+            "be SKIPPED (no warning, no failure). (P1-031 root fix)",
+            sorted(_acknowledged_missing),
+        )
+
     for source_key in _REQUIRED_SOURCES_FOR_PHASE2:
         if source_key not in PHASE1_OUTPUT_SCHEMA:
             # Defensive: should never happen (the frozenset is hardcoded
@@ -1771,6 +1819,16 @@ def _validate_output_impl() -> dict:
                 f"_REQUIRED_SOURCES_FOR_PHASE2 but NOT in "
                 f"PHASE1_OUTPUT_SCHEMA. The contract drifted from the "
                 f"master DAG. Update _REQUIRED_SOURCES_FOR_PHASE2."
+            )
+            continue
+
+        # P1-031: skip acknowledged-missing sources entirely.
+        if source_key in _acknowledged_missing:
+            logger.info(
+                "validate_output: source %r is in "
+                "P1_ACKNOWLEDGED_MISSING_SOURCES -- skipping (operator "
+                "acknowledged degraded state). (P1-031 root fix)",
+                source_key,
             )
             continue
 
@@ -1786,20 +1844,23 @@ def _validate_output_impl() -> dict:
                 break
 
         if csv_path is None:
-            if is_production:
-                failures.append(
-                    f"validate_output: required CSV not found for source "
-                    f"{source_key!r}. Tried aliases: {aliases}. Expected ID "
-                    f"column: {id_col!r}. The corresponding pipeline did not "
-                    f"produce output. Check Airflow task logs for the failing "
-                    f"source."
-                )
-            else:
-                logger.warning(
-                    "validate_output: source %r CSV not found at any alias "
-                    "%s (dev mode -- skipping). (TM1 Task 1.4 v131)",
-                    source_key, aliases,
-                )
+            # P1-031 + P1-042 ROOT FIX: DEMOTE to WARNING (was: failure in
+            # production). ``_validate_phase1_contract`` is the authoritative
+            # existence checker and will fail HARD if the source is required.
+            # ``validate_output`` focuses on data quality, not existence.
+            # This eliminates redundant failures when both ChEMBL and
+            # DrugBank are skipped (P1-031) and the redundant existence
+            # check (P1-042).
+            logger.warning(
+                "validate_output: source %r CSV not found at any alias "
+                "%s. The existence check is handled by "
+                "_validate_phase1_contract (which fails HARD on missing "
+                "required sources). This warning is informational only. "
+                "If the operator intentionally skipped this source, set "
+                "P1_ACKNOWLEDGED_MISSING_SOURCES=%s to silence this "
+                "warning. (P1-031 + P1-042 root fix)",
+                source_key, aliases, source_key,
+            )
             continue
 
         # Verify the ID column exists in the CSV header (skip for
@@ -1819,12 +1880,11 @@ def _validate_output_impl() -> dict:
                     continue
                 # Spot-check: first 50 data rows must have non-null ID.
                 import pandas as _pd
-                # P1-016 ROOT FIX: use robust gzip-aware reader. A CSV that
-                # is gzipped with a non-standard extension (e.g.
-                # ``chembl_drugs.csv`` whose bytes are actually gzip) would
-                # raise ``BadGzipFile`` with a plain ``read_csv`` call,
-                # blocking ``trigger_phase2``. Sniff the gzip magic bytes
-                # (0x1f 0x8b) and force the correct ``compression``.
+                # P1-033 + P1-016 combined ROOT FIX: Teammate 2's P1-016
+                # added ``_robust_read_csv`` which sniffs gzip magic bytes.
+                # This is MORE robust than Teammate 3's P1-033 fix
+                # (compression="infer" relies on the .gz extension). We
+                # adopt Teammate 2's solution.
                 df_sample = _robust_read_csv(_pd, csv_path, nrows=50)
                 if id_col in df_sample.columns:
                     non_null = df_sample[id_col].dropna()
@@ -1851,7 +1911,7 @@ def _validate_output_impl() -> dict:
         # so we must read at least one column.
         try:
             import pandas as _pd
-            # P1-016 ROOT FIX: gzip-aware read (see ``_robust_read_csv``).
+            # P1-033 + P1-016 combined ROOT FIX: gzip-aware read.
             df_count = _robust_read_csv(_pd, csv_path, usecols=[0])
             row_counts[source_key] = len(df_count)
         except Exception as exc:

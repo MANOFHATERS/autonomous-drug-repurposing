@@ -151,8 +151,13 @@ def _validate_source(
         return issues
 
     # Read the CSV (no dtype coercion yet — we check actual dtypes below).
-    # P1-016 ROOT FIX: use the robust reader that sniffs gzip magic bytes
-    # instead of relying on file extension. See ``_read_csv_robust``.
+    # P1-033 + P1-016 combined ROOT FIX: Teammate 2's P1-016 added
+    # ``_read_csv_robust`` which sniffs gzip MAGIC BYTES (not just the
+    # file extension). This is MORE robust than Teammate 3's P1-033 fix
+    # (compression="infer" relies on the .gz extension). We adopt
+    # Teammate 2's solution and keep the P1-033 rationale as a comment:
+    # the goal is to handle .gz files robustly; magic-byte sniffing
+    # achieves that goal better than extension-based inference.
     try:
         df = _read_csv_robust(path)
     except pd.errors.EmptyDataError:

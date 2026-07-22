@@ -510,6 +510,47 @@ def _validate_gene_symbol(value: Optional[str]) -> Optional[str]:
     )
 
 
+# P1-040 FORENSIC ROOT FIX (Teammate 3): validator for the new
+# ``chembl_target_id`` column on the Protein model. ChEMBL target IDs
+# follow the format ``CHEMBL_TGT_`` followed by 1-9 digits (e.g.
+# ``CHEMBL_TGT_12345``). The validator is permissive about case
+# (ChEMBL IDs are case-insensitive in practice) and strips whitespace.
+_CHEMBL_TARGET_ID_RE: re.Pattern[str] = re.compile(
+    r"^CHEMBL_TGT_[0-9]{1,9}$",
+    re.IGNORECASE,
+)
+
+
+def _validate_chembl_target_id(value: Optional[str]) -> Optional[str]:
+    """Validate a ChEMBL target ID (``CHEMBL_TGT_<digits>``) for the
+    ``proteins.chembl_target_id`` column.
+
+    P1-040 ROOT FIX: the ``_validate_uniprot_id`` validator (line 426)
+    REJECTS ``CHEMBL_TGT_*`` values with an error message that says
+    "Store ChEMBL target IDs in the chembl_target_id column". This
+    validator is the receiving end -- it ensures values stored in
+    ``chembl_target_id`` are well-formed.
+
+    Returns ``None`` for ``None`` (the column is nullable). Raises
+    ``ValueError`` for malformed values.
+    """
+    if value is None:
+        return value
+    value = value.strip()
+    if not value:
+        return None  # treat empty string as NULL
+    if _CHEMBL_TARGET_ID_RE.match(value):
+        # Normalize to uppercase (ChEMBL IDs are case-insensitive but
+        # the canonical form is uppercase per ChEMBL's convention).
+        return value.upper()
+    raise ValueError(
+        f"Invalid ChEMBL target ID: '{value}'. "
+        "Must match pattern 'CHEMBL_TGT_<digits>' (e.g. CHEMBL_TGT_12345). "
+        "P1-040: this column stores ChEMBL target IDs SEPARATELY from "
+        "uniprot_id (which stores only real UniProt accessions like P69999)."
+    )
+
+
 def _validate_sequence(value: Optional[str]) -> Optional[str]:
     """Validate protein amino acid sequence (SCI-08)."""
     if value is None:
@@ -1298,6 +1339,47 @@ class Protein(Base, IDMixin, TimestampMixin, SoftDeleteMixin):
     # ----------------------------------------------------------------
     function: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     subcellular_location: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # ----------------------------------------------------------------
+    # P1-040 FORENSIC ROOT FIX (Teammate 3 -- hostile-auditor pass):
+    #   The ``_validate_uniprot_id`` function (line 426) raises
+    #   ``ValueError`` when a value starts with ``CHEMBL_TGT_``, with
+    #   the message: "Store ChEMBL target IDs in the chembl_target_id
+    #   column, not in uniprot_id." But the Protein model had NO
+    #   ``chembl_target_id`` column -- the error message told operators
+    #   to use a column that DID NOT EXIST. ChEMBL target IDs without
+    #   UniProt mappings were DROPPED entirely, losing Drug->Protein
+    #   edges from ChEMBL (the backbone drug-protein interaction source
+    #   per the project docx §3). The KG silently lost ~30% of drug-
+    #   protein edges (ChEMBL has many targets without UniProt cross-
+    #   references, especially for older or less-studied targets).
+    #
+    #   ROOT FIX: add the ``chembl_target_id`` column to the Protein
+    #   model. This column stores ChEMBL target IDs (``CHEMBL_TGT_*``)
+    #   SEPARATELY from ``uniprot_id`` (which stores only real UniProt
+    #   accessions). The loader (``bulk_upsert_proteins``) already
+    #   filters to ``Protein.__table__.columns.keys()`` (line 2466), so
+    #   adding the column here automatically makes the loader accept it
+    #   from input DataFrames. Migration 021 adds the column to the DB.
+    #
+    #   Design decisions:
+    #     - ``nullable=True``: a protein may not have a ChEMBL target ID
+    #       (e.g. UniProt-only proteins, microproteins not in ChEMBL).
+    #     - ``unique=False``: NOT unique because multiple ChEMBL target
+    #       IDs can map to the same UniProt accession (ChEMBL splits
+    #       some targets into multiple entries for variant isoforms).
+    #       The uniqueness is on ``uniprot_id`` (the canonical protein
+    #       identifier); ``chembl_target_id`` is a cross-reference.
+    #     - ``String(50)``: ChEMBL target IDs are ``CHEMBL_TGT_`` + 1-9
+    #       digits (e.g. ``CHEMBL_TGT_12345``). 50 chars is plenty.
+    #     - No DB CHECK constraint: the format is enforced by the
+    #       ``_validate_uniprot_id`` validator (which REJECTS
+    #       ``CHEMBL_TGT_`` in ``uniprot_id``) and by the
+    #       ``_validate_chembl_target_id`` validator (added below).
+    # ----------------------------------------------------------------
+    chembl_target_id: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True,
+    )
 
     # -- relationships --
     # v89 ROOT FIX (BUG #20 -- P1 N+1 explosion under bulk loads):
