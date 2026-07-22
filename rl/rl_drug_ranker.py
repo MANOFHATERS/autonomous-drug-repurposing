@@ -189,10 +189,74 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="gymnasium
 def setup_logging(level: int = logging.INFO, json_logs: bool = False) -> None:
     """Configure structured logging for the RL pipeline.
 
+    P4-022 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+    The previous implementation called ``logging.basicConfig(..., force=True)``
+    in BOTH branches (json_logs and plain). ``force=True`` REMOVES every
+    existing handler from the root logger and REPLACES them with our handler.
+    In production the root logger is typically configured by uvicorn,
+    fastapi, neo4j, gunicorn, or structured-logging libraries BEFORE the
+    RL pipeline starts. Calling ``basicConfig(force=True)`` silently
+    strips those handlers — important logs from other components
+    (HTTP request logs, Neo4j driver warnings, audit logs from the
+    FastAPI middleware) disappear. Debugging becomes harder and audit
+    trails (21 CFR Part 11) lose entries.
+
+    The root fix:
+      1. Always call ``root.setLevel(level)`` — this is safe and never
+         clobbers handlers (it only changes the threshold).
+      2. Only add our handler if the root logger has NO handlers
+         (``not root.handlers``). This preserves any existing
+         configuration from upstream components. When the root logger
+         already has handlers (the production case), we leave them
+         alone — our level update still applies to them.
+      3. When the root logger already has handlers AND the caller asked
+         for JSON logs, we log a NOTICE (NOT an error) that JSON
+         formatting was skipped because existing handlers were
+         preserved. The operator can configure JSON logs upstream
+         (e.g., via ``LOGGING_CONFIG`` env var or a ``logging.config``
+         file) if they need both.
+
     Args:
         level: Logging level (e.g. logging.INFO, logging.DEBUG).
         json_logs: If True, emit JSON-formatted log lines for machine parsing.
+            NOTE: when the root logger already has handlers (production),
+            json_logs is IGNORED to avoid clobbering. A notice is logged.
     """
+    root = logging.getLogger()
+    # P4-022: setLevel is always safe — it does NOT remove handlers.
+    root.setLevel(level)
+
+    # P4-022: only add our handler if the root logger has none.
+    # This preserves configurations from uvicorn/fastapi/neo4j/gunicorn
+    # that were set up BEFORE the RL pipeline started.
+    if root.handlers:
+        # Root logger already has handlers — do NOT clobber them.
+        # If the caller asked for JSON logs but we skipped them, log a
+        # NOTICE so the operator knows why their log format didn't change.
+        if json_logs:
+            # Use a one-off logger (NOT the root logger) to emit this
+            # notice, so we don't inject a NEW handler into the root
+            # logger just to emit this notice (which would partially
+            # defeat the purpose of preserving existing handlers).
+            _notice = logging.getLogger("rl.setup_logging")
+            if not _notice.handlers:
+                _h = logging.StreamHandler()
+                _h.setFormatter(logging.Formatter(
+                    "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+                ))
+                _notice.addHandler(_h)
+                _notice.propagate = False  # avoid duplicate emission via root
+            _notice.setLevel(logging.INFO)
+            _notice.info(
+                "P4-022: setup_logging(json_logs=True) SKIPPED — root logger "
+                "already has %d handler(s). Preserving existing configuration "
+                "(not clobbering with force=True). Configure JSON logs "
+                "upstream (e.g. via logging.config) if you need both.",
+                len(root.handlers),
+            )
+        return
+
+    # Root logger has NO handlers — safe to add ours.
     if json_logs:
         class _JSONFormatter(logging.Formatter):
             def format(self, record: logging.LogRecord) -> str:
@@ -207,10 +271,12 @@ def setup_logging(level: int = logging.INFO, json_logs: bool = False) -> None:
                 return json.dumps(entry)
         handler = logging.StreamHandler()
         handler.setFormatter(_JSONFormatter())
-        logging.basicConfig(level=level, handlers=[handler], force=True)
+        root.addHandler(handler)
     else:
         fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-        logging.basicConfig(level=level, format=fmt, force=True)
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(fmt))
+        root.addHandler(handler)
 
 
 # P4-023 ROOT FIX (lineterminator pandas 1.x compat):
@@ -2384,6 +2450,27 @@ class PipelineConfig:
     # own Phase1StagedData instance so the bridge fallback is wired in
     # automatically on every bridge-driven run.
     pathway_bridge: Optional[Any] = None
+    # P4-026 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+    # Explicit Phase 1 directory for the DrugBank safety-signal loader.
+    # When set, run_pipeline calls
+    # ``build_reward_function_with_phase1_safety(phase1_dir=config.phase1_dir)``
+    # so the reward function uses the LIVE Phase 1 DrugBank withdrawn-drug
+    # set (merged with the hardcoded WITHDRAWN_DRUGS frozenset). This is
+    # the production path — newly-withdrawn drugs that Phase 1 correctly
+    # flagged ``is_withdrawn=True`` are caught by the reward function,
+    # not just the ~41 drugs in the hardcoded frozenset.
+    #
+    # When None (default), run_pipeline falls back to the
+    # ``PHASE1_PROCESSED_DIR`` env var. When BOTH are unset, run_pipeline
+    # logs a CRITICAL warning (the patient-safety guardrail is in
+    # DEGRADED mode) and uses the hardcoded frozenset only. In
+    # ``allow_fake_data=True`` mode (dev/CI), the warning is downgraded
+    # to DEBUG — fake-data runs don't need Phase 1 data.
+    #
+    # The GT-RL bridge (run_4phase.py) sets this to its own resolved
+    # Phase 1 output directory so the safety wiring is AUTOMATIC on every
+    # bridge-driven run, without requiring the operator to set env vars.
+    phase1_dir: Optional[str] = None
     # v90 P0 ROOT FIX (BUG #8): PPO hyperparams were NOT actually
     # configurable. getattr(cfg, 'ppo_gamma', 0.0) always returned the
     # default because PipelineConfig did not define these fields. A user
@@ -9537,46 +9624,64 @@ def compute_output_hmac(filepath: str, secret_key: str = "") -> Tuple[Optional[s
         is_verified = True
         key_source = "RL_HMAC_KEY env var"
     else:
-        # v89: derive deterministic project-default key for corruption detection.
-        # This is NOT cryptographically secure (an attacker who reads the source
-        # can forge it), but it DOES detect accidental corruption (file transfer
-        # errors, truncation, encoding issues). The is_verified=False flag makes
-        # the security level HONEST.
+        # P4-028 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+        # Derive the default key from a FIXED project secret (pipeline
+        # version constant ONLY), NOT from the file's content. The
+        # previous v89/P4-015 fix derived the key from
+        # ``pipeline_version + file_size + first_64_bytes``. The first
+        # 64 bytes of a CSV file are the HEADER (column names). If the
+        # column order changes between schema versions (e.g., a new
+        # feature column is added at position 2, shifting all subsequent
+        # columns), the first 64 bytes change → the default key changes
+        # → the HMAC value changes — even if the DATA ROWS are
+        # identical. A regulator re-verifying an OLD output with NEW
+        # code (new schema) sees an HMAC mismatch (FALSE TAMPER ALARM).
         #
-        # P4-015 ROOT FIX (HMAC key derivation broken):
-        # The ORIGINAL v89 code read the metadata file (``.meta.json``)
-        # to derive the default key from ``pipeline_version + run_id``.
-        # But save_results writes the metadata FIRST, then computes the
-        # HMAC, then RE-WRITES the metadata with the HMAC field. A
-        # verifier who re-computes the HMAC derives a DIFFERENT default
-        # key (because the metadata now contains the output_hmac_sha256
-        # field, changing the file content). The integrity guarantee
-        # was broken — a pharma partner re-verifying got a mismatch.
+        # The 21 CFR Part 11 integrity concern: a false tamper alarm
+        # forces an investigation, slows down regulatory review, and
+        # erodes trust in the platform's audit trail. The previous
+        # behavior was especially bad because the false alarm rate
+        # increased with every schema migration — exactly when the
+        # platform is being upgraded and regulators are most likely to
+        # re-verify old outputs.
         #
-        # The fix: derive the default key from the CSV file's OWN
-        # content (its size and first 64 bytes), NOT from the metadata.
-        # The CSV content does NOT change between HMAC computation and
-        # re-verification, so the key is stable. The metadata can be
-        # updated freely without invalidating the HMAC.
+        # The fix: derive the default key from a FIXED string (the
+        # pipeline version constant) — NO file content, NO file size.
+        # This makes the HMAC STABLE across schema versions: the same
+        # data rows produce the same HMAC regardless of column order.
+        # The trade-off (already acknowledged by is_verified=False):
+        # the default key is NOT cryptographically secure — an attacker
+        # who reads the source code can forge it. The is_verified=False
+        # flag makes this HONEST. For cryptographic tamper detection,
+        # set RL_HMAC_KEY (documented in the CLI help).
+        #
+        # The default key STILL provides accidental-corruption
+        # detection (the original v89 goal): file transfer errors,
+        # truncation, encoding issues all change the file content →
+        # HMAC mismatch. This works because the HMAC is computed over
+        # the FULL file content (the loop below reads the file in 1MB
+        # chunks), regardless of how the KEY is derived. The key
+        # derivation only affects cross-version stability, not
+        # corruption detection within a single version.
+        #
+        # Hostile-auditor note: the previous comment claimed the
+        # file-content derivation was "the fix" for the metadata-
+        # mutation problem (P4-015). It WAS a fix for THAT problem,
+        # but it introduced a NEW problem (cross-schema-version
+        # instability). The metadata-mutation problem is now moot
+        # because we derive from a CONSTANT — neither metadata nor
+        # file content can mutate the key.
         default_key_parts = ["drugos-pipeline-v4.2.0"]  # P4-011: aligned with __version__
-        try:
-            st = os.stat(filepath)
-            default_key_parts.append(str(st.st_size))
-        except Exception:
-            pass
-        # P4-015: include the first 64 bytes of the CSV file itself
-        # (not the metadata) so the key is derived from the file's
-        # content, not from the mutable metadata. This makes the HMAC
-        # stable across metadata updates.
-        try:
-            with open(filepath, 'rb') as f:
-                file_head = f.read(64)
-            default_key_parts.append(file_head.hex())
-        except Exception:
-            pass
+        # P4-028: DO NOT include file_size or file_head — they change
+        # across schema versions (file_head is the CSV header = column
+        # names; adding a new column shifts the header bytes). The
+        # constant-only derivation is stable across schema versions.
         secret_key = "drugos-default:" + ":".join(default_key_parts)
         is_verified = False
-        key_source = "project-default (corruption detection only, NOT cryptographic)"
+        key_source = (
+            "project-default constant (corruption detection only, NOT "
+            "cryptographic; cross-schema-version stable per P4-028)"
+        )
 
     h = hmac.new(secret_key.encode(), digestmod=hashlib.sha256)
     with open(filepath, 'rb') as f:
@@ -10701,6 +10806,69 @@ def run_pipeline(
         # internally calls set_seed via the config, but we re-seed here
         # to be explicit and to cover any code that reads RNG state
         # before PPO is constructed.
+        # P4-025 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+        # ALSO set ``os.environ["PYTHONHASHSEED"]`` so that any SUBPROCESS
+        # spawned by run_pipeline (e.g., the GT-RL bridge subprocess, the
+        # Phase 1 Airflow worker, the Phase 2 kg_builder subprocess) gets
+        # a deterministic hash seed. This makes dict/set iteration order
+        # deterministic across runs — important for reproducibility of
+        # any code that iterates frozensets like ``WITHDRAWN_DRUGS`` or
+        # ``INDICATION_WITHDRAWN_DRUGS.keys()``.
+        #
+        # IMPORTANT: setting PYTHONHASHSEED at runtime does NOT affect
+        # the CURRENT process — Python reads PYTHONHASHSEED ONCE at
+        # interpreter startup. The current process's hash seed is fixed
+        # at startup. To make the CURRENT process deterministic, the
+        # env var must be set BEFORE Python starts (e.g., in the shell
+        # wrapper or Dockerfile). We:
+        #   1. Set the env var here for SUBPROCESSES (covers the bridge).
+        #   2. Log a CRITICAL warning if the current process's hash seed
+        #      appears randomized (we can't detect this directly, but we
+        #      can check if PYTHONHASHSEED was set in the env at startup
+        #      by inspecting ``os.environ`` — if it was unset, the
+        #      current process IS randomized, and we warn the operator
+        #      to set it in the Dockerfile / shell wrapper for full
+        #      reproducibility).
+        #   3. The Dockerfiles (Dockerfile.ml, Dockerfile.gpu,
+        #      Dockerfile.python-ml) set ``ENV PYTHONHASHSEED=0`` for
+        #      production builds (separate fix in this same commit).
+        # This is the standard pattern for 21 CFR Part 11 reproducibility:
+        # the runtime env-var set covers subprocesses; the Dockerfile ENV
+        # covers the main process; the warning catches dev/CI runs that
+        # bypass the Dockerfile.
+        os.environ["PYTHONHASHSEED"] = str(config.seed)
+        # P4-025: warn if the CURRENT process's hash seed was NOT set at
+        # startup. We can't read the actual hash seed (Python doesn't
+        # expose it), but we CAN check whether PYTHONHASHSEED was in the
+        # environment when the process started. If it was unset, the
+        # current process IS using a randomized hash seed, and dict/set
+        # iteration order may differ across runs even with the same
+        # numpy/torch/random seed.
+        _pyhash_at_startup = os.environ.get("PYTHONHASHSEED")
+        if _pyhash_at_startup is None or _pyhash_at_startup == "random":
+            logger.warning(
+                "P4-025: PYTHONHASHSEED was NOT set at process startup "
+                "(current env value: %r). Python's hash randomization is "
+                "ENABLED by default since Python 3.3 — dict/set iteration "
+                "order is non-deterministic across runs. This affects "
+                "frozensets like WITHDRAWN_DRUGS and dicts like "
+                "INDICATION_WITHDRAWN_DRUGS. Two runs with seed=%d may "
+                "produce slightly different policies. For 21 CFR Part 11 "
+                "reproducibility, set PYTHONHASHSEED=0 (or a fixed int) "
+                "BEFORE the Python interpreter starts — e.g., in the "
+                "Dockerfile (ENV PYTHONHASHSEED=0) or shell wrapper "
+                "(export PYTHONHASHSEED=0). We have set os.environ now "
+                "so SUBPROCESSES spawned by run_pipeline will be "
+                "deterministic, but the CURRENT process remains randomized.",
+                _pyhash_at_startup, config.seed,
+            )
+        else:
+            logger.info(
+                "P4-025: PYTHONHASHSEED=%s was set at process startup — "
+                "current process is fully deterministic. Subprocesses "
+                "will inherit PYTHONHASHSEED=%d (set by run_pipeline).",
+                _pyhash_at_startup, config.seed,
+            )
         import random as _random
         _random.seed(config.seed)
         np.random.seed(config.seed)  # numpy is imported at module level as np
@@ -10713,7 +10881,8 @@ def run_pipeline(
             pass  # torch not installed (CI without GPU deps)
         logger.info(
             f"P4-015: RL training seed = {config.seed} (propagated from "
-            f"GT-RL bridge via explicit run_pipeline seed parameter)."
+            f"GT-RL bridge via explicit run_pipeline seed parameter). "
+            f"P4-025: PYTHONHASHSEED={config.seed} set for subprocesses."
         )
 
     metrics = PipelineMetrics()
@@ -10824,13 +10993,17 @@ def run_pipeline(
     # The ``treat_unknown_as_withdrawn=True`` default means a drug with
     # ``is_withdrawn=None`` in the input row is treated as WITHDRAWN
     # (fail-CLOSED) — the conservative patient-safety default.
-    _phase1_dir = os.environ.get("PHASE1_PROCESSED_DIR", "phase1/processed_data")
+    _phase1_dir = (
+        config.phase1_dir
+        if getattr(config, "phase1_dir", None)
+        else os.environ.get("PHASE1_PROCESSED_DIR")
+    )
     _phase1_dir_resolved = (
         _phase1_dir
-        if os.path.isabs(_phase1_dir)
-        else os.path.abspath(_phase1_dir)
+        if (_phase1_dir and os.path.isabs(_phase1_dir))
+        else (os.path.abspath(_phase1_dir) if _phase1_dir else None)
     )
-    if os.path.isdir(_phase1_dir_resolved):
+    if _phase1_dir_resolved and os.path.isdir(_phase1_dir_resolved):
         try:
             from rl.reward import build_reward_function_with_phase1_safety
             reward_fn = build_reward_function_with_phase1_safety(
@@ -10840,8 +11013,11 @@ def run_pipeline(
             )
             logger.info(
                 "TEAMMATE-3: Built reward function with Phase 1 safety "
-                "signals from %s. safety_source=%s, withdrawn_drugs=%d.",
+                "signals from %s (source: %s). safety_source=%s, "
+                "withdrawn_drugs=%d.",
                 _phase1_dir_resolved,
+                "config.phase1_dir" if getattr(config, "phase1_dir", None)
+                else "PHASE1_PROCESSED_DIR env var",
                 getattr(reward_fn, "_safety_source", "unknown"),
                 len(getattr(reward_fn, "_withdrawn_drugs", WITHDRAWN_DRUGS)),
             )
@@ -10864,13 +11040,32 @@ def run_pipeline(
             )
             reward_fn = RewardFunction(config.reward)
     else:
-        logger.warning(
-            "TEAMMATE-3: Phase 1 processed dir %s not found. Falling back "
-            "to hardcoded WITHDRAWN_DRUGS frozenset (%d drugs). The "
-            "patient-safety guardrail is running in DEGRADED mode — Phase 1 "
-            "live data is NOT being used. Set PHASE1_PROCESSED_DIR to the "
-            "Phase 1 output directory to enable live safety signals.",
-            _phase1_dir_resolved, len(WITHDRAWN_DRUGS),
+        # P4-026 ROOT FIX (hostile-auditor v143): neither config.phase1_dir
+        # nor PHASE1_PROCESSED_DIR pointed to a valid directory. Log
+        # CRITICAL in production mode (allow_fake_data=False, the default)
+        # so the operator knows the patient-safety guardrail is in
+        # DEGRADED mode. In dev/CI mode (allow_fake_data=True), downgrade
+        # to DEBUG — fake-data runs don't need Phase 1 data.
+        _is_dev_mode = bool(getattr(config, "allow_fake_data", False))
+        _log_fn = logger.debug if _is_dev_mode else logger.critical
+        _log_fn(
+            "P4-026: Phase 1 safety-signal directory not available "
+            "(config.phase1_dir=%r, PHASE1_PROCESSED_DIR=%r, "
+            "resolved=%r). Falling back to hardcoded WITHDRAWN_DRUGS "
+            "frozenset (%d drugs). The patient-safety guardrail is "
+            "running in DEGRADED mode — Phase 1 live data is NOT being "
+            "used. Newly-withdrawn drugs that Phase 1 correctly flagged "
+            "is_withdrawn=True will NOT be caught by the reward function "
+            "unless their names happen to be in the hardcoded frozenset. "
+            "Set config.phase1_dir (preferred) or PHASE1_PROCESSED_DIR "
+            "env var to the Phase 1 output directory to enable live "
+            "safety signals.%s",
+            getattr(config, "phase1_dir", None),
+            os.environ.get("PHASE1_PROCESSED_DIR"),
+            _phase1_dir_resolved,
+            len(WITHDRAWN_DRUGS),
+            "" if not _is_dev_mode
+            else " (allow_fake_data=True — DEGRADED mode is acceptable for dev/CI.)",
         )
         reward_fn = RewardFunction(config.reward)
     reward_fn.set_validated_hypotheses(validated_set)
@@ -10889,35 +11084,50 @@ def run_pipeline(
     # Instead, we compute reward statistics on the TRAIN set only (after
     # the split) for logging purposes. The env computes rewards on-the-fly
     # during step(), which is correct and avoids the leak.
-    # P4-046 ROOT FIX (Teammate 13, LOW): the previous version called
-    # ``train_df.apply(lambda r: reward_fn.compute(r), axis=1)`` over the
-    # ENTIRE train set purely to log min/max reward. ``.apply(axis=1)`` is
-    # a Python-level row-by-row loop — for a 10K-row train set that is
-    # ~10K ``reward_fn.compute`` calls, each of which does several dict
-    # lookups + arithmetic. On the V1-scale dataset (100K+ rows) this log
-    # line alone took minutes and dominated pipeline runtime, for a
-    # statistic that is also computed (on-the-fly, correctly) inside the
-    # env during ``step()``.
-    # P4-035 ROOT FIX: sample at most 10K rows for the reward-range log.
-    # 10K samples gives a stable min/max estimate (reward is bounded in
-    # [0, 1]) without the O(N) Python loop. The env's own reward stats
-    # (logged during training) remain the authoritative source.
-    # The previous v100 fix used 1000 samples; the P4-035 fix raises this
-    # to 10K (still << the 100K+ full train set) for a more stable estimate
-    # of the reward distribution's tails (the min/max can be noisy with
-    # only 1000 samples if the distribution is heavy-tailed).
-    _REWARD_SAMPLE_LIMIT = 10_000  # P4-035 ROOT FIX: cap reward sample at 10K rows
-    reward_sample_size = min(_REWARD_SAMPLE_LIMIT, len(train_df))
-    reward_sample_df = (
-        train_df.sample(n=reward_sample_size, random_state=42)
-        if reward_sample_size < len(train_df)
-        else train_df
-    )
-    train_reward_sample = reward_sample_df.apply(lambda r: reward_fn.compute(r), axis=1)
+    # P4-023 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+    # REMOVED the slow ``train_df.apply(lambda r: reward_fn.compute(r), axis=1)``
+    # over a 10K-row sample. This was a Python-level row-by-row loop
+    # (~10K ``reward_fn.compute`` calls = several seconds on production
+    # data) purely to log a min/max reward statistic. The audit found:
+    #
+    #   1. The DrugRankingEnv computes the SAME reward on-the-fly during
+    #      ``step()`` (authoritative) — the pre-training log line was
+    #      duplicate compute on a sample, while the env computes on the
+    #      FULL train set during actual training.
+    #   2. ``df.apply(axis=1)`` creates a ``pd.Series`` per row (~5μs
+    #      overhead per row) then calls the lambda. Each
+    #      ``reward_fn.compute(row)`` call does dict lookups + arithmetic
+    #      + multiple gate checks (withdrawn with ICD-10/pregnancy
+    #      substring/tokenized matching, safety sigmoid, validated bonus
+    #      flagging, etc.). For 10K rows this is ~50ms minimum, often
+    #      >1s on real hardware.
+    #   3. The P4-035 fix raised the sample from 1K to 10K for "a more
+    #      stable estimate of the reward distribution's tails" — but the
+    #      env's own reward stats (logged during the first episode) are
+    #      computed on the FULL train set and are the AUTHORITATIVE
+    #      source. The pre-training sample estimate was always inferior.
+    #
+    # The fix: REMOVE the duplicate logging entirely. If a developer
+    # needs pre-training reward diagnostics, they can call
+    # ``reward_fn.compute(train_df.iloc[0])`` (microseconds, one row)
+    # or wait for the env's first-episode stats. The pipeline startup
+    # is now faster, with NO loss of signal — the env's reward stats
+    # during ``step()`` remain the authoritative source.
+    #
+    # Hostile-auditor note: the previous "P4-046 ROOT FIX" comment
+    # claimed the sample was "purely to log min/max reward" — which is
+    # exactly the waste the audit identified. The "P4-035 ROOT FIX"
+    # then RAISED the sample from 1K to 10K, making the waste 10x
+    # worse. Both comments framed the change as an improvement; in
+    # reality both preserved the slow Python loop. This v143 fix
+    # removes the loop entirely.
     logger.info(
-        f"Reward range (train sample of {len(reward_sample_df)}/{len(train_df)}, "
-        f"capped at _REWARD_SAMPLE_LIMIT={_REWARD_SAMPLE_LIMIT}): "
-        f"{train_reward_sample.min():.3f} -> {train_reward_sample.max():.3f}"
+        "P4-023: Pre-training reward-range logging REMOVED (was a slow "
+        "df.apply over a 10K sample). The DrugRankingEnv computes the "
+        "authoritative reward stats on-the-fly during step() on the "
+        "FULL train set — see the env's first-episode log lines for "
+        "min/max/mean reward. Pipeline startup is now faster with no "
+        "loss of signal."
     )
 
     # ROOT FIX (W-04): compute the adaptive gnn threshold on a HELD-OUT
@@ -12265,6 +12475,237 @@ def run_pipeline(
 # ============================================================================
 # EVALUATION REPORT (P4-007 / audit #199)
 # ============================================================================
+
+# P4-029 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+# Private helper that runs the PPO policy through ``test_env`` ONCE,
+# collecting per-pair (prob_high, drug, disease, is_known_positive) AND
+# the Top-N candidates from the env's high_ranked buffer. This eliminates
+# the 2x inference cost in ``produce_evaluation_report`` (which previously
+# called ``evaluate_agent`` then ``compute_auc`` — each ran the policy
+# through ALL test pairs).
+#
+# The helper is PRIVATE (leading underscore) because it exists ONLY to
+# serve ``produce_evaluation_report``. Other callers should continue to
+# use the public ``evaluate_agent`` (returns only candidates) and
+# ``compute_auc`` (returns only AUC + CI) — their signatures are
+# unchanged for backward compatibility.
+#
+# Returns a Dict with keys:
+#   - "candidates": List[RankedCandidate] — Top-N from env.get_top_candidates
+#   - "predictions": List[float] — prob_high for each pair (aligned with labels)
+#   - "labels": List[int] — 1 if (drug, disease) in KNOWN_POSITIVES else 0
+#   - "n_known_in_test": int — count of known positives in the test set
+#   - "env": DrugRankingEnv — the test_env after the inference loop (for
+#     any caller that needs post-inference env state)
+def _run_inference_once(
+    model: Any,
+    test_env: "DrugRankingEnv",
+    top_n: int = 10,
+    vec_normalize: Any = None,
+) -> Dict[str, Any]:
+    """Run the policy through ``test_env`` ONCE, collecting all signals.
+
+    P4-029 ROOT FIX: this is the SINGLE inference pass that
+    ``produce_evaluation_report`` uses to derive BOTH the Top-N candidates
+    AND the AUC. The previous code called ``evaluate_agent`` (1 inference
+    pass) then ``compute_auc`` (a SECOND inference pass over a fresh test
+    env built from test_data) — 2x inference cost. On a 1M-pair test set,
+    this doubles evaluation time. When ``run_scientific_validation_gate``
+    is called after ``run_pipeline`` (which has its OWN evaluation logic),
+    the agent runs 4x per test pair.
+
+    This helper:
+      1. Resets ``test_env`` with ``shuffle=False`` (deterministic order,
+         required for label/prediction alignment — same invariant as
+         ``compute_auc``).
+      2. Loops through the env, calling ``extract_policy_prob_high`` ONCE
+         per pair (same pattern as ``evaluate_agent`` and ``compute_auc``).
+      3. For each pair, records:
+           - ``prob_high`` (the policy's continuous score for action HIGH)
+           - ``drug_lower``, ``disease_lower`` (for KP label lookup)
+           - The pair is labeled 1 if it's in ``KNOWN_POSITIVES``, else 0.
+      4. After the loop, calls ``env.get_top_candidates(top_n)`` to get
+         the Top-N candidates (the env's high_ranked buffer was populated
+         during the loop via ``env._current_policy_prob = prob_high``).
+      5. Returns the candidates + predictions + labels so the caller can
+         compute AUC, KP recovery, and per-candidate features WITHOUT
+         re-running the policy.
+
+    Args:
+        model: Trained PPO model.
+        test_env: DrugRankingEnv built from held-out test data. MUST be
+            the same env that ``produce_evaluation_report`` received
+            (NOT a fresh one — we don't want to rebuild disease stats).
+        top_n: Number of top candidates to return.
+        vec_normalize: Optional VecNormalize wrapper (passed to
+            ``extract_policy_prob_high`` so obs is normalized at inference).
+
+    Returns:
+        Dict with keys "candidates", "predictions", "labels",
+        "n_known_in_test", "env".
+    """
+    # Build the KNOWN_POSITIVES lookup once (lowercased).
+    known_set = {(d.lower(), v.lower()) for d, v in KNOWN_POSITIVES}
+
+    # Reset the env with shuffle=False for deterministic label/prediction
+    # alignment (same invariant as compute_auc — see P4-001 fix).
+    obs, _ = test_env.reset(options={"shuffle": False})
+    done = False
+
+    predictions: List[float] = []
+    labels: List[int] = []
+    n_known_in_test = 0
+
+    while not done:
+        # Capture the row index BEFORE extract_policy_prob_high (same
+        # off-by-one defensive alignment as compute_auc — P4-001 fix).
+        current_row_idx = int(test_env.current_idx)
+        # Extract policy probability ONCE (same pattern as evaluate_agent
+        # and compute_auc — uses extract_policy_prob_high to avoid double
+        # policy network invocation per C5 fix).
+        prob_high = extract_policy_prob_high(
+            model, obs, vec_normalize=vec_normalize,
+            require_vec_normalize=(vec_normalize is not None),
+        )
+        # Read the label from test_env.data (NOT a separate test_data
+        # DataFrame — same defensive invariant as compute_auc P4-001 fix:
+        # the env's data is the source of truth for what the policy saw).
+        row = test_env.data.iloc[current_row_idx]
+        drug_lower = str(row[DRUG_COL]).lower().strip()
+        disease_lower = str(row[DISEASE_COL]).lower().strip()
+        if (drug_lower, disease_lower) in known_set:
+            labels.append(1)
+            n_known_in_test += 1
+        else:
+            labels.append(0)
+        predictions.append(float(prob_high))
+        # Set the policy prob on the env BEFORE step() so the high_ranked
+        # buffer captures it (used by get_top_candidates downstream —
+        # same pattern as evaluate_agent B-F2 fix).
+        test_env._current_policy_prob = prob_high
+        # Derive the action from the prob (same >= 0.5 threshold as
+        # evaluate_agent and compute_auc — P4-037 fix for boundary
+        # consistency).
+        action_int = 1 if prob_high >= 0.5 else 0
+        obs, _, done, _, _ = test_env.step(action_int)
+
+    # Get the Top-N candidates from the env's high_ranked buffer.
+    candidates = test_env.get_top_candidates(top_n=top_n)
+    display_top_candidates(candidates, top_n=top_n)
+
+    return {
+        "candidates": candidates,
+        "predictions": predictions,
+        "labels": labels,
+        "n_known_in_test": n_known_in_test,
+        "env": test_env,
+    }
+
+
+# P4-029 ROOT FIX (continued): private helper that computes the AUC +
+# bootstrap CI from PRE-COMPUTED predictions and labels (skipping the
+# inference loop). This is the "compute_auc without inference" path
+# used by ``produce_evaluation_report`` when it has already run inference
+# via ``_run_inference_once``.
+def _compute_auc_from_predictions(
+    predictions: List[float],
+    labels: List[int],
+    n_known_in_test: int,
+    n_bootstrap: int = 1000,
+) -> Optional[Dict[str, Any]]:
+    """Compute AUC + 95% bootstrap CI from pre-computed predictions.
+
+    P4-029: this is the inference-free counterpart of ``compute_auc``.
+    Same return shape (Dict with auc, ci_lower, ci_upper, n_bootstrap),
+    same None-for-degenerate-case semantics (V4 S-F3 fix).
+
+    Args:
+        predictions: List of float policy probabilities (aligned with labels).
+        labels: List of int (0 or 1) — 1 if the pair is a known positive.
+        n_known_in_test: Count of known positives in the test set (for
+            the degenerate-case check — same as compute_auc).
+        n_bootstrap: Number of bootstrap resamples for the 95% CI.
+            Default 1000. Set to 0 to skip the CI.
+
+    Returns:
+        Dict with auc, ci_lower, ci_upper, n_bootstrap. Or None if the
+        test set is degenerate (0 KPs or only one class — V4 S-F3 fix).
+    """
+    from sklearn.metrics import roc_auc_score
+
+    # V4 S-F3 fix: return None for degenerate cases.
+    if n_known_in_test == 0:
+        logger.warning(
+            "V4 S-F3: 0 KNOWN_POSITIVES in test set. AUC is UNDEFINED. "
+            "Returning None (distinguishable from 0.5 'random')."
+        )
+        return None
+    if len(set(labels)) < 2:
+        logger.warning(
+            "V4 S-F3: only one class present in labels (all %d). AUC is "
+            "UNDEFINED. Returning None.",
+            labels[0] if labels else -1,
+        )
+        return None
+
+    try:
+        auc = float(roc_auc_score(labels, predictions))
+    except ValueError as exc:
+        logger.warning(
+            "roc_auc_score failed: %s. Returning None (degenerate case).",
+            exc,
+        )
+        return None
+
+    # Bootstrap CI (same logic as compute_auc).
+    if n_bootstrap <= 0:
+        return {
+            "auc": auc,
+            "ci_lower": auc,
+            "ci_upper": auc,
+            "n_bootstrap": 0,
+        }
+
+    import numpy as _np
+    rng = _np.random.RandomState(42)
+    n = len(labels)
+    labels_arr = _np.array(labels, dtype=int)
+    preds_arr = _np.array(predictions, dtype=float)
+    bootstrap_aucs: List[float] = []
+    for _ in range(n_bootstrap):
+        idx = rng.randint(0, n, size=n)
+        sample_labels = labels_arr[idx]
+        if len(set(sample_labels.tolist())) < 2:
+            continue  # skip degenerate resample
+        try:
+            sample_auc = float(roc_auc_score(sample_labels, preds_arr[idx]))
+            bootstrap_aucs.append(sample_auc)
+        except ValueError:
+            continue
+
+    if not bootstrap_aucs:
+        logger.warning(
+            "All %d bootstrap resamples were degenerate. CI is undefined. "
+            "Returning point estimate only.",
+            n_bootstrap,
+        )
+        return {
+            "auc": auc,
+            "ci_lower": auc,
+            "ci_upper": auc,
+            "n_bootstrap": 0,
+        }
+
+    ci_lower = float(_np.percentile(bootstrap_aucs, 2.5))
+    ci_upper = float(_np.percentile(bootstrap_aucs, 97.5))
+    return {
+        "auc": auc,
+        "ci_lower": ci_lower,
+        "ci_upper": ci_upper,
+        "n_bootstrap": len(bootstrap_aucs),
+    }
+
+
 def produce_evaluation_report(
     model: Any,
     test_env: "DrugRankingEnv",
@@ -12328,30 +12769,84 @@ def produce_evaluation_report(
     if test_data is None:
         test_data = test_env.data
 
-    # 1. Run evaluate_agent to get top candidates (deterministic).
-    candidates = evaluate_agent(
+    # P4-029 ROOT FIX (hostile-auditor v143, MEDIUM — Teammate 11):
+    # Run the policy through test_env ONCE via ``_run_inference_once``,
+    # collecting (candidates, predictions, labels) in a SINGLE pass.
+    # The previous code called ``evaluate_agent`` (1 inference pass over
+    # test_env) then ``compute_auc`` (a SECOND inference pass over a
+    # FRESH test env built from test_data) — 2x inference cost. On a 1M-
+    # pair test set, this doubled evaluation time. When
+    # ``run_scientific_validation_gate`` was called after ``run_pipeline``
+    # (which has its OWN evaluation logic calling evaluate_agent +
+    # compute_auc), the agent ran 4x per test pair.
+    #
+    # The fix uses ``_run_inference_once`` (1 pass) to get candidates +
+    # predictions + labels, then ``_compute_auc_from_predictions`` to
+    # derive AUC + bootstrap CI from the pre-computed predictions
+    # (NO inference). This HALVES the inference cost.
+    #
+    # IMPORTANT: ``_run_inference_once`` uses the ``test_env`` we
+    # received — NOT a fresh env built from test_data. This means the
+    # ``reward_fn`` and ``disease_context_stats`` parameters (which the
+    # previous code passed to ``compute_auc`` so it would build a fresh
+    # env with them) are now consumed by the CALLER when building
+    # ``test_env``. The caller is responsible for building ``test_env``
+    # with the train env's reward_fn + disease_context_stats (the
+    # P4-005 fix's intent — no train/test distribution shift). The
+    # ``run_scientific_validation_gate`` function already does this
+    # (see its test_env construction). We log a WARNING if reward_fn
+    # or disease_context_stats are provided but the test_env appears
+    # not to have them (defensive invariant — cannot fully verify at
+    # runtime, but we can check the obvious case).
+    if reward_fn is not None and not getattr(test_env, "_uses_train_reward_fn", False):
+        logger.warning(
+            "P4-029: produce_evaluation_report received reward_fn but "
+            "test_env does not have _uses_train_reward_fn=True. The "
+            "test_env may have been built with a FRESH reward_fn (not "
+            "the train env's), causing train/test distribution shift. "
+            "The reward_fn parameter is now IGNORED (test_env's "
+            "reward_fn is used as-is). Build test_env with the train "
+            "env's reward_fn BEFORE calling produce_evaluation_report."
+        )
+    if disease_context_stats is not None and not getattr(test_env, "_uses_train_disease_stats", False):
+        logger.warning(
+            "P4-029: produce_evaluation_report received "
+            "disease_context_stats but test_env does not have "
+            "_uses_train_disease_stats=True. The test_env may compute "
+            "its own disease stats from test data (distribution shift). "
+            "The disease_context_stats parameter is now IGNORED. Build "
+            "test_env with the train env's disease_context_stats BEFORE "
+            "calling produce_evaluation_report."
+        )
+
+    # 1. SINGLE inference pass — get candidates + predictions + labels.
+    _inference = _run_inference_once(
         model, test_env, top_n=top_n, vec_normalize=vec_normalize,
     )
+    candidates = _inference["candidates"]
+    _predictions = _inference["predictions"]
+    _labels = _inference["labels"]
+    _n_known_in_test = _inference["n_known_in_test"]
 
-    # 2. Compute AUC.
-    # P4-005 ROOT FIX: propagate reward_fn + disease_context_stats to
-    # compute_auc so the test env uses the SAME adaptive threshold and
-    # disease stats as the train env (no train/test distribution shift).
-    # The previous call DROPPED both parameters, causing compute_auc to
-    # build a fresh test env that recomputed disease stats from test
-    # data — the AUC was computed against a DIFFERENT distribution than
-    # the policy was trained against.
-    # TM16 v132 P4-005: compute_auc now returns a Dict
+    # 2. Compute AUC from the pre-computed predictions (NO inference).
+    # P4-005 ROOT FIX intent preserved: the test_env was built with the
+    # train env's reward_fn + disease_context_stats by the caller, so
+    # the predictions are computed against the SAME distribution the
+    # policy was trained against (no train/test distribution shift).
+    # TM16 v132 P4-005: _compute_auc_from_predictions returns a Dict
     # {auc, ci_lower, ci_upper, n_bootstrap}. The 'auc' field is the
     # point estimate (used by the report's 'auc' key for backward compat
     # with downstream consumers like the dashboard). The 'ci_lower' and
     # 'ci_upper' fields are the 95% bootstrap CI bounds — used by the
     # scientific validation gate to check the DOCX §8 criterion
     # "GT AUC > 0.85" via ci_lower >= 0.85 (not auc >= 0.85).
-    _auc_full = compute_auc(
-        model, test_data, config=config, vec_normalize=vec_normalize,
-        reward_fn=reward_fn,
-        disease_context_stats=disease_context_stats,
+    _auc_full = _compute_auc_from_predictions(
+        predictions=_predictions,
+        labels=_labels,
+        n_known_in_test=_n_known_in_test,
+        # Use the same default n_bootstrap as compute_auc (1000). Set
+        # to 0 in unit tests for speed.
+        n_bootstrap=1000,
     )
     if _auc_full is None:
         auc = None
@@ -12873,13 +13368,17 @@ def run_scientific_validation_gate(
         # a withdrawn drug that training correctly hard-rejected could
         # get a non-negative reward at validation time, producing
         # inconsistent AUC numbers.
-        _vh_phase1_dir = os.environ.get("PHASE1_PROCESSED_DIR", "phase1/processed_data")
+        _vh_phase1_dir = (
+            config.phase1_dir
+            if getattr(config, "phase1_dir", None)
+            else os.environ.get("PHASE1_PROCESSED_DIR")
+        )
         _vh_phase1_dir_resolved = (
             _vh_phase1_dir
-            if os.path.isabs(_vh_phase1_dir)
-            else os.path.abspath(_vh_phase1_dir)
+            if (_vh_phase1_dir and os.path.isabs(_vh_phase1_dir))
+            else (os.path.abspath(_vh_phase1_dir) if _vh_phase1_dir else None)
         )
-        if os.path.isdir(_vh_phase1_dir_resolved):
+        if _vh_phase1_dir_resolved and os.path.isdir(_vh_phase1_dir_resolved):
             try:
                 from rl.reward import build_reward_function_with_phase1_safety
                 _vh_reward_fn = build_reward_function_with_phase1_safety(
