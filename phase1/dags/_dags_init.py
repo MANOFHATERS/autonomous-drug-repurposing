@@ -48,10 +48,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-#: The Phase 1 project root (parent of the ``dags/`` directory). All
-#: pipeline / config / entity_resolution imports resolve from here.
-_PROJECT_ROOT: str = str(Path(__file__).resolve().parent.parent)
-
 
 def ensure_project_root() -> str:
     """Insert ``_PROJECT_ROOT`` at the front of ``sys.path`` (idempotent).
@@ -64,10 +60,34 @@ def ensure_project_root() -> str:
     its module body. This makes the ``sys.path`` side effect explicit
     per-DAG rather than hidden in an imported module -- fixing the test
     isolation breakage.
+
+    P1-051 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+      The audit found that ``_PROJECT_ROOT`` was a MODULE-LEVEL constant
+      computed at import time, but it was used ONLY by this function.
+      A module-level constant computed-at-import has two costs:
+        1. It runs ``Path(__file__).resolve()`` even if no caller ever
+           invokes ``ensure_project_root()``. In test environments that
+           import ``dags._dags_init`` to mock ``require_airflow()``
+           (which doesn't need the project root), this is wasted work
+           AND a side effect — ``resolve()`` calls ``os.stat`` to
+           resolve symlinks, which is a filesystem syscall on EVERY
+           import.
+        2. It creates a module attribute that test code can accidentally
+           depend on (``from dags._dags_init import _PROJECT_ROOT``),
+           creating a hidden coupling. If a future refactor changes the
+           project structure, all such callers break silently.
+      ROOT FIX: move the computation INSIDE the function. The path is
+      recomputed on every call (cheap — ``Path(__file__).resolve()`` is
+      <1ms), but the computation is now VISIBLE in the function body,
+      and there is no module-level attribute to accidentally depend on.
+      Tests that need the project root MUST call ``ensure_project_root()``
+      (which is the documented public API) — they can no longer reach
+      into a private module attribute.
     """
-    if _PROJECT_ROOT not in sys.path:
-        sys.path.insert(0, _PROJECT_ROOT)
-    return _PROJECT_ROOT
+    project_root: str = str(Path(__file__).resolve().parent.parent)
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    return project_root
 
 
 def require_airflow() -> tuple:

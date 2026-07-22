@@ -1513,7 +1513,7 @@ class TestRateLimitedHttpClient:
 
     def test_http_client_initializes_with_defaults(self):
         """The HTTP client initializes with default settings."""
-        from pipelines._http_client import RateLimitedHttpClient
+        from pipelines._chembl_http_client import RateLimitedHttpClient  # P1-054: canonical name
 
         client = RateLimitedHttpClient()
         assert client.max_retries >= 1
@@ -1525,7 +1525,7 @@ class TestRateLimitedHttpClient:
 
     def test_http_client_get_success(self):
         """A successful GET returns parsed JSON and records the call."""
-        from pipelines._http_client import RateLimitedHttpClient
+        from pipelines._chembl_http_client import RateLimitedHttpClient  # P1-054: canonical name
 
         client = RateLimitedHttpClient()
         mock_response = MagicMock()
@@ -1544,7 +1544,7 @@ class TestRateLimitedHttpClient:
 
     def test_http_client_4xx_no_retry(self):
         """A 4xx response (not 429) fails immediately without retry."""
-        from pipelines._http_client import RateLimitedHttpClient, HttpClientError
+        from pipelines._chembl_http_client import RateLimitedHttpClient, HttpClientError  # P1-054: canonical name
 
         client = RateLimitedHttpClient(max_retries=3)
         mock_response = MagicMock()
@@ -1564,7 +1564,7 @@ class TestRateLimitedHttpClient:
 
     def test_http_client_response_too_large_aborts(self):
         """A response exceeding max_response_bytes raises MaxResponseSizeExceeded."""
-        from pipelines._http_client import (
+        from pipelines._chembl_http_client import (  # P1-054: canonical name
             MaxResponseSizeExceeded,
             RateLimitedHttpClient,
         )

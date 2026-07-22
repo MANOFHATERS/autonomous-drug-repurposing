@@ -918,19 +918,44 @@ from ._constants import (
 # (deduplicator uses CANONICAL_INCHIKEY_REGEX strict, DB loader uses
 # is_strict_inchikey strict) silently dead-lettered them. The fix has
 # TWO parts: (1) ``standardize_inchikey`` now strips the suffix before
-# validation (see above); (2) ``_INCHIKEY_PATTERN`` is now the STRICT
+# validation (see above); (2) ``CANONICAL_INCHIKEY_REGEX`` is the STRICT
 # 27-char pattern so any suffixed key still reaches validation is
 # rejected loudly. We delegate to the canonical regex from
 # ``_constants`` so there is exactly ONE definition of "valid InChIKey"
 # across the entire codebase.
-_INCHIKEY_PATTERN: re.Pattern[str] = CANONICAL_INCHIKEY_REGEX
+#
+# P1-055 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+#   The audit found that ``CANONICAL_INCHIKEY_REGEX`` was re-exported
+#   under the alias ``_INCHIKEY_PATTERN``. Similarly,
+#   ``CANONICAL_STANDARD_INCHIKEY_REGEX`` was aliased to
+#   ``_STANDARD_INCHIKEY_PATTERN``, and ``CANONICAL_NONSTANDARD_INCHIKEY_REGEX``
+#   to ``_NONSTANDARD_INCHIKEY_PATTERN``. The aliases created naming
+#   confusion: a reader searching for "InChIKey regex" had to know that
+#   the SAME regex was referenced under 6 different names across the
+#   codebase (``CANONICAL_INCHIKEY_REGEX`` in _constants, ``_INCHIKEY_PATTERN``
+#   in normalizer, ``_STANDARD_INCHIKEY_RE`` in models, ``_INCHIKEY_RE`` /
+#   ``INCHIKEY_PATTERN`` / ``INCHIKEY_RE`` in various pipelines). This
+#   naming divergence is exactly the kind of "schema drift" the audit
+#   flags as a silent-data-loss risk: if a future edit changes the
+#   canonical regex but misses one of the aliases, the alias becomes
+#   a STALE copy that validates against the OLD pattern.
+#
+#   ROOT FIX: DEPRECATE the aliases. Internal references in this file
+#   now use the canonical names (``CANONICAL_INCHIKEY_REGEX``,
+#   ``CANONICAL_STANDARD_INCHIKEY_REGEX``, etc.) directly. The aliases
+#   are KEPT as backward-compat shims (so external callers like
+#   ``test_v26_data_quality_fixes.py`` that import ``_INCHIKEY_PATTERN``
+#   continue to work) but are REMOVED from ``__all__`` so they are no
+#   longer part of the public API. New code MUST use the canonical
+#   names. The aliases will be REMOVED in a future version after all
+#   callers are migrated.
+_INCHIKEY_PATTERN: re.Pattern[str] = CANONICAL_INCHIKEY_REGEX  # DEPRECATED: use CANONICAL_INCHIKEY_REGEX directly
 
 # [SCI-8, COMP-1] Strict patterns — version char must be S (standard) or
 # N (non-standard).  Used by validate_inchikey(strict=True).
-# v29: re-export the canonical regexes under the legacy names so
-# existing callers in this file (and downstream importers) keep working.
-_STANDARD_INCHIKEY_PATTERN = CANONICAL_STANDARD_INCHIKEY_REGEX
-_NONSTANDARD_INCHIKEY_PATTERN = CANONICAL_NONSTANDARD_INCHIKEY_REGEX
+# P1-055: these aliases are DEPRECATED — use the CANONICAL_* names directly.
+_STANDARD_INCHIKEY_PATTERN = CANONICAL_STANDARD_INCHIKEY_REGEX  # DEPRECATED
+_NONSTANDARD_INCHIKEY_PATTERN = CANONICAL_NONSTANDARD_INCHIKEY_REGEX  # DEPRECATED
 
 # [DQ-1, ARCH-1, INTEROP-1, INTEROP-2] Synthetic InChIKey pattern.
 # LOOSENED to match the DB layer's `startswith("SYNTH")` contract.
@@ -5907,10 +5932,17 @@ __all__ = [
     "STEREO_POLICY",
     "UNIT_CONVERSIONS",
     "WITHDRAWN_GROUP_KEYWORDS",
-    "_INCHIKEY_PATTERN",
+    # P1-055 ROOT FIX: the _INCHIKEY_PATTERN / _STANDARD_INCHIKEY_PATTERN /
+    # _NONSTANDARD_INCHIKEY_PATTERN / _MIXTURE_INCHIKEY_PATTERN aliases
+    # are DEPRECATED and REMOVED from __all__. They still exist as
+    # module-level names (for backward compat with external callers like
+    # test_v26_data_quality_fixes.py) but are no longer part of the
+    # public API. Use the CANONICAL_* names from cleaning._constants
+    # directly. The _SYNTHETIC_*_PATTERN aliases remain in __all__ for
+    # now because they are NOT simple re-exports — they have additional
+    # logic (case-insensitivity, mixture handling) and do not have a
+    # 1:1 CANONICAL_* counterpart.
     "_MIXTURE_INCHIKEY_PATTERN",
-    "_NONSTANDARD_INCHIKEY_PATTERN",
-    "_STANDARD_INCHIKEY_PATTERN",
     "_SYNTHETIC_INCHIKEY_PATTERN",
     "_SYNTHETIC_INCHIKEY_STRICT_PATTERN",
     "__version__",

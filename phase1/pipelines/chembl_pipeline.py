@@ -321,7 +321,25 @@ from database.models import (
     InteractionType,
     PipelineRun,
 )
-from pipelines._http_client import (
+# P1-054 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+#   The audit found that ``pipelines._http_client`` was a 33-line
+#   backward-compat shim that re-exported symbols from the canonical
+#   ``pipelines._chembl_http_client`` module. The shim existed ONLY so
+#   historical callers that referenced the old name (``_http_client``)
+#   continued to work. The shim was misleading because the file name
+#   implied a generic, pipeline-agnostic HTTP utility — but the
+#   implementation hard-codes ChEMBL-specific behaviour (token-bucket
+#   parameters tuned for ChEMBL's rate limits, ``CHEMBL_MAX_RESPONSE_BYTES``
+#   size cap, the ChEMBL User-Agent string, and the ChEMBL REST API URL
+#   contract).
+#
+#   ROOT FIX: import directly from the canonical ``pipelines._chembl_http_client``
+#   module. The shim has been DELETED (see the deletion of
+#   ``phase1/pipelines/_http_client.py``). All other callers (test files)
+#   have also been migrated to the canonical import path. This is the
+#   master-grade fix: no misleading shim, no naming divergence, no
+#   "which file do I edit?" confusion for future maintainers.
+from pipelines._chembl_http_client import (
     CircuitBreakerOpenError,
     HttpClientError,
     RateLimitedHttpClient,

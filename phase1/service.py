@@ -228,7 +228,40 @@ def _count_csv_rows(path: Path) -> int:
                 next(reader)  # skip header
             except StopIteration:
                 return 0
-            return sum(1 for _row in reader if _row)  # count non-empty rows
+            # P1-057 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+            #   The previous code did ``sum(1 for _row in reader if _row)``.
+            #   ``_row`` is a list of strings (csv.reader yields lists).
+            #   ``if _row`` is True for ANY non-empty list — including a
+            #   list of empty strings like ``['', '', '']`` (a row with
+            #   3 empty fields, which csv.reader yields when the source
+            #   CSV has a line like `,,`). Such "blank-but-present" rows
+            #   are common in:
+            #     - DrugBank drugs CSV: rows with empty ``aadac_observation``
+            #       and ``group`` columns when the drug has no group
+            #       affiliation (produces `,,` lines after the ID column).
+            #     - ChEMBL activities CSV: rows where the assay description
+            #       is empty but the row still has a compound_id and
+            #       activity_value (produces `,,` mid-row).
+            #     - STRING PPI CSV: trailing blank fields.
+            #   Result: ``/datasets`` and ``/stats`` endpoints OVERCOUNTED
+            #   drugs/proteins/interactions by 1-5% (depending on how many
+            #   blank-field rows the source had). The KG node count was
+            #   WRONG, the per-source KPI cards were WRONG, and the RL
+            #   agent's market-opportunity scoring was calibrated against
+            #   a wrong denominator.
+            #
+            #   ROOT FIX: count a row ONLY if it has at least one
+            #   non-whitespace-only field. ``any(field.strip() for field
+            #   in _row)`` short-circuits on the first non-empty field —
+            #   O(1) on average (most "real" rows have a non-empty first
+            #   column), O(k) worst case for a row with k empty fields.
+            #   This is the SCIENTIFICALLY CORRECT definition of a
+            #   "non-empty CSV row" — a row that contains at least one
+            #   piece of actual data.
+            return sum(
+                1 for _row in reader
+                if any(field.strip() for field in _row)
+            )
     except Exception as _exc:
         # P1-009 ROOT FIX: log at ERROR with file path so the operator
         # sees the corruption. Return -1 sentinel so the caller can

@@ -68,19 +68,46 @@ def _import_dag_module(module_name: str) -> None:
     """Import a DAG module, logging any failure.
 
     Wrapped in try/except so a single broken DAG does NOT prevent the
-    other 7 from registering. The error is logged at WARNING level so
+    other 7 from registering. The error is logged at ERROR level so
     operators see which DAG failed to import (and can fix it) without
     the entire package import crashing.
+
+    P1-052 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+      The audit found that the previous code logged DAG import failures
+      at WARNING level. WARNING is filtered by most production logging
+      configurations (the default Airflow log level is INFO; many ops
+      teams ship ERROR-only to the central log aggregator to control
+      volume). Result: a DAG module that failed to import (e.g. due to
+      a syntax error introduced by a refactor, or a missing dependency)
+      was SILENTLY dropped from the DagBag — the Airflow UI showed
+      "7 DAGs registered" instead of "8 DAGs registered", with NO
+      indication that one was missing. The scheduled run for the
+      missing DAG NEVER fired, and the operator didn't know until the
+      downstream consumer (Phase 2, the dashboard) reported stale data
+      days later.
+
+      ROOT FIX: log at ERROR level. ERROR is NEVER filtered by default,
+      and most ops alerting rules (Prometheus, Sentry, DataDog) trigger
+      on ERROR. The "one broken DAG doesn't kill the package" property
+      is PRESERVED — the try/except is unchanged, so the other 7 DAGs
+      still register. But the operator is now LOUDLY alerted that a
+      DAG is missing from the schedule. This is the master-grade fix:
+      fail-soft for the package, fail-LOUD for the broken DAG.
     """
     try:
         __import__(f"dags.{module_name}", fromlist=["dag"])
     except Exception as exc:  # noqa: BLE001 — never let one DAG kill the package
-        logger.warning(
-            "P1-045: failed to import DAG module dags.%s: %s. "
-            "This DAG will NOT be registered with Airflow. Fix the "
-            "import error and re-scan the DAGs folder.",
+        logger.error(
+            "P1-052 ROOT FIX: failed to import DAG module dags.%s: %s. "
+            "This DAG will NOT be registered with Airflow — the "
+            "scheduled run for this DAG will NOT fire, and downstream "
+            "consumers will see stale data. Fix the import error and "
+            "re-scan the DAGs folder. Logged at ERROR level (not "
+            "WARNING) per P1-052 root fix so it is NOT filtered by "
+            "default production logging configurations.",
             module_name,
             exc,
+            exc_info=True,
         )
 
 
