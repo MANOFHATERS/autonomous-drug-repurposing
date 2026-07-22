@@ -194,7 +194,7 @@ _DRUG_ALIASES_CURATED: Dict[str, str] = {
     "dexamethasone": "dexamethasone",
     "decadron": "dexamethasone",
     "prednisone": "prednisone",
-    " deltasone": "prednisone",  # leading space typo — keep for safety
+    "deltasone": "prednisone",  # P3-017 ROOT FIX: removed leading space (was dead alias)
     "prednisolone": "prednisolone",
     "methylprednisolone": "methylprednisolone",
     "medrol": "methylprednisolone",

@@ -1497,6 +1497,55 @@ class BiomedicalGraphBuilder:
                         arr[i] = arr[i] / norm
             return arr
 
+        # ------------------------------------------------------------------
+        # P3-015 ROOT FIX (Teammate 8 — hostile-auditor, RED TEAM):
+        # The TRAINING_POSITIVES injection loop (further down, after the
+        # ``register_nodes`` calls) SKIPS pairs whose drug or disease is
+        # not in drug_names/disease_names. For small demo graphs
+        # (num_drugs < 25), ZERO training positives were added — the GT
+        # model trained with ZERO positive labels, could not learn the
+        # multi-hop pattern, AUC stayed at 0.5 (random), and the V1
+        # launch gate failed.
+        #
+        # ROOT FIX: PRE-INJECT the first MIN_TRAINING_POSITIVES (5)
+        # training-positive drug/disease names into drug_names and
+        # disease_names BEFORE the ``register_nodes`` calls below. This
+        # guarantees the names are registered as nodes WITH REAL FEATURES
+        # (computed by ``_build_drug_features`` and
+        # ``_build_struct_features``), so the later ``add_edge("drug",
+        # "treats", "disease", ...)`` call in the TRAINING_POSITIVES
+        # loop will succeed (the nodes will be found in the node maps).
+        #
+        # This is the EXACT pattern used by ``known_positives`` and
+        # ``validated_hypotheses`` above (they inject names into the
+        # lists BEFORE ``register_nodes``). We follow the same pattern
+        # for training positives to guarantee the demo graph always has
+        # ≥5 positive labels for the GT model to learn from, regardless
+        # of ``num_drugs``.
+        # ------------------------------------------------------------------
+        MIN_TRAINING_POSITIVES = 5
+        _training_positives_for_preinject = (
+            BiomedicalGraphBuilder.TRAINING_POSITIVES[:MIN_TRAINING_POSITIVES]
+        )
+        _preinjected_drugs = 0
+        _preinjected_diseases = 0
+        for _tp_drug, _tp_disease in _training_positives_for_preinject:
+            if _tp_drug not in drug_names:
+                drug_names.append(_tp_drug)
+                _preinjected_drugs += 1
+            if _tp_disease not in disease_names:
+                disease_names.append(_tp_disease)
+                _preinjected_diseases += 1
+        if _preinjected_drugs > 0 or _preinjected_diseases > 0:
+            logger.info(
+                f"P3-015 ROOT FIX: pre-injected {_preinjected_drugs} "
+                f"training-positive drug(s) and {_preinjected_diseases} "
+                f"disease(s) into the name lists BEFORE register_nodes. "
+                f"This guarantees ≥{MIN_TRAINING_POSITIVES} training "
+                f"positives for any num_drugs value (was 0 for "
+                f"num_drugs<25 before this fix)."
+            )
+
         builder.register_nodes(
             "drug", drug_names,
             _build_drug_features(drug_names),
@@ -2036,6 +2085,14 @@ class BiomedicalGraphBuilder:
                 # inject training positives for drugs that are already
                 # in the graph OR that fit within the requested size.
                 # This prevents the graph from growing unboundedly.
+                #
+                # P3-015 NOTE: the first MIN_TRAINING_POSITIVES pairs
+                # have ALREADY been pre-injected into drug_names above
+                # (see the P3-015 pre-injection block right before the
+                # ``register_nodes`` call), so they will NOT hit this
+                # skip branch. Only pairs beyond the first 5 (which
+                # would grow the graph beyond num_drugs) are skipped
+                # here.
                 continue
             if disease_name not in disease_names:
                 continue
@@ -2064,6 +2121,31 @@ class BiomedicalGraphBuilder:
             # target counts and thus their efficacy_score). With injection
             # removed, efficacy_score reflects the drug's NATURAL target
             # diversity.
+
+        # P3-015 ROOT FIX: log a WARNING if training_positives_added < 5.
+        # The pre-injection above guarantees ≥5 positives for any graph
+        # size, so this warning indicates a data-quality issue (e.g.,
+        # the TRAINING_POSITIVES list was edited to have <5 entries).
+        MIN_TRAINING_POSITIVES = 5
+        if training_positives_added < MIN_TRAINING_POSITIVES:
+            logger.warning(
+                f"P3-015 ROOT FIX: only {training_positives_added} training "
+                f"positives were added (minimum is {MIN_TRAINING_POSITIVES}). "
+                f"The TRAINING_POSITIVES list has "
+                f"{len(BiomedicalGraphBuilder.TRAINING_POSITIVES)} entries — "
+                f"investigate why fewer than {MIN_TRAINING_POSITIVES} were "
+                f"injectable. The GT model may not have enough positive "
+                f"signal to learn the multi-hop pattern (V1 launch gate "
+                f"requires AUC > 0.85; with <5 positives, AUC stays at "
+                f"0.5 = random)."
+            )
+        else:
+            logger.info(
+                f"P3-015 ROOT FIX: {training_positives_added} training "
+                f"positives added (>= {MIN_TRAINING_POSITIVES} minimum). "
+                f"The GT model has enough positive signal to learn the "
+                f"multi-hop pattern."
+            )
 
         if training_positives_added > 0:
             logger.info(
@@ -3124,7 +3206,43 @@ class DiskBackedBiomedicalGraphBuilder(BiomedicalGraphBuilder):
                     parts = fwd_key.split("|", 2)
                     if len(parts) != 3:
                         continue
-                    src_type, _, tgt_type = parts
+                    src_type, rel, tgt_type = parts
+                    # P3-019 ROOT FIX (Teammate 8 — hostile-auditor, RED TEAM):
+                    # The LIKE pattern ``%|{fwd_rel}|%`` matches any
+                    # edge_type_key containing ``|{fwd_rel}|`` as a
+                    # substring. With the current edge-type vocabulary
+                    # (inhibits, activates, binds, modulates, treats,
+                    # causes, etc.) there are NO false positives because
+                    # no relation name is a substring of another WITH
+                    # ``|`` delimiters around it. However, the pattern
+                    # is fragile against future additions: if a future
+                    # relation name happens to be a substring of an
+                    # existing relation name (e.g., adding "inhibits_v2"
+                    # while "inhibits" already exists), the LIKE would
+                    # match BOTH, and the reverse-edge builder would
+                    # create duplicate reverse edges.
+                    #
+                    # ROOT FIX (defense-in-depth): explicitly verify that
+                    # the relation extracted from the edge_type_key
+                    # EXACTLY matches ``fwd_rel``. If a LIKE false
+                    # positive slips through (e.g., "drug|not_inhibits|
+                    # protein" matched by ``%|inhibits|%`` — currently
+                    # impossible because ``|not_inhibits|`` is not
+                    # ``|inhibits|``, but defensive), this check skips
+                    # it. This makes the code robust against any future
+                    # vocabulary additions without requiring a schema
+                    # migration to split ``edge_type_key`` into separate
+                    # ``src_type``, ``rel``, ``tgt_type`` columns (which
+                    # would be a much larger change).
+                    if rel != fwd_rel:
+                        logger.debug(
+                            "P3-019: skipping edge_type_key %r — LIKE "
+                            "pattern matched but relation %r != fwd_rel "
+                            "%r (defense-in-depth against LIKE substring "
+                            "false positives).",
+                            fwd_key, rel, fwd_rel,
+                        )
+                        continue
                     rev_key = f"{tgt_type}|{rev_rel}|{src_type}"
                     # INSERT the reversed pairs. ``INSERT OR IGNORE``
                     # deduplicates against existing rows (the UNIQUE
