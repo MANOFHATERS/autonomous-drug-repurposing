@@ -47,3 +47,36 @@
 12. P4-021: Add DeprecationWarning to pure re-export shims
 
 ## Branch: fix/p4-001-to-021-forensic-root-v142
+
+## FINAL VERIFICATION (post-merge, fresh clone from main):
+
+- Re-cloned main as `adr_verify` from `https://github.com/MANOFHATERS/autonomous-drug-repurposing.git`.
+- Verified merge commit `67201e1` is the HEAD of main:
+  `67201e1 Merge fix/p4-001-to-021-forensic-root-v142: 12 P4 forensic root-cause fixes (v142)`
+- Ran `tests/test_p4_v142_forensic_root_fixes.py` on the FRESH clone:
+  **Results: 20/20 passed, 0 failed**
+- All 12 fixes (P4-002, P4-006, P4-007, P4-010, P4-011, P4-012, P4-013,
+  P4-014, P4-015, P4-017, P4-019, P4-020, P4-021) are present on main
+  and verified by the test suite.
+
+## CONFLICT RESOLUTION (rebase on Teammate 11 v143):
+
+The rebase on the latest main (which included Teammate 11 v143's refactor
+of produce_evaluation_report → _run_inference_once + _compute_auc_from_predictions)
+produced ONE conflict in rl/rl_drug_ranker.py. Resolution:
+
+- Adopted TM11's `_compute_auc_from_predictions` approach (avoids double
+  inference — better than my v142 approach which re-ran the policy).
+- Extended `_run_inference_once` to also collect per-disease labels +
+  predictions (for P4-017 per-disease AUC).
+- Extended `_compute_auc_from_predictions` to accept `per_disease_labels`
+  + `per_disease_preds` and compute per-disease AUC + min_per_disease_auc
+  (same shape as compute_auc's return).
+- The bridge_disease_min_max parameter on produce_evaluation_report is
+  now UNUSED (the new code path doesn't rebuild a test env) but kept in
+  the signature for backward compat with callers (run_pipeline).
+- The P4-010 fix is still active in the DrugRankingEnv constructor (the
+  test_env built by run_pipeline still gets bridge_disease_min_max from
+  the train env — that path is unchanged).
+
+All 20/20 tests pass on the rebased + merged main.
