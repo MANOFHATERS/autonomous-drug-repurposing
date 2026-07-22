@@ -6532,15 +6532,60 @@ def step11_train_transe(
     # produced different model initialisations and therefore different
     # held_out_auc values. Synchronized with run_full_pipeline and
     # run_unified.py — DO NOT diverge (audit ML-7).
+    #
+    # P2-011 ROOT FIX (v142 — Teammate 6 forensic): the previous code
+    # called ``_set_global_seed(42)`` with a HARDCODED 42. This IGNORES
+    # the ``DRUGOS_SEED`` env var (which ``TransEConfig`` reads via
+    # ``config.SEED = int(os.environ.get("DRUGOS_SEED", "42"))``). If
+    # an operator set ``DRUGOS_SEED=123`` for a different experiment,
+    # step11 still seeded with 42, producing:
+    #   - IDENTICAL model initializations across DRUGOS_SEED=123 runs
+    #     (because the global seed was always 42)
+    #   - DIFFERENT training-data shuffling across DRUGOS_SEED=123 runs
+    #     (because train_transe's local RNG uses config.seed=123)
+    # The model was initialized the same way but trained on differently-
+    # shuffled data — non-reproducible AUC variance across runs that
+    # should be identical. This is a regulatory reproducibility
+    # violation (FDA 21 CFR Part 11).
+    #
+    # ROOT FIX: call ``_set_global_seed()`` with NO argument. The
+    # ``set_global_seed`` function (config.py:819) defaults to the
+    # module-level ``SEED`` constant which IS
+    # ``int(os.environ.get("DRUGOS_SEED", "42"))``. This ensures
+    # step11's seed is SYNCHRONIZED with ``config.seed`` (which is
+    # also ``SEED`` via ``field(default_factory=lambda: SEED)``).
+    # An assertion is added to detect any future divergence between
+    # the env var and the config (e.g. if someone monkey-patches
+    # ``SEED`` after module import).
     try:
-        from .config import set_global_seed as _set_global_seed
+        from .config import set_global_seed as _set_global_seed, SEED as _MODULE_SEED
 
-        _set_global_seed(42)
+        _set_global_seed()  # uses module-level SEED (= DRUGOS_SEED env var)
+        # P2-011 v142: assertion to detect divergence between the
+        # module-level SEED and the env var. If someone monkey-patches
+        # SEED after module import (e.g. in a test fixture), the
+        # assertion fires. This catches the exact regression P2-011
+        # describes: step11 seeding with a value that diverges from
+        # what config.seed would have used.
+        _env_seed = int(os.environ.get("DRUGOS_SEED", "42"))
+        assert _MODULE_SEED == _env_seed, (
+            f"P2-011 v142: SEED divergence detected — module SEED="
+            f"{_MODULE_SEED} but DRUGOS_SEED env var={_env_seed}. "
+            f"This means step11's set_global_seed() used a DIFFERENT "
+            f"seed than what TransEConfig.seed would use. This is the "
+            f"exact regression P2-011 describes. Either: (a) set "
+            f"DRUGOS_SEED to match the module SEED, or (b) investigate "
+            f"who monkey-patched the SEED constant after module import."
+        )
+    except AssertionError:
+        raise  # Never swallow assertion failures — they indicate real bugs.
     except Exception as _seed_exc:  # noqa: BLE001 — best-effort
         logger.warning(
-            "set_global_seed(42) failed in step11_train_transe (%s) — "
+            "set_global_seed() failed in step11_train_transe (%s) — "
             "model init will be non-deterministic. This is a regression "
-            "(audit ML-7).",
+            "(audit ML-7, P2-011 v142). The seed value used should be "
+            "int(os.environ.get('DRUGOS_SEED', '42')) — verify the "
+            "config module is importable.",
             _seed_exc,
         )
 
@@ -7670,6 +7715,59 @@ def step11_train_transe(
         )
     train_input_checksum = _checksum_hasher.hexdigest()
 
+    # P2-016 v142 ROOT FIX (Teammate 6 forensic): create ONE
+    # MLflowTracker here, BEFORE calling train_transe. Pass the tracker
+    # to train_transe via ``mlflow_tracker=_step11_tracker`` with
+    # ``manage_mlflow_lifecycle=False`` so train_transe logs per-epoch
+    # metrics to THIS run (not a separate one). After train_transe
+    # returns, log the step11-specific final metrics to the SAME run,
+    # then end the run ONCE.
+    #
+    # Pre-v142, step11 did NOT pass a tracker to train_transe, then
+    # created a SEPARATE MLflowTracker after train_transe returned,
+    # started a NEW run, logged final metrics, and ended that run.
+    # This produced TWO uncorrelated MLflow runs per step11 invocation
+    # — operators could not correlate per-epoch loss curves with final
+    # AUC. The fix consolidates everything into ONE run.
+    _step11_tracker = None
+    _mlflow_enabled = os.environ.get("DRUGOS_MLFLOW_TRACKING", "1") == "1"
+    if _mlflow_enabled:
+        try:
+            from .mlflow_tracker import MLflowTracker
+            _step11_tracker = MLflowTracker()
+            _step11_tracker.start_run(
+                run_name=f"transe_step11_{int(time.time())}"
+            )
+            # Log step11-specific params ONCE here (not in train_transe,
+            # which doesn't know about num_train/val/test_triples or
+            # negative_sampler_strategy at its level).
+            _step11_tracker.log_params({
+                "model_type": "transe",
+                "embedding_dim": getattr(config, "embedding_dim", 256),
+                "num_epochs": getattr(config, "num_epochs", 100),
+                "learning_rate": getattr(config, "lr", 0.01),
+                "margin": getattr(config, "margin", 1.0),
+                "num_train_triples": int(len(train_idx)),
+                "num_val_triples": int(len(val_idx)),
+                "num_test_triples": int(len(test_idx)),
+                "negative_sampler_strategy": (
+                    "type_constrained" if negative_sampler is not None
+                    else "crude_random_fallback"
+                ),
+            })
+        except ImportError:
+            logger.debug(
+                "Step 11: mlflow_tracker not available — "
+                "skipping MLflow logging"
+            )
+            _step11_tracker = None
+        except Exception as _mlflow_init_exc:
+            logger.debug(
+                "Step 11: MLflow tracker init failed (non-fatal): %s",
+                _mlflow_init_exc,
+            )
+            _step11_tracker = None
+
     history = train_transe(
         model,
         train_triples,
@@ -7691,6 +7789,12 @@ def step11_train_transe(
         # below).
         known_triples=train_known,
         input_checksum=train_input_checksum,
+        # P2-016 v142: pass the tracker so train_transe logs per-epoch
+        # metrics to OUR run (not a separate one). The caller (us)
+        # manages the lifecycle — we started the run above and will
+        # end it below after logging step11-specific final metrics.
+        mlflow_tracker=_step11_tracker,
+        manage_mlflow_lifecycle=False,
     )
 
     elapsed = time.time() - t0
@@ -7703,46 +7807,32 @@ def step11_train_transe(
         getattr(history, "model_sha256", "")[:16] + "..."
         if getattr(history, "model_sha256", "") else "(none)",
     )
-    # v55 ROOT FIX (Dead Code — mlflow_tracker never called):
-    # The v48 codebase defined MLflowTracker but NEVER called it from
-    # run_pipeline.py. ROOT FIX: wire it into step11 so training
-    # metrics (best_val_auc, held_out_auc, num_train_triples, etc.)
-    # are logged to MLflow for experiment tracking. This is a no-op
-    # if mlflow is not installed or DRUGOS_MLFLOW_TRACKING=0.
-    try:
-        import os as _os_v55
-        _mlflow_enabled = _os_v55.environ.get("DRUGOS_MLFLOW_TRACKING", "1") == "1"
-        if _mlflow_enabled:
-            from .mlflow_tracker import MLflowTracker
-            _tracker = MLflowTracker()
-            _tracker.start_run(run_name=f"transe_step11_{int(time.time())}")
-            _tracker.log_params({
-                "model_type": "transe",
-                "embedding_dim": getattr(config, "embedding_dim", 256),
-                "num_epochs": getattr(config, "num_epochs", 100),
-                "learning_rate": getattr(config, "lr", 0.01),
-                "margin": getattr(config, "margin", 1.0),
-                "num_train_triples": int(len(train_idx)),
-                "num_val_triples": int(len(val_idx)),
-                "num_test_triples": int(len(test_idx)),
-                "negative_sampler_strategy": (
-                    "type_constrained" if negative_sampler is not None
-                    else "crude_random_fallback"
-                ),
-            })
-            _tracker.log_metrics({
+    # P2-016 v142: log step11-specific FINAL metrics to the SAME run
+    # that train_transe just logged per-epoch metrics to. Then end
+    # the run ONCE. Pre-v162 this was a SEPARATE tracker + SEPARATE
+    # run, producing two uncorrelated MLflow runs per step11
+    # invocation.
+    if _step11_tracker is not None:
+        try:
+            _step11_tracker.log_metrics({
                 "best_val_auc": float(getattr(history, "best_val_auc", -1.0)),
                 "held_out_auc": float(getattr(history, "held_out_auc", -1.0)),
                 "test_auc": float(getattr(history, "test_auc", -1.0)),
                 "elapsed_seconds": float(elapsed),
                 "cpu_elapsed_seconds": float(cpu_elapsed),
             })
-            _tracker.end_run()
-            logger.info("Step 11: training metrics logged to MLflow (v55 dead-code fix)")
-    except ImportError:
-        logger.debug("Step 11: mlflow_tracker not available — skipping MLflow logging")
-    except Exception as _mlflow_exc:
-        logger.debug("Step 11: MLflow logging failed (non-fatal): %s", _mlflow_exc)
+            _step11_tracker.end_run()
+            logger.info(
+                "Step 11: training metrics logged to MLflow "
+                "(P2-016 v142 — single-run consolidation; per-epoch "
+                "metrics from train_transe and final metrics from "
+                "step11 are now in the SAME MLflow run)."
+            )
+        except Exception as _mlflow_exc:
+            logger.debug(
+                "Step 11: MLflow final-metrics logging failed (non-fatal): %s",
+                _mlflow_exc,
+            )
     # v6 fix: TrainingHistory is a dataclass, not a dict. Access by attr.
     history_loss = (
         history.train_loss[-5:] if history.train_loss else []
@@ -9911,15 +10001,28 @@ def run_full_pipeline(
     # is deterministic. Synchronized with run_unified.py (which also calls
     # set_global_seed before any model is constructed) — DO NOT diverge
     # (audit TOP-14).
+    #
+    # P2-011 v142 ROOT FIX (Teammate 6 forensic): replaced hardcoded
+    # ``_set_global_seed(42)`` with ``_set_global_seed()`` (no arg) so
+    # the seed is read from the ``DRUGOS_SEED`` env var via the module-
+    # level ``SEED`` constant. See step11_train_transe for the full
+    # rationale (regulatory reproducibility under FDA 21 CFR Part 11).
     try:
-        from .config import set_global_seed as _set_global_seed
+        from .config import set_global_seed as _set_global_seed, SEED as _MODULE_SEED
 
-        _set_global_seed(42)
+        _set_global_seed()  # uses module-level SEED (= DRUGOS_SEED env var)
+        _env_seed = int(os.environ.get("DRUGOS_SEED", "42"))
+        assert _MODULE_SEED == _env_seed, (
+            f"P2-011 v142: SEED divergence detected — module SEED="
+            f"{_MODULE_SEED} but DRUGOS_SEED env var={_env_seed}."
+        )
+    except AssertionError:
+        raise
     except Exception as _seed_exc:  # noqa: BLE001 — best-effort
         logger.warning(
-            "set_global_seed(42) failed in run_full_pipeline (%s) — "
+            "set_global_seed() failed in run_full_pipeline (%s) — "
             "model init will be non-deterministic. This is a regression "
-            "(audit TOP-14).",
+            "(audit TOP-14, P2-011 v142).",
             _seed_exc,
         )
 

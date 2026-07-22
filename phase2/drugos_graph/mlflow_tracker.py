@@ -137,7 +137,34 @@ class MLflowTracker:
     heartbeat timestamp to the current time to detect stale
     RUNNING runs and reap them. The heartbeat is started in
     ``start_run`` and stopped in ``close``.
+
+    P2-014 v142 ROOT FIX (Teammate 6 forensic): the previous code
+    defined ``check_for_dangling_mlflow_runs()`` as a module-level
+    function but did NOT call it automatically on construction. The
+    issue (P2-014 fix #3) requires "on the next MLflowTracker
+    construction, query the MLflow API for RUNNING runs with stale
+    heartbeat_ts and mark them FAILED." The previous implementation
+    relied on the Phase 2 service to explicitly call the function on
+    startup — but operators constructing ``MLflowTracker()`` from
+    notebooks, scripts, or tests would NOT trigger the self-check,
+    leaving dangling runs from prior crashes undetected.
+
+    ROOT FIX: ``__init__`` now spawns a background thread (once per
+    process, gated by ``_startup_check_done``) that calls
+    ``check_for_dangling_mlflow_runs(dry_run=False)``. The thread is
+    non-blocking (construction returns immediately) and uses a class-
+    level flag to prevent recursion (``check_for_dangling_mlflow_runs``
+    itself constructs a temporary MLflowTracker — that construction
+    sees ``_startup_check_done=True`` and skips the self-check).
     """
+
+    # P2-014 v142: class-level flag to prevent recursion. The first
+    # MLflowTracker() construction sets this to True and spawns the
+    # self-check thread. Subsequent constructions (including the
+    # temporary one inside ``check_for_dangling_mlflow_runs``) see
+    # True and skip the self-check.
+    _startup_check_done: bool = False
+    _startup_check_lock = threading.Lock()
 
     def __init__(
         self,
@@ -235,6 +262,62 @@ class MLflowTracker:
         except Exception as e:
             logger.warning(f"MLflow initialization failed: {e}")
             self.mlflow = None
+
+        # P2-014 v142 ROOT FIX (Teammate 6 forensic): spawn the
+        # dangling-runs self-check ONCE per process. The self-check
+        # is gated by ``_startup_check_done`` (class-level) to prevent
+        # recursion — ``check_for_dangling_mlflow_runs`` itself
+        # constructs a temporary MLflowTracker, which would re-trigger
+        # the self-check without this guard.
+        #
+        # The self-check runs in a daemon thread so construction is
+        # non-blocking. Operators who want to disable the self-check
+        # (e.g. for unit tests) can set ``DRUGOS_MLFLOW_SKIP_STARTUP_CHECK=1``.
+        if (
+            not MLflowTracker._startup_check_done
+            and os.environ.get("DRUGOS_MLFLOW_SKIP_STARTUP_CHECK", "0") != "1"
+        ):
+            with MLflowTracker._startup_check_lock:
+                if not MLflowTracker._startup_check_done:
+                    MLflowTracker._startup_check_done = True
+                    # Spawn the self-check in a daemon thread so it
+                    # does not block construction. The thread is a
+                    # daemon so it does not prevent interpreter shutdown.
+                    _self_check_thread = threading.Thread(
+                        target=self._run_startup_self_check,
+                        name="mlflow-startup-self-check",
+                        daemon=True,
+                    )
+                    _self_check_thread.start()
+
+    def _run_startup_self_check(self) -> None:
+        """P2-014 v142: background self-check for dangling MLflow runs.
+
+        Calls ``check_for_dangling_mlflow_runs`` (module-level function)
+        which queries MLflow for RUNNING runs with stale heartbeats and
+        marks them FAILED. This runs ONCE per process, in a daemon
+        thread, on the first ``MLflowTracker()`` construction.
+
+        Failures are logged at ERROR level (P2-014 fix #1) but do NOT
+        propagate — the tracker must remain usable even if the self-
+        check fails (e.g. MLflow server unreachable on startup).
+        """
+        try:
+            # Import here to avoid circular import at module load time.
+            # ``check_for_dangling_mlflow_runs`` is defined at the bottom
+            # of this module (after the MLflowTracker class).
+            from .mlflow_tracker import check_for_dangling_mlflow_runs
+            check_for_dangling_mlflow_runs(dry_run=False)
+        except Exception as exc:
+            logger.error(
+                "P2-014 v142: startup self-check for dangling MLflow "
+                "runs FAILED: %s: %s. The self-check could not run — "
+                "operators should manually inspect the MLflow UI for "
+                "stale RUNNING runs. This is a NON-BLOCKING error (the "
+                "tracker remains usable), but it indicates an MLflow "
+                "connectivity issue that should be investigated.",
+                type(exc).__name__, exc,
+            )
 
     def _atexit_close(self) -> None:
         """P2-014: atexit-registered close handler.
