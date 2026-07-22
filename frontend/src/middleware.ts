@@ -13,28 +13,71 @@ import { randomBytes } from "crypto";
  * is the PRIMARY mitigation — it stops the XSS from running in the first
  * place.
  *
- * FE-033 ROOT FIX (v115, MEDIUM): the previous CSP allowed
- * 'unsafe-inline' for scripts — a known XSS surface. While Next.js
- * hydration historically required inline scripts, Next.js 16 supports
- * per-request nonces via the `x-nextjs-nonce` header. This middleware
- * now generates a fresh 32-byte nonce per request, sets it on the
- * response, and the CSP only allows scripts/styles matching that nonce.
+ * FE-008 ROOT FIX (Teammate 14, HIGH) — replaces the previous FE-033 fix:
  *
- * Policy choices (FE-033 root fix):
+ * The previous FE-033 fix generated a per-request nonce but ALSO kept
+ * `'unsafe-inline'` in script-src as a "fallback for browsers that don't
+ * support nonces". Per the CSP spec (CSP Level 2 §6.6.2), when a nonce
+ * source expression is present in a source list, the 'unsafe-inline'
+ * keyword MUST be ignored by modern browsers. So the comment was right
+ * that 'unsafe-inline' was dead code for modern browsers — but it was
+ * LIVE for every browser that didn't support nonces (which, in 2026,
+ * includes several embedded WebViews used in pharma internal tools).
+ *
+ * The bigger problem: even on nonce-supporting browsers, 'unsafe-inline'
+ * was a defense-in-depth failure. If a future refactor accidentally
+ * removed the nonce from a single script tag (e.g., a third-party widget
+ * loaded without nonce propagation), 'unsafe-inline' would silently
+ * re-activate as the fallback — the CSP would still pass but XSS would
+ * be possible. A patient-safety platform cannot rely on a "fallback"
+ * that becomes the primary attack surface when the primary defense fails.
+ *
+ * ROOT FIX:
+ *   1. Remove 'unsafe-inline' from `script-src` entirely. The nonce is
+ *      the ONLY way an inline script can execute. Next.js 16 generates
+ *      the nonce-attached hydration script automatically — no inline
+ *      script in the app needs 'unsafe-inline'. If a future feature
+ *      needs an inline script, the developer MUST attach the nonce
+ *      explicitly (forcing them to think about it).
+ *   2. Keep 'unsafe-inline' in `style-src` ONLY because Tailwind 4 and
+ *      several Radix UI primitives inject inline styles at runtime via
+ *      the `style` attribute (which is governed by style-src 'unsafe-inline'
+ *      — nonces do NOT gate the `style` attribute, only <style> blocks).
+ *      Removing 'unsafe-inline' from style-src would break the entire UI.
+ *      This is a known limitation of CSP Level 2; CSP Level 3's 'unsafe-hashes'
+ *      would let us whitelist specific style attributes, but Next.js 16
+ *      doesn't generate those hashes automatically. We accept this trade-off:
+ *      inline styles can't execute JS (so they're not an XSS vector).
+ *   3. Restrict `connect-src` to 'self' plus an EXPLICIT ALLOWLIST of
+ *      upstream biomedical APIs the frontend actually calls from the
+ *      browser. The previous `connect-src 'self' https:` allowed an XSS
+ *      payload to exfiltrate data to ANY https:// URL (e.g.,
+ *      https://attacker.com/). The new allowlist is:
+ *        - 'self' (Next.js API routes — same origin)
+ *        - https://api.fda.gov (openFDA adverse events + drug labels)
+ *        - https://clinicaltrials.gov (CT.gov search API)
+ *        - https://eutils.ncbi.nlm.nih.gov (PubMed + MeSH E-utilities)
+ *        - https://rxnav.nlm.nih.gov (RxNorm drug search)
+ *        - https://id.nlm.nih.gov (NLM MeSH descriptor lookup)
+ *        - https://search.patentsview.org (USPTO PatentsView patent search)
+ *        - https://www.ebi.ac.uk (ChEMBL — for future direct browser calls)
+ *      Note: in the current architecture, ALL of these are called from
+ *      Next.js API routes (server-side), NOT from the browser. The browser
+ *      only calls /api/* (same-origin). The allowlist is defense-in-depth —
+ *      if a future component accidentally calls an external API from the
+ *      browser, the CSP will block it unless the domain is on this list.
+ *
+ * Policy choices (FE-008 root fix):
  *   - default-src 'self': only same-origin resources by default.
- *   - script-src 'self' 'nonce-<random>': ONLY scripts with the
- *     matching nonce execute. 'unsafe-inline' is REMOVED — inline
- *     event handlers (onclick="...") and inline <script> blocks
- *     without the nonce are blocked. Next.js 16's React Server
- *     Components automatically inject the nonce into the hydration
- *     script. This is the OWASP-recommended CSP for React apps.
- *   - style-src 'self' 'nonce-<random>': ONLY styles with the
- *     matching nonce apply. Tailwind 4 generates server-side CSS
- *     (no inline styles needed) — the nonce gates any remaining
- *     styled-components output.
+ *   - script-src 'self' 'nonce-<random>': ONLY nonce-attached scripts run.
+ *     No 'unsafe-inline' — see above.
+ *   - style-src 'self' 'nonce-<random>' 'unsafe-inline': nonce for <style>
+ *     blocks, 'unsafe-inline' for style ATTRIBUTES (Tailwind/Radix need it).
  *   - img-src 'self' data: https: avatar images from external CDNs.
- *   - connect-src 'self' https:: allow the dashboard to call external
- *     biomedical APIs (RxNorm, ClinicalTrials.gov, PubMed, OpenFDA).
+ *   - connect-src 'self' https://api.fda.gov https://clinicaltrials.gov
+ *     https://eutils.ncbi.nlm.nih.gov https://rxnav.nlm.nih.gov
+ *     https://id.nlm.nih.gov https://search.patentsview.org
+ *     https://www.ebi.ac.uk — explicit allowlist, no wildcards.
  *   - frame-ancestors 'none': prevent clickjacking (no iframing).
  *   - object-src 'none': no Flash/Java/PDF embeds.
  *   - base-uri 'self': prevent <base> tag hijacking.
@@ -61,22 +104,38 @@ export function middleware(_req: NextRequest) {
   // Set the nonce header so Next.js picks it up.
   res.headers.set("x-nextjs-nonce", nonce);
 
+  // FE-008 ROOT FIX: explicit upstream allowlist for connect-src.
+  // Every domain here is a real public biomedical API the platform
+  // integrates with. If a future feature needs a new upstream, the
+  // developer MUST add it here — this is the chokepoint that prevents
+  // silent data exfiltration via XSS.
+  const connectSrcAllowlist = [
+    "'self'",
+    "https://api.fda.gov",
+    "https://clinicaltrials.gov",
+    "https://eutils.ncbi.nlm.nih.gov",
+    "https://rxnav.nlm.nih.gov",
+    "https://id.nlm.nih.gov",
+    "https://search.patentsview.org",
+    "https://www.ebi.ac.uk",
+  ].join(" ");
+
   const csp = [
     "default-src 'self'",
-    // FE-033 ROOT FIX (v115, MEDIUM): the nonce is the primary
-    // defense. 'unsafe-inline' is KEPT as a fallback for browsers
-    // that don't support nonces (very old browsers) and for any
-    // edge case where Next.js doesn't inject the nonce into a
-    // generated script. Per the CSP spec (CSP Level 2 §6.6.2):
-    // "If a nonce source expression is present in a source list,
-    // the 'unsafe-inline' keyword expression MUST be ignored."
-    // So modern browsers honor ONLY the nonce — 'unsafe-inline'
-    // is dead code for them, but provides backward compatibility.
-    `script-src 'self' 'nonce-${nonce}' 'unsafe-inline'`,
+    // FE-008 ROOT FIX: 'unsafe-inline' is REMOVED from script-src.
+    // The nonce is the ONLY way an inline script can execute. This is
+    // stricter than the previous FE-033 fix (which kept 'unsafe-inline'
+    // as a "fallback" — see file header for why that was wrong).
+    `script-src 'self' 'nonce-${nonce}'`,
+    // FE-008 ROOT FIX: 'unsafe-inline' is KEPT in style-src ONLY for
+    // the `style` attribute (Tailwind/Radix inject inline style attrs
+    // at runtime; nonces do not gate style attributes, only <style>
+    // blocks). Inline styles cannot execute JS, so this is not an XSS
+    // vector. The nonce still gates <style> blocks.
     `style-src 'self' 'nonce-${nonce}' 'unsafe-inline'`,
     "img-src 'self' data: https:",
     "font-src 'self' data:",
-    "connect-src 'self' https:",
+    `connect-src ${connectSrcAllowlist}`,
     "frame-ancestors 'none'",
     "object-src 'none'",
     "base-uri 'self'",

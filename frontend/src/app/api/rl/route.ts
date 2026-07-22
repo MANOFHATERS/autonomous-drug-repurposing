@@ -177,7 +177,13 @@ export async function POST(req: NextRequest) {
   // org — not the request body or query string.
   const targetOrgId = auth.user.orgId || null;
 
-  const availability = checkRlAvailability();
+  // FE-009 ROOT FIX (Teammate 14, HIGH): checkRlAvailability() is now
+  // async — it delegates to checkRlHealth() in rl-ranker.ts, which
+  // HTTP-pings {RL_SERVICE_URL}/health. The previous synchronous
+  // version returned `available: true` based solely on env-var presence,
+  // producing false positives when the service was configured but down.
+  // We now await the real health check.
+  const availability = await checkRlAvailability();
   // FE-003 ROOT FIX: the local-CSV path is no longer gated on the env
   // var being set. The lib service `rl-ranker.ts` now resolves the
   // default path to the LATEST `top_candidates_*.csv` file (the real
@@ -395,7 +401,12 @@ export async function GET(req: NextRequest) {
   const drugParam = (sp.get('drug') || '').trim() || undefined;
   const diseaseParam = (sp.get('disease') || '').trim() || undefined;
 
-  const availability = checkRlAvailability();
+  // FE-009 ROOT FIX (Teammate 14, HIGH): checkRlAvailability() is now
+  // async — it delegates to checkRlHealth() in rl-ranker.ts, which
+  // HTTP-pings {RL_SERVICE_URL}/health. The previous synchronous version
+  // returned `available: true` based solely on env-var presence. We now
+  // await the real health check (same fix as the POST handler above).
+  const availability = await checkRlAvailability();
 
   try {
     const result = await getRankedHypotheses({

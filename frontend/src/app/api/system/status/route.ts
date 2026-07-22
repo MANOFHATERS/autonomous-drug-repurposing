@@ -127,6 +127,22 @@ export async function GET(req: Request) {
   const rawHealth = await getSystemHealth();
   const health = scrubSystemHealth(rawHealth);
 
+  // FE-009 ROOT FIX (Teammate 14, HIGH): the legacy check*Availability
+  // functions in ml-stubs.ts are now ASYNC — they delegate to the real
+  // health-check functions (checkKgHealth / checkDatasetHealth / checkRlHealth)
+  // which actually ping the services. The previous synchronous versions
+  // returned `available: true` based solely on env-var presence, which
+  // produced false positives when a service was configured but down.
+  //
+  // We run all three checks in parallel via Promise.all so the route's
+  // total latency is the MAX of the three (capped at 5s each by the
+  // underlying health-check timeouts), not the sum.
+  const [kgAvailability, datasetAvailability, rlAvailability] = await Promise.all([
+    checkKnowledgeGraphAvailability(),
+    checkDatasetAvailability(),
+    checkRlAvailability(),
+  ]);
+
   // Build the response. We keep the legacy per-service keys (auth,
   // rxnorm, mesh, etc.) for backwards compat with the admin console UI,
   // but ADD the new `health` object with the real aggregated status.
@@ -163,11 +179,14 @@ export async function GET(req: Request) {
       admin: { available: true, service: "Admin Console" },
       apiKeys: { available: true, service: "Developer API Keys" },
       evidence: { available: true, service: "Evidence Packages" },
-      // ML services (legacy stubs — kept for backwards compat with the
-      // admin console UI; the real status is in `health.services`).
-      knowledgeGraph: scrubService(checkKnowledgeGraphAvailability()),
-      dataset: scrubService(checkDatasetAvailability()),
-      rl: scrubService(checkRlAvailability()),
+      // FE-009 ROOT FIX: the legacy per-service keys now reflect REAL
+      // availability (the check*Availability functions delegate to the
+      // real health checks). Previously these were env-var-presence
+      // stubs that returned `available: true` even when the service
+      // was down — a false positive that hid outages from operators.
+      knowledgeGraph: scrubService(kgAvailability),
+      dataset: scrubService(datasetAvailability),
+      rl: scrubService(rlAvailability),
     },
     generatedAt: new Date().toISOString(),
   };
