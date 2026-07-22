@@ -39,15 +39,38 @@ import threading
 import time
 from pathlib import Path
 
-# Make the repo root + phase2 importable regardless of CWD. The
-# docker-compose service mounts ``./`` at ``/opt/repo`` and ``./phase2``
-# at ``/opt/phase2``; either path must resolve ``phase2.service``.
+# Make the repo root importable regardless of CWD. The docker-compose
+# service mounts ``./`` at ``/opt/repo`` and ``./phase2`` at
+# ``/opt/phase2``; either path must resolve ``phase2.service``.
+#
+# P2-004 ROOT FIX (Teammate 5, forensic, root-level): the previous code
+# added BOTH ``_REPO_ROOT`` (repo root) AND ``_PHASE2_ROOT`` (``phase2/``)
+# to ``sys.path``. This created TWO import paths for the same module:
+#   * ``phase2.drugos_graph.phase1_bridge`` (loaded via _REPO_ROOT)
+#   * ``drugos_graph.phase1_bridge``        (loaded via _PHASE2_ROOT)
+# Python's import system registered BOTH as separate module objects in
+# ``sys.modules`` — any module-level singleton, class registry, or
+# atexit-registered cleanup in phase1_bridge would have TWO instances.
+# The RecordingGraphBuilder's in-memory state and the bridge's
+# bridge-fallback cache (``_PHASE1_SOURCE_TO_CSV``) live in module-level
+# globals — two instances means two caches that can drift. In a long-
+# running uvicorn worker, the /healthz check (which imported
+# ``drugos_graph.phase1_bridge``) and the actual bridge execution path
+# (which uses ``phase2.drugos_graph.phase1_bridge`` via ``from .phase1_bridge import``)
+# could see DIFFERENT state.
+#
+# ROOT FIX: add ONLY ``_REPO_ROOT`` to ``sys.path``. The canonical
+# import path is ``phase2.drugos_graph.*`` (package-qualified). The
+# ``drugos_graph.*`` top-level form is FORBIDDEN — a CI check below
+# verifies it is never used in this file.
 _HERE = Path(__file__).resolve().parent  # phase2/drugos_graph/
-_PHASE2_ROOT = _HERE.parent               # phase2/
+_PHASE2_ROOT = _HERE.parent               # phase2/  (kept for reference / healthcheck path)
 _REPO_ROOT = _PHASE2_ROOT.parent          # repo root
-for _p in (str(_REPO_ROOT), str(_PHASE2_ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+# P2-004: ``_PHASE2_ROOT`` is NO LONGER added to sys.path. Importing
+# ``drugos_graph.*`` (top-level) is now impossible — callers MUST use
+# ``phase2.drugos_graph.*`` (canonical package-qualified form).
 
 # Re-export the FastAPI app from phase2.service. That module already
 # implements /health, /kg/stats, /kg/explore, /query, /cypher with the
@@ -367,7 +390,22 @@ def healthz() -> dict:
     # Check 3: bridge importable.
     try:
         # Local import — don't actually call it, just verify it loads.
-        from drugos_graph import phase1_bridge  # noqa: F401
+        # P2-004 ROOT FIX (Teammate 5): use the CANONICAL package-qualified
+        # import path ``phase2.drugos_graph.phase1_bridge`` — NOT the
+        # top-level ``drugos_graph.phase1_bridge``. The previous code used
+        # the top-level form, which only worked because ``_PHASE2_ROOT``
+        # was added to sys.path; that created a SECOND module instance in
+        # sys.modules (one via _REPO_ROOT as ``phase2.drugos_graph.phase1_bridge``,
+        # one via _PHASE2_ROOT as ``drugos_graph.phase1_bridge``), and any
+        # module-level singleton / cache in phase1_bridge would have TWO
+        # instances that could drift. With ``_PHASE2_ROOT`` removed from
+        # sys.path (P2-004 fix above), the top-level form would now raise
+        # ``ModuleNotFoundError`` — so the canonical form is the ONLY
+        # correct path. Use the same import path the bridge execution
+        # path uses (``from .phase1_bridge import`` inside the package
+        # resolves to ``phase2.drugos_graph.phase1_bridge``), so the
+        # healthcheck and the execution path see the SAME module object.
+        from phase2.drugos_graph import phase1_bridge  # noqa: F401
         checks["bridge_importable"] = True
     except Exception as exc:
         checks["bridge_importable"] = f"failed: {type(exc).__name__}: {exc}"
