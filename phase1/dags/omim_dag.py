@@ -21,11 +21,16 @@ v89 FORENSIC ROOT FIX (BUG #8 P1 -- Sunday Morning Pile-Up):
   and this standalone DAG invoke the SAME pipelines (OMIMPipeline().run()),
   writing to the SAME CSV files and DB tables. This causes file-lock
   contention and DB write conflicts (~12 collisions per year).
-  ROOT FIX: move to the 15th of the month. The 15th is a fixed
-  day-of-month that is independent of the day-of-week, so it NEVER
-  systematically collides with the Sunday master DAG schedule. The
-  ~2-week offset from the master DAG also gives operators a clean
-  mid-month refresh point without overlapping the weekly cadence.
+
+  v89 originally proposed moving to the 15th of the month. That fix
+  was SUPERSEDED by P1-047 (see the @dag schedule annotation below),
+  which moved the schedule to weekly Thursday at 07:00 UTC. The
+  weekly cadence is safer than a fixed day-of-month because it
+  guarantees no collision with the Sunday master DAG window
+  regardless of calendar month length. This v89 block is preserved
+  for audit-trail continuity; the ACTUAL schedule is set in the
+  ``@dag(schedule=...)`` annotation below and is ``0 7 * * 4``
+  (every Thursday at 07:00 UTC).
 """
 
 from __future__ import annotations

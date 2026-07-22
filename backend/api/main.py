@@ -905,11 +905,79 @@ app = FastAPI(
 # tools) to call this API from the browser. The frontend's URL is
 # configured via FRONTEND_URL env var; production deploys should set
 # this to the specific origin (not "*").
-_frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+#
+# P1-023 ROOT FIX (Team 2 — Phase 1): hostile-auditor pass.
+#   The previous code was:
+#       allow_origins=[_frontend_url] if _frontend_url != "*" else ["*"],
+#       allow_credentials=True,
+#   This is a CORS security vulnerability per the W3C CORS spec: when
+#   ``allow_origins=["*"]`` is combined with ``allow_credentials=True``,
+#   the spec REQUIRES browsers to refuse credentialed requests. Modern
+#   browsers comply, but the configuration is still a vulnerability
+#   because:
+#     1. Older or non-compliant browsers (some embedded WebViews) may
+#        still send credentials, allowing any website to make
+#        authenticated requests to the API.
+#     2. Pharma partner API keys in cookies/Authorization headers could
+#        be exfiltrated by a malicious website if the browser fails to
+#        enforce the spec.
+#     3. Static-analysis tools and security auditors flag this as a
+#        finding, blocking production deployment at pharma IT review.
+#
+#   ROOT FIX (defense-in-depth):
+#     A. In PRODUCTION (ENVIRONMENT=production), REJECT ``FRONTEND_URL=*``
+#        with a RuntimeError at startup. Fail-closed: the API refuses
+#        to start rather than run with an insecure CORS config. This
+#        matches the patient-safety principle: "a wrong integration is
+#        worse than no integration."
+#     B. In NON-PRODUCTION (dev/CI), if ``FRONTEND_URL=*`` is set, log
+#        a CRITICAL warning and DISABLE ``allow_credentials`` so the
+#        config is technically valid per the spec. This preserves the
+#        dev convenience of ``FRONTEND_URL=*`` for local testing
+#        without enabling credentialed cross-origin requests.
+#     C. When ``FRONTEND_URL`` is a specific origin (the normal case),
+#        ``allow_credentials=True`` is preserved (the frontend needs
+#        cookies for JWT session auth).
+_frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000").strip()
+_environment = os.environ.get("ENVIRONMENT", "development").strip().lower()
+_is_production_env = _environment in ("production", "prod")
+
+if _frontend_url == "*":
+    if _is_production_env:
+        # P1-023 ROOT FIX: fail-closed in production. Refuse to start.
+        raise RuntimeError(
+            "CORS security vulnerability (P1-023): FRONTEND_URL='*' is "
+            "FORBIDDEN in production (ENVIRONMENT=production). Setting "
+            "allow_origins=['*'] with allow_credentials=True allows any "
+            "website to make authenticated requests to this API, "
+            "exfiltrating pharma partner API keys. Set FRONTEND_URL to "
+            "the specific frontend origin (e.g. "
+            "'https://app.drugos.ai') or set ENVIRONMENT=development "
+            "for local testing (which disables credentials)."
+        )
+    else:
+        # Non-production: allow '*' but DISABLE credentials. Log CRITICAL
+        # so the operator sees this in the structured log stream.
+        logger.critical(
+            "CORS P1-023: FRONTEND_URL='*' is set in a non-production "
+            "environment (%s). allow_credentials is being DISABLED to "
+            "comply with the W3C CORS spec (allow_origins=['*'] + "
+            "allow_credentials=True is a security vulnerability). "
+            "Credentialed cross-origin requests will FAIL. Set "
+            "FRONTEND_URL to a specific origin to enable credentials.",
+            _environment,
+        )
+        _cors_origins = ["*"]
+        _cors_allow_credentials = False
+else:
+    # Normal case: specific origin(s). Allow comma-separated lists.
+    _cors_origins = [u.strip() for u in _frontend_url.split(",") if u.strip()]
+    _cors_allow_credentials = True
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[_frontend_url] if _frontend_url != "*" else ["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
     max_age=600,  # Cache preflight responses for 10 minutes.
