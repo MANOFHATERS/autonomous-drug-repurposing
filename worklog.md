@@ -1883,3 +1883,76 @@ Stage Summary:
 - Fresh clone verification: 28/28 tests pass on the newly cloned main.
 - No regressions introduced in Phase 1 areas (existing test_all_18_issues.py: 12/17 pass; 5 failures are other teammates' scope).
 - Artifacts: tests/forensic_v142_teammate1/test_p1_forensic_v142.py, FORENSIC_VERIFICATION_V142.md
+
+---
+Task ID: teammate6-p2-009-to-016-v142
+Agent: Teammate 6 (Phase 2 — Knowledge Graph — Builder + Pipeline)
+Task: Fix 8 Phase 2 issues (P2-009 through P2-016) — RED TEAM forensic root-cause fixes.
+
+Work Log:
+- Read project docx (Cosmic_Build_Process_Updated.docx) to understand the
+  4-phase autonomous drug repurposing platform architecture.
+- Cloned repo, created branch fix/teammate6-p2-009-to-016-forensic-root-v142.
+- RED TEAM verification of all 8 issues by reading ACTUAL CODE at cited
+  line numbers (not comments, not test files). Found line drift from many
+  prior merges — re-located each broken code block via Grep then read
+  the actual code to verify.
+- Issue 1 (P2-009) CONFIRMED at kg_builder.py:2350 (not 2997).
+  Applied root fix: GraphConnection._detect_version() now RAISES
+  CriticalDataSourceError on Neo4j < 5.0 unless DRUGOS_ALLOW_NEO4J_4X=1.
+  Added legacy Compound-MERGE Cypher branch for 4.x operators.
+- Issue 2 (P2-010) CONFIRMED at transe_model.py:3855 step → 3884 normalize.
+  Applied root fix: added pre-forward normalize_entity/relation_embeddings()
+  so the loss is ALWAYS computed against constrained embeddings per
+  Bordes 2013 §3.2. Post-step normalize kept as defensive measure.
+- Issue 3 (P2-011) CONFIRMED at run_pipeline.py:6538 (step11) AND 9917
+  (run_full_pipeline). Applied root fix: replaced _set_global_seed(42)
+  with _set_global_seed() (no-arg, uses module SEED = DRUGOS_SEED env var).
+  Added assertion to detect SEED divergence.
+- Issue 4 (P2-012) PARTIALLY FIXED pre-v142. Completed root fix: promoted
+  Xavier fallback log to CRITICAL when DRUGOS_ENVIRONMENT=production
+  (was WARNING regardless of environment).
+- Issue 5 (P2-013) CONFIRMED at kg_builder.py:2049. Applied root fix:
+  create_indexes() now RAISES CriticalDataSourceError on failure (mirrors
+  create_constraints). Added strict parameter (default True; env override
+  DRUGOS_INDEX_STRICT=0). Added post-load SHOW INDEXES verification.
+- Issue 6 (P2-014) PARTIALLY FIXED pre-v142. Completed root fix:
+  MLflowTracker.__init__ now spawns a background daemon thread that calls
+  check_for_dangling_mlflow_runs() ONCE per process. Class-level
+  _startup_check_done flag prevents recursion. Env override
+  DRUGOS_MLFLOW_SKIP_STARTUP_CHECK=1 for unit tests.
+- Issue 7 (P2-015) CONFIRMED at kg_api.py:163. Applied root fix: module-
+  level Neo4j driver cache (_healthz_cached_driver) + result cache
+  (_healthz_cached_result) with 30s TTL (configurable via
+  DRUGOS_HEALTHCHECK_CACHE_TTL). _check_neo4j_reachable() helper replaces
+  per-call driver creation.
+- Issue 8 (P2-016) CONFIRMED at run_pipeline.py:7717. Applied root fix:
+  added manage_mlflow_lifecycle kwarg to train_transe (default True,
+  backward-compatible). step11 now creates ONE tracker, starts ONE run,
+  passes the tracker to train_transe (manage_mlflow_lifecycle=False),
+  logs step11-specific final metrics to the SAME run, ends ONCE.
+- Wrote 30 source-level RED TEAM verification tests
+  (phase2/tests/teammate6_p2_009_to_016_v142/test_p2_009_to_016_v142_root_fixes.py)
+  — these read ACTUAL CODE (not comments, not test stubs) to verify
+  each fix is present. All 30 PASS.
+- Wrote 8 real-code functional verification tests
+  (scripts/verify_v142_real_code.py) — these EXERCISE the fixed code
+  paths with controlled inputs (no mocks for code under test). All 8 PASS.
+- Ran adjacent existing tests for regressions: 142 passed, 1 skipped
+  (torch_geometric not installed — pre-existing), 0 failed.
+- Committed (f90d921), pushed branch, merged to main (7babd8d) with --no-ff.
+- Fresh-clone verification: cloned main into a new directory, ran the
+  30 source-level tests against the fresh clone — 30/30 PASS. Verified
+  all 8 fix markers (P2-009 through P2-016) are present in the fresh
+  clone's source code.
+
+Stage Summary:
+- 8 root-cause fixes applied (P2-009 to P2-016) — 6 MEDIUM, 2 LOW.
+- 6 files modified: kg_builder.py, transe_model.py, run_pipeline.py,
+  pyg_builder.py, mlflow_tracker.py, kg_api.py.
+- 869 insertions, 141 deletions across the 6 files.
+- 30 new source-level tests + 8 real-code functional tests — all PASS.
+- 0 regressions in adjacent existing tests (142 passed, 1 skipped).
+- Fresh-clone verification confirms all fixes landed on main.
+- Merge commit on main: 7babd8d
+- Branch: fix/teammate6-p2-009-to-016-forensic-root-v142 (preserved for audit)
