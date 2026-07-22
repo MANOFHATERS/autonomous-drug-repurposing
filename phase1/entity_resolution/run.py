@@ -109,6 +109,63 @@ logger = logging.getLogger(__name__)
 SourceDiagnostic = Dict[str, Any]
 
 
+# -----------------------------------------------------------------------------
+# P1-019 ROOT FIX (Team 2 — Phase 1): contract-driven ChEMBL CSV resolution.
+#
+#   Why this exists: ``run_entity_resolution`` previously hardcoded
+#   ``chembl_path = PROCESSED_DATA_DIR / "drugs.csv"``. The Phase 1
+#   contract (``phase1_schema.py::PHASE1_OUTPUT_SCHEMA``) declares the
+#   CANONICAL filename as ``chembl_drugs.csv`` with ``drugs.csv`` as
+#   an alias. After P1-020 the pipeline emits the canonical name; before
+#   P1-020 it emitted the alias. To stay robust to BOTH, this helper
+#   walks the contract's alias list (canonical first, then aliases)
+#   and returns the first path that EXISTS on disk.
+#
+#   This is the same pattern the validator (``validate_output.py``)
+#   uses via ``_resolve_source_file`` — the contract is the single
+#   source of truth, and the consumer is robust to either filename.
+#
+#   Patient-safety rationale: if the ChEMBL pipeline emits the
+#   canonical name but the consumer reads the legacy alias, the
+#   consumer silently loads an EMPTY DataFrame. Entity resolution
+#   produces 0 canonical mappings, Phase 2 builds a KG with 0
+#   Compound nodes, and the GNN trains on 0 drugs. The dashboard
+#   shows the platform "working" while producing zero predictions —
+#   a silent data-loss path the audit correctly flagged.
+# -----------------------------------------------------------------------------
+def _resolve_chembl_drugs_path(processed_data_dir) -> "Any":
+    """Return the first existing ChEMBL drugs CSV path, or the canonical
+    path (which will then return an empty DataFrame via the existing
+    ``path.exists()`` check) if none exist on disk.
+
+    Walks the contract's alias list (canonical first). Stays robust to
+    both pre-P1-020 (``drugs.csv``) and post-P1-020 (``chembl_drugs.csv``)
+    pipeline outputs.
+    """
+    from pathlib import Path
+    processed_data_dir = Path(processed_data_dir)
+    # Try the contract's alias list first (canonical + legacy).
+    try:
+        # Import lazily so this module stays importable in test contexts
+        # where the phase1 package is not on sys.path.
+        try:
+            from phase1.contracts.phase1_schema import get_all_aliases
+        except ImportError:
+            from contracts.phase1_schema import get_all_aliases  # type: ignore[no-redef]
+        candidate_names = get_all_aliases("chembl_drugs")
+    except Exception:  # noqa: BLE001 — defensive: never crash ER on contract lookup
+        # Fallback to the hardcoded canonical + legacy list if the
+        # contract is unavailable (e.g. broken install).
+        candidate_names = ["chembl_drugs.csv", "drugs.csv"]
+    for name in candidate_names:
+        candidate = processed_data_dir / name
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    # Nothing on disk — return the canonical path so the caller's
+    # ``path.exists()`` check fails cleanly and produces a clear error.
+    return processed_data_dir / "chembl_drugs.csv"
+
+
 def _new_diagnostics() -> List[SourceDiagnostic]:
     """Return a fresh diagnostics list (factory for clarity)."""
     return []
@@ -262,7 +319,7 @@ def run_entity_resolution() -> Dict[str, Any]:
     logger.info("Starting drug entity resolution ...")
     drug_resolver = DrugResolver()
 
-    chembl_path = PROCESSED_DATA_DIR / "drugs.csv"
+    chembl_path = _resolve_chembl_drugs_path(PROCESSED_DATA_DIR)
     drugbank_path = PROCESSED_DATA_DIR / "drugbank_drugs.csv"
     pubchem_path = PROCESSED_DATA_DIR / "pubchem_enrichment.csv"
 

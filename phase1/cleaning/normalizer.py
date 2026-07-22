@@ -800,10 +800,56 @@ _ACTIVITY_VALUE_SIG_FIGS: int = 6
 # Activity type "None" is not a real pharmacology term; values that
 # are actually missing should be null (Python None), not the string
 # "None".
+#
+# P1-027 ROOT FIX (Team 2 — Phase 1): added the ChEMBL "generic"
+# activity types that were previously missing. ChEMBL emits MANY
+# activity types beyond the canonical IC50/Ki/Kd/EC50 family:
+#   - "Potency"          — ChEMBL's generic potency label (often a
+#                          fallback when the specific type isn't
+#                          labeled, e.g. "Potency = 1.2 µM").
+#   - "Activity"         — ChEMBL's generic activity label (no
+#                          specific directionality; value can be
+#                          inhibition OR activation).
+#   - "Inhibition"       — % inhibition at a fixed concentration
+#                          (common in high-throughput screens).
+#   - "Activation"       — % activation at a fixed concentration.
+#   - "% Inhibition"     — alternative formatting of "Inhibition".
+#   - "Residual Activity"— % activity remaining after treatment
+#                          (used in resistance assays).
+#   - "MIC"              — Minimum Inhibitory Concentration (µg/mL,
+#                          antimicrobial assays — used heavily in
+#                          antibiotic repurposing screens).
+#
+# The previous set REJECTED all of these, logging a WARNING and
+# flagging the row with ``unknown_activity_type:{type}``. While the
+# normalizer PRESERVED the value, downstream filters that checked
+# ``activity_type in _ALLOWED_ACTIVITY_TYPES`` DROPPED the row —
+# losing legitimate activity measurements. The KG then lost
+# drug-protein edges for any assay reported with these types,
+# reducing the Graph Transformer's training data and corrupting
+# the model's edge-feature distribution.
+#
+# ROOT FIX: add the missing types to the canonical set. The DB
+# CHECK constraint in ``database/models.py::chk_dpi_activity_type``
+# and ``cleaning/deduplicator.py::_DB_ACTIVITY_TYPES`` MUST be
+# updated in lockstep — see the v93 ROOT FIX comment in models.py
+# ("The DB CHECK must be a SUPERSET of (or exactly match) the
+# normalizer's allowed set — never a subset").
+#
+# NOTE on case sensitivity: ChEMBL emits these with mixed casing
+# ("Inhibition", "% Inhibition", "Residual Activity", "MIC").
+# The deduplicator's ``_validate_activity_type`` does case-insensitive
+# matching (line ~1226), so the canonical case here is the DISPLAY
+# form. Downstream consumers that filter by exact string match MUST
+# use the same case or do case-insensitive comparison.
 _ALLOWED_ACTIVITY_TYPES: frozenset[str] = frozenset({
-    "IC50", "Ki", "Kd", "EC50", "Kb",
+    # Canonical concentration-based potency measures (nM scale).
+    "IC50", "Ki", "Kd", "EC50", "Kb", "ED50", "AC50",
+    # Log10-transformed potency measures (p-scale, dimensionless).
     "pKi", "pIC50", "pEC50", "pKd", "pKb", "pED50", "pAC50",
-    "ED50", "AC50",
+    # P1-027: ChEMBL generic / percent / MIC activity types.
+    "Potency", "Activity", "Inhibition", "Activation",
+    "% Inhibition", "Residual Activity", "MIC",
 })
 # P1-020 NOTE (Team-2): pED50 is INCLUDED here because ChEMBL emits it
 # for some dose-response assay types. The p-scale conversion block

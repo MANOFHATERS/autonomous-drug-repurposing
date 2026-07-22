@@ -29,6 +29,7 @@ import io
 import logging
 import os
 import sys
+import threading as _threading
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set
 
@@ -1188,8 +1189,149 @@ else:  # pragma: no cover — fastapi always pulls pydantic
     ValidatedHypothesisRequest = None  # type: ignore[assignment, misc]
 
 
+# -----------------------------------------------------------------------------
+# P1-021 ROOT FIX (Team 2 — Phase 1): module-level lazy singleton engine.
+#
+#   Why this exists: the previous ``_get_db_session`` created a NEW
+#   SQLAlchemy ``Engine`` on EVERY POST request. Each engine sets up
+#   its own ``QueuePool`` of DB connections. Under any sustained load
+#   (e.g. a pharma partner bulk-validating 500 hypotheses), this causes:
+#     - TCP setup/teardown churn per request (latency floor ~50ms).
+#     - Connection-pool proliferation (N engines × pool_size connections).
+#     - Potential PostgreSQL ``max_connections`` exhaustion (default 100).
+#     - Time wasted in ``create_engine`` parsing the URL, setting up
+#       dialects, registering event listeners, etc.
+#
+#   ROOT FIX: a module-level ``_DB_ENGINE`` singleton, lazily created
+#   on the FIRST POST request via ``_get_db_engine()``. Subsequent
+#   requests reuse the same engine and its pool. ``Session(_engine)``
+#   is created per-request (cheap — just a transaction handle).
+#
+#   This matches the pattern in ``phase1.database.connection.get_engine``
+#   (the canonical DB engine for the rest of the codebase). The POST
+#   endpoint previously bypassed that path because it needed to remain
+#   importable without SQLAlchemy installed (CI environment). The
+#   lazy singleton preserves that property: ``_DB_ENGINE`` starts as
+#   None, and the engine is created only when the POST endpoint is
+#   actually called.
+#
+#   Thread-safety: SQLAlchemy Engine objects are THREAD-SAFE by design
+#   (the connection pool handles concurrent checkout). ``_DB_ENGINE``
+#   is set ONCE; subsequent reads of the module-level variable are
+#   atomic in CPython due to the GIL. For non-CPython runtimes the
+#   ``_DB_ENGINE_LOCK`` serializes the initial creation.
+# -----------------------------------------------------------------------------
+_DB_ENGINE = None  # type: ignore[var-annotated]
+_DB_ENGINE_LOCK = _threading.Lock() if _threading else None  # type: ignore[assignment]
+
+
+def _get_db_engine():
+    """Return the module-level SQLAlchemy Engine singleton.
+
+    Lazily creates the engine on first call. Returns ``(engine, None)``
+    on success or ``(None, error_message)`` on failure.
+
+    P1-021 ROOT FIX + P1-030 ROOT FIX (combined — both touch this path):
+      - P1-021: engine is created ONCE and cached at module scope.
+      - P1-030: error classification distinguishes config errors
+        (no DATABASE_URL) from import errors (SQLAlchemy not installed)
+        from connection errors (DB unreachable). The error message
+        includes the exception TYPE so the operator can diagnose
+        without guessing.
+    """
+    global _DB_ENGINE
+    if _DB_ENGINE is not None:
+        return _DB_ENGINE, None
+
+    db_url = os.environ.get("DATABASE_URL") or os.environ.get("PHASE1_DB_URL")
+    if not db_url:
+        return None, (
+            "DATABASE_URL and PHASE1_DB_URL are both unset. The data "
+            "flywheel requires PostgreSQL — set DATABASE_URL to the "
+            "Phase 1 PostgreSQL connection string."
+        )
+
+    # Lazy import so the service starts even if SQLAlchemy / psycopg2
+    # are not installed (CI environment testing only CSV-backed GETs).
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.exc import ArgumentError
+    except ImportError as exc:
+        # P1-030 ROOT FIX: surface the IMPORT error specifically so
+        # the operator knows this is an install problem, not a DB problem.
+        return None, (
+            f"SQLAlchemy is not installed (ImportError: {type(exc).__name__}: "
+            f"{exc}). The POST /datasets/validated_hypotheses endpoint "
+            f"requires SQLAlchemy + psycopg2. Install via "
+            f"`pip install sqlalchemy psycopg2-binary`."
+        )
+
+    # check_same_thread is False only for SQLite; for Postgres it's a no-op.
+    connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
+
+    # Create the engine ONCE. ``pool_pre_ping=True`` ensures stale
+    # connections are detected before use (handles DB restarts).
+    # ``pool_recycle=1800`` recycles connections every 30 minutes to
+    # avoid the classic "connection timed out by server" failure on
+    # long-idle pools.
+    try:
+        engine = create_engine(
+            db_url,
+            connect_args=connect_args,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+        )
+    except ArgumentError as exc:
+        # P1-030 ROOT FIX: bad DATABASE_URL (e.g. missing driver,
+        # malformed URL). Surface the specific exception type.
+        return None, (
+            f"SQLAlchemy ArgumentError while creating engine from "
+            f"DATABASE_URL (likely malformed URL): "
+            f"{type(exc).__name__}: {exc}"
+        )
+    except Exception as exc:
+        # P1-030 ROOT FIX: any OTHER engine-creation error (e.g.
+        # unknown dialect). Surface the exception TYPE so the operator
+        # can diagnose without guessing. Previously this was hidden
+        # behind a generic ``DB connection failed: ...`` message.
+        return None, (
+            f"Failed to create SQLAlchemy engine from DATABASE_URL: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    # Cache at module scope. Use the lock if available (non-CPython).
+    if _DB_ENGINE_LOCK is not None:
+        with _DB_ENGINE_LOCK:
+            if _DB_ENGINE is None:
+                _DB_ENGINE = engine
+            # else: another thread won the race — discard our engine
+            # and use theirs. (Engines are cheap to discard; the pool
+            # is torn down by GC.)
+            else:
+                try:
+                    engine.dispose()
+                except Exception:
+                    pass
+    else:
+        _DB_ENGINE = engine
+    return _DB_ENGINE, None
+
+
 def _get_db_session():
-    """Lazily create a SQLAlchemy session to the Phase 1 PostgreSQL DB.
+    """Return ``(Session, None)`` or ``(None, error_message)``.
+
+    P1-021 ROOT FIX: reuses the module-level Engine singleton from
+    ``_get_db_engine``. Only the Session is per-request — Sessions
+    are cheap (transaction handles), Engines are expensive (pool
+    setup, dialect initialization).
+
+    P1-030 ROOT FIX: error messages now distinguish:
+      - config errors (DATABASE_URL unset)
+      - import errors (SQLAlchemy not installed)
+      - DB connection errors (OperationalError, InterfaceError)
+      - engine-creation errors (ArgumentError, unknown dialect)
+    Each error message includes the exception TYPE so the operator
+    can diagnose without guessing.
 
     Returns ``None`` if DATABASE_URL is unset or the connection fails —
     the caller (the POST endpoint) returns a 503 in that case so the
@@ -1197,15 +1339,11 @@ def _get_db_session():
     /health, /stats) do NOT use the DB — they read CSVs — so a DB failure
     does not affect the existing service surface.
     """
-    db_url = os.environ.get("DATABASE_URL") or os.environ.get("PHASE1_DB_URL")
-    if not db_url:
-        return None, "DATABASE_URL and PHASE1_DB_URL are both unset"
+    engine, err = _get_db_engine()
+    if engine is None:
+        return None, err
+
     try:
-        # Lazy import so the service starts even if SQLAlchemy / psycopg2
-        # are not installed (e.g. in a CI environment that only tests the
-        # CSV-backed GET endpoints). The POST endpoint will return 503
-        # with a clear error message in that case.
-        from sqlalchemy import create_engine
         from sqlalchemy.orm import Session
         # Import the models so Base.metadata has the ValidatedHypothesis
         # table registered (needed if the DB is empty and create_all is
@@ -1213,18 +1351,70 @@ def _get_db_session():
         # owned by the migration runner).
         import phase1.database.models  # noqa: F401
         from phase1.database.models import ValidatedHypothesis  # noqa: F401
+    except ImportError as exc:
+        # P1-030 ROOT FIX: surface the import error specifically.
+        return None, (
+            f"Required DB model module is not importable "
+            f"(ImportError: {type(exc).__name__}: {exc}). Ensure "
+            f"`phase1.database.models` is installed and importable."
+        )
+    except Exception as exc:
+        # P1-030 ROOT FIX: any other model-import error (e.g. a
+        # misconfigured model file). Surface the exception TYPE.
+        return None, (
+            f"Failed to import phase1.database.models: "
+            f"{type(exc).__name__}: {exc}"
+        )
 
-        # check_same_thread is False only for SQLite; for Postgres it's
-        # a no-op. The engine is per-call (not cached) because the POST
-        # endpoint is low-traffic (validated hypotheses arrive at human
-        # speed — wet-lab results, not ML inference throughput).
-        # For production-grade connection pooling, callers should use
-        # phase1.database.connection.get_db_session() instead.
-        connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
-        engine = create_engine(db_url, connect_args=connect_args, pool_pre_ping=True)
+    try:
+        # Create a Session bound to the singleton Engine. Sessions are
+        # cheap — they hold a transaction handle and checkout a
+        # connection from the engine's pool on first query.
         return Session(engine), None
     except Exception as exc:
-        return None, f"DB connection failed: {exc!r}"
+        # P1-030 ROOT FIX: distinguish specific DB-side errors from
+        # generic failures. SQLAlchemy groups DB-side errors into:
+        #   - OperationalError: connection lost, timeout, too many clients.
+        #   - InterfaceError: connection to the DB driver failed
+        #     (e.g. psycopg2 can't reach Postgres).
+        #   - DatabaseError: base class for all DB-side errors.
+        # Each is surfaced with its TYPE so the operator can diagnose.
+        try:
+            from sqlalchemy.exc import (
+                OperationalError,
+                InterfaceError,
+                DatabaseError,
+                SQLAlchemyError,
+            )
+        except ImportError:  # pragma: no cover
+            OperationalError = InterfaceError = DatabaseError = SQLAlchemyError = Exception  # type: ignore[assignment]
+
+        if isinstance(exc, (OperationalError, InterfaceError)):
+            # DB-side connection failure. The DB is up enough to return
+            # an error but the connection itself failed.
+            return None, (
+                f"DB connection failed (DB-side error): "
+                f"{type(exc).__name__}: {exc}. Check PostgreSQL status, "
+                f"network connectivity, and DATABASE_URL."
+            )
+        if isinstance(exc, DatabaseError):
+            return None, (
+                f"DB error: {type(exc).__name__}: {exc}. Check "
+                f"PostgreSQL logs and DATABASE_URL."
+            )
+        if isinstance(exc, SQLAlchemyError):
+            return None, (
+                f"SQLAlchemy session-creation error: "
+                f"{type(exc).__name__}: {exc}."
+            )
+        # P1-030 ROOT FIX: previously this was a generic
+        # ``f"DB connection failed: {exc!r}"`` which hid the exception
+        # type. Now we surface the type so the operator knows whether
+        # this is a DB error, a SQLAlchemy bug, or a stdlib issue.
+        return None, (
+            f"Unexpected error creating DB session: "
+            f"{type(exc).__name__}: {exc}"
+        )
 
 
 @app.post("/datasets/validated_hypotheses", status_code=201)

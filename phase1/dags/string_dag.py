@@ -9,10 +9,18 @@ Can be triggered independently or as part of the master pipeline.
 Schedule: every Saturday at 05:00 UTC (cron ``0 5 * * 6`` — P1-047 root fix)
 
 v89 FORENSIC ROOT FIX (BUG #8 P1 -- Sunday Morning Pile-Up):
-  Moved from ``0 5 1 * *`` (1st of month) to ``0 5 15 * *`` (15th of
-  month). The 1st could fall on a Sunday, colliding with the master DAG
-  (Sunday 02:00 UTC, up to 7h runtime). See omim_dag.py for full fix
-  rationale. The 15th never systematically collides with Sunday.
+  Originally moved from ``0 5 1 * *`` (1st of month) to ``0 5 15 * *``
+  (15th of month) to avoid colliding with the master DAG (Sunday 02:00
+  UTC, up to 7h runtime). See omim_dag.py for the full fix rationale.
+
+  This v89 fix was SUPERSEDED by P1-047 (see the @dag schedule
+  annotation below), which moved the schedule to weekly Saturday at
+  05:00 UTC. The weekly cadence is safer than a fixed day-of-month
+  because it guarantees no collision with the Sunday master DAG
+  window regardless of calendar month length. This v89 block is
+  preserved for audit-trail continuity; the ACTUAL schedule is set
+  in the ``@dag(schedule=...)`` annotation below and is ``0 5 * * 6``
+  (every Saturday at 05:00 UTC).
 """
 
 from __future__ import annotations

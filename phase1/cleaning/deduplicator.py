@@ -373,8 +373,33 @@ PERCENT_ACTIVITY_TYPES: frozenset[str] = frozenset({
 # the DB contract. Rows with non-DB-enum activity types are
 # dead-lettered HERE (with a clear reason) instead of silently
 # dead-lettered at INSERT time.
+#
+# v93 ROOT FIX (P1-049): the DB CHECK in models.py was updated to
+# include ``Kb``, ``pKi``, ``pIC50``, ``pEC50``, ``pKd``, ``ED50``.
+# This deduplicator set was NOT updated in lockstep, so the dedup
+# continued to dead-letter rows that the DB would accept. The sets
+# are now in sync.
+#
+# P1-027 ROOT FIX (Team 2 — Phase 1): the DB CHECK and normalizer's
+# ``_ALLOWED_ACTIVITY_TYPES`` were updated to include the seven
+# ChEMBL "generic" activity types: ``Potency``, ``Activity``,
+# ``Inhibition``, ``Activation``, ``% Inhibition``,
+# ``Residual Activity``, ``MIC``. This deduplicator set is updated
+# in lockstep so rows with these types are NOT dead-lettered here.
+# Single source of truth: ``normalizer.py::_ALLOWED_ACTIVITY_TYPES`` +
+# ``models.py::chk_dpi_activity_type``.
 _DB_ACTIVITY_TYPES: frozenset[str] = frozenset({
-    "IC50", "EC50", "Ki", "Kd", "potency", "AC50", "unknown", "None",
+    # Canonical concentration-based potency measures.
+    "IC50", "EC50", "Ki", "Kd", "Kb", "ED50", "AC50",
+    # Log10-transformed potency measures (p-scale).
+    "pKi", "pIC50", "pEC50", "pKd", "pKb", "pED50", "pAC50",
+    # P1-027: ChEMBL generic / percent / MIC activity types.
+    "Potency", "Activity", "Inhibition", "Activation",
+    "% Inhibition", "Residual Activity", "MIC",
+    # Sentinel values (DB allows these for backward compat).
+    "potency",  # lowercase alias — DB CHECK is case-sensitive
+    "unknown",
+    "None",     # legacy — see normalizer.py SW-4 root fix
 })
 _ALLOWED_ACTIVITY_TYPES: frozenset[str] = _DB_ACTIVITY_TYPES
 

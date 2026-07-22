@@ -78,6 +78,50 @@ def _resolve_source_file(spec: SourceSpec, base_dir: Path) -> Optional[Path]:
     return None
 
 
+# -----------------------------------------------------------------------------
+# P1-016 ROOT FIX: robust CSV reader that handles BOTH plain and gzipped
+# files regardless of extension.
+#
+#   Why this exists: pandas' default ``compression="infer"`` only inspects
+#   the FILE EXTENSION (``.gz`` -> gzip, anything else -> plain). If a
+#   Phase 1 pipeline writes a gzipped CSV with a non-standard extension
+#   (e.g. ``chembl_drugs.csv`` whose bytes are actually gzip-compressed
+#   because the pipeline was upgraded mid-release), pandas raises
+#   ``BadGzipFile`` (or, worse, silently parses the gzip header as raw
+#   text). The validator's broad ``except Exception`` caught this and
+#   marked the source as ``read_error``, blocking ``trigger_phase2``.
+#   Phase 2 then NEVER ran.
+#
+#   ROOT FIX: sniff the file's first two bytes for the gzip magic
+#   ``0x1f 0x8b`` (RFC 1952). If present, force ``compression="gzip"``.
+#   Otherwise force ``compression=None`` (skip pandas' extension-based
+#   inference entirely — we already know it's plain). This is a
+#   content-aware decision, not an extension-aware one.
+#
+#   Why not just pass ``compression="gzip"`` always? Because plain CSVs
+#   would then fail with ``BadGzipFile``. The magic-byte sniff is the
+#   only way to robustly handle both cases without trying both reads.
+# -----------------------------------------------------------------------------
+def _read_csv_robust(path: Path, **kwargs) -> "pd.DataFrame":
+    """Read a CSV that may be plain or gzipped regardless of file extension.
+
+    Sniffs the gzip magic bytes (``0x1f 0x8b``) at the start of the file.
+    If present, decompresses with gzip. Otherwise reads as plain text.
+    """
+    is_gzip = False
+    try:
+        with open(path, "rb") as _f:
+            _magic = _f.read(2)
+        is_gzip = (_magic == b"\x1f\x8b")
+    except OSError:
+        # If we can't even read 2 bytes, let pandas raise the real error.
+        is_gzip = False
+
+    if is_gzip:
+        return pd.read_csv(path, compression="gzip", **kwargs)
+    return pd.read_csv(path, compression=None, **kwargs)
+
+
 # =============================================================================
 # Per-source validation
 # =============================================================================
@@ -107,8 +151,10 @@ def _validate_source(
         return issues
 
     # Read the CSV (no dtype coercion yet — we check actual dtypes below).
+    # P1-016 ROOT FIX: use the robust reader that sniffs gzip magic bytes
+    # instead of relying on file extension. See ``_read_csv_robust``.
     try:
-        df = pd.read_csv(path)
+        df = _read_csv_robust(path)
     except pd.errors.EmptyDataError:
         issues.append(ValidationIssue(
             source=spec.key,

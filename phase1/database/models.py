@@ -1750,10 +1750,36 @@ class DrugProteinInteraction(Base, IDMixin, TimestampMixin):
         # be a SUPERSET of (or exactly match) the normalizer's allowed
         # set -- never a subset. Single source of truth:
         # ``cleaning/normalizer.py::_ALLOWED_ACTIVITY_TYPES``.
+        #
+        # P1-027 ROOT FIX (Team 2 — Phase 1): the DB CHECK was ALSO
+        # missing the seven ChEMBL "generic" activity types added to
+        # ``normalizer.py::_ALLOWED_ACTIVITY_TYPES``: ``Potency``,
+        # ``Activity``, ``Inhibition``, ``Activation``,
+        # ``% Inhibition``, ``Residual Activity``, ``MIC``. Without
+        # this update, the normalizer would ACCEPT a row with
+        # ``activity_type='Inhibition'`` but the DB INSERT would FAIL
+        # with CheckViolation — silently dead-lettering the row at the
+        # DB boundary. The KG would lose every drug-protein edge from
+        # high-throughput screening assays (which predominantly report
+        # % Inhibition), antibiotic-resistance assays (MIC), and
+        # generic Potency assays. This corrupts the Graph Transformer's
+        # training distribution: the model would over-represent
+        # dose-response assays (IC50/Ki) and under-represent HTS data,
+        # biasing predictions toward well-studied targets.
+        #
+        # MIGRATION NOTE: existing PostgreSQL DBs need an
+        # ``ALTER TABLE ... DROP CONSTRAINT chk_dpi_activity_type`` +
+        # ``ADD CONSTRAINT chk_dpi_activity_type CHECK (...)`` migration
+        # to pick up the new enum. ORM-created DBs (dev/test) get the
+        # new CHECK automatically on the next ``Base.metadata.create_all()``.
+        # The migration is owned by the migration runner; this ORM
+        # definition is the source of truth for new DBs.
         CheckConstraint(
             "activity_type IS NULL OR activity_type IN "
             "('IC50', 'EC50', 'Ki', 'Kd', 'Kb', 'potency', 'AC50', "
-            "'pKi', 'pIC50', 'pEC50', 'pKd', 'ED50', 'unknown')",
+            "'pKi', 'pIC50', 'pEC50', 'pKd', 'pKb', 'pED50', 'pAC50', "
+            "'ED50', 'Potency', 'Activity', 'Inhibition', 'Activation', "
+            "'% Inhibition', 'Residual Activity', 'MIC', 'unknown')",
             name="chk_dpi_activity_type",
         ),
         CheckConstraint(

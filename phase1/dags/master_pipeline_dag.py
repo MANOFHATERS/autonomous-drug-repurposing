@@ -120,6 +120,52 @@ except ImportError:  # pragma: no cover -- defensive: sqlalchemy is in requireme
 
 logger = logging.getLogger(__name__)
 
+
+# -----------------------------------------------------------------------------
+# P1-016 ROOT FIX (Team 2 — Phase 1): gzip-aware CSV reader.
+#
+#   Why this exists: ``pd.read_csv(path)`` defaults to
+#   ``compression="infer"`` which only inspects the FILE EXTENSION. A
+#   gzipped CSV with a non-.gz extension (e.g. ``chembl_drugs.csv``
+#   whose bytes are actually gzip-compressed) raises ``BadGzipFile``.
+#   The validator's broad ``except Exception`` catches this and marks
+#   the source as ``read_error`` — blocking ``trigger_phase2``.
+#
+#   ROOT FIX: sniff the gzip magic bytes (``0x1f 0x8b`` — RFC 1952).
+#   If present, force ``compression="gzip"``. Otherwise force
+#   ``compression=None`` (skip pandas' extension-based inference — we
+#   already know it's plain). Content-aware, not extension-aware.
+#
+#   ``pd_module`` is accepted (rather than importing pandas at module
+#   top) so this helper is lazy and never triggers an import-cost
+#   penalty when the validate_output task is not the one running.
+# -----------------------------------------------------------------------------
+def _robust_read_csv(pd_module, csv_path, **kwargs):
+    """Read a CSV that may be plain or gzipped, regardless of file extension.
+
+    Args:
+        pd_module: the ``pandas`` module (caller imports it lazily so the
+            DAG parse path stays light).
+        csv_path: path-like to the CSV file.
+        **kwargs: forwarded to ``pd.read_csv`` (e.g. ``nrows=50``).
+
+    Returns:
+        pandas.DataFrame
+    """
+    is_gzip = False
+    try:
+        with open(csv_path, "rb") as _fh:
+            _magic = _fh.read(2)
+        is_gzip = (_magic == b"\x1f\x8b")
+    except OSError:
+        # File unreadable at the binary level — let pandas raise the
+        # real, user-visible error (e.g. FileNotFoundError).
+        is_gzip = False
+
+    if is_gzip:
+        return pd_module.read_csv(csv_path, compression="gzip", **kwargs)
+    return pd_module.read_csv(csv_path, compression=None, **kwargs)
+
 # v89 ROOT FIX (BUG #27 — fragile runtime import inside _check_drugbank_xml):
 # The previous code did ``from config.settings import DRUGBANK_XML_PATH``
 # INSIDE the ``_check_drugbank_xml`` branch callable. That import runs
@@ -1773,7 +1819,13 @@ def _validate_output_impl() -> dict:
                     continue
                 # Spot-check: first 50 data rows must have non-null ID.
                 import pandas as _pd
-                df_sample = _pd.read_csv(csv_path, nrows=50)
+                # P1-016 ROOT FIX: use robust gzip-aware reader. A CSV that
+                # is gzipped with a non-standard extension (e.g.
+                # ``chembl_drugs.csv`` whose bytes are actually gzip) would
+                # raise ``BadGzipFile`` with a plain ``read_csv`` call,
+                # blocking ``trigger_phase2``. Sniff the gzip magic bytes
+                # (0x1f 0x8b) and force the correct ``compression``.
+                df_sample = _robust_read_csv(_pd, csv_path, nrows=50)
                 if id_col in df_sample.columns:
                     non_null = df_sample[id_col].dropna()
                     if len(non_null) == 0:
@@ -1799,7 +1851,8 @@ def _validate_output_impl() -> dict:
         # so we must read at least one column.
         try:
             import pandas as _pd
-            df_count = _pd.read_csv(csv_path, usecols=[0])
+            # P1-016 ROOT FIX: gzip-aware read (see ``_robust_read_csv``).
+            df_count = _robust_read_csv(_pd, csv_path, usecols=[0])
             row_counts[source_key] = len(df_count)
         except Exception as exc:
             logger.warning(
@@ -1831,8 +1884,13 @@ def _validate_output_impl() -> dict:
                 continue  # already flagged in Check 1
             try:
                 import pandas as _pd
-                df_sample = _pd.read_csv(
-                    csv_path, nrows=1000, compression="infer",
+                # P1-016 ROOT FIX: gzip-aware read. Originally this call
+                # used ``compression="infer"`` which only inspects the
+                # FILE EXTENSION — a gzipped file with a non-.gz extension
+                # would fail with ``BadGzipFile``. Sniff magic bytes
+                # instead so the read succeeds regardless of extension.
+                df_sample = _robust_read_csv(
+                    _pd, csv_path, nrows=1000,
                 )
                 if "inchikey" in df_sample.columns:
                     synth_count = int(
@@ -1901,7 +1959,8 @@ def _validate_output_impl() -> dict:
     if _entity_mapping_path.exists():
         try:
             import pandas as _pd
-            em_df = _pd.read_csv(_entity_mapping_path)
+            # P1-016 ROOT FIX: gzip-aware read (see ``_robust_read_csv``).
+            em_df = _robust_read_csv(_pd, _entity_mapping_path)
             if len(em_df) == 0 and is_production:
                 failures.append(
                     "validate_output: entity_mappings.csv is EMPTY. Entity "

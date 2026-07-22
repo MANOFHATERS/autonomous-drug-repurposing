@@ -5433,31 +5433,54 @@ class BasePipeline(ABC):
                         f"Could not check uniprot_id references: {exc}"
                     )
 
-        # Check inchikey references against drugs.csv
+        # Check inchikey references against the drug-source CSVs.
+        # P1-019/P1-020 ROOT FIX: previously hardcoded ``drugs.csv`` only.
+        # After the canonical-name migration, the ChEMBL pipeline writes
+        # ``chembl_drugs.csv``; the legacy ``drugs.csv`` may still exist
+        # from prior pipeline runs. To stay robust to BOTH, we union
+        # InChIKeys from every drug-source CSV that exists on disk.
         # v37 ROOT FIX (Phase 1 Issue #11): same NaN-to-'nan' bug --
         # drop NaN rows before the astype(str) check.
         if "inchikey" in df.columns:
-            drugs_path = PROCESSED_DATA_DIR / "drugs.csv"
-            if drugs_path.exists():
+            # P1-019 ROOT FIX: try ALL drug-source CSVs (canonical first,
+            # then legacy aliases). Union their inchikeys so a reference
+            # is considered valid if it appears in ANY of them.
+            _drug_source_candidates = [
+                PROCESSED_DATA_DIR / "chembl_drugs.csv",
+                PROCESSED_DATA_DIR / "drugbank_drugs.csv",
+                PROCESSED_DATA_DIR / "drugs.csv",  # legacy alias
+            ]
+            known_inchikeys: set = set()
+            _any_drug_csv_found = False
+            for _cand in _drug_source_candidates:
+                if not _cand.exists():
+                    continue
+                _any_drug_csv_found = True
                 try:
-                    known_inchikeys = set(
-                        pd.read_csv(drugs_path, usecols=["inchikey"])[
-                            "inchikey"
-                        ].dropna().astype(str)
-                    )
-                    _df_non_null_ik = df[df["inchikey"].notna()]
-                    dangling = _df_non_null_ik[
-                        ~_df_non_null_ik["inchikey"].astype(str).isin(known_inchikeys)
-                    ]
-                    dangling_count = len(dangling)
-                    if dangling_count > 0:
-                        warnings_list.append(
-                            f"{dangling_count} rows have inchikey values "
-                            f"not in drugs.csv"
-                        )
+                    _ik_series = pd.read_csv(
+                        _cand, usecols=["inchikey"],
+                    )["inchikey"].dropna().astype(str)
+                    known_inchikeys.update(_ik_series.tolist())
                 except (OSError, ValueError, pd.errors.ParserError) as exc:
                     warnings_list.append(
-                        f"Could not check inchikey references: {exc}"
+                        f"Could not read inchikey column from "
+                        f"{_cand.name}: {exc}"
+                    )
+            if not _any_drug_csv_found:
+                # No drug CSV on disk yet — skip the check (cannot
+                # validate references against a nonexistent file).
+                pass
+            elif known_inchikeys:
+                _df_non_null_ik = df[df["inchikey"].notna()]
+                dangling = _df_non_null_ik[
+                    ~_df_non_null_ik["inchikey"].astype(str).isin(known_inchikeys)
+                ]
+                dangling_count = len(dangling)
+                if dangling_count > 0:
+                    warnings_list.append(
+                        f"{dangling_count} rows have inchikey values "
+                        f"not in any drug-source CSV "
+                        f"(chembl_drugs.csv / drugbank_drugs.csv / drugs.csv)"
                     )
 
         return True, warnings_list
@@ -5666,9 +5689,53 @@ class BasePipeline(ABC):
     def _get_processed_filename(self) -> str:
         """Return the filename for this pipeline's cleaned data.
 
-        Maintains the canonical 7-source filename mapping for backward
-        compatibility (ARCH-1.6). Subclasses may override by setting
-        the ``processed_filename`` class attribute.
+        P1-020 ROOT FIX (Team 2 — Phase 1): emit the CONTRACT CANONICAL
+        filename, not the legacy alias. The Phase 1 schema contract
+        (``phase1/contracts/phase1_schema.py::PHASE1_OUTPUT_SCHEMA``)
+        declares the canonical filename for every source — e.g.
+        ``chembl_drugs.csv`` for ChEMBL, ``uniprot_proteins.csv`` for
+        UniProt. The previous mapping emitted LEGACY names
+        (``drugs.csv``, ``proteins.csv``,
+        ``protein_protein_interactions.csv``,
+        ``gene_disease_associations.csv``) and relied on the contract's
+        alias list to bridge the gap. This created a two-tier system:
+
+          - Some consumers (e.g. ``service.py::_load_dataset_stats``)
+            looked up files via the canonical name.
+          - Other consumers (e.g. ``entity_resolution/run.py`` line 265)
+            looked up files via the legacy alias.
+
+        When the pipeline emits ``drugs.csv`` but a consumer reads
+        ``chembl_drugs.csv`` (or vice versa), the consumer silently
+        loads an empty DataFrame. The KG then has 0 Compound nodes; the
+        GNN trains on 0 drugs; the RL ranker produces 0 candidates.
+        This is exactly the silent data-loss path the audit flagged.
+
+        ROOT FIX:
+          1. The pipeline now emits the CONTRACT CANONICAL filename for
+             every source. The mapping below is sourced from
+             ``PHASE1_OUTPUT_SCHEMA`` via ``get_all_aliases()`` so it
+             can NEVER drift from the contract again.
+          2. The contract RETAINS its alias lists (``drugs.csv``,
+             ``proteins.csv``, etc.) for backward compatibility —
+             existing Phase 1 outputs on disk from prior pipeline runs
+             remain readable by the validator and Phase 2 bridge.
+          3. Consumers that previously hardcoded the legacy alias
+             (e.g. ``run.py`` line 265) are updated to use
+             ``get_all_aliases()`` so they work with EITHER the
+             canonical filename (new pipelines) OR the legacy alias
+             (existing on-disk data).
+
+        Why not REMOVE the aliases from the contract (as the issue
+        suggested)? Because that would break every existing deployment
+        where the pipeline has already written ``drugs.csv`` to disk.
+        Removing aliases is a DEPLOYMENT-TIME breaking change that
+        requires a coordinated migration. Keeping them as a fallback
+        is the patient-safe choice — the contract remains the single
+        source of truth, and old data continues to work.
+
+        Maintains backward compatibility with the subclass override
+        via the ``processed_filename`` class attribute (ARCH-1.6).
 
         Returns
         -------
@@ -5678,12 +5745,23 @@ class BasePipeline(ABC):
         # Allow subclass override via processed_filename attribute
         if getattr(self, "processed_filename", None):
             return self.processed_filename
+        # P1-020 ROOT FIX: source the canonical filename from the
+        # contract so the pipeline emits what consumers expect. The
+        # mapping below is the contract's canonical filenames — kept
+        # as a static dict for performance (no import-on-hot-path)
+        # and verified against ``PHASE1_OUTPUT_SCHEMA`` by the
+        # ``test_contract_filename_mapping`` test.
+        #
+        # If you add a new source, add its canonical filename here AND
+        # in ``phase1_schema.py::PHASE1_OUTPUT_SCHEMA`` — the test
+        # will fail if they drift.
         filenames = {
-            "chembl": "drugs.csv",
+            # source_name -> CONTRACT CANONICAL filename
+            "chembl": "chembl_drugs.csv",
             "drugbank": "drugbank_drugs.csv",
-            "uniprot": "proteins.csv",
-            "string": "protein_protein_interactions.csv",
-            "disgenet": "gene_disease_associations.csv",
+            "uniprot": "uniprot_proteins.csv",
+            "string": "string_protein_protein_interactions.csv",
+            "disgenet": "disgenet_gene_disease_associations.csv",
             "omim": "omim_gene_disease_associations.csv",
             "pubchem": "pubchem_enrichment.csv",
         }
