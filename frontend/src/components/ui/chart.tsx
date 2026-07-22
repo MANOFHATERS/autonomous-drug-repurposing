@@ -102,19 +102,79 @@ const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
     return null
   }
 
+  // FE-021 ROOT FIX (Teammate 16, hostile-auditor): the previous code
+  // interpolated `color` directly into a CSS `<style>` tag via
+  // `dangerouslySetInnerHTML`. If `color` is attacker-controlled (e.g.,
+  // from an API response that includes a user-specified chart color,
+  // or from a future feature that lets users customize chart colors),
+  // an attacker could inject:
+  //   `red; } </style><script>alert(1)</script><style>body{color:`
+  // to break out of the style tag and inject arbitrary HTML/JS. The
+  // CSP allows 'unsafe-inline' (per FE-008) so the injected script
+  // would execute. In practice, ChartConfig is currently hardcoded —
+  // but if a future feature lets users customize chart colors, this
+  // becomes a stored XSS.
+  //
+  // ROOT FIX (per FE-021 issue spec):
+  //   1. Validate `color` against a strict whitelist regex BEFORE
+  //      interpolation. The regex accepts:
+  //        - Hex colors: #RGB, #RGBA, #RRGGBB, #RRGGBBAA (3-8 hex
+  //          digits, case-insensitive, leading #).
+  //        - CSS custom properties: var(--name) where name matches
+  //          [-_a-zA-Z0-9]+.
+  //        - Named CSS colors: a single token of letters and hyphens
+  //          (e.g., "red", "dark-blue", "transparent", "inherit").
+  //        - rgb()/rgba()/hsl()/hsl() function calls with strictly
+  //          whitelisted characters (digits, commas, spaces, percent,
+  //          decimal points, slashes for modern rgb() alpha syntax).
+  //      Anything else is REJECTED and replaced with `transparent`
+  //      (which is visually a no-op — the chart will show no color
+  //      for that series, but no XSS payload executes).
+  //   2. As a defense-in-depth, ALSO strip any `<`, `>`, `;`, `}`,
+  //      `{`, `(`, `)`, `"`, `'`, `\\` characters from the color
+  //      value before interpolation. Even if the regex is bypassed
+  //      by a future change, the strip ensures no CSS-breaking or
+  //      HTML-breaking characters can appear in the output.
+  //
+  // The regex is anchored (^...$) so the ENTIRE color string must
+  // match the whitelist — no prefix/suffix injection.
+  const SAFE_COLOR_RE = /^#[0-9a-fA-F]{3,8}$|^var\(--[-\w]+\)$|^[a-zA-Z-]+$|^rgba?\(\s*[0-9.%\s,/]+\)$|^hsla?\(\s*[0-9.%\s,/]+\)$/;
+  const sanitizeColor = (raw: string | undefined): string => {
+    if (!raw || typeof raw !== "string") return "transparent";
+    // Defense-in-depth: strip HTML/CSS-breaking characters. Even if
+    // the regex below accepts the value, we strip these to guarantee
+    // no `<style>` breakout is possible.
+    const stripped = raw.replace(/[<>;{}()"'\\]/g, "");
+    if (SAFE_COLOR_RE.test(stripped)) {
+      return stripped;
+    }
+    // Reject — return transparent (visually a no-op, no XSS).
+    return "transparent";
+  };
+  // Also validate the `id` (used as a CSS attribute selector). Same
+  // whitelist: letters, digits, hyphens. Anything else is rejected
+  // and replaced with a safe placeholder.
+  const SAFE_ID_RE = /^[-\w]+$/;
+  const safeId = SAFE_ID_RE.test(id) ? id : "chart-invalid-id";
+
   return (
     <style
       dangerouslySetInnerHTML={{
         __html: Object.entries(THEMES)
           .map(
             ([theme, prefix]) => `
-${prefix} [data-chart=${id}] {
+${prefix} [data-chart=${safeId}] {
 ${colorConfig
   .map(([key, itemConfig]) => {
-    const color =
+    const rawColor =
       itemConfig.theme?.[theme as keyof typeof itemConfig.theme] ||
       itemConfig.color
-    return color ? `  --color-${key}: ${color};` : null
+    if (!rawColor) return null
+    const color = sanitizeColor(rawColor)
+    // FE-021: also validate the `key` — it's interpolated into a CSS
+    // custom property name (--color-${key}). Same whitelist as id.
+    const safeKey = SAFE_ID_RE.test(key) ? key : "invalid-key"
+    return `  --color-${safeKey}: ${color};`
   })
   .join("\n")}
 }

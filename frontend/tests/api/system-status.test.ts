@@ -133,20 +133,39 @@ describeWithDb("TASK-277: System status — aggregates real status from all serv
     expect(health.services.postgres.latencyMs).toBeGreaterThanOrEqual(0);
   });
 
-  it("marks Neo4j as unavailable when NEO4J_URL is not configured", async () => {
+  it("marks Neo4j as degraded (NOT unavailable) when NEO4J_URL is not configured (FE-018 root fix)", async () => {
+    // FE-018 ROOT FIX (Teammate 16): Neo4j "not configured" is an
+    // OPERATOR ACTION, not a service outage. The previous code
+    // returned `available: false, status: "unavailable", critical: true`
+    // which made /api/system/status return 503 → K8s readiness probes
+    // failed on every dev deploy. The fix: report "degraded" (NOT
+    // unavailable) and NOT critical (so overall != "down" → no 503).
     const oldUrl = process.env.NEO4J_URL;
     const oldKgUrl = process.env.KG_SERVICE_URL;
+    const oldDrugosUri = process.env.DRUGOS_NEO4J_URI;
+    const oldNeo4jUri = process.env.NEO4J_URI;
     delete process.env.NEO4J_URL;
     delete process.env.KG_SERVICE_URL;
+    delete process.env.DRUGOS_NEO4J_URI;
+    delete process.env.NEO4J_URI;
     try {
       const health = await getSystemHealth();
       expect(health.services.neo4j.available).toBe(false);
-      expect(health.services.neo4j.status).toBe("unavailable");
-      expect(health.services.neo4j.critical).toBe(true);
-      expect(health.services.neo4j.reason).toContain("not configured");
+      // FE-018: status is now "degraded" (NOT "unavailable").
+      expect(health.services.neo4j.status).toBe("degraded");
+      expect(health.services.neo4j.degraded).toBe(true);
+      // FE-018: NOT critical — the service isn't down, the operator
+      // just hasn't configured the URL yet.
+      expect(health.services.neo4j.critical).toBe(false);
+      expect(health.services.neo4j.reason).toMatch(/NOT CONFIGURED/i);
+      // Overall must NOT be "down" — K8s readiness probes must stay
+      // healthy when Neo4j is merely not configured.
+      expect(health.overall).not.toBe("down");
     } finally {
       if (oldUrl) process.env.NEO4J_URL = oldUrl;
       if (oldKgUrl) process.env.KG_SERVICE_URL = oldKgUrl;
+      if (oldDrugosUri) process.env.DRUGOS_NEO4J_URI = oldDrugosUri;
+      if (oldNeo4jUri) process.env.NEO4J_URI = oldNeo4jUri;
     }
   });
 
@@ -171,19 +190,39 @@ describeWithDb("TASK-277: System status — aggregates real status from all serv
     expect(body.services).toHaveProperty("knowledgeGraph");
   });
 
-  it("returns 503 when overall === 'down' (Neo4j not configured in test env)", async () => {
-    const user = await createUser({ email: "pa-down@test.com", role: "researcher", platformRole: "admin" });
-    const org = await createOrg(user.id, "pa-down-org", "member");
-    const token = signAccessToken({
-      userId: user.id, email: user.email, role: user.role, platformRole: "admin", orgId: org.id,
-    });
-    setTestCookies({ drugos_access: token });
-    const req = await buildReq("/api/system/status");
-    const res = await systemStatusGet(req as any);
-    expect([200, 503]).toContain(res.status);
-    if (res.status === 503) {
+  it("does NOT return 503 when Neo4j is merely not configured (FE-018 root fix)", async () => {
+    // FE-018 ROOT FIX (Teammate 16): the previous test expected 503
+    // when Neo4j was not configured — but the FIX is that "not
+    // configured" is degraded (NOT critical), so overall != "down"
+    // and /api/system/status returns 200. K8s readiness probes must
+    // stay healthy when the operator just hasn't wired up Neo4j yet.
+    const oldUrl = process.env.NEO4J_URL;
+    const oldKgUrl = process.env.KG_SERVICE_URL;
+    const oldDrugosUri = process.env.DRUGOS_NEO4J_URI;
+    const oldNeo4jUri = process.env.NEO4J_URI;
+    delete process.env.NEO4J_URL;
+    delete process.env.KG_SERVICE_URL;
+    delete process.env.DRUGOS_NEO4J_URI;
+    delete process.env.NEO4J_URI;
+    try {
+      const user = await createUser({ email: "pa-down@test.com", role: "researcher", platformRole: "admin" });
+      const org = await createOrg(user.id, "pa-down-org", "member");
+      const token = signAccessToken({
+        userId: user.id, email: user.email, role: user.role, platformRole: "admin", orgId: org.id,
+      });
+      setTestCookies({ drugos_access: token });
+      const req = await buildReq("/api/system/status");
+      const res = await systemStatusGet(req as any);
+      // FE-018: must be 200, NOT 503. Neo4j "not configured" is
+      // degraded (not critical), so overall != "down" → no 503.
+      expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.overall).toBe("down");
+      expect(body.overall).not.toBe("down");
+    } finally {
+      if (oldUrl) process.env.NEO4J_URL = oldUrl;
+      if (oldKgUrl) process.env.KG_SERVICE_URL = oldKgUrl;
+      if (oldDrugosUri) process.env.DRUGOS_NEO4J_URI = oldDrugosUri;
+      if (oldNeo4jUri) process.env.NEO4J_URI = oldNeo4jUri;
     }
   });
 });
