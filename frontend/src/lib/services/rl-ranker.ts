@@ -55,6 +55,15 @@ import {
   type RlRankResponse as ContractRlRankResponse,
   validateMlResponse,
 } from "@/lib/ml-contracts";
+// FE-002 ROOT FIX (Teammate 13, v143): import the canonical SERVICE_PORTS
+// and buildServiceUrlHint so the "RL_SERVICE_URL is not set" hint message
+// can NEVER drift from the canonical contract again. The previous code
+// hardcoded "8003" in the hint string — a literal that future code could
+// silently change to a wrong port without any compile-time check.
+import {
+  SERVICE_PORTS,
+  buildServiceUrlHint,
+} from "@/../contracts/_url-constants";
 
 // ---------------------------------------------------------------------------
 // Public types (kept stable for existing callers)
@@ -285,13 +294,20 @@ export async function getRankedHypotheses(opts?: {
       // wrong port, perpetuating the "service unreachable" error across
       // 30 days of debugging. Fixed to 8003 to match the canonical
       // contract.
+      //
+      // FE-002 ROOT FIX (Teammate 13, v143): the hint is now built from
+      // the imported SERVICE_PORTS constant via buildServiceUrlHint() —
+      // the literal "8003" no longer appears in this file. If a future
+      // contract change moves phase4_rl to a different port, this hint
+      // updates automatically. This is the "centralize the port constants
+      // and import them in every service file" fix the audit demanded.
       note:
         "RL_SERVICE_URL is not set. The Phase 4 RL ranker service " +
         "(rl/service.py) must be running and reachable. Start it with " +
-        "`python rl/service.py` (defaults to port 8003 per the canonical " +
-        "SERVICE_PORTS contract) and set " +
-        "RL_SERVICE_URL=http://localhost:8003 in frontend/.env.local. " +
-        "Issue 231 ROOT FIX: this endpoint NEVER reads a local CSV and " +
+        "`python rl/service.py` (defaults to port " +
+        `${SERVICE_PORTS.phase4_rl} per the canonical SERVICE_PORTS ` +
+        "contract) and " + buildServiceUrlHint("RL_SERVICE_URL", "phase4_rl") +
+        ". Issue 231 ROOT FIX: this endpoint NEVER reads a local CSV and " +
         "NEVER fabricates rankings.",
     };
   }

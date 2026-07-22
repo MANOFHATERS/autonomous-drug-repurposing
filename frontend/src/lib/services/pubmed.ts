@@ -246,7 +246,21 @@ export async function getAbstract(
   url.searchParams.set("rettype", "abstract");
   url.searchParams.set("retmode", "text");
   if (process.env.NCBI_API_KEY) url.searchParams.set("api_key", process.env.NCBI_API_KEY);
-  const res = await fetch(url, { next: { revalidate: 86400 } });
+  // FE-006 ROOT FIX (Teammate 13, v143): replace raw `fetch()` with
+  // `fetchWithRetry()`. The previous code used `fetch(url, { next: { revalidate: 86400 } })`
+  // — bypassing the monitoredFetch + retry infrastructure that EVERY
+  // other PubMed call (searchPubMed, esearch, esummary) already uses.
+  // PubMed 429 responses on abstract fetches were NOT retried — a
+  // single NCBI rate-limit returned a 429 to the researcher with no
+  // recovery. PubMed latency on abstract fetches was NOT logged to
+  // the external-api-monitor — operators had no visibility into
+  // abstract-fetch outages.
+  //
+  // The `next: { revalidate: 86400 }` option is forwarded as part of
+  // `init` so Next.js's ISR cache still applies (the abstract is
+  // revalidated once per day). fetchWithRetry passes init through to
+  // monitoredFetch unchanged.
+  const res = await fetchWithRetry(url, { next: { revalidate: 86400 } });
   if (!res.ok) throw new Error(`NCBI efetch returned ${res.status}`);
   const text = (await res.text()).trim();
   if (maxLength === undefined) return text;
@@ -272,7 +286,15 @@ export async function getAbstractTruncated(
   url.searchParams.set("rettype", "abstract");
   url.searchParams.set("retmode", "text");
   if (process.env.NCBI_API_KEY) url.searchParams.set("api_key", process.env.NCBI_API_KEY);
-  const res = await fetch(url, { next: { revalidate: 86400 } });
+  // FE-006 ROOT FIX (Teammate 13, v143): same fix as getAbstract above —
+  // replace raw `fetch()` with `fetchWithRetry()` so 429s are retried and
+  // the call is logged to the external-api-monitor. The previous code
+  // claimed (in the BE-058 comment block) that the BE-058 root fix had
+  // migrated ALL PubMed fetches to monitoredFetch — but getAbstract and
+  // getAbstractTruncated still used raw `fetch()`. The comment was a lie;
+  // the code was broken. This is the "comments claim fixed, code is
+  // broken" pattern the user explicitly called out.
+  const res = await fetchWithRetry(url, { next: { revalidate: 86400 } });
   if (!res.ok) throw new Error(`NCBI efetch returned ${res.status}`);
   const text = (await res.text()).trim();
   const truncated = truncateAbstract(text, maxLength);

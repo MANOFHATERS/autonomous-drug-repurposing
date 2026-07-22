@@ -68,12 +68,30 @@ export const ALL_SERVICE_URLS = [
 // ============================================================================
 // DEFAULT SERVICE PORTS — MUST match shared/contracts/urls.py SERVICE_PORTS
 // ============================================================================
+//
+// FE-002 ROOT FIX (Teammate 13, v143, CRITICAL — port drift):
+// The previous SERVICE_PORTS map was MISSING the FastAPI backend port. This
+// caused the .env.example to suggest `BACKEND_URL=http://localhost:8000`
+// (colliding with phase1_dataset) while backend/api/main.py defaults to
+// port 8004 (per `uvicorn main:app --host 0.0.0.0 --port 8004 --workers 4`
+// at main.py L75). The mismatch meant operators following .env.example
+// could never reach the FastAPI — every /api/predict call returned
+// ECONNREFUSED because port 8000 is the Phase 1 dataset service, not the
+// FastAPI. Adding `backend_fastapi: 8004` makes the canonical contract
+// match the actual FastAPI default. Every error message that hints the
+// operator to set DRUGOS_API_URL / BACKEND_URL MUST build the port from
+// `SERVICE_PORTS.backend_fastapi` so the hint can never drift again.
+// ============================================================================
 
 export const SERVICE_PORTS = {
   phase1_dataset: 8000,
   phase2_kg: 8001,
   phase3_gt: 8002,
   phase4_rl: 8003,
+  // FE-002 ROOT FIX (Teammate 13, v143): the public FastAPI REST API.
+  // Default port 8004 matches `uvicorn main:app --port 8004` in
+  // backend/api/main.py L75. Used by DRUGOS_API_URL / BACKEND_URL.
+  backend_fastapi: 8004,
   airflow_webserver: 8080,
   mlflow_tracking: 5000,
   neo4j_bolt: 7687,
@@ -83,3 +101,65 @@ export const SERVICE_PORTS = {
 } as const;
 
 export type ServiceName = keyof typeof SERVICE_PORTS;
+
+// ============================================================================
+// FE-002 ROOT FIX (Teammate 13, v143): canonical env-var → service map.
+// Used by the startup env-var validator (lib/service-url-validator.ts) to
+// detect when an operator has pointed a *_SERVICE_URL env var at the WRONG
+// port (e.g. KG_SERVICE_URL=http://localhost:8002 → 8002 is GT, not KG).
+// Each entry maps an env var name to the SERVICE_PORTS key it should
+// resolve to. If the URL in the env var points at a port assigned to a
+// DIFFERENT service, the validator emits a console.warn at startup.
+//
+// NOTE: this map is for the FRONTEND env vars only. The backend has its
+// own copies (PHASE1_SERVICE_URL etc.) — they are intentionally NOT
+// duplicated here. The frontend now calls /api/* Next.js routes (which
+// proxy to the FastAPI backend) for every ML operation; the only direct
+// service URL the frontend still uses is RL_SERVICE_URL (rl-ranker.ts
+// retained it as a legacy escape hatch until BE-035 fully lands).
+// ============================================================================
+
+export const SERVICE_URL_ENV_VARS: Record<string, ServiceName> = {
+  // Frontend → backend FastAPI (the only canonical frontend service URL).
+  DRUGOS_API_URL: "backend_fastapi",
+  BACKEND_URL: "backend_fastapi",
+  BACKEND_SERVICE_URL: "backend_fastapi",
+  // Legacy direct-service env vars (deprecated on the frontend, but if an
+  // operator sets them on the frontend by mistake, the validator flags it).
+  PHASE1_SERVICE_URL: "phase1_dataset",
+  KG_SERVICE_URL: "phase2_kg",
+  GT_SERVICE_URL: "phase3_gt",
+  RL_SERVICE_URL: "phase4_rl",
+};
+
+// Reverse map: SERVICE_PORTS key → expected env-var name (for hint messages).
+export const SERVICE_ENV_VAR_NAMES: Record<ServiceName, string> = {
+  phase1_dataset: "PHASE1_SERVICE_URL",
+  phase2_kg: "KG_SERVICE_URL",
+  phase3_gt: "GT_SERVICE_URL",
+  phase4_rl: "RL_SERVICE_URL",
+  backend_fastapi: "DRUGOS_API_URL",
+  airflow_webserver: "AIRFLOW_WEBSERVER_URL",
+  mlflow_tracking: "MLFLOW_TRACKING_URL",
+  neo4j_bolt: "NEO4J_BOLT_URL",
+  neo4j_http: "NEO4J_HTTP_URL",
+  postgres: "DATABASE_URL",
+  frontend: "NEXT_PUBLIC_APP_URL",
+};
+
+/**
+ * FE-002 ROOT FIX (Teammate 13, v143): build a "set X=http://localhost:N"
+ * hint message from the canonical SERVICE_PORTS constant. This is the
+ * SINGLE source of truth for hint messages — service files MUST NOT
+ * hardcode port numbers in their error messages. They MUST call this
+ * helper so the hint can never drift from the canonical contract.
+ *
+ * Usage:
+ *   `set ${envVarName} to http://localhost:${SERVICE_PORTS[serviceName]}`
+ * becomes:
+ *   `set RL_SERVICE_URL to http://localhost:8003`
+ */
+export function buildServiceUrlHint(envVarName: string, serviceName: ServiceName): string {
+  const port = SERVICE_PORTS[serviceName];
+  return `set ${envVarName}=http://localhost:${port} in frontend/.env.local (canonical port for ${serviceName} per SERVICE_PORTS in contracts/_url-constants.ts)`;
+}
