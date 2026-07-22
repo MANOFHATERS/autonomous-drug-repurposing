@@ -315,12 +315,18 @@ def test_backend_kg_explore_proxies_to_phase2(
 
 
 # ---------------------------------------------------------------------------
-# Test 7: backend port defaults to 8000 (no collision with Phase 2 on 8001)
+# Test 7: backend port defaults to 8004 (no collision with phase1=8000 or phase2=8001)
 # ---------------------------------------------------------------------------
 @pytest.mark.integration
-def test_backend_default_port_is_8000():
-    """The backend FastAPI service defaults to port 8000 (NOT 8001).
-    Port 8001 collides with the Phase 2 KG service.
+def test_backend_default_port_is_8004():
+    """The backend FastAPI service defaults to port 8004 (NOT 8000 or 8001).
+
+    BE-003 v143 ROOT FIX (Teammate 12 — hostile-auditor pass):
+      The previous "fix" moved the port from 8001 → 8000 to avoid colliding
+      with phase2_kg. But 8000 is the canonical phase1_dataset port (per
+      shared/contracts/urls.py SERVICE_PORTS) — the "fix" just moved the
+      collision. The TRULY free port is 8004 (after the 4 ML services
+      8000-8003). This test asserts the default is 8004.
     """
     # Import the module to read the port default.
     import importlib
@@ -330,14 +336,16 @@ def test_backend_default_port_is_8000():
     # Save + restore the env var so this test doesn't affect others.
     saved_port = os.environ.pop("DRUGOS_API_PORT", None)
     try:
-        # Re-read the default by re-importing in a clean env. We can't
-        # easily reload just the __main__ block, so we read the source
-        # and assert the default value is "8000".
+        # Re-read the default by reading the source and asserting the
+        # default value is "8004" (NOT "8000" — that collides with
+        # phase1_dataset per shared/contracts/urls.py).
         main_file = Path(main_module.__file__)
         source = main_file.read_text()
-        assert 'os.environ.get("DRUGOS_API_PORT", "8000")' in source, (
-            "backend/api/main.py should default DRUGOS_API_PORT to '8000' "
-            "(NOT '8001' — 8001 collides with the Phase 2 KG service)."
+        assert 'os.environ.get("DRUGOS_API_PORT", "8004")' in source, (
+            "backend/api/main.py should default DRUGOS_API_PORT to '8004' "
+            "(NOT '8000' — 8000 collides with phase1_dataset per "
+            "shared/contracts/urls.py SERVICE_PORTS; NOT '8001' — 8001 "
+            "collides with phase2_kg). BE-003 v143."
         )
     finally:
         if saved_port is not None:

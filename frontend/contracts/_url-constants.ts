@@ -88,9 +88,13 @@ export const SERVICE_PORTS = {
   phase2_kg: 8001,
   phase3_gt: 8002,
   phase4_rl: 8003,
-  // FE-002 ROOT FIX (Teammate 13, v143): the public FastAPI REST API.
-  // Default port 8004 matches `uvicorn main:app --port 8004` in
-  // backend/api/main.py L75. Used by DRUGOS_API_URL / BACKEND_URL.
+  // BE-003 v143 (Teammate 12) + FE-002 v143 (Teammate 13): the public
+  // FastAPI REST API. Default port 8004 matches `uvicorn main:app --port
+  // 8004` in backend/api/main.py L75. Used by DRUGOS_API_URL / BACKEND_URL.
+  // Both `drugos_api` (BE-003 canonical name) and `backend_fastapi`
+  // (FE-002 alias) refer to the SAME service — kept both so existing
+  // code referencing either name continues to work.
+  drugos_api: 8004,
   backend_fastapi: 8004,
   airflow_webserver: 8080,
   mlflow_tracking: 5000,

@@ -751,11 +751,20 @@ class AuthContext(BaseModel):
     Returned by verify_jwt. Every protected endpoint receives this via
     Depends(verify_jwt) and can use auth.user_id, auth.org_id, and
     auth.org_role to scope queries and enforce permissions.
+
+    BE-002 v143: added platform_role field (mirrors the Prisma
+    PlatformRole enum: 'none' | 'admin'). The JWT's 'platformRole'
+    claim is extracted alongside 'org_role' so backend endpoints can
+    enforce platform-admin vs. org-admin distinctions (e.g., only
+    platformRole='admin' can call /admin/* cross-tenant routes).
     """
     model_config = ConfigDict(extra="forbid")
     user_id: str
     org_id: str
     org_role: str = "member"  # 'admin' | 'member' | 'viewer'
+    # BE-002 v143: platformRole from JWT — 'none' (default) or 'admin'.
+    # Mirrors frontend/prisma/schema.prisma:enum PlatformRole.
+    platform_role: str = "none"
 
 
 security = HTTPBearer(auto_error=False)
@@ -816,11 +825,20 @@ async def verify_jwt(
         # extract org_id — every endpoint had to re-decode the JWT or
         # pull org_id from a separate source (and most didn't, causing
         # BE-002). The fix REQUIRES org_id in the JWT. Missing org_id →
-        # 401 Unauthorized (fail-closed).
+        # 403 Forbidden (the JWT is valid authentication — signature OK,
+        # sub present — but the user has no active org context, which is
+        # "forbidden" not "unauthenticated"). This mirrors the frontend's
+        # lib/auth/server.ts BE-062 pattern: a user with no active org
+        # gets 403, not 401. Re-authenticating won't help — the user
+        # must SELECT or JOIN an org first.
+        # NOTE: missing OrganizationMember DB row (BE-002 v143
+        # verify_org_membership) returns 401 because the JWT is STALE
+        # (user was removed since the JWT was issued) — re-authenticating
+        # WILL help in that case.
         org_id = payload.get("org_id")
         if not org_id:
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
+                status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
                     "JWT payload missing 'org_id' claim. The Next.js "
                     "frontend's /api/auth/login route MUST issue JWTs "
@@ -831,7 +849,17 @@ async def verify_jwt(
                 ),
             )
         org_role = payload.get("org_role", "member")
-        return AuthContext(user_id=str(user_id), org_id=str(org_id), org_role=str(org_role))
+        # BE-002 v143: extract platformRole from JWT. The Next.js frontend's
+        # /api/auth/login route sets this claim from the User.platformRole
+        # DB column (frontend/prisma/schema.prisma:enum PlatformRole).
+        # Values: 'none' (default for every user) or 'admin' (SaaS operator).
+        platform_role = str(payload.get("platformRole") or payload.get("platform_role") or "none")
+        return AuthContext(
+            user_id=str(user_id),
+            org_id=str(org_id),
+            org_role=str(org_role),
+            platform_role=platform_role,
+        )
     except jwt.ExpiredSignatureError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -852,6 +880,160 @@ async def verify_org_id(auth: AuthContext = Depends(verify_jwt)) -> str:
     explicit in the endpoint signature.
     """
     return auth.org_id
+
+
+# ---------------------------------------------------------------------------
+# BE-002 ROOT FIX (v143, Teammate 12 — hostile-auditor pass):
+# verify_org_membership — DB-backed org membership verification.
+# ---------------------------------------------------------------------------
+# The audit explicitly required:
+#   "Add a verify_org_membership dependency that queries the shared
+#    PostgreSQL DB (DATABASE_URL) for OrganizationMember(userId, orgId).
+#    Reject with 401 if membership is missing (mirror the BE-062 + BE-084
+#    logic from lib/auth/server.ts)."
+#
+# The previous verify_jwt only extracted org_id from the JWT — it did NOT
+# verify the user is STILL a member of that org. A user removed from an
+# org could continue calling /predict for 30 days via refresh-token
+# rotation, with no revocation signal reaching the FastAPI service. This
+# is exactly the BE-062 + BE-084 bug pattern the frontend fixed in
+# lib/auth/server.ts.
+#
+# This dependency does a real SELECT against the OrganizationMember table
+# (frontend/prisma/schema.prisma:model OrganizationMember) using the
+# SQLAlchemy engine already imported for the audit log. When DATABASE_URL
+# is unset OR the lookup fails (DB down, table missing), we fall back to
+# TRUSTING the JWT (fail-open) ONLY in non-production — in production we
+# fail-closed (401) because silently trusting an unverified org_id claim
+# is a 21 CFR Part 11 violation (cross-tenant data leakage).
+#
+# Endpoints that need cross-tenant isolation MUST use this dependency
+# instead of (or in addition to) verify_jwt. Example:
+#
+#   @app.post("/predict")
+#   async def predict(
+#       auth: AuthContext = Depends(verify_jwt),
+#       _membership: None = Depends(verify_org_membership),
+#   ):
+#       ...
+async def verify_org_membership(
+    auth: AuthContext = Depends(verify_jwt),
+) -> None:
+    """Verify the JWT's (user_id, org_id) is a real OrganizationMember row.
+
+    Queries the shared PostgreSQL DB at DATABASE_URL for an
+    OrganizationMember record matching (auth.user_id, auth.org_id).
+    Raises 401 if no such row exists — the user has been removed from
+    the org (or never was a member), mirroring the frontend's
+    lib/auth/server.ts getAuthenticatedUser() BE-062 fix.
+
+    Fail-open in non-production when the DB is unreachable (so dev/CI
+    environments without a real DB still work). Fail-CLOSED in production
+    — silently trusting an unverified org_id claim is a 21 CFR Part 11
+    violation.
+
+    Returns None on success (the dependency is used for its side effect
+    of raising 401 on bad membership; endpoints don't need the return
+    value).
+    """
+    if not _HAS_SQLALCHEMY:
+        # SQLAlchemy not installed — can't query the DB. In production
+        # this is a fail-closed condition (we cannot verify membership
+        # without a DB). In non-production, fail-open.
+        if _is_production_env:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "BE-002: SQLAlchemy is not installed — cannot verify "
+                    "OrganizationMember membership. In production this is "
+                    "a fail-closed condition (21 CFR Part 11 requires "
+                    "membership verification). Install SQLAlchemy and "
+                    "psycopg2-binary, then restart the service."
+                ),
+            )
+        return None
+
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        if _is_production_env:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "BE-002: DATABASE_URL is not set — cannot verify "
+                    "OrganizationMember membership. In production this is "
+                    "a fail-closed condition (21 CFR Part 11 requires "
+                    "membership verification). Set DATABASE_URL to the "
+                    "shared PostgreSQL connection string."
+                ),
+            )
+        return None
+
+    # Build the SQL query. The OrganizationMember table has columns
+    # userId, organizationId (camelCase, matching Prisma's column
+    # naming). The unique constraint (userId, organizationId) ensures
+    # at most one row matches — we just need to know if it EXISTS.
+    try:
+        # Use a fresh engine per call (cheap with pool_pre_ping). The
+        # alternative — a module-level engine — would leak connections
+        # across worker processes under uvicorn --workers >1.
+        engine = create_engine(db_url, pool_pre_ping=True, pool_size=2)
+        with engine.connect() as conn:
+            # parameterized query — never interpolate user-controlled
+            # values into SQL. user_id and org_id come from the JWT
+            # (signed) but defense-in-depth.
+            result = conn.execute(
+                text(
+                    "SELECT 1 FROM \"OrganizationMember\" "
+                    "WHERE \"userId\" = :uid AND \"organizationId\" = :oid "
+                    "LIMIT 1"
+                ),
+                {"uid": auth.user_id, "oid": auth.org_id},
+            )
+            row = result.fetchone()
+        engine.dispose()
+        if row is None:
+            # Membership missing — fail-closed. The user's JWT says they're
+            # in this org, but the DB says they're not. This is the BE-062
+            # scenario: the user was removed from the org but their JWT
+            # hasn't expired yet.
+            logger.warning(
+                "BE-002: membership check FAILED for user_id=%s org_id=%s "
+                "(no OrganizationMember row). Rejecting with 401.",
+                auth.user_id, auth.org_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    "BE-002: User is not a member of the organization in "
+                    "their JWT. The membership may have been revoked since "
+                    "the JWT was issued. Re-authenticate to get a fresh "
+                    "JWT with a valid org_id claim."
+                ),
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    except HTTPException:
+        raise  # Propagate 401/503 — don't let the catch-all swallow it
+    except Exception as exc:
+        # DB error (connection refused, table missing, etc.). In
+        # production, fail-closed. In non-production, fail-open.
+        logger.error(
+            "BE-002: OrganizationMember lookup error: %s. user_id=%s org_id=%s",
+            exc, auth.user_id, auth.org_id,
+        )
+        if _is_production_env:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    f"BE-002: Cannot verify org membership (DB error: "
+                    f"{type(exc).__name__}). In production this is a "
+                    f"fail-closed condition. Retry the request; if the "
+                    f"error persists, the database is unavailable."
+                ),
+            ) from exc
+        # Non-production: fail-open (let the request through).
+        return None
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -931,7 +1113,14 @@ async def verify_jwt_lenient(
         # case where the JWT lacks org_id.
         org_id = str(payload.get("org_id") or payload.get("orgId") or "")
         org_role = str(payload.get("org_role") or "member")
-        return AuthContext(user_id=str(user_id), org_id=org_id, org_role=org_role)
+        # BE-002 v143: extract platformRole (same as verify_jwt).
+        platform_role = str(payload.get("platformRole") or payload.get("platform_role") or "none")
+        return AuthContext(
+            user_id=str(user_id),
+            org_id=org_id,
+            org_role=org_role,
+            platform_role=platform_role,
+        )
     except jwt.ExpiredSignatureError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1212,9 +1401,38 @@ else:
 #     C. When ``FRONTEND_URL`` is a specific origin (the normal case),
 #        ``allow_credentials=True`` is preserved (the frontend needs
 #        cookies for JWT session auth).
-_frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000").strip()
+# BE-005 ROOT FIX (v143, Teammate 12 — hostile-auditor pass):
+# The previous "fix" handled the case FRONTEND_URL="*" (rejected in prod),
+# but SILENTLY accepted the case where FRONTEND_URL was UNSET. The default
+# "http://localhost:3000" would be used, and in a production deploy where
+# the operator forgot to set FRONTEND_URL, every browser request from the
+# real frontend domain (e.g. https://app.drugos.ai) would be rejected by
+# CORS — the whole API silently broken. The audit explicitly required:
+# "Hard-fail at startup if NODE_ENV=production AND FRONTEND_URL is unset or '*'."
+# We honor that literally: if ENVIRONMENT=production AND the env var is
+# missing or empty, raise RuntimeError. This is the patient-safety
+# principle — "a wrong integration is worse than no integration".
+#
+# NOTE: we check os.environ.get("FRONTEND_URL") WITHOUT a default — the
+# default "http://localhost:3000" is only used in non-production.
+_frontend_url_raw = os.environ.get("FRONTEND_URL")
 _environment = os.environ.get("ENVIRONMENT", "development").strip().lower()
 _is_production_env = _environment in ("production", "prod")
+
+if _is_production_env and not (_frontend_url_raw or "").strip():
+    raise RuntimeError(
+        "BE-005 CORS security vulnerability (v143): FRONTEND_URL env var is "
+        "UNSET (or empty) in production (ENVIRONMENT=production). The "
+        "default 'http://localhost:3000' would silently reject every "
+        "browser request from the real production frontend domain. Set "
+        "FRONTEND_URL to the specific frontend origin (e.g. "
+        "'https://app.drugos.ai') or a comma-separated list of allowed "
+        "origins. Anonymous/unconfigured CORS is forbidden in production "
+        "— 21 CFR Part 11 requires every API call to be attributable to "
+        "a known origin."
+    )
+
+_frontend_url = (_frontend_url_raw or "http://localhost:3000").strip()
 
 if _frontend_url == "*":
     if _is_production_env:
@@ -1274,12 +1492,63 @@ else:
     )
 
 # TM14 ROOT FIX (v132): wire up slowapi rate limiting.
-# The Limiter is keyed by remote IP (get_remote_address). When the
-# service runs behind a load balancer, the LB's IP would be used —
-# operators should set X-Forwarded-For and configure slowapi's
-# get_remote_address to honor it (see slowapi docs).
+# BE-007 ROOT FIX (v143, Teammate 12 — hostile-auditor pass):
+# The previous limiter was keyed by `get_remote_address` (IP-based). The
+# audit explicitly required: "Key the limiter on user_id (extracted from
+# JWT) not IP — the FastAPI is meant for direct API-key access." A single
+# pharma partner with one NAT egress IP could share a 100/min budget
+# across 50 researchers — defeating the per-user SLO. Conversely, two
+# different pharma partners behind the same corporate proxy would SHARE
+# the same IP-keyed budget, each getting throttled by the other's traffic.
+#
+# The fix introduces `_get_user_id_from_jwt` — a slowapi key_func that
+# extracts `sub` from the JWT in the Authorization header. When the JWT
+# is missing/invalid (e.g., pre-auth /health), it falls back to the
+# remote IP so unauthenticated endpoints don't bypass the limiter
+# entirely. Authenticated requests are keyed by user_id, which is what
+# the V1 contract's "100 concurrent requests" SLO is actually scoped to.
+def _get_user_id_from_jwt(request: Request) -> str:
+    """slowapi key_func — extract user_id from JWT, fall back to IP.
+
+    Used as the slowapi Limiter's key_func so rate limits are enforced
+    PER-USER (not per-IP). The JWT is decoded WITHOUT signature
+    verification here — the verify_jwt dependency on each endpoint does
+    the full signature verification. We just need the `sub` claim to
+    identify the caller for rate-limit accounting.
+
+    Fallback chain:
+      1. JWT 'sub' claim (the canonical user_id).
+      2. X-User-Id header (trusted internal caller — e.g. the Next.js
+         proxy passing the authenticated user_id through).
+      3. Remote IP address (unauthenticated or pre-auth requests).
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        try:
+            import jwt as _pyjwt
+            # Decode without verification — just need the claims. The
+            # endpoint's verify_jwt does the real signature check.
+            payload = _pyjwt.decode(
+                token,
+                options={"verify_signature": False},
+            )
+            sub = payload.get("sub")
+            if sub:
+                return f"user:{sub}"
+        except Exception:
+            pass  # Fall through to next strategy
+    # Trusted internal caller header (set by the Next.js proxy).
+    x_user_id = request.headers.get("X-User-Id", "").strip()
+    if x_user_id:
+        return f"user:{x_user_id}"
+    # Fallback: IP address (for unauthenticated endpoints like /health).
+    return f"ip:{get_remote_address(request)}"
+
+
 if _HAS_SLOWAPI:
-    limiter = Limiter(key_func=get_remote_address)
+    # BE-007 v143: key by user_id (not IP).
+    limiter = Limiter(key_func=_get_user_id_from_jwt)
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     # SlowAPIMiddleware reads app.state.limiter and enforces the
@@ -1454,9 +1723,25 @@ async def _drain_inflight_ml_calls() -> None:
 
 
 # TM14 ROOT FIX (v132): audit log middleware.
-# Logs every POST/PUT/PATCH/DELETE to the audit_log table. The middleware
-# is FAIL-SAFE — a DB write failure is logged to stderr but does NOT block
-# the response. GET requests are NOT audited (read-only, no mutation).
+# BE-008 ROOT FIX (v143, Teammate 12 — hostile-auditor pass):
+# The previous middleware was FAIL-SAFE — a DB write failure was logged
+# to stderr but the response was returned unchanged. The audit explicitly
+# required: "Make it critical — fail-closed if audit log write fails
+# (mirror lib/api-helpers.ts writeAuditLogCritical)."
+#
+# A fail-safe audit log is a 21 CFR Part 11 VIOLATION: if the audit DB
+# is briefly unreachable, /predict calls silently succeed without an
+# audit record — exactly the "unattributable API call" the regulation
+# forbids. The fix is fail-closed: if the audit write fails, return 503
+# so the caller knows their request was NOT processed auditably and can
+# retry. The original response is DISCARDED — the researcher sees an
+# audit-failure error instead of a prediction.
+#
+# OPT-OUT for non-production: when ENVIRONMENT != production, the
+# middleware stays fail-safe (logs the failure but returns the response)
+# so dev/CI environments without a real DB don't break. The fail-closed
+# behavior is gated on `_is_production_env` — the same env var that
+# gates the CORS hard-fail (BE-005).
 @app.middleware("http")
 async def audit_log_middleware(request: Request, call_next):
     """Audit log every state-changing request (POST/PUT/PATCH/DELETE).
@@ -1466,11 +1751,12 @@ async def audit_log_middleware(request: Request, call_next):
     the JWT (without validating it — that's verify_jwt's job for the
     endpoint itself) and logs the request to the audit_log table.
 
-    The middleware is FAIL-SAFE: if the DB write fails (DB down, table
-    missing, connection pool exhausted), the request still succeeds —
-    the audit log entry is lost but the service stays available. The
-    failure is logged to stderr so operators can detect systematic
-    audit log failures.
+    BE-008 v143: the middleware is FAIL-CLOSED in production. If the
+    audit DB write fails (DB down, table missing, connection pool
+    exhausted), the middleware returns 503 instead of the original
+    response — the caller knows their request was NOT audited and can
+    retry. In non-production, the middleware is fail-safe (logs to stderr
+    but returns the response) so dev/CI without a DB still works.
 
     The request body is read ONCE and cached so the endpoint can read
     it again. The body summary is truncated to 500 chars to avoid
@@ -1524,7 +1810,7 @@ async def audit_log_middleware(request: Request, call_next):
     # Call the endpoint.
     response = await call_next(request)
 
-    # Log to audit_log table (fail-safe). Truncate body to 500 chars.
+    # Prepare the audit log fields. Truncate body to 500 chars.
     body_summary = ""
     try:
         body_text = body_bytes.decode("utf-8", errors="replace")
@@ -1537,7 +1823,12 @@ async def audit_log_middleware(request: Request, call_next):
     method = request.method
     status_code = response.status_code
 
-    # Try to write to the DB. On ANY failure, log to stderr and continue.
+    # BE-008 v143: write the audit log entry. In PRODUCTION, a write
+    # failure causes the response to be REPLACED with a 503 — fail-closed
+    # per 21 CFR Part 11. In non-production, the failure is logged but
+    # the original response is returned (dev convenience).
+    audit_write_ok = False
+    audit_write_error: Optional[str] = None
     try:
         session = _get_audit_db_session()
         if session is not None and AuditLog is not None:
@@ -1573,21 +1864,53 @@ async def audit_log_middleware(request: Request, call_next):
             session.add(entry)
             session.commit()
             session.close()
+            audit_write_ok = True
         else:
-            # DB not available — log to stderr so the audit trail is
-            # at least captured in the service logs.
+            # DB not available. In production this is a fail-closed
+            # condition — the audit log table is required for 21 CFR
+            # Part 11 compliance. In non-production, just log to stderr.
+            audit_write_error = "DATABASE_URL not set or SQLAlchemy not available"
             logger.info(
                 "AUDIT user_id=%s org_id=%s method=%s endpoint=%s status=%d ip=%s body_summary=%r",
                 user_id, org_id, method, endpoint, status_code, ip_address, body_summary[:100],
             )
     except Exception as exc:
-        # FAIL-SAFE: do NOT block the response. Log the failure and
-        # continue. The researcher still gets their prediction; the
-        # audit log entry is lost.
+        audit_write_error = f"{type(exc).__name__}: {exc}"
         logger.error(
-            "TM14 audit log write FAILED (request still succeeded): "
-            "user_id=%s org_id=%s method=%s endpoint=%s status=%d error=%s",
+            "BE-008 audit log write FAILED: user_id=%s org_id=%s method=%s "
+            "endpoint=%s status=%d error=%s",
             user_id, org_id, method, endpoint, status_code, exc,
+        )
+
+    # BE-008 v143: fail-closed in production. If the audit log write
+    # failed AND we're in production, return 503 — the request was NOT
+    # audited, so the caller must retry. Returning the original response
+    # would silently violate 21 CFR Part 11.
+    if _is_production_env and not audit_write_ok:
+        # Import locally to avoid circular import at module load.
+        from fastapi.responses import JSONResponse
+        logger.error(
+            "BE-008 FAIL-CLOSED: returning 503 because audit log write "
+            "failed in production. user_id=%s org_id=%s method=%s endpoint=%s "
+            "original_status=%d audit_error=%s",
+            user_id, org_id, method, endpoint, status_code, audit_write_error,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "error": "audit_log_write_failed",
+                "message": (
+                    "The audit log write failed in production. The request "
+                    "was processed but NOT recorded in the audit trail — "
+                    "21 CFR Part 11 requires every mutation to be "
+                    "attributable. The request has been rejected (fail-"
+                    "closed). Retry the request; if the error persists, "
+                    "the audit_log database table is unavailable and the "
+                    "platform operator must be notified."
+                ),
+                "audit_error": audit_write_error,
+                "original_status_code": status_code,
+            },
         )
 
     return response
@@ -1722,6 +2045,9 @@ async def predict(
     request: Request,
     req: PredictRequest,
     auth: AuthContext = Depends(verify_jwt),
+    # BE-002 v143: verify the user is STILL a member of their JWT's org.
+    # In production this does a real SELECT against OrganizationMember.
+    _membership: None = Depends(verify_org_membership),
 ) -> PredictResponse:
     """Predict the repurposing score for a (drug, disease) pair.
 
@@ -1936,6 +2262,8 @@ async def top_k(
     request: Request,
     req: TopKRequest,
     auth: AuthContext = Depends(verify_jwt),
+    # BE-002 v143: verify the user is STILL a member of their JWT's org.
+    _membership: None = Depends(verify_org_membership),
     org_id: str = Depends(verify_org_id),
 ) -> TopKResponse:
     """Get the top-K repurposing candidates for a drug or disease.
@@ -2386,8 +2714,8 @@ async def get_dataset_stats(
         p1_payload = p1_resp.json()
     except httpx.RequestError as exc:
         raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail=f"Phase 1 service unreachable at {phase1_url}: {exc}",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Phase 1 service unavailable at {phase1_url}: {exc}",
         ) from exc
 
     # Merge the Phase 1 service's response with our audit fields. The
@@ -2398,6 +2726,192 @@ async def get_dataset_stats(
     # org_id for audit echo (TM14 v132 fix preserved).
     p1_payload["org_id"] = auth.org_id  # audit echo
     return p1_payload
+
+
+# ---------------------------------------------------------------------------
+# P1 v143 ROOT FIX (Teammate 12 — hostile-auditor pass):
+# POST /datasets/validated_hypotheses — proxy to Phase 1 service.
+# ---------------------------------------------------------------------------
+# The Phase 1 dataset service exposes POST /datasets/validated_hypotheses
+# (phase1/service.py) which writes a wet-lab-validated drug-disease
+# hypothesis to the staging DB (and triggers the data flywheel). The
+# backend proxy adds:
+#   1. JWT auth (verify_jwt — requires org_id claim).
+#   2. org_id scoping — the JWT's org_id ALWAYS wins over any org_id in
+#      the request body. A user in org A CANNOT write a hypothesis for
+#      org B (cross-tenant data leak prevention). If the body's org_id
+#      differs from the JWT's org_id, return 403.
+#   3. X-Org-Id header forwarding to Phase 1 (for audit).
+#   4. 503 fallback when Phase 1 is unreachable (NOT 504 — the service
+#      is DOWN, not slow; 503 tells the client to retry later).
+# ---------------------------------------------------------------------------
+class ValidatedHypothesisRequest(BaseModel):
+    """POST /datasets/validated_hypotheses request body.
+
+    Mirrors phase1/service.py's ValidatedHypothesis schema. The org_id
+    field is OPTIONAL — if omitted, the backend injects the JWT's org_id.
+    If present, it MUST match the JWT's org_id (cross-tenant check).
+    """
+    model_config = ConfigDict(extra="forbid")
+    drug: str = Field(..., min_length=1, max_length=200)
+    disease: str = Field(..., min_length=1, max_length=200)
+    outcome: str = Field(..., description="One of: validated_positive, "
+                                          "validated_negative, validated_toxic, invalidated")
+    validated_at: Optional[str] = Field(None, description="ISO 8601 timestamp")
+    validated_by: Optional[str] = Field(None, max_length=200)
+    validation_study_id: Optional[str] = Field(None, max_length=200)
+    notes: Optional[str] = None
+    org_id: Optional[str] = Field(None, description="Optional — if present, "
+                                                    "MUST match JWT's org_id (cross-tenant check)")
+
+
+@app.post("/datasets/validated_hypotheses", tags=["dataset"])
+@limiter.limit("100/minute")
+async def post_validated_hypothesis(
+    request: Request,
+    req: ValidatedHypothesisRequest,
+    auth: AuthContext = Depends(verify_jwt),
+) -> Dict[str, Any]:
+    """Proxy POST /datasets/validated_hypotheses to the Phase 1 service.
+
+    Enforces org_id scoping: the JWT's org_id ALWAYS wins. If the body's
+    org_id differs from the JWT's org_id, return 403 (cross-tenant
+    validation forbidden). If the body's org_id is omitted, the backend
+    injects the JWT's org_id before forwarding.
+
+    Returns 503 when Phase 1 is unavailable (NOT 504 — the service is
+    DOWN, not slow). Forwards the actual status code from Phase 1 (201
+    Created when a new hypothesis is persisted, 200 OK for idempotent
+    re-validations).
+    """
+    logger.info(
+        "datasets/validated_hypotheses: user=%s org=%s drug=%s disease=%s outcome=%s",
+        auth.user_id, auth.org_id, req.drug, req.disease, req.outcome,
+    )
+
+    # Cross-tenant check: if body has org_id, it MUST match JWT's org_id.
+    if req.org_id and req.org_id != auth.org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Cross-org validation forbidden: JWT org_id='{auth.org_id}' "
+                f"but body org_id='{req.org_id}'. A user in org A cannot "
+                f"write a hypothesis for org B. Remove the org_id field "
+                f"from the request body — the backend will inject the "
+                f"JWT's org_id automatically."
+            ),
+        )
+
+    # Build the forwarded payload. ALWAYS use the JWT's org_id (never
+    # trust the body's org_id — it could be spoofed).
+    forwarded_payload = {
+        "drug": req.drug,
+        "disease": req.disease,
+        "outcome": req.outcome,
+        "validated_at": req.validated_at,
+        "validated_by": req.validated_by or auth.user_id,
+        "validation_study_id": req.validation_study_id,
+        "notes": req.notes,
+        "org_id": auth.org_id,  # JWT's org_id wins
+    }
+
+    phase1_url = os.environ.get("PHASE1_SERVICE_URL")
+    if not phase1_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PHASE1_SERVICE_URL not configured — the Phase 1 dataset "
+                   "service is not deployed. /datasets/validated_hypotheses "
+                   "cannot write the hypothesis. Deploy the Phase 1 service "
+                   "and set PHASE1_SERVICE_URL.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            p1_resp = await client.post(
+                f"{phase1_url.rstrip('/')}/datasets/validated_hypotheses",
+                json=forwarded_payload,
+                headers={
+                    "X-Org-Id": auth.org_id,
+                    "X-User-Id": auth.user_id,
+                    "Content-Type": "application/json",
+                },
+            )
+        if p1_resp.status_code not in (200, 201):
+            raise HTTPException(
+                status_code=p1_resp.status_code,
+                detail=f"Phase 1 service returned {p1_resp.status_code}: "
+                       f"{p1_resp.text[:500]}",
+            )
+        # Forward the actual status code from Phase 1 (201 Created when
+        # a new hypothesis is persisted, 200 OK for idempotent re-validations).
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=p1_resp.status_code,
+            content=p1_resp.json(),
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Phase 1 service unavailable at {phase1_url}: {exc}",
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# P1 v143 ROOT FIX (Teammate 12 — hostile-auditor pass):
+# GET /datasets/{drug}/mechanism — proxy to Phase 1 service.
+# ---------------------------------------------------------------------------
+# The Phase 1 dataset service exposes GET /datasets/{drug}/mechanism
+# (phase1/service.py) which returns the drug's targets, indications, and
+# mechanism of action (sourced from DrugBank CSV). The backend proxy adds
+# JWT auth + org_id audit + 503 fallback.
+# ---------------------------------------------------------------------------
+@app.get("/datasets/{drug}/mechanism", tags=["dataset"])
+@limiter.limit("100/minute")
+async def get_drug_mechanism(
+    drug: str,
+    request: Request,
+    auth: AuthContext = Depends(verify_jwt),
+) -> Dict[str, Any]:
+    """Proxy GET /datasets/{drug}/mechanism to the Phase 1 service.
+
+    Returns the drug's targets (proteins), indications, and mechanism of
+    action. Sourced from DrugBank CSV in Phase 1.
+
+    Returns 503 when Phase 1 is unavailable.
+    """
+    logger.info(
+        "datasets/%s/mechanism: user=%s org=%s",
+        drug, auth.user_id, auth.org_id,
+    )
+
+    phase1_url = os.environ.get("PHASE1_SERVICE_URL")
+    if not phase1_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PHASE1_SERVICE_URL not configured — the Phase 1 dataset "
+                   "service is not deployed. /datasets/{drug}/mechanism "
+                   "cannot return the drug mechanism. Deploy the Phase 1 "
+                   "service and set PHASE1_SERVICE_URL.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            p1_resp = await client.get(
+                f"{phase1_url.rstrip('/')}/datasets/{drug}/mechanism",
+                headers={"X-Org-Id": auth.org_id, "X-User-Id": auth.user_id},
+            )
+        if p1_resp.status_code != 200:
+            raise HTTPException(
+                status_code=p1_resp.status_code,
+                detail=f"Phase 1 service returned {p1_resp.status_code}: "
+                       f"{p1_resp.text[:500]}",
+            )
+        return p1_resp.json()
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Phase 1 service unavailable at {phase1_url}: {exc}",
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -2427,6 +2941,8 @@ class ValidateRequest(BaseModel):
 async def validate(
     req: ValidateRequest,
     auth: AuthContext = Depends(verify_jwt),
+    # BE-002 v143: verify the user is STILL a member of their JWT's org.
+    _membership: None = Depends(verify_org_membership),
 ) -> Dict[str, Any]:
     """Validate a drug-disease hypothesis and write it back to all 3 phases.
 
@@ -2880,6 +3396,7 @@ def create_test_jwt(
     user_id: str,
     org_id: str,
     org_role: str = "member",
+    platform_role: str = "none",
     expires_in_seconds: int = 3600,
 ) -> str:
     """Mint a valid JWT for integration tests.
@@ -2890,6 +3407,7 @@ def create_test_jwt(
       - ``sub``: the user_id (str)
       - ``org_id``: the user's active org (str, REQUIRED)
       - ``org_role``: 'admin' | 'member' | 'viewer' (default 'member')
+      - ``platformRole``: 'none' | 'admin' (default 'none') — BE-002 v143
       - ``iss``: the issuer (default 'drugos', override via JWT_ISSUER)
       - ``exp``: now + expires_in_seconds (default 1 hour)
       - ``iat``: now
@@ -2920,6 +3438,8 @@ def create_test_jwt(
         "sub": str(user_id),
         "org_id": str(org_id),
         "org_role": str(org_role),
+        # BE-002 v143: platformRole claim — 'none' (default) or 'admin'.
+        "platformRole": str(platform_role),
         "iss": jwt_issuer,
         "iat": now,
         "exp": now + timedelta(seconds=int(expires_in_seconds)),
@@ -2957,11 +3477,20 @@ if __name__ == "__main__":
     #   - The backend FastAPI runs on the HOST (or in a separate docker
     #     container with `ports: ["8000:8000"]`), so port 8000 on the
     #     host is free.
-    # The shared/contracts/urls.py SERVICE_PORTS dict is OUT OF DATE —
-    # it still says phase1_dataset=8000, but the actual docker-compose
-    # has phase1 on 8001. That contract drift is tracked separately;
-    # this fix matches the ACTUAL deployment, not the stale contract.
-    port = int(os.environ.get("DRUGOS_API_PORT", "8000"))
+    # BE-003 ROOT FIX (v143, Teammate 12 — hostile-auditor pass):
+    # The previous "fix" moved the FastAPI from port 8001 → 8000 to avoid
+    # colliding with phase2_kg. But port 8000 is the CANONICAL phase1_dataset
+    # port per shared/contracts/urls.py SERVICE_PORTS — the "fix" just moved
+    # the collision. phase1/service.py actually runs on 8001 (docker-compose
+    # bump), but the CONTRACT still says 8000, and the frontend reads the
+    # contract for its SERVICE_PORTS map. Using 8000 here would silently
+    # shadow the contract's phase1_dataset port.
+    #
+    # The TRULY free port is 8004 — after the 4 ML services (8000-8003).
+    # shared/contracts/urls.py and frontend/contracts/_url-constants.ts have
+    # BOTH been updated to register `drugos_api: 8004` so the contract is
+    # the single source of truth.
+    port = int(os.environ.get("DRUGOS_API_PORT", "8004"))
     workers = int(os.environ.get("DRUGOS_API_WORKERS", "4"))
     # FE-014 ROOT FIX (Teammate 15, v143): graceful shutdown timeout.
     # On SIGTERM (k8s pod drain) or SIGINT (Ctrl-C), uvicorn stops
