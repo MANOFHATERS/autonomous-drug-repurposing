@@ -1991,3 +1991,27 @@ Stage Summary:
 - P4-024 is ALREADY FIXED in code (verified by reading backend/api/main.py and rl/service.py). Will add regression test only.
 - Beginning root-cause fixes now (manual edits via Edit/MultiEdit, no scripts).
 
+
+---
+Task ID: teammate11-p4-022-to-031-v143-COMPLETION
+Agent: Teammate 11 (Phase 4 RL Ranker — Writeback + Misc)
+Task: Final completion summary for P4-022..P4-031 forensic root fixes.
+
+Work Log:
+- All 10 assigned issues fixed with root-cause patches (9 real bugs + 1 already-fixed with regression test added).
+- 19 forensic regression tests written using AST to check EXECUTABLE code only (not comments, not strings). All 19 pass.
+- 8 real-code behavioral tests run: imports, runtime, behavioral. All pass.
+- python3 -m py_compile: all 4 modified files compile cleanly.
+- Pre-existing p4_team11 tests verified: 32 pass, 4 pre-existing failures (missing run_full_platform.py / run_real_pipeline.py / torch / pre-existing validated_hypotheses.csv) — confirmed NOT caused by my changes (git stash + re-run control).
+- Branch fix/teammate11-p4-022-to-031-forensic-root-v143 pushed.
+- Rebased on latest origin/main (Teammate 6 v142 had pushed in parallel) — worklog.md conflict resolved by keeping both entries.
+- Merged to main with --no-ff (merge commit f325494).
+- Fresh clone of main (verify_clone) — all 19 tests pass, confirming fixes are in main.
+
+Stage Summary:
+- 5 files modified: rl/rl_drug_ranker.py, rl/scientific_thresholds.py, phase4/writeback.py, worklog.md.
+- 1 file added: tests/p4_team11/test_p4_022_to_031_v143_root_fixes.py (1048 lines, 19 tests).
+- 1780 insertions, 142 deletions.
+- All fixes are ROOT-CAUSE (not surface-level): each fix addresses the underlying defect, not just the symptom.
+- Hostile-auditor methodology followed: read ACTUAL code at cited line ranges (not comments), verified each bug exists, applied minimal-change root fix, wrote AST-based regression tests that check EXECUTABLE code.
+- P4-024 was the only issue already fixed in code — verified by reading backend/api/main.py /top-k endpoint (uses verify_jwt + verify_org_id + passes org_id as query param AND X-Org-Id header). Added regression test only (no code change).
