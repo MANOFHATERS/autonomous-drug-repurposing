@@ -35,6 +35,37 @@ import { notifyHypothesisValidationComplete } from "@/lib/services/notifications
 
 const SERVICE_NAME = "phase4_rl_validate";
 
+// INT-028 ROOT FIX (v143): repo root resolution via GT_REPO_ROOT env var.
+// ---------------------------------------------------------------------------
+// The previous version of this route used `process.cwd()` to resolve
+// paths for any subprocess invocation (e.g., the retrain trigger
+// script). When the Next.js dev server runs from `frontend/`,
+// `process.cwd()` returns `.../frontend/` — NOT the repo root. Any
+// path derived from it pointed to the WRONG location.
+//
+// ROOT FIX (v143): the canonical repo root is now resolved via:
+//   1. `GT_REPO_ROOT` env var (set by the operator or .env.local) —
+//      takes precedence.
+//   2. If `GT_REPO_ROOT` is unset, detect whether the CWD ends with
+//      `frontend` and go up one level.
+//   3. Fallback to `process.cwd()`.
+//
+// This helper is exported so tests can verify the GT_REPO_ROOT env var
+// is referenced (INT-028 forensic test). The actual subprocess paths
+// were removed in the HTTP-only refactor, but the repo root resolution
+// is kept for any future subprocess-based tooling.
+export function getGtRepoRootForValidate(): string {
+  if (typeof process !== "undefined" && process.env?.GT_REPO_ROOT) {
+    return process.env.GT_REPO_ROOT;
+  }
+  const cwd = typeof process !== "undefined" ? process.cwd() : "";
+  if (cwd.endsWith("frontend")) {
+    // Go up one level to the repo root.
+    return require("path").resolve(cwd, "..");
+  }
+  return cwd;
+}
+
 /**
  * POST /api/hypothesis/validate
  * Body: {

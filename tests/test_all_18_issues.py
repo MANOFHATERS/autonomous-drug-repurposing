@@ -113,6 +113,14 @@ class TestInt015_Int016_ColumnAndPath:
             CANONICAL_VALIDATED_CSV, OUTCOME_VALIDATED_POSITIVE, OUTCOME_VALIDATED_TOXIC,
         )
 
+        # INT-015/INT-016 v143 FIX: assign checkpoint_path BEFORE the try
+        # block so the finally block can always reference it. The previous
+        # code assigned checkpoint_path INSIDE the try block AFTER
+        # ``import torch`` — if torch was not installed, the import raised
+        # ModuleNotFoundError, checkpoint_path was never assigned, and the
+        # finally block raised UnboundLocalError — masking the real error.
+        checkpoint_path = "/tmp/test_gt_checkpoint.pt"
+
         os.makedirs(os.path.dirname(CANONICAL_VALIDATED_CSV), exist_ok=True)
         with open(CANONICAL_VALIDATED_CSV, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=["drug", "disease", "outcome", "validated_at"])
@@ -127,9 +135,20 @@ class TestInt015_Int016_ColumnAndPath:
             })
 
         try:
-            # Mock checkpoint for retrain_on_validated
-            import torch
-            checkpoint_path = "/tmp/test_gt_checkpoint.pt"
+            # Mock checkpoint for retrain_on_validated.
+            # INT-015/INT-016 v143 FIX: skip gracefully if torch is not
+            # installed (Phase 3 dependency). The trainer code itself is
+            # verified by the AST-based test below; this behavioral test
+            # requires torch to actually run retrain_on_validated.
+            try:
+                import torch
+            except ImportError:
+                pytest.skip(
+                    "torch not installed — Phase 3 GT trainer behavioral "
+                    "test requires torch. The trainer's 'outcome' column "
+                    "reading logic is verified by source inspection."
+                )
+
             bundle = {
                 "known_pairs": [],
                 "node_maps": {"drug": {"ibuprofen": 0, "acetaminophen": 1}, "disease": {"arthritis": 0, "liver_failure": 1}},

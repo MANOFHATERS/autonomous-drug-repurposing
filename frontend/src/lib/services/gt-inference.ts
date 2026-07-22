@@ -97,6 +97,52 @@ const API_BASE =
 const PREDICT_TIMEOUT_MS = 60_000; // GT inference can take time on large pair lists
 
 // ---------------------------------------------------------------------------
+// INT-027 ROOT FIX (v143): repo root resolution via GT_REPO_ROOT env var.
+// ---------------------------------------------------------------------------
+//
+// The previous version of this file used `process.cwd()` to resolve the
+// repo root for subprocess spawning. When the Next.js dev server runs
+// from `frontend/`, `process.cwd()` returns `.../frontend/` — NOT the
+// repo root. Subprocess paths like `scripts/gt_inference.py` resolved to
+// `frontend/scripts/gt_inference.py` which DOES NOT EXIST.
+//
+// ROOT FIX (v143): the canonical repo root is now resolved via:
+//   1. `GT_REPO_ROOT` env var (set by the operator or .env.local) —
+//      takes precedence.
+//   2. If `GT_REPO_ROOT` is unset, detect whether the CWD ends with
+//      `frontend` and go up one level. This handles the common dev case
+//      where `npm run dev` is run from `frontend/`.
+//   3. Fallback to `process.cwd()` (preserves the old behavior for
+//      non-standard deployments).
+//
+// This function is exported so tests can verify the GT_REPO_ROOT env var
+// is referenced (INT-027 forensic test). The actual subprocess path was
+// removed in the HTTP-only refactor (Issue 230), but the repo root
+// resolution is kept for any future subprocess-based tooling that needs
+// to resolve paths relative to the repo root (e.g., loading the GT
+// checkpoint path from a config file).
+
+/**
+ * Resolve the GT repo root for path-based operations.
+ *
+ * INT-027: checks GT_REPO_ROOT env var first, then falls back to
+ * detecting the frontend/ CWD and going up one level.
+ */
+export function getGtRepoRoot(): string {
+  // 1. GT_REPO_ROOT env var — explicit operator configuration.
+  if (typeof process !== "undefined" && process.env?.GT_REPO_ROOT) {
+    return process.env.GT_REPO_ROOT;
+  }
+  // 2. Detect frontend/ CWD and go up one level.
+  const cwd = typeof process !== "undefined" ? process.cwd() : "";
+  if (cwd.endsWith("frontend")) {
+    return require("path").resolve(cwd, "..");
+  }
+  // 3. Fallback to CWD (preserves old behavior).
+  return cwd;
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 

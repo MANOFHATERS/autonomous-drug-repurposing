@@ -419,12 +419,43 @@ export async function getRankedHypotheses(opts?: {
  * for callers that need to recompute the score from individual
  * signals (e.g., when displaying a candidate that lacks overallScore
  * in the response).
+ *
+ * INT-024 ROOT FIX (v143): when the RL agent's policy probability
+ * (`policyProb`) is available, it IS the overall score — the agent
+ * already weighted all signals internally. The previous code
+ * recomputed a weighted average of gnnScore/safetyScore/marketScore
+ * using hardcoded weights (0.04/0.25/0.12) that DIVERGED from the
+ * agent's actual reward weights when the .meta.json sidecar specified
+ * different values. This caused the dashboard's overallScore column
+ * to show a DIFFERENT number than the one the RL service returned —
+ * eroding researcher trust in the displayed rankings.
+ *
+ * ROOT FIX: if `policyProb` is present (non-null, non-undefined),
+ * return it directly. Only fall back to the weighted-average
+ * computation when policyProb is absent (e.g., for candidates from
+ * a legacy CSV export that pre-dates the policyProb field).
  */
 export function computeOverallScore(c: {
   gnnScore?: number | null;
   safetyScore?: number | null;
   marketScore?: number | null;
+  /**
+   * INT-024: the RL agent's policy probability for this candidate.
+   * When present, this IS the overall score — the agent already
+   * weighted all signals internally. Takes precedence over the
+   * weighted-average fallback below.
+   */
+  policyProb?: number | null;
 }): number | null {
+  // INT-024 ROOT FIX: if the agent's policy probability is available,
+  // return it directly. This is the agent's own assessment of the
+  // candidate's quality — recomputing it from individual signals
+  // would only introduce divergence.
+  if (c.policyProb !== undefined && c.policyProb !== null) {
+    return c.policyProb;
+  }
+
+  // Fallback: compute weighted average from individual signals.
   // These are the agent's DEFAULT reward weights (from RewardConfig
   // in rl/rl_drug_ranker.py). The Python service may use different
   // weights if the .meta.json sidecar specifies them — in that case,
