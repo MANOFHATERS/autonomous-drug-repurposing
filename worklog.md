@@ -2259,3 +2259,32 @@ Stage Summary:
 - Branch: fix/teammate13-fe-001-to-fe-006-forensic-root (pushed)
 - Merged to main (commit 6a388a1) — fresh clone confirms fixes landed.
 - Pre-existing TS errors (Prisma 7, react-resizable-panels) are OUT OF SCOPE per the user's instruction "Do not modify files outside the scope of your assigned issues unless the fix explicitly requires it." These errors existed BEFORE my changes and are not caused by my fixes.
+
+---
+Task ID: teammate-14-fe-007-to-012
+Agent: Teammate 14 (Frontend — Routing + Type system)
+Task: Fix 6 assigned frontend issues (FE-007 to FE-012) — root-cause, production-grade.
+
+Work Log:
+- Read project docx (Cosmic_Build_Process_Updated.docx) to understand the 4-phase platform architecture (Phase 1 dataset, Phase 2 KG, Phase 3 GT, Phase 4 RL) and the frontend's role as the researcher-facing dashboard.
+- Cloned repo to /home/z/my-project/repo/autonomous-drug-repurposing; created dedicated branch fix/teammate-14-fe-007-to-012-frontend-routing-types.
+- Read each affected file LINE BY LINE (real code, not comments, not tests): use-mobile.ts, next.config.ts, middleware.ts, ml-stubs.ts, api-client.ts, ml-contracts.ts, dataset-service.ts, kg-service.ts, rl-ranker.ts, evidence-package.ts, patentsview.ts, system-health.ts, /api/system/status/route.ts, /api/rl/route.ts, /api/patents/search/route.ts, /api/evidence-package/route.ts, examples/websocket/server.ts, lib/types.ts.
+- FE-007: Added 'use client' directive as line 1 of use-mobile.ts.
+- FE-008: Root-caused that next.config.ts headers() OVERWRITES middleware's CSP (Next.js applies headers() AFTER middleware). Removed CSP from next.config.ts entirely (kept X-Frame-Options, HSTS, etc.). In middleware.ts: removed 'unsafe-inline' from script-src (nonce is the only gate); replaced connect-src 'self' https: with explicit allowlist (api.fda.gov, clinicaltrials.gov, eutils.ncbi.nlm.nih.gov, rxnav.nlm.nih.gov, id.nlm.nih.gov, search.patentsview.org, www.ebi.ac.uk).
+- FE-009: Rewrote ml-stubs.ts — checkKnowledgeGraphAvailability / checkDatasetAvailability / checkRlAvailability are now ASYNC and delegate to the real health-check functions (checkKgHealth / checkDatasetHealth / checkRlHealth). available = health.reachable (not env-var presence). Updated /api/system/status/route.ts to await all three (Promise.all for parallelism). Updated /api/rl/route.ts (both GET and POST) to await checkRlAvailability().
+- FE-010: Deleted hand-written DatasetStatsResponse, KnowledgeGraphStatsResponse, RlRankerResponse, RankedHypothesis, DatasetSourceStat, GraphSourceStat interfaces from api-client.ts. Re-exported canonical Zod-derived types from ml-contracts.ts (with name aliases for backward compat). Wired DatasetStatsResponseSchema and KgStatsResponseSchema into the request<T>() calls (FE-066 runtime validation).
+- FE-011: Created new file frontend/src/lib/response-schemas.ts with Zod schemas for PatentRecord, PatentSearchResponse, EvidencePackage (mirrors lib/services/evidence-package.ts), EvidencePackageBuildResponse. Wired all three schemas into the api.searchPatents / api.buildEvidencePackage / api.getEvidencePackage calls. Renamed the local EvidencePackage interface in api-client.ts to EvidencePackageSummary (it's the DB row shape — different from the built package shape). Re-exported the canonical EvidencePackage type from lib/services/evidence-package.
+- FE-012: Replaced cors origin: "*" with env-var-driven allowlist (WS_ALLOWED_ORIGINS, defaults to localhost:3000) using a CORS callback for fine-grained checking. Replaced Math.random() with crypto.randomUUID() (Node 19+) with randomBytes(16).toString('hex') fallback. Added 'EXAMPLE ONLY — DO NOT DEPLOY' header.
+- Wrote 45 verification tests in fe-007-to-012-teammate-14.test.ts. The tests read the ACTUAL production code (filtering out comments) and assert each fix is present at the source level. All 45 pass.
+- Verified zero new tsc errors: 28 errors before my changes, 28 after (all pre-existing Prisma 7 / react-resizable-panels issues). After merging main (which pulled in Teammate 16's fixes), total errors dropped to 23 — still zero from my changes.
+- ESLint on modified files: 0 errors, 3 pre-existing warnings (none new).
+- Pushed branch, merged to main with --no-ff, pushed main.
+- Re-cloned main to /home/z/my-project/verify/verify-repo and verified all 6 fixes are present and all 45 tests pass on the fresh clone.
+
+Stage Summary:
+- 6 issues FIXED at the root level (FE-007, FE-008, FE-009, FE-010, FE-011, FE-012).
+- 10 files changed, 1275 insertions, 231 deletions.
+- 2 new files: frontend/src/lib/response-schemas.ts (Zod schemas for patents + evidence-package responses), frontend/src/lib/services/__tests__/fe-007-to-012-teammate-14.test.ts (45 verification tests).
+- 0 new tsc errors. 0 new lint errors. 45/45 tests pass.
+- Merge commit on main: e7ff356 (pushed to origin/main).
+- Pre-existing issues NOT in scope (assigned to other teammates): 23 tsc errors from Prisma 7 client not generating types (package.json has duplicate @prisma/client entries with conflicting versions; Prisma 7 requires prisma.config.ts which doesn't exist). These cause `next build` to fail at the type-check step — but this is the correct behavior per next.config.ts (typescript.ignoreBuildErrors: false, per FE-011 ROOT FIX). The Prisma issues are owned by the infra/BE teammates.
