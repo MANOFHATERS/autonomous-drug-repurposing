@@ -4171,7 +4171,7 @@ def standardize_drug_record(
         "rule_version": _RULE_VERSION,
         "schema_version": _OUTPUT_SCHEMA_VERSION,
         "config_version": _CONFIG_VERSION,
-        "logic_hash": _LOGIC_HASH,
+        "logic_hash": _get_logic_hash(),  # P1-035: lazy via @functools.cache
         "cleaned_at": datetime.now(timezone.utc).isoformat(),
         "input_sha256": input_sha,
         "transformations": transformations,

@@ -431,7 +431,7 @@ def _extract_http_status(exc: BaseException) -> int | None:
             if _last is not None and hasattr(_last, "exception"):
                 try:
                     _inner = _last.exception()
-                except (RuntimeError, AttributeError, ValueError) as _inner_exc:
+                except (RuntimeError, AttributeError, ValueError):
                     # P1-037 FORENSIC ROOT FIX (Teammate 3 -- hostile-auditor pass):
                     #   The previous code had a broad ``except Exception``
                     #   here. This SWALLOWED real bugs (e.g. a tenacity
