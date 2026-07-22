@@ -103,6 +103,7 @@ SERVICE_PORTS: Dict[str, int] = {
     "phase2_kg": 8001,       # phase2/drugos_graph/kg_api.py
     "phase3_gt": 8002,       # scripts/gt_api.py
     "phase4_rl": 8003,       # scripts/rl_api.py
+    "drugos_api": 8004,      # backend/api/main.py — public REST API (BE-003 v143)
     "airflow_webserver": 8080,  # Airflow webserver (REST API + UI)
     "mlflow_tracking": 5000,    # MLflow tracking server
     "neo4j_bolt": 7687,         # Neo4j Bolt protocol (Cypher)

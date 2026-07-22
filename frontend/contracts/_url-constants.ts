@@ -74,6 +74,7 @@ export const SERVICE_PORTS = {
   phase2_kg: 8001,
   phase3_gt: 8002,
   phase4_rl: 8003,
+  drugos_api: 8004, // BE-003 v143: FastAPI public REST API (was colliding with phase1_dataset at 8000)
   airflow_webserver: 8080,
   mlflow_tracking: 5000,
   neo4j_bolt: 7687,
