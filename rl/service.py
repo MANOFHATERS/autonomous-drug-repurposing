@@ -93,10 +93,24 @@ except Exception:  # Defensive fallback.
 logger = logging.getLogger("rl.service")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
 
+# P4-006 v142 FORENSIC ROOT FIX: aligned version with rl/__init__.py,
+# phase4/__init__.py, and rl/rl_drug_ranker.py — all hold "4.2.0" now
+# (was "1.0.0" here, conflicting with "4.2.0" in rl_drug_ranker.py and
+# "4.1.0" in rl/__init__.py — 21 CFR Part 11 provenance auditors could
+# not reconcile which code version produced a given output).
+#
+# We hardcode "4.2.0" instead of `from rl import __version__` to AVOID a
+# circular import (service.py is INSIDE the rl package — importing rl
+# triggers rl/__init__.py which imports rl.rl_drug_ranker which itself
+# imports things conditionally; doing this at FastAPI app construction
+# time can fail when service.py is run directly as a script).
+# The CI test tests/test_p4_006_version_alignment.py asserts that this
+# string EQUALS rl.__version__ — if they drift, the test fails.
+_RL_SERVICE_VERSION = "4.2.0"
 app = FastAPI(
     title="Autonomous Drug Repurposing — Phase 4 RL Ranker Service",
     description="HTTP wrapper around Phase 4 RL hypothesis ranker.",
-    version="1.0.0",
+    version=_RL_SERVICE_VERSION,
 )
 # P4-006 ROOT FIX: CORS allow_origins is now read from an env var
 # (RL_CORS_ORIGINS) instead of hardcoded ["*"] which allowed ANY website
