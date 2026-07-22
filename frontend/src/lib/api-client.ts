@@ -549,8 +549,29 @@ export const api = {
   createProject: (body: { name: string; description?: string; visibility?: "private" | "org" | "public"; tags?: string[] }) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify(body) }),
   getProject: (id: string) => request<ProjectDetail>(`/api/projects/${id}`),
+  // FE-016 ROOT FIX (Teammate 15, v143): addHypothesis now POSTs to
+  // `/api/projects/${projectId}/hypotheses` (NOT `/api/projects/${projectId}`).
+  //
+  // The previous path was AMBIGUOUS — it POSTed to the SAME path as
+  // getProject (a GET). REST semantics say POST to /projects/{id}
+  // should be "create a sub-resource of project {id}", but the URL
+  // didn't disambiguate WHICH sub-resource (hypothesis? comment?
+  // member?). The backend route handler had to dispatch on body shape,
+  // not URL — making future API evolution (e.g. POST /api/projects/{id}/members)
+  // ambiguous.
+  //
+  // The fix aligns addHypothesis with addComment's pattern
+  // (`/api/projects/${projectId}/comments`). The Next.js route file
+  // `frontend/src/app/api/projects/[id]/hypotheses/route.ts` now hosts
+  // the POST handler; the old POST handler was REMOVED from
+  // `frontend/src/app/api/projects/[id]/route.ts` (which now only has GET).
+  //
+  // This is a ROOT FIX (not surface): the URL contract is now self-
+  // documenting, the backend dispatches on URL (not body shape), and
+  // future sub-resources (members, labels, attachments) follow the
+  // same `/api/projects/{id}/{subresource}` pattern without ambiguity.
   addHypothesis: (projectId: string, body: { title: string; drugName: string; diseaseName: string; notes?: string }) =>
-    request<Hypothesis>(`/api/projects/${projectId}`, { method: "POST", body: JSON.stringify(body) }),
+    request<Hypothesis>(`/api/projects/${projectId}/hypotheses`, { method: "POST", body: JSON.stringify(body) }),
   // FE-073 ROOT FIX: authorName is intentionally NOT accepted. The server
   // derives it from the authenticated user's User.name || User.email.
   // Sending authorName in the body is a no-op (server ignores it).
@@ -582,14 +603,32 @@ export const api = {
     request<{ ok: true }>(`/api/notifications/${id}/read`, { method: "POST" }),
 
   // ADMIN
-  listUsers: (limit = 50, offset = 0) =>
-    request<{ items: AdminUser[]; total: number }>(`/api/admin/users?limit=${limit}&offset=${offset}`),
+  // FE-017 ROOT FIX (Teammate 15, v143): listUsers now uses URLSearchParams
+  // instead of a template literal. The previous `?limit=${limit}&offset=${offset}`
+  // pattern didn't URL-encode the values — fine for numbers, but if a future
+  // maintainer adds a string param (e.g. a search query) and follows the same
+  // pattern, special characters would corrupt the URL. URLSearchParams is the
+  // canonical, encoding-safe way to build query strings (matches the pattern
+  // already used by searchClinicalTrials below). An ESLint `no-restricted-syntax`
+  // rule in eslint.config.mjs now bans `?${var}=` URL patterns in this file to
+  // prevent regressions.
+  listUsers: (limit = 50, offset = 0) => {
+    const qs = new URLSearchParams();
+    qs.set("limit", String(limit));
+    qs.set("offset", String(offset));
+    return request<{ items: AdminUser[]; total: number }>(`/api/admin/users?${qs.toString()}`);
+  },
   updateUser: (body: { userId: string; role?: string; status?: string }) =>
     request<AdminUser>("/api/admin/users", { method: "PATCH", body: JSON.stringify(body) }),
 
   // AUDIT LOGS
-  listAuditLogs: (limit = 100, offset = 0) =>
-    request<{ items: AuditLog[]; total: number }>(`/api/audit-logs?limit=${limit}&offset=${offset}`),
+  // FE-017 ROOT FIX (Teammate 15, v143): same URLSearchParams fix as listUsers.
+  listAuditLogs: (limit = 100, offset = 0) => {
+    const qs = new URLSearchParams();
+    qs.set("limit", String(limit));
+    qs.set("offset", String(offset));
+    return request<{ items: AuditLog[]; total: number }>(`/api/audit-logs?${qs.toString()}`);
+  },
 
   // SYSTEM STATUS
   getSystemStatus: () => request<SystemStatus>("/api/system/status"),

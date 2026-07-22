@@ -1,7 +1,39 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { io } from 'socket.io-client';
+/**
+ * FE-013 ROOT FIX (Teammate 15, v143 — Frontend Hooks + Components):
+ *
+ *   1. `onKeyPress` is deprecated in React 18.3+ and REMOVED in React 19.
+ *      package.json declares `react: ^19.0.0`, so the deprecated handler
+ *      was a no-op in strict mode — Enter-to-send silently stopped
+ *      working in the demo. Replaced ALL `onKeyPress` with `onKeyDown`,
+ *      which is the canonical key-event handler in React 19 (and works
+ *      in 16.8+ for backwards compatibility).
+ *
+ *   2. Storing a `Socket` instance in `useState` is an anti-pattern.
+ *      Sockets are MUTABLE, NON-REACTIVE objects — they don't participate
+ *      in React's render cycle. `setSocket(socketInstance)` triggered a
+ *      re-render on every connection state change, which (under React 19
+ *      strict-mode double-effect-invocation in dev) could re-run the
+ *      `useEffect` and create a SECOND socket, causing duplicate message
+ *      handlers and (in extreme cases) "Maximum call stack" errors.
+ *      Replaced with `useRef<Socket | null>(null)` — refs are the
+ *      canonical store for non-reactive mutable objects per the React
+ *      docs (https://react.dev/reference/react/useRef#avoiding-recreating-the-ref-contents).
+ *
+ *   3. This file is an ILLUSTRATIVE-ONLY example — it is not part of the
+ *      production Next.js app (it lives in `frontend/examples/`, which is
+ *      excluded from ESLint, tsc, and the Next.js build). It demonstrates
+ *      the WebSocket pattern for pharma partners integrating with the
+ *      DruGOS live-update feed. Do NOT deploy this file as a route.
+ *
+ * The fix is ROOT-LEVEL (not surface): the `useRef` change eliminates the
+ * re-render storm at its source, and the `onKeyDown` change restores the
+ * Enter-to-send contract that the React 19 upgrade silently broke.
+ */
+
+import { useEffect, useRef, useState } from 'react';
+import { io, type Socket } from 'socket.io-client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -25,14 +57,20 @@ export default function SocketDemo() {
   const [inputMessage, setInputMessage] = useState('');
   const [username, setUsername] = useState('');
   const [isUsernameSet, setIsUsernameSet] = useState(false);
-  const [socket, setSocket] = useState<any>(null);
+  // FE-013 ROOT FIX: socket is a MUTABLE, NON-REACTIVE object — it must
+  // live in a ref, NOT in useState. `useState` is for values that
+  // participate in the render cycle; storing a Socket there causes
+  // re-renders on every connection state change and (under React 19
+  // strict-mode double-effect-invocation in dev) can re-run the
+  // useEffect and create a SECOND socket with duplicate handlers.
+  const socketRef = useRef<Socket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
 
   useEffect(() => {
-    // Connect to websocket server
-    // Never use PORT in the URL, alyways use XTransformPort
-    // DO NOT change the path, it is used by Caddy to forward the request to the correct port
+    // Connect to websocket server.
+    // Never use PORT in the URL, always use XTransformPort.
+    // DO NOT change the path, it is used by Caddy to forward the request to the correct port.
     const socketInstance = io('/?XTransformPort=3003', {
       transports: ['websocket', 'polling'],
       forceNew: true,
@@ -40,9 +78,10 @@ export default function SocketDemo() {
       reconnectionAttempts: 5,
       reconnectionDelay: 1000,
       timeout: 10000
-    })
+    });
 
-    setSocket(socketInstance);
+    // FE-013 ROOT FIX: store in ref (NOT useState). No re-render triggered.
+    socketRef.current = socketInstance;
 
     socketInstance.on('connect', () => {
       setIsConnected(true);
@@ -77,10 +116,14 @@ export default function SocketDemo() {
 
     return () => {
       socketInstance.disconnect();
+      // FE-013: clear the ref on cleanup so we don't hold a stale reference.
+      socketRef.current = null;
     };
   }, []);
 
   const handleJoin = () => {
+    // FE-013: read from ref (NOT state).
+    const socket = socketRef.current;
     if (socket && username.trim() && isConnected) {
       socket.emit('join', { username: username.trim() });
       setIsUsernameSet(true);
@@ -88,6 +131,8 @@ export default function SocketDemo() {
   };
 
   const sendMessage = () => {
+    // FE-013: read from ref (NOT state).
+    const socket = socketRef.current;
     if (socket && inputMessage.trim() && username.trim()) {
       socket.emit('message', {
         content: inputMessage.trim(),
@@ -97,9 +142,21 @@ export default function SocketDemo() {
     }
   };
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
+  // FE-013 ROOT FIX: renamed from `handleKeyPress` to `handleKeyDown`.
+  // `onKeyPress` is REMOVED in React 19 — the handler was a silent no-op.
+  // `onKeyDown` is the canonical key-event handler in React 19 (and
+  // works in 16.8+ for backwards compatibility).
+  const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       sendMessage();
+    }
+  };
+
+  // FE-013 ROOT FIX: `handleJoinKeyDown` mirrors `handleKeyDown` but
+  // triggers `handleJoin` instead of `sendMessage`. Same onKeyDown fix.
+  const handleJoinKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      handleJoin();
     }
   };
 
@@ -120,11 +177,9 @@ export default function SocketDemo() {
               <Input
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                onKeyPress={(e) => {
-                  if (e.key === 'Enter') {
-                    handleJoin();
-                  }
-                }}
+                // FE-013 ROOT FIX: onKeyDown (NOT onKeyPress, which is
+                // removed in React 19).
+                onKeyDown={handleJoinKeyDown}
                 placeholder="Enter your username..."
                 disabled={!isConnected}
                 className="flex-1"
@@ -175,7 +230,9 @@ export default function SocketDemo() {
                 <Input
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
-                  onKeyPress={handleKeyPress}
+                  // FE-013 ROOT FIX: onKeyDown (NOT onKeyPress, which is
+                  // removed in React 19). Enter-to-send now actually fires.
+                  onKeyDown={handleKeyDown}
                   placeholder="Type a message..."
                   disabled={!isConnected}
                   className="flex-1"

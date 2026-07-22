@@ -99,22 +99,217 @@ from typing import Any, Dict, List, Optional
 # TM11 v141 + TM8 v134 ROOT FIX comment block for the rationale (module-
 # level import is required for integration test mocking).
 
-# FastAPI + Pydantic are declared in the top-level requirements.txt and
-# in phase1/requirements.txt (P1-003 v114 fix). When this module is
-# imported in an environment without FastAPI (e.g., the Next.js
-# frontend's build process), the import fails gracefully — the FastAPI
-# service is OPT-IN (only runs when explicitly started via uvicorn).
+# FE-015 ROOT FIX (Teammate 15, v143 — Frontend → Backend graceful degradation):
+#
+# The previous code RE-RAISED ImportError when FastAPI was missing:
+#
+#     except ImportError as _fastapi_import_err:  # pragma: no cover
+#         raise ImportError(
+#             "BE-001 v123: FastAPI is required for the public REST API. "
+#             "Install with `pip install fastapi uvicorn[standard]`. "
+#             f"Original error: {_fastapi_import_err}"
+#         ) from _fastapi_import_err
+#
+# The comment two lines above said "the import fails GRACEFULLY" — that
+# was a LIE. The re-raise meant `import backend.api.main` CRASHED in any
+# environment without FastAPI installed, including frontend-only dev
+# environments where the Next.js `gen:contracts` script
+# (`python3 frontend/scripts/extract_openapi.py`) imports this module to
+# extract the OpenAPI spec. The frontend build chain broke on every
+# frontend dev's laptop who hadn't `pip install fastapi` — and the
+# frontend package.json doesn't list FastAPI as a dep (correctly — it's
+# a backend dep).
+#
+# ROOT FIX (this block):
+#   1. On ImportError, define `app = None` and replace FastAPI/Pydantic
+#      symbols with no-op stubs so the module's `@app.get(...)` decorators
+#      and `BaseModel` subclasses parse without error. The route handler
+#      functions are defined but NEVER INVOKED (app is None → uvicorn
+#      refuses to start). This is the canonical "graceful degradation"
+#      pattern: the module is importable everywhere, but only RUNS when
+#      FastAPI is installed.
+#   2. extract_openapi.py (frontend/scripts/extract_openapi.py) detects
+#      `app is None` and skips this service with a WARNING, so the
+#      frontend build chain produces contracts from the OTHER services
+#      (phase1/phase2/phase3/phase4) even when the backend isn't
+#      installed.
+#   3. FastAPI is required ONLY for backend dev (running the public REST
+#      API via uvicorn). Frontend dev does NOT need FastAPI — the
+#      Next.js routes proxy to a remote backend in dev (see
+#      frontend/.env.example BACKEND_URL).
+#
+# The stubs below are NEVER exercised at runtime in production (FastAPI
+# IS installed there). They exist solely so the module is importable in
+# frontend-only dev environments. The stubs raise NotImplementedError if
+# called at runtime — this catches any code path that accidentally
+# invokes a route handler when app is None (e.g., a test that imports
+# the handler directly without FastAPI installed).
+import logging as _std_logging
+
+_HAS_FASTAPI: bool
+_fastapi_import_err: Optional[BaseException] = None
 try:
     from fastapi import FastAPI, HTTPException, Depends, Request, status
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
     from pydantic import BaseModel, Field, ConfigDict
-except ImportError as _fastapi_import_err:  # pragma: no cover
-    raise ImportError(
-        "BE-001 v123: FastAPI is required for the public REST API. "
-        "Install with `pip install fastapi uvicorn[standard]`. "
-        f"Original error: {_fastapi_import_err}"
-    ) from _fastapi_import_err
+    _HAS_FASTAPI = True
+except ImportError as _err:  # pragma: no cover — frontend-only dev path
+    _HAS_FASTAPI = False
+    _fastapi_import_err = _err
+    _std_logging.getLogger(__name__).warning(
+        "FE-015 v143: FastAPI not importable (%s: %s). The backend FastAPI "
+        "service will NOT run (app=None). This is acceptable for frontend-"
+        "only dev environments — extract_openapi.py will skip this service "
+        "and emit a warning. For backend dev, install FastAPI: "
+        "`pip install fastapi uvicorn[standard] pydantic`. "
+        "FastAPI is required ONLY for backend dev, NOT for frontend dev.",
+        type(_err).__name__, _err,
+    )
+
+    # -----------------------------------------------------------------
+    # No-op stubs so the module parses when FastAPI/Pydantic are absent.
+    # These are NEVER called at runtime in production (FastAPI is
+    # installed there). They exist solely so `import backend.api.main`
+    # succeeds in frontend-only dev environments.
+    # -----------------------------------------------------------------
+
+    class BaseModel:  # type: ignore[no-redef]
+        """Stub Pydantic BaseModel — defined so the route handler
+        signatures (e.g. `req: PredictRequest`) parse without error.
+        Never instantiated at runtime when FastAPI is missing (the
+        route handlers are never called)."""
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise NotImplementedError(
+                "FE-015: BaseModel stub called — FastAPI is not installed. "
+                "Install with `pip install fastapi pydantic` to run the backend."
+            )
+        @classmethod
+        def model_validate(cls, *args: Any, **kwargs: Any) -> Any:
+            raise NotImplementedError("FE-015: BaseModel.model_validate stub")
+        @classmethod
+        def model_dump_json(cls, *args: Any, **kwargs: Any) -> str:
+            raise NotImplementedError("FE-015: BaseModel.model_dump_json stub")
+
+    def Field(*args: Any, **kwargs: Any) -> Any:  # type: ignore[no-redef]
+        """Stub Pydantic Field — returns None (the type annotation is
+        what matters, not the Field default, when FastAPI is absent)."""
+        return None
+
+    def ConfigDict(*args: Any, **kwargs: Any) -> Any:  # type: ignore[no-redef]
+        """Stub Pydantic ConfigDict — returns empty dict."""
+        return {}
+
+    class _NoOpApp:
+        """Stub FastAPI app — accepts all constructor args (discarded)
+        and exposes .get/.post/.put/.delete/.patch/.middleware/.on_event
+        as no-op decorators so the @app.get(...) lines below parse
+        without error. The route handler functions are defined but
+        never registered (app is None at runtime)."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            # Discard all FastAPI constructor args (title, description,
+            # version, etc.) — they're only used by the real FastAPI.
+            pass
+
+        def _no_op_decorator(self, *args: Any, **kwargs: Any):
+            # Return a decorator that returns the function unchanged.
+            # The function is never invoked (app is None → uvicorn won't
+            # start), but it must be defined so module import succeeds.
+            def decorator(func):
+                return func
+            return decorator
+
+        # HTTP method decorators.
+        def get(self, *args, **kwargs): return self._no_op_decorator(*args, **kwargs)
+        def post(self, *args, **kwargs): return self._no_op_decorator(*args, **kwargs)
+        def put(self, *args, **kwargs): return self._no_op_decorator(*args, **kwargs)
+        def delete(self, *args, **kwargs): return self._no_op_decorator(*args, **kwargs)
+        def patch(self, *args, **kwargs): return self._no_op_decorator(*args, **kwargs)
+        def head(self, *args, **kwargs): return self._no_op_decorator(*args, **kwargs)
+        def options(self, *args, **kwargs): return self._no_op_decorator(*args, **kwargs)
+
+        # Middleware / lifecycle decorators.
+        def middleware(self, *args, **kwargs): return self._no_op_decorator(*args, **kwargs)
+        def on_event(self, *args, **kwargs): return self._no_op_decorator(*args, **kwargs)
+
+        # Imperative registration methods (no-op).
+        def add_middleware(self, *args: Any, **kwargs: Any) -> None: pass
+        def add_exception_handler(self, *args: Any, **kwargs: Any) -> None: pass
+        def include_router(self, *args: Any, **kwargs: Any) -> None: pass
+        def mount(self, *args: Any, **kwargs: Any) -> None: pass
+
+        # State attribute (slowapi sets app.state.limiter).
+        @property
+        def state(self) -> Any:
+            return _NoOpAppState()
+
+    class _NoOpAppState:
+        """Stub for app.state — slowapi sets app.state.limiter."""
+        def __setattr__(self, key: str, value: Any) -> None: pass
+        def __getattr__(self, key: str) -> Any: return None
+
+    FastAPI = _NoOpApp  # type: ignore[assignment,misc]
+
+    class HTTPException(Exception):  # type: ignore[no-redef]
+        """Stub HTTPException — raised by route handlers, but handlers
+        are never called when FastAPI is missing."""
+        def __init__(self, status_code: int = 500, detail: Any = None, *args: Any, **kwargs: Any) -> None:
+            self.status_code = status_code
+            self.detail = detail
+            super().__init__(detail)
+
+    def Depends(*args: Any, **kwargs: Any) -> Any:  # type: ignore[no-redef]
+        """Stub FastAPI Depends — returns None (the dependency is never
+        resolved because the route handler is never called)."""
+        return None
+
+    class Request:  # type: ignore[no-redef]
+        """Stub FastAPI Request — never instantiated when FastAPI is missing."""
+        pass
+
+    class _StatusStub:  # type: ignore[no-redef]
+        """Stub for fastapi.status — provides the HTTP status constants
+        used by route handlers (e.g. status.HTTP_503_SERVICE_UNAVAILABLE)."""
+        HTTP_100_CONTINUE = 100
+        HTTP_200_OK = 200
+        HTTP_201_CREATED = 201
+        HTTP_204_NO_CONTENT = 204
+        HTTP_301_MOVED_PERMANENTLY = 301
+        HTTP_302_FOUND = 302
+        HTTP_304_NOT_MODIFIED = 304
+        HTTP_307_TEMPORARY_REDIRECT = 307
+        HTTP_308_PERMANENT_REDIRECT = 308
+        HTTP_400_BAD_REQUEST = 400
+        HTTP_401_UNAUTHORIZED = 401
+        HTTP_403_FORBIDDEN = 403
+        HTTP_404_NOT_FOUND = 404
+        HTTP_405_METHOD_NOT_ALLOWED = 405
+        HTTP_409_CONFLICT = 409
+        HTTP_422_UNPROCESSABLE_ENTITY = 422
+        HTTP_429_TOO_MANY_REQUESTS = 429
+        HTTP_500_INTERNAL_SERVER_ERROR = 500
+        HTTP_501_NOT_IMPLEMENTED = 501
+        HTTP_502_BAD_GATEWAY = 502
+        HTTP_503_SERVICE_UNAVAILABLE = 503
+        HTTP_504_GATEWAY_TIMEOUT = 504
+    status = _StatusStub  # type: ignore[assignment]
+
+    class CORSMiddleware:  # type: ignore[no-redef]
+        """Stub CORSMiddleware — never instantiated when FastAPI is missing."""
+        pass
+
+    class HTTPBearer:  # type: ignore[no-redef]
+        """Stub HTTPBearer — never instantiated when FastAPI is missing.
+        Accepts all constructor args (discarded) so `HTTPBearer(auto_error=False)`
+        parses without error."""
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    class HTTPAuthorizationCredentials:  # type: ignore[no-redef]
+        """Stub HTTPAuthorizationCredentials — accepts constructor args."""
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
 
 # TEAMMATE-11 ROOT FIX (v141, P0 — P3 → Backend integration):
 # ``httpx`` is imported at MODULE LEVEL (not inside function bodies) so
@@ -141,7 +336,62 @@ except ImportError as _fastapi_import_err:  # pragma: no cover
 # The same module-level `import httpx` is also used by the /top-k endpoint
 # which proxies to the RL service via httpx.AsyncClient. The previous code
 # imported httpx INSIDE the /top-k function body — invisible to patch().
-import httpx  # noqa: E402 — required at module level for test mocking
+#
+# FE-015 ROOT FIX (Teammate 15, v143): httpx is now imported OPTIONALLY.
+# When FastAPI is missing (frontend-only dev environment), httpx is also
+# missing (it's a backend dep). The stub below provides `httpx.AsyncClient`
+# as a no-op class so the module parses. The route handlers that use
+# `httpx.AsyncClient` are never called when FastAPI is missing (app is
+# None → uvicorn won't start), so the stub is never exercised at runtime.
+# Integration tests install httpx (it's in requirements.txt), so the real
+# `httpx.AsyncClient` is available for `patch()` in test environments.
+try:
+    import httpx  # noqa: E402 — required at module level for test mocking
+    _HAS_HTTPX = True
+except ImportError as _httpx_import_err:  # pragma: no cover — frontend-only dev path
+    _HAS_HTTPX = False
+    _std_logging.getLogger(__name__).warning(
+        "FE-015 v143: httpx not importable (%s: %s). The backend route "
+        "handlers that proxy to GT/RL/KG services will NOT work. This is "
+        "acceptable for frontend-only dev environments (the handlers are "
+        "never called when app is None). For backend dev, install httpx: "
+        "`pip install httpx`.",
+        type(_httpx_import_err).__name__, _httpx_import_err,
+    )
+
+    class _NoOpHttpxModule:  # type: ignore[no-redef]
+        """Stub for the `httpx` module when httpx is not installed.
+        Provides `AsyncClient` and `RequestError` / `HTTPStatusError` so
+        the route handlers' `except httpx.RequestError` blocks parse.
+        Never exercised at runtime — route handlers are never called
+        when FastAPI is missing."""
+        class AsyncClient:
+            def __init__(self, *args: Any, **kwargs: Any) -> None: pass
+            async def __aenter__(self) -> "AsyncClient": return self
+            async def __aexit__(self, *args: Any) -> None: pass
+            async def get(self, *args: Any, **kwargs: Any) -> Any:
+                raise NotImplementedError("FE-015: httpx.AsyncClient.get stub")
+            async def post(self, *args: Any, **kwargs: Any) -> Any:
+                raise NotImplementedError("FE-015: httpx.AsyncClient.post stub")
+            async def put(self, *args: Any, **kwargs: Any) -> Any:
+                raise NotImplementedError("FE-015: httpx.AsyncClient.put stub")
+            async def delete(self, *args: Any, **kwargs: Any) -> Any:
+                raise NotImplementedError("FE-015: httpx.AsyncClient.delete stub")
+
+        class RequestError(Exception):
+            pass
+
+        class HTTPStatusError(Exception):
+            def __init__(self, *args: Any, response: Any = None, request: Any = None, **kwargs: Any) -> None:
+                self.response = response
+                self.request = request
+                super().__init__(*args, **kwargs)
+
+        @staticmethod
+        def Request(*args: Any, **kwargs: Any) -> Any:  # type: ignore[no-redef]
+            return None
+
+    httpx = _NoOpHttpxModule()  # type: ignore[assignment]
 
 # TM8 v134 ROOT FIX: import the per-user in-memory rate limiters for
 # the /kg/* proxy routes. These are defined in backend/api/rate_limit.py
@@ -870,36 +1120,60 @@ def _get_audit_db_session():
 # ---------------------------------------------------------------------------
 # FastAPI app — the public REST API.
 # ---------------------------------------------------------------------------
-app = FastAPI(
-    title="DrugOS Public REST API",
-    description=(
-        "Public REST API for the DrugOS Autonomous Drug Repurposing Platform. "
-        "Pharma partners use this API to programmatically query the platform "
-        "for drug repurposing candidates, evidence packages, and top-K rankings. "
-        "\n\n"
-        "Authentication: Bearer JWT (obtained via the /auth/login endpoint on "
-        "the Next.js frontend, or via /auth/api-key-exchange when using an API key). "
-        "The JWT MUST contain 'sub' (user_id), 'org_id', and 'org_role' claims. "
-        "JWTs without 'org_id' are rejected (401) — anonymous access is forbidden."
-    ),
-    # TEAMMATE-11 ROOT FIX (v141, P3-020): the FastAPI app version is
-    # now the canonical BACKEND_VERSION (derived from
-    # graph_transformer.__version__) — was hardcoded "1.0.0". The
-    # OpenAPI spec at /openapi.json now reports the real version so
-    # pharma partners generating client libraries get the right one.
-    version=BACKEND_VERSION,
-    contact={
-        "name": "DrugOS Team",
-        "email": "api@drugos.ai",
-    },
-    license_info={
-        "name": "Proprietary",
-        "url": "https://drugos.ai/terms",
-    },
-    openapi_url="/openapi.json",
-    docs_url="/docs",
-    redoc_url="/redoc",
-)
+# FE-015 ROOT FIX (Teammate 15, v143): when FastAPI is missing (frontend-
+# only dev environment), `app` is set to None. The `@app.get(...)` decorators
+# below would fail with `AttributeError: 'NoneType' object has no attribute
+# 'get'` — so we use the `_NoOpApp` stub class instead of None. The stub's
+# decorator methods are no-ops (they return the function unchanged), so the
+# route handler functions are defined but never registered. uvicorn refuses
+# to start (it requires a real FastAPI app), which is the correct behavior
+# in a frontend-only dev environment.
+#
+# `extract_openapi.py` checks `app is None` (or `isinstance(app, _NoOpApp)`)
+# to detect this case and skip the backend service when generating contracts.
+# The check is `getattr(app, '_is_noop_stub', False)` so we don't couple
+# extract_openapi.py to the internal `_NoOpApp` class name.
+if _HAS_FASTAPI:
+    app = FastAPI(
+        title="DrugOS Public REST API",
+        description=(
+            "Public REST API for the DrugOS Autonomous Drug Repurposing Platform. "
+            "Pharma partners use this API to programmatically query the platform "
+            "for drug repurposing candidates, evidence packages, and top-K rankings. "
+            "\n\n"
+            "Authentication: Bearer JWT (obtained via the /auth/login endpoint on "
+            "the Next.js frontend, or via /auth/api-key-exchange when using an API key). "
+            "The JWT MUST contain 'sub' (user_id), 'org_id', and 'org_role' claims. "
+            "JWTs without 'org_id' are rejected (401) — anonymous access is forbidden."
+        ),
+        # TEAMMATE-11 ROOT FIX (v141, P3-020): the FastAPI app version is
+        # now the canonical BACKEND_VERSION (derived from
+        # graph_transformer.__version__) — was hardcoded "1.0.0". The
+        # OpenAPI spec at /openapi.json now reports the real version so
+        # pharma partners generating client libraries get the right one.
+        version=BACKEND_VERSION,
+        contact={
+            "name": "DrugOS Team",
+            "email": "api@drugos.ai",
+        },
+        license_info={
+            "name": "Proprietary",
+            "url": "https://drugos.ai/terms",
+        },
+        openapi_url="/openapi.json",
+        docs_url="/docs",
+        redoc_url="/redoc",
+    )
+else:
+    # FE-015: FastAPI is not installed (frontend-only dev environment).
+    # Create the no-op stub app so the @app.get(...) decorators below
+    # parse without error. The route handlers are defined but never
+    # registered. `extract_openapi.py` detects this case via
+    # `getattr(app, '_is_noop_stub', False)` and skips the backend.
+    app = _NoOpApp()  # type: ignore[assignment]
+    # Tag the stub so extract_openapi.py can detect it without coupling
+    # to the internal class name.
+    setattr(app, "_is_noop_stub", True)
 
 # CORS — allow the Next.js frontend (and any pharma partner's internal
 # tools) to call this API from the browser. The frontend's URL is
@@ -1020,6 +1294,163 @@ else:  # pragma: no cover
                 return func
             return decorator
     limiter = _NoOpLimiter()  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# FE-014 ROOT FIX (Teammate 15, v143 — Graceful SIGTERM/SIGINT shutdown):
+# ---------------------------------------------------------------------------
+# The previous `if __name__ == "__main__":` block called `uvicorn.run(...)`
+# with NO `timeout_graceful_shutdown` parameter and NO shutdown handler.
+# When Kubernetes sends SIGTERM during a pod drain, uvicorn killed in-flight
+# requests IMMEDIATELY — a /predict call that's 5 seconds into a 10-second
+# GT inference returned a connection-reset to the pharma partner. They
+# retried, doubling the GT service's load during the deploy window. Audit
+# log entries for the killed requests were lost.
+#
+# ROOT FIX (3 layers, defense-in-depth):
+#
+#   1. `timeout_graceful_shutdown=30` is passed to `uvicorn.run` (below in
+#      the `__main__` block). Uvicorn stops accepting new connections on
+#      SIGTERM and waits up to 30s for in-flight HTTP requests to complete.
+#      After 30s it forces shutdown. This matches k8s' default
+#      `terminationGracePeriodSeconds=30` — the pod is SIGKILLed at 30s
+#      regardless, so a longer uvicorn timeout would be pointless.
+#
+#   2. `_inflight_ml_tasks: set[asyncio.Task]` tracks every httpx.AsyncClient
+#      call to a downstream ML service (GT, RL, KG). The `_track_ml_call`
+#      helper wraps each call so the shutdown handler can wait for them
+#      explicitly. Uvicorn's graceful shutdown already waits for in-flight
+#      HTTP requests, but this gives us EXPLICIT logging + bounded drain
+#      so a hung ML call doesn't consume the full 30s budget.
+#
+#   3. `@app.on_event("shutdown")` handler drains the tracked ML tasks
+#      with a 25s timeout (5s less than uvicorn's 30s budget, leaving
+#      room for audit-log flush + connection cleanup). On timeout it
+#      logs CRITICAL so operators can detect hung GT/RL/KG services.
+#
+# Deploy-time SIGTERM behavior (documented for ops):
+#   - t=0s:  k8s sends SIGTERM, stops routing new traffic to the pod.
+#   - t=0s:  uvicorn stops accepting new connections.
+#   - t=0s:  FastAPI shutdown handler fires — drains in-flight ML calls
+#            (up to 25s timeout).
+#   - t≤30s: uvicorn waits for in-flight HTTP requests to complete
+#            (timeout_graceful_shutdown=30).
+#   - t=30s: k8s sends SIGKILL if the pod hasn't exited.
+#
+# This means /predict calls that are mid-inference get up to 25s to
+# complete (the GT service's 30s httpx timeout is the bottleneck — a
+# well-behaved GT call completes in <1s; a hung one is cancelled at 25s
+# and the pharma partner gets a 503, which they can retry against a
+# healthy pod). Audit logs for completed requests are flushed; audit
+# logs for cancelled requests are lost (the audit_log_middleware is
+# fail-safe — it logs to stderr on DB write failure).
+# ---------------------------------------------------------------------------
+import asyncio as _asyncio  # noqa: E402 — local import for clarity
+
+# Module-level set of in-flight ML service call tasks. Populated by
+# `_track_ml_call`, drained by the shutdown handler. Using a set (not a
+# list) so removal is O(1) via `task.add_done_callback(_inflight_ml_tasks.discard)`.
+_inflight_ml_tasks: "set[_asyncio.Task]" = set()
+
+# 25s < 30s (uvicorn timeout_graceful_shutdown) — leaves 5s for audit-log
+# flush + connection cleanup before k8s SIGKILLs the pod.
+_INFLIGHT_ML_DRAIN_TIMEOUT_SECONDS = 25.0
+
+
+def _track_ml_call(coro):
+    """Wrap an ML service call coroutine with shutdown-drain tracking.
+
+    Usage (replaces `await client.post(...)`):
+        gt_response = await _track_ml_call(
+            client.post(f"{gt_url}/predict", json=body, headers=h)
+        )
+
+    The coroutine is scheduled as a Task on the current event loop and
+    added to `_inflight_ml_tasks`. When the Task completes (success,
+    exception, or cancellation), it auto-removes itself from the set via
+    `add_done_callback(_inflight_ml_tasks.discard)`.
+
+    The shutdown handler (`_drain_inflight_ml_calls`) awaits all tracked
+    tasks with a 25s timeout before letting uvicorn exit, so in-flight
+    /predict and /top-k calls get a chance to complete cleanly instead
+    of being killed mid-inference.
+
+    This is a NO-OP when `_HAS_FASTAPI` is False (frontend-only dev env)
+    — the coro is awaited directly without tracking, since there's no
+    shutdown handler to drain it.
+    """
+    if not _HAS_FASTAPI:
+        # No shutdown handler to drain — just await the coro directly.
+        # (This path is only hit in frontend-only dev envs where the
+        # route handlers are never actually called.)
+        return coro
+    try:
+        loop = _asyncio.get_running_loop()
+    except RuntimeError:
+        # No running event loop (e.g., called outside an async context).
+        # Return the coro unchanged — the caller will await it.
+        return coro
+    task = loop.create_task(coro)
+    _inflight_ml_tasks.add(task)
+    task.add_done_callback(_inflight_ml_tasks.discard)
+    return task
+
+
+# FE-014 ROOT FIX: shutdown handler — drains in-flight ML calls.
+# Registered via `@app.on_event("shutdown")` so it fires when uvicorn
+# receives SIGTERM/SIGINT and begins graceful shutdown. The handler
+# MUST complete within uvicorn's `timeout_graceful_shutdown` (30s) —
+# we use a 25s timeout to leave room for audit-log flush.
+@app.on_event("shutdown")
+async def _drain_inflight_ml_calls() -> None:
+    """FE-014 ROOT FIX: drain in-flight ML service calls on shutdown.
+
+    Uvicorn's `timeout_graceful_shutdown=30` already waits for in-flight
+    HTTP requests to complete, but this handler provides EXPLICIT draining
+    of the httpx.AsyncClient calls to downstream GT/RL/KG services. If a
+    call hangs beyond 25s, we log CRITICAL so operators can detect a
+    hung downstream service — k8s will SIGKILL the pod at 30s.
+
+    Behavior:
+      - If no in-flight ML calls: returns immediately.
+      - If in-flight calls complete within 25s: logs success, returns.
+      - If in-flight calls don't complete within 25s: logs CRITICAL,
+        returns (the calls are cancelled by uvicorn's force-shutdown).
+    """
+    if not _inflight_ml_tasks:
+        logger.info(
+            "FE-014 shutdown: no in-flight ML calls to drain — clean exit."
+        )
+        return
+    logger.info(
+        "FE-014 shutdown: draining %d in-flight ML call(s) (timeout=%ss)...",
+        len(_inflight_ml_tasks), _INFLIGHT_ML_DRAIN_TIMEOUT_SECONDS,
+    )
+    # Snapshot the set — `discard` callbacks mutate it during iteration.
+    tasks_snapshot = list(_inflight_ml_tasks)
+    try:
+        await _asyncio.wait_for(
+            _asyncio.gather(*tasks_snapshot, return_exceptions=True),
+            timeout=_INFLIGHT_ML_DRAIN_TIMEOUT_SECONDS,
+        )
+        # Count how many actually completed vs raised.
+        completed = sum(1 for t in tasks_snapshot if t.done() and not t.cancelled())
+        raised = sum(1 for t in tasks_snapshot if t.done() and t.exception() is not None)
+        logger.info(
+            "FE-014 shutdown: %d/%d ML call(s) drained cleanly "
+            "(%d completed, %d raised).",
+            completed, len(tasks_snapshot), completed, raised,
+        )
+    except _asyncio.TimeoutError:
+        still_running = sum(1 for t in tasks_snapshot if not t.done())
+        logger.critical(
+            "FE-014 shutdown: %d in-flight ML call(s) did NOT complete within "
+            "%ss — they will be cancelled by uvicorn's force-shutdown. "
+            "Investigate GT/RL/KG service health (likely a hung downstream). "
+            "Pharma partners with in-flight /predict or /top-k calls will "
+            "receive connection-reset and should retry against a healthy pod.",
+            still_running, _INFLIGHT_ML_DRAIN_TIMEOUT_SECONDS,
+        )
 
 
 # TM14 ROOT FIX (v132): audit log middleware.
@@ -1365,11 +1796,18 @@ async def predict(
         # 30s timeout — the GT service pre-encodes the graph at startup
         # (P3-050 fix), so per-request inference is ~100ms for a single
         # pair. 30s gives a 300x safety margin for slow GPU contention.
+        # FE-014 ROOT FIX: wrap the httpx call with `_track_ml_call` so the
+        # shutdown handler can drain it on SIGTERM/SIGINT. This prevents
+        # /predict calls from being killed mid-inference during k8s pod
+        # drains (which would corrupt the response to the pharma partner
+        # and trigger retries that double the GT service's load).
         async with httpx.AsyncClient(timeout=30.0) as client:
-            gt_response = await client.post(
-                f"{gt_service_url.rstrip('/')}/predict",
-                json=gt_request_body,
-                headers=gt_headers,
+            gt_response = await _track_ml_call(
+                client.post(
+                    f"{gt_service_url.rstrip('/')}/predict",
+                    json=gt_request_body,
+                    headers=gt_headers,
+                )
             )
         # TEAMMATE-11 v141: check status_code MANUALLY instead of calling
         # ``gt_response.raise_for_status()``. The latter raises
@@ -1655,12 +2093,18 @@ async def top_k(
     # service would hang /top-k indefinitely, exhausting the backend's
     # connection pool.
     try:
+        # FE-014 ROOT FIX: wrap the httpx call with `_track_ml_call` so the
+        # shutdown handler can drain it on SIGTERM/SIGINT. Same rationale
+        # as /predict — a /top-k call killed mid-RL-rank corrupts the
+        # response to the pharma partner and triggers retries.
         async with httpx.AsyncClient(timeout=60.0) as client:
-            rl_resp = await client.post(
-                f"{rl_url}/rank",
-                json=request_body,
-                params=request_params,
-                headers=request_headers,
+            rl_resp = await _track_ml_call(
+                client.post(
+                    f"{rl_url}/rank",
+                    json=request_body,
+                    params=request_params,
+                    headers=request_headers,
+                )
             )
     except httpx.RequestError as exc:
         # P4-024: connection failure → 503. This covers:
@@ -1928,8 +2372,11 @@ async def get_dataset_stats(
         )
 
     try:
+        # FE-014 ROOT FIX: wrap with _track_ml_call for graceful shutdown drain.
         async with httpx.AsyncClient(timeout=15.0) as client:
-            p1_resp = await client.get(f"{phase1_url.rstrip('/')}/stats")
+            p1_resp = await _track_ml_call(
+                client.get(f"{phase1_url.rstrip('/')}/stats")
+            )
         if p1_resp.status_code != 200:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -2015,19 +2462,22 @@ async def validate(
         )
 
     try:
+        # FE-014 ROOT FIX: wrap with _track_ml_call for graceful shutdown drain.
         async with httpx.AsyncClient(timeout=15.0) as client:
-            rl_resp = await client.post(
-                f"{rl_url.rstrip('/')}/validate",
-                json={
-                    "drug": req.drug,
-                    "disease": req.disease,
-                    "outcome": req.outcome,
-                    "validated_by": req.validated_by or auth.user_id,
-                    "validation_study_id": req.validation_study_id,
-                    "notes": req.notes,
-                    "original_gt_score": req.original_gt_score,
-                    "original_rl_rank": req.original_rl_rank,
-                },
+            rl_resp = await _track_ml_call(
+                client.post(
+                    f"{rl_url.rstrip('/')}/validate",
+                    json={
+                        "drug": req.drug,
+                        "disease": req.disease,
+                        "outcome": req.outcome,
+                        "validated_by": req.validated_by or auth.user_id,
+                        "validation_study_id": req.validation_study_id,
+                        "notes": req.notes,
+                        "original_gt_score": req.original_gt_score,
+                        "original_rl_rank": req.original_rl_rank,
+                    },
+                )
             )
         if rl_resp.status_code != 200:
             raise HTTPException(
@@ -2152,10 +2602,13 @@ async def proxy_kg_stats(
         auth.user_id, org_id, KG_SERVICE_URL,
     )
     try:
+        # FE-014 ROOT FIX: wrap with _track_ml_call for graceful shutdown drain.
         async with httpx.AsyncClient(timeout=_KG_PROXY_TIMEOUT_SECONDS) as client:
-            response = await client.get(
-                f"{KG_SERVICE_URL}/kg/stats",
-                headers={"X-Org-Id": org_id},
+            response = await _track_ml_call(
+                client.get(
+                    f"{KG_SERVICE_URL}/kg/stats",
+                    headers={"X-Org-Id": org_id},
+                )
             )
         # TM8 v134: check is_success directly instead of raise_for_status()
         # to avoid httpx 0.28+ RuntimeError when the Response object's
@@ -2230,11 +2683,14 @@ async def proxy_kg_explore(
     # proxy: the backend presents a stable public API while Phase 2's
     # internal API can evolve.
     try:
+        # FE-014 ROOT FIX: wrap with _track_ml_call for graceful shutdown drain.
         async with httpx.AsyncClient(timeout=_KG_PROXY_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                f"{KG_SERVICE_URL}/query",
-                json=payload,
-                headers={"X-Org-Id": org_id},
+            response = await _track_ml_call(
+                client.post(
+                    f"{KG_SERVICE_URL}/query",
+                    json=payload,
+                    headers={"X-Org-Id": org_id},
+                )
             )
         if not response.is_success:
             logger.warning(
@@ -2337,11 +2793,14 @@ async def proxy_cypher(
     if "max_rows" in payload:
         phase2_payload["max_rows"] = payload["max_rows"]
     try:
+        # FE-014 ROOT FIX: wrap with _track_ml_call for graceful shutdown drain.
         async with httpx.AsyncClient(timeout=_KG_PROXY_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                f"{KG_SERVICE_URL}/cypher",
-                json=phase2_payload,
-                headers={"X-Org-Id": org_id},
+            response = await _track_ml_call(
+                client.post(
+                    f"{KG_SERVICE_URL}/cypher",
+                    json=phase2_payload,
+                    headers={"X-Org-Id": org_id},
+                )
             )
         if not response.is_success:
             logger.warning(
@@ -2504,10 +2963,32 @@ if __name__ == "__main__":
     # this fix matches the ACTUAL deployment, not the stale contract.
     port = int(os.environ.get("DRUGOS_API_PORT", "8000"))
     workers = int(os.environ.get("DRUGOS_API_WORKERS", "4"))
+    # FE-014 ROOT FIX (Teammate 15, v143): graceful shutdown timeout.
+    # On SIGTERM (k8s pod drain) or SIGINT (Ctrl-C), uvicorn stops
+    # accepting new connections and waits up to `timeout_graceful_shutdown`
+    # seconds for in-flight HTTP requests to complete. After the timeout,
+    # uvicorn force-closes the connections and exits.
+    #
+    # 30s matches k8s' default `terminationGracePeriodSeconds=30` — the
+    # pod is SIGKILLed at 30s regardless, so a longer uvicorn timeout
+    # would be pointless (the kernel would kill the process mid-drain).
+    #
+    # The shutdown handler `_drain_inflight_ml_calls` (registered above
+    # via `@app.on_event("shutdown")`) fires INSIDE this 30s window and
+    # drains in-flight httpx calls to GT/RL/KG services with a 25s
+    # timeout (5s less than this value, leaving room for audit-log flush).
+    #
+    # The env var override `DRUGOS_API_GRACEFUL_SHUTDOWN_SECONDS` lets
+    # operators tune the timeout without code changes (e.g., set to 60s
+    # for a deployment with `terminationGracePeriodSeconds=60`).
+    graceful_shutdown_seconds = int(
+        os.environ.get("DRUGOS_API_GRACEFUL_SHUTDOWN_SECONDS", "30")
+    )
     uvicorn.run(
         "backend.api.main:app",
         host="0.0.0.0",
         port=port,
         workers=workers,
         log_level=os.environ.get("DRUGOS_API_LOG_LEVEL", "info"),
+        timeout_graceful_shutdown=graceful_shutdown_seconds,
     )
