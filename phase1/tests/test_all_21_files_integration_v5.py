@@ -124,7 +124,7 @@ class TestAll21FilesImport:
             "pipelines",
             "pipelines.base_pipeline",
             "pipelines.chembl_pipeline",
-            "pipelines._http_client",  # new module
+            "pipelines._chembl_http_client",  # P1-054: canonical module (shim deleted)
         ]
         failed = []
         for mod_name in importable_modules:
@@ -148,11 +148,35 @@ class TestAll21FilesImport:
         assert not empty, f"Empty files: {empty}"
 
     def test_new_http_client_module_exists(self):
-        """The new pipelines/_http_client.py module exists."""
-        http_client_path = PROJECT_ROOT / "pipelines" / "_http_client.py"
-        assert http_client_path.exists(), (
-            "pipelines/_http_client.py must exist (new module added for the "
-            "institutional-grade chembl_pipeline.py rewrite -- A5)"
+        """The canonical pipelines/_chembl_http_client.py module exists.
+
+        P1-054 FORENSIC ROOT FIX (Teammate 4): the previous test asserted
+        that ``pipelines/_http_client.py`` exists. That file was a 33-line
+        backward-compat shim that re-exported symbols from the canonical
+        ``pipelines._chembl_http_client`` module. The shim has been
+        DELETED (per Issue P1-054) because:
+          - The file name ``_http_client`` implied a generic, pipeline-
+            agnostic HTTP utility — but the implementation hard-codes
+            ChEMBL-specific behaviour.
+          - The shim created naming confusion (two module names for the
+            same code).
+          - The shim was dead weight (all callers now import from the
+            canonical ``_chembl_http_client`` directly).
+        This test now asserts the CANONICAL module exists (which it does
+        — it's the real implementation, not a shim).
+        """
+        # P1-054: the canonical module MUST exist (this is the real impl).
+        chembl_http_client_path = PROJECT_ROOT / "pipelines" / "_chembl_http_client.py"
+        assert chembl_http_client_path.exists(), (
+            "pipelines/_chembl_http_client.py must exist (canonical ChEMBL "
+            "HTTP client module -- the real implementation, not a shim)"
+        )
+        # P1-054: the OLD shim MUST NOT exist (it was deleted per Issue 9).
+        old_shim_path = PROJECT_ROOT / "pipelines" / "_http_client.py"
+        assert not old_shim_path.exists(), (
+            "pipelines/_http_client.py must NOT exist (P1-054 root fix: "
+            "the 33-line backward-compat shim was DELETED; all callers "
+            "now import from the canonical _chembl_http_client module)"
         )
 
 
@@ -437,7 +461,7 @@ class TestEndToEndAll21Files:
         - cleaning.missing_values (fill_missing_drug_fields)
         - pipelines.base_pipeline (BasePipeline)
         - pipelines.chembl_pipeline (ChEMBLPipeline)
-        - pipelines._http_client (RateLimitedHttpClient)
+        - pipelines._chembl_http_client (RateLimitedHttpClient)  # P1-054: canonical name
         """
         from database.models import Drug, DrugProteinInteraction, Protein
         from pipelines.chembl_pipeline import ChEMBLPipeline
@@ -637,7 +661,7 @@ class TestReliabilityAll21Files:
 
     def test_http_client_4xx_no_retry(self):
         """4xx (not 429) fails immediately without retry."""
-        from pipelines._http_client import HttpClientError, RateLimitedHttpClient
+        from pipelines._chembl_http_client import HttpClientError, RateLimitedHttpClient
 
         client = RateLimitedHttpClient(max_retries=3)
         mock_response = MagicMock()
@@ -762,7 +786,7 @@ class TestSecurityAll21Files:
 
     def test_http_client_enforces_response_size_cap(self):
         """Responses exceeding max_response_bytes are rejected (SEC-5)."""
-        from pipelines._http_client import (
+        from pipelines._chembl_http_client import (
             MaxResponseSizeExceeded,
             RateLimitedHttpClient,
         )
@@ -779,7 +803,7 @@ class TestSecurityAll21Files:
 
     def test_http_client_user_agent_set(self):
         """The User-Agent header is set on every request (SEC-3)."""
-        from pipelines._http_client import RateLimitedHttpClient
+        from pipelines._chembl_http_client import RateLimitedHttpClient
 
         client = RateLimitedHttpClient()
         assert "DrugRepurposingPipeline" in client.user_agent
@@ -910,7 +934,7 @@ class TestObservabilityAll21Files:
 
     def test_http_client_tracks_api_calls(self):
         """The HTTP client records every API call (L1, L6, LIN-7)."""
-        from pipelines._http_client import RateLimitedHttpClient
+        from pipelines._chembl_http_client import RateLimitedHttpClient
 
         client = RateLimitedHttpClient()
         assert client.api_calls == []
@@ -962,11 +986,17 @@ class TestDocumentationAll21Files:
         )
 
     def test_http_client_has_module_docstring(self):
-        """_http_client.py has a module docstring."""
-        from pipelines import _http_client
+        """_chembl_http_client.py has a module docstring.
 
-        assert _http_client.__doc__ is not None
-        assert len(_http_client.__doc__) > 100
+        P1-054 ROOT FIX: the previous test imported ``pipelines._http_client``
+        (the backward-compat shim). The shim has been DELETED per Issue 9;
+        all callers now import from the canonical ``pipelines._chembl_http_client``
+        module. This test now asserts the CANONICAL module has a docstring.
+        """
+        from pipelines import _chembl_http_client
+
+        assert _chembl_http_client.__doc__ is not None
+        assert len(_chembl_http_client.__doc__) > 100
 
 
 # =====================================================================
@@ -1086,7 +1116,7 @@ class TestAll21FilesTogether:
             "entity_resolution", "entity_resolution.resolver_utils",
             "entity_resolution.drug_resolver", "entity_resolution.protein_resolver",
             "pipelines", "pipelines.base_pipeline",
-            "pipelines.chembl_pipeline", "pipelines._http_client",
+            "pipelines.chembl_pipeline", "pipelines._chembl_http_client",
         ]
         for mod in modules:
             try:

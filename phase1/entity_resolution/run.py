@@ -1285,30 +1285,21 @@ def run_entity_resolution() -> Dict[str, Any]:
                     "on the next run's pre-cleanup step.",
                     _cleanup_exc,
                 )
-        # v104 FORENSIC ROOT FIX (P1-002 -- duplicate INSERT/DELETE block):
-        #   The V90 CI fix that lived here (lines 880-935 in the pre-v104
-        #   codebase) was a COMPLETE SECOND COPY of the same temp-table
-        #   INSERT/DELETE block above. It (a) lacked try/finally cleanup,
-        #   so on failure the temp table was orphaned forever; (b) used a
-        #   divergent ORDER BY clause (the chembl_id dedup ran a SECOND
-        #   time with subtly different row ordering than the pre-dedup at
-        #   lines 798-816), so the second INSERT silently OVERWROTE the
-        #   first INSERT's rows with potentially different survivors --
-        #   non-deterministic deduplication. The duplicate was a copy-paste
-        #   artifact from the V90 CI hotfix that was never cleaned up.
-        #
-        #   ROOT FIX: DELETED the entire duplicate block. The first block
-        #   (lines 818-879 above) already has (1) proper pre-dedup at
-        #   lines 798-816, (2) atomic INSERT/DELETE inside a single
-        #   transaction, (3) try/finally cleanup that ALWAYS drops the
-        #   temp table even on failure. Nothing is lost by deleting the
-        #   duplicate; correctness, idempotency, and disk hygiene are all
-        #   restored.
-        #
-        #   Regression test: phase1/tests/test_p1_002_duplicate_block.py
-        #   asserts that running run_entity_resolution() TWICE on the same
-        #   input leaves no orphaned _tmp_entity_mapping_staging table and
-        #   produces deterministic row counts.
+        # P1-047 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+        #   DELETED a 30-line historical comment block that described a
+        #   duplicate INSERT/DELETE block removed in v104. The comment
+        #   was purely historical (described code that no longer exists,
+        #   referenced line numbers in a pre-v104 codebase that have
+        #   since shifted multiple times). Per the audit's "comments are
+        #   lies until proven otherwise" rule, this block was verified
+        #   as STALE: the duplicate block it describes is NOT present in
+        #   the current code, the line numbers it cites (880-935, 798-816,
+        #   818-879) do not match the current file, and the regression
+        #   test it references (phase1/tests/test_p1_002_duplicate_block.py)
+        #   does not exist in the current codebase. The comment was
+        #   misleading future readers into thinking the bug was recently
+        #   fixed when in fact it was fixed many versions ago and the
+        #   comment itself was the only remaining artifact. DELETED.
         logger.info(
             "Persisted %d drug entity mappings to database",
             len(drug_mapping_df),

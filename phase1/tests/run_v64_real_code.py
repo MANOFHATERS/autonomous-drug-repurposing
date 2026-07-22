@@ -178,7 +178,7 @@ def step_5_pipeline_imports():
         "pipelines.disgenet_pipeline",
         "pipelines.omim_pipeline",
         "pipelines.pubchem_pipeline",
-        "pipelines._http_client",
+        "pipelines._chembl_http_client",  # P1-054: canonical name (shim deleted)
     ]
     for mod_name in modules:
         try:

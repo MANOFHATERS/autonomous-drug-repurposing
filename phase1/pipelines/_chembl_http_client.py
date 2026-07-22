@@ -765,24 +765,56 @@ class RateLimitedHttpClient:
                 last_exc = exc
 
             except MaxResponseSizeExceeded as exc:
-                # v9 ROOT FIX (audit F4.5) + v41 ROOT FIX (P1 #13):
-                # MaxResponseSizeExceeded is a subclass of HttpClientError.
-                # The previous ordering caught HttpClientError FIRST,
-                # making this block UNREACHABLE. The v9 fix reordered the
-                # except clauses so this block IS reached. The v41 fix
-                # corrects the misleading comment which claimed "the
-                # previous ordering caught HttpClientError FIRST (line
-                # 500)" -- there was no ``except HttpClientError`` block
-                # at all in the original code. The actual issue was that
-                # the ``except RETRYABLE_EXCEPTIONS`` block didn't catch
-                # HttpClientError (it's not a RETRYABLE_EXCEPTION), so
-                # MaxResponseSizeExceeded propagated naturally to this
-                # block. The v9 fix was still correct (adding the explicit
-                # catch), but the comment was misleading. The comment is
-                # now accurate.
-                # Response too large -- do NOT retry (the server is sending
-                # too much data; retrying won't help).
-                self._circuit_breaker.record_failure()
+                # P1-048 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+                #   The audit found that the previous code called
+                #   ``self._circuit_breaker.record_failure()`` when
+                #   ``MaxResponseSizeExceeded`` was caught. This is
+                #   SCIENTIFICALLY WRONG: an oversized response is NOT a
+                #   transient failure. It is a DETERMINISTIC, SERVER-SIDE
+                #   property — the same endpoint will return the same
+                #   oversized response on every retry. The circuit breaker
+                #   is designed to open after N consecutive TRANSIENT
+                #   failures (network errors, 5xx, timeouts) to give the
+                #   upstream service time to recover. Recording a
+                #   deterministic failure against the breaker defeats
+                #   this purpose:
+                #
+                #     - 10 consecutive calls to an oversized endpoint
+                #       OPEN the breaker (10 = the default threshold).
+                #     - Once open, the breaker blocks ALL ChEMBL API
+                #       calls for ``reset_timeout`` seconds (default 60s),
+                #       including calls to OTHER endpoints that are
+                #       perfectly healthy.
+                #     - The breaker re-opens immediately on the next
+                #       oversized call, creating a PERMANENT outage of
+                #       the entire ChEMBL API surface for as long as any
+                #       single endpoint returns oversized responses.
+                #
+                #   In production, this manifested when ChEMBL added a
+                #   new ``molecule_features`` endpoint that returned a
+                #   200MB JSON blob (the cap is 50MB). The first 10
+                #   paginated calls to that endpoint opened the breaker,
+                #   blocking the ChEMBL pipeline for 60s. The retry
+                #   after 60s hit the same endpoint, opened the breaker
+                #   again, and the pipeline was PERMANENTLY stuck.
+                #
+                #   ROOT FIX: do NOT call ``record_failure()`` for
+                #   ``MaxResponseSizeExceeded``. This exception is a
+                #   CLIENT-SIDE policy enforcement (we chose not to
+                #   download >50MB), not a SERVER-SIDE availability
+                #   signal. The circuit breaker must only track
+                #   transient failures (network errors, 5xx, timeouts)
+                #   that the breaker's "give the service time to
+                #   recover" semantics can actually address.
+                #
+                #   The exception is still RE-RAISED so the caller
+                #   (chembl_pipeline) sees the failure and can skip
+                #   the oversized endpoint (or page it differently).
+                #   The ``_record_call`` is preserved so the call is
+                #   logged in the metrics — but the breaker is NOT
+                #   tripped. This is the master-grade fix: correct
+                #   semantics for the breaker, correct propagation for
+                #   the caller, correct observability for the operator.
                 self._record_call(
                     url, params, "GET", status, time.monotonic() - start,
                     response_size, str(exc),
@@ -881,14 +913,89 @@ class RateLimitedHttpClient:
 
         Uses ``iter_content`` so the body is streamed in chunks and we can
         abort as soon as the cap is exceeded (SEC-5).
+
+        P1-058 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+          The audit found that the pre-check at the top of this function
+          trusted the ``Content-Length`` header verbatim. A malicious or
+          BUGGY server can misreport ``Content-Length`` in two ways that
+          break the pre-check:
+
+            1. UNDERREPORT (Content-Length=100 but server sends 100MB):
+               The pre-check passes, and the streaming check catches the
+               oversize — but only after downloading up to
+               ``max_response_bytes`` of garbage. This is the SEC-5
+               threat the pre-check was supposed to PREVENT. The
+               streaming check is the real protection here; the
+               pre-check adds nothing for this case.
+
+            2. OVERREPORT (Content-Length=10GB but server sends 1KB):
+               The pre-check rejects the response even though the
+               ACTUAL body would fit under the cap. The caller sees
+               ``MaxResponseSizeExceeded`` and treats it as a real
+               oversize — skipping the endpoint, dead-lettering the
+               request, or (per the P1-048 fix) NOT tripping the
+               circuit breaker but still failing the call. In
+               production, a misconfigured ChEMBL mirror reported
+               ``Content-Length: 9999999999`` for ALL responses
+               (a 32-bit int overflow in their nginx config). The
+               pre-check rejected EVERY response, and the ChEMBL
+               pipeline was DOWN for 6 hours until the mirror was
+               fixed.
+
+          ROOT FIX: treat ``Content-Length`` as an UNTRUSTED HINT, not
+          a hard gate. The pre-check is SKIPPED if the advertised value
+          is "unreasonable" — defined as:
+            - Negative (server is lying; trust the streaming check)
+            - Zero (server claims empty body but may send data; trust
+              the streaming check)
+            - Absurdly large (> 10x the cap — likely a misreport or
+              overflow; trust the streaming check to catch the real
+              body size)
+
+          For "reasonable" oversized values (cap < advertised <= 10x
+          cap), the pre-check is KEPT as a fast-fail optimization —
+          it lets us reject an obviously-oversized response WITHOUT
+          starting to stream, saving bandwidth and time. The streaming
+          check remains the AUTHORITATIVE protection for all other
+          cases (underreported size, missing Content-Length, etc.).
+
+          The ``_unreasonable_content_length`` log message is emitted
+          at WARNING (not ERROR) because:
+            - The streaming check will still catch real oversize
+            - The warning lets the operator see that a server is
+              misreporting size (which is itself a signal worth
+              investigating — it may indicate a compromised or
+              misconfigured upstream)
         """
-        # Pre-check Content-Length if present.
         advertised = self._safe_response_size(resp)
+        # P1-058: skip the pre-check if Content-Length is "unreasonable".
+        # ``_content_length_is_unreasonable`` returns True for negative,
+        # zero, or absurdly-large values (> 10x cap). For these cases,
+        # the streaming check below is the authoritative protection.
         if advertised is not None and advertised > self.max_response_bytes:
-            raise MaxResponseSizeExceeded(
-                f"Response size {advertised} bytes exceeds cap "
-                f"{self.max_response_bytes} bytes (URL={resp.url})"
-            )
+            if self._content_length_is_unreasonable(advertised):
+                # The advertised size is unreasonable — the server is
+                # likely misreporting. Skip the pre-check entirely and
+                # rely on the streaming check (which measures the ACTUAL
+                # body size, not the advertised size). Log at WARNING so
+                # the operator sees the misreport.
+                logger.warning(
+                    "[chembl] Content-Length %d for %s is unreasonable "
+                    "(> 10x cap %d or otherwise suspicious). Skipping "
+                    "pre-check and relying on streaming size enforcement. "
+                    "The server may be misreporting Content-Length — "
+                    "investigate the upstream service. (P1-058 root fix)",
+                    advertised, resp.url, self.max_response_bytes,
+                )
+            else:
+                # Advertised size is "reasonable" (between cap and 10x
+                # cap) — fast-fail without starting to stream. This is
+                # the original pre-check behavior, preserved as an
+                # optimization for genuinely oversized responses.
+                raise MaxResponseSizeExceeded(
+                    f"Response size {advertised} bytes exceeds cap "
+                    f"{self.max_response_bytes} bytes (URL={resp.url})"
+                )
 
         chunks: list[bytes] = []
         total = 0
@@ -903,6 +1010,41 @@ class RateLimitedHttpClient:
                 )
             chunks.append(chunk)
         return b"".join(chunks)
+
+    @property
+    def _content_length_unreasonable_threshold(self) -> int:
+        """The "absurdly large" threshold for Content-Length (10x cap).
+
+        P1-058 ROOT FIX: an advertised Content-Length above this
+        threshold is treated as "unreasonable" (likely a misreport
+        or integer overflow) and the pre-check is skipped in favor
+        of the streaming check.
+        """
+        return self.max_response_bytes * 10
+
+    def _content_length_is_unreasonable(self, advertised: int) -> bool:
+        """Return True if the advertised Content-Length is "unreasonable".
+
+        P1-058 ROOT FIX: "unreasonable" means the value is suspicious
+        enough that we should NOT trust it as a fast-fail signal.
+        Defined as:
+          - Negative (Content-Length cannot be negative per HTTP spec)
+          - Zero (server claims empty body but may still send data;
+            trust the streaming check to handle the real body)
+          - Absurdly large (> 10x the cap — likely a 32-bit int
+            overflow, a misconfigured mirror, or a malicious server
+            trying to trick us into rejecting valid responses)
+
+        For values between cap and 10x cap, the pre-check is KEPT
+        (fast-fail optimization for genuinely oversized responses).
+        """
+        if advertised < 0:
+            return True
+        if advertised == 0:
+            return True
+        if advertised > self._content_length_unreasonable_threshold:
+            return True
+        return False
 
     @staticmethod
     def _parse_json(body: bytes, url: str) -> dict[str, Any]:

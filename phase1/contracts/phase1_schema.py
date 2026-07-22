@@ -41,6 +41,61 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+# =============================================================================
+# P1-053 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+# TABLE OF CONTENTS — grep-able navigation aid for this 1314-line contract.
+# =============================================================================
+# The audit (P1-053) found that "the contract file is large. Finding a
+# specific source's spec requires scrolling." The root PROBLEM is
+# navigability — a reader looking for the spec for, say, ``disgenet_gda``
+# has to scroll through 800 lines of other specs to find it.
+#
+# ROOT FIX: this TOC provides O(1) navigation via grep or jump-to-line.
+# Each entry has the source key, the CSV filename, the line range, and a
+# one-line description. To find a source:
+#   1. Grep this TOC for the source key (e.g. ``grep -n "disgenet_gda"``)
+#   2. Jump to the listed line range
+#   3. Each source spec is also delimited by a grep-able section marker
+#      of the form ``# === SOURCE: <key> ===`` so you can grep directly
+#      for the section marker if you prefer.
+#
+# A full split into per-source files (``phase1/contracts/sources/<key>.py``)
+# was evaluated and DEFERRED because:
+#   - It would require creating 13 new files (1 _types.py + 11 sources + 1 __init__.py)
+#   - It would require updating every importer of ``phase1_schema.py`` to
+#     either keep importing from the re-export shim or migrate to the new
+#     per-source paths — a high-risk change for a LOW-severity issue.
+#   - The TOC + grep-able section markers solve the navigability problem
+#     (the audit's actual concern) with ZERO risk of breaking imports.
+#
+# Source specs (in declaration order):
+# ---------------------------------------------------------------------------
+#   KEY                     CSV FILENAME                              LINES    DESC
+# ---------------------------------------------------------------------------
+#   chembl_drugs            chembl_drugs.csv                          204-243  ChEMBL FDA-approved drugs (Compound source)
+#   chembl_activities       chembl_activities_clean.csv               250-312  ChEMBL bioactivity (Compound-Protein edges)
+#   drugs                   drugbank_drugs.csv                        321-408  DrugBank drugs (preferred Compound source)
+#   interactions            drugbank_interactions.csv                 415-437  DrugBank drug-protein interactions
+#   indications             drugbank_indications.csv                  444-475  DrugBank drug-indication mappings
+#   uniprot_proteins        uniprot_proteins.csv                      482-539  UniProt proteins (Protein node source)
+#   string_ppi              string_protein_protein_interactions.csv   546-579  STRING PPI (Pathway + Protein-Protein edges)
+#   disgenet_gda            disgenet_gene_disease_associations.csv    586-638  DisGeNET gene-disease associations
+#   omim_gda                omim_gene_disease_associations.csv        645-705  OMIM gene-disease (Mendelian)
+#   omim_susceptibility     omim_gene_disease_susceptibility.csv      712-741  OMIM susceptibility (complex disease)
+#   pubchem_enrichment      pubchem_enrichment.csv                    748-811  PubChem enrichment (Compound properties)
+# ---------------------------------------------------------------------------
+#
+# Helper functions and other sections:
+# ---------------------------------------------------------------------------
+#   PHASE1_CSV_FILENAMES                                              819-821  Flat dict of {key: filename}
+#   get_required_columns()                                            829-832  List of required column names
+#   get_any_of_groups()                                               835-838  List of any-of column groups
+#   get_optional_columns()                                            841-844  List of optional column names
+#   get_all_aliases()                                                 847-856  [filename] + aliases (Phase 2 bridge uses this)
+#   _REQUIRED_ID_COLUMNS                                              913-...  Canonical ID column per source
+#   get_required_id_column()                                          ...      Canonical ID column accessor
+# ---------------------------------------------------------------------------
+
 
 # =============================================================================
 # CONTRACT VERSION — Teammate 5 (P2→P1 Integration, P0 root fix)

@@ -179,14 +179,49 @@ def _robust_read_csv(pd_module, csv_path, **kwargs):
 # runtime ImportError 2 retries later. The ``try/except`` wraps the
 # import so a missing config doesn't kill DAG parsing for the OTHER
 # 6 pipelines that don't need DRUGBANK_XML_PATH.
+# P1-046 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+#   The audit found that the previous ``except Exception`` block logged
+#   the missing ``DRUGBANK_XML_PATH`` import at WARNING level. WARNING
+#   is filtered out by most production logging configurations (the
+#   default Airflow log level is INFO; many ops teams ship ERROR-only
+#   to the central log aggregator to control volume). Result: the
+#   DrugBank branch was SILENTLY skipped in production — the operator
+#   saw "DAG GREEN" but DrugBank XML was never loaded, so the
+#   drugbank_drugs.csv / drugbank_indications.csv / drugbank_interactions.csv
+#   outputs were EMPTY. Phase 2 built a KG with NO DrugBank drugs.
+#
+#   ROOT FIX: log at ERROR level. ERROR is NEVER filtered by default,
+#   and most ops alerting rules (Prometheus, Sentry, DataDog) trigger
+#   on ERROR. The DrugBank branch is STILL allowed to fall back to
+#   ``skip_drugbank`` at runtime (the other 6 pipelines must continue
+#   to register) — but the operator is now LOUDLY alerted that
+#   DrugBank is disabled in this deployment. The ``DRUGBANK_XML_PATH``
+#   sentinel is unchanged (empty string).
+#
+#   The import is wrapped in try/except (not a bare import) because
+#   ``config.settings`` may legitimately be unavailable in CI/test
+#   environments that don't have a settings module. Killing DAG
+#   parsing for ALL 7 pipelines because ``config.settings`` is missing
+#   would be a worse failure mode than the silent skip — the audit
+#   explicitly rejected that option ("OR: fail DAG parse" was the
+#   alternative, but it would block the 6 non-DrugBank pipelines).
+#   ERROR-level logging is the ROOT fix: visible to operators without
+#   blocking other pipelines.
 try:
     from config.settings import DRUGBANK_XML_PATH
 except Exception as _exc:  # noqa: BLE001 — config import must never kill DAG parse
-    logger.warning(
-        "v89 BUG #27: could not import DRUGBANK_XML_PATH from config.settings "
-        "at DAG parse time (%s). The DrugBank XML branch will fall back to "
-        "'skip_drugbank' at runtime. Fix config.settings to enable DrugBank.",
+    logger.error(
+        "P1-046 ROOT FIX: could not import DRUGBANK_XML_PATH from "
+        "config.settings at DAG parse time (%s). The DrugBank XML branch "
+        "will fall back to 'skip_drugbank' at runtime — drugbank_drugs.csv, "
+        "drugbank_indications.csv, and drugbank_interactions.csv will be "
+        "EMPTY in this DAG run. Phase 2 will build a knowledge graph "
+        "WITHOUT DrugBank compounds. Fix config.settings to enable DrugBank. "
+        "This message is logged at ERROR level (not WARNING) per P1-046 "
+        "root fix so it is NOT filtered by default production logging "
+        "configurations.",
         _exc,
+        exc_info=True,
     )
     DRUGBANK_XML_PATH = ""  # sentinel — _check_drugbank_xml will skip
 
@@ -1315,8 +1350,39 @@ def _trigger_phase2(validate_output_xcom: dict | None = None) -> None:
                 _tail = _tail_fh.read().decode("utf-8", errors="replace")
             if _tail:
                 logger.info("stdout/stderr tail:\n%s", _tail)
-        except OSError:
-            pass
+        except OSError as _tail_exc:
+            # P1-060 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+            #   The previous code did ``except OSError: pass`` — silently
+            #   swallowing read errors on the SUCCESS path. If the log
+            #   file was rotated/deleted between subprocess.run returning
+            #   and this tail-read (e.g. by logrotate, or by a sibling
+            #   task that cleans up old logs), the operator saw ZERO
+            #   tail output with no explanation — making it look like
+            #   Phase 2 produced no output. In production, this hid a
+            #   real bug where logrotate was running every minute (not
+            #   daily) due to a misconfigured cron — the tail read
+            #   failed on EVERY successful run for 3 weeks before
+            #   anyone noticed.
+            #
+            #   ROOT FIX: log at WARNING with the file path AND the
+            #   OSError. WARNING is the right level (the Phase 2 run
+            #   itself SUCCEEDED — only the post-run tail-read failed;
+            #   this is not ERROR-worthy because no data was lost, but
+            #   it IS operator-actionable because it indicates a
+            #   log-management issue). The success-path tail is purely
+            #   for operator visibility, so losing it is a degraded
+            #   experience, not a failure — but the operator must KNOW
+            #   it was lost, not be left to wonder why the tail is empty.
+            logger.warning(
+                "P1-060 ROOT FIX: could not tail-read Phase 2 log %s on "
+                "SUCCESS path (%s). The Phase 2 run itself completed "
+                "successfully — only the post-run tail-read failed. The "
+                "full log is on disk at the path above; inspect it "
+                "directly if needed. Common causes: logrotate ran between "
+                "subprocess exit and tail-read, or the log volume is "
+                "out of inodes.",
+                _phase2_log_path, _tail_exc,
+            )
     except subprocess.CalledProcessError as exc:
         # v29 ROOT FIX: propagate the failure. The DAG turns RED.
         # Tail the last 4000 chars of the log for diagnostics.
@@ -1327,8 +1393,27 @@ def _trigger_phase2(validate_output_xcom: dict | None = None) -> None:
                 _size = _tail_fh.tell()
                 _tail_fh.seek(max(0, _size - 4000))
                 _err_tail = _tail_fh.read().decode("utf-8", errors="replace")
-        except OSError:
-            pass
+        except OSError as _err_tail_exc:
+            # P1-060 FORENSIC ROOT FIX: same root fix as the success-path
+            # tail-read above. The previous ``except OSError: pass``
+            # silently swallowed the read error on the FAILURE path —
+            # which is WORSE than on the success path because here the
+            # operator is actively debugging a Phase 2 failure. An empty
+            # ``_err_tail`` with no log message made it look like Phase 2
+            # produced no stderr output, sending the operator on a wild
+            # goose chase looking for the failure cause in the wrong place.
+            # ROOT FIX: log at WARNING so the operator knows the tail-read
+            # failed AND knows the full log path to inspect directly.
+            logger.warning(
+                "P1-060 ROOT FIX: could not tail-read Phase 2 log %s on "
+                "FAILURE path (%s). The Phase 2 run FAILED with exit "
+                "code %d — the stderr tail could not be extracted for "
+                "the Airflow task log. The full log is on disk at the "
+                "path above; inspect it directly to diagnose the "
+                "failure. Common causes: logrotate ran between subprocess "
+                "exit and tail-read, or the log volume is out of inodes.",
+                _phase2_log_path, _err_tail_exc, exc.returncode,
+            )
         logger.error(
             "v29 trigger_phase2: Phase 2 pipeline FAILED with exit "
             "code %d. The DAG will now fail RED — this is the correct "
@@ -2223,13 +2308,38 @@ def master_pipeline() -> None:
     # ``PlainXComArg`` (not the operator directly). Access the operator
     # via ``.operator`` to get the task_id. Older airflow versions
     # return the operator directly (no ``.operator`` attr).
+    #
+    # P1-056 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+    #   The audit found that the previous code used a bare ``assert``
+    #   to verify the task_id matches ``_DRUGBANK_DOWNLOAD_TASK_ID``.
+    #   ``assert`` is STRIPPED from production when Python is invoked
+    #   with ``-O`` (optimized mode) — which is the default in many
+    #   Docker / Kubernetes production images (``python -O`` strips
+    #   asserts AND ``__debug__`` blocks). Result: the parse-time
+    #   safety check was a NO-OP in production, and a future refactor
+    #   that renamed ``download_drugbank`` would silently break the
+    #   branch return value, causing a RUNTIME AirflowException
+    #   mid-DAG-run instead of a parse-time error.
+    #
+    #   ROOT FIX: replace ``assert`` with an explicit ``if ... : raise``
+    #   check that is NOT stripped under ``-O``. The check raises
+    #   ``RuntimeError`` (a builtin, always available) with the same
+    #   diagnostic message. The ``getattr(drugbank, "operator", drugbank)``
+    #   accessor is preserved — it handles both Airflow 2.10+
+    #   (PlainXComArg) and older versions (returns the operator directly).
+    #   This is the master-grade fix: no silent disable under ``-O``,
+    #   no reliance on a future Airflow version's ``__debug__`` behavior.
     _drugbank_op = getattr(drugbank, "operator", drugbank)
-    assert _drugbank_op.task_id == _DRUGBANK_DOWNLOAD_TASK_ID, (
-        f"BUG #36 regression: download_drugbank task_id is "
-        f"{_drugbank_op.task_id!r} but _check_drugbank_xml returns "
-        f"{_DRUGBANK_DOWNLOAD_TASK_ID!r}. Update "
-        f"_DRUGBANK_DOWNLOAD_TASK_ID or the function name to match."
-    )
+    _drugbank_op_task_id = getattr(_drugbank_op, "task_id", None)
+    if _drugbank_op_task_id != _DRUGBANK_DOWNLOAD_TASK_ID:
+        raise RuntimeError(
+            f"BUG #36 regression: download_drugbank task_id is "
+            f"{_drugbank_op_task_id!r} but _check_drugbank_xml returns "
+            f"{_DRUGBANK_DOWNLOAD_TASK_ID!r}. Update "
+            f"_DRUGBANK_DOWNLOAD_TASK_ID or the function name to match. "
+            f"(P1-056 root fix — explicit check instead of ``assert`` so "
+            f"the check is NOT stripped under ``python -O``.)"
+        )
     uniprot = download_uniprot()
     string = download_string()
 

@@ -170,28 +170,31 @@ _WITHDRAWN_DRUG_NAMES_LOWER: frozenset[str] = frozenset({
     "phenformin", "dbi",
     # Anti-gout withdrawn 1979 for bone-marrow suppression
     "benzbromarone",
-    # HMG-CoA reductase inhibitor withdrawn 2001 for rhabdomyolysis
-    "cerivastatin",  # already above; kept for safety on dedup
     # Antibiotic withdrawn for severe cutaneous adverse reactions
     "telithromycin", "ketek",
     # Psoriasis therapy withdrawn 1996 for hepatotoxicity
+    # (also withdrawn 1983 as antihypertensive — same molecule, same
+    # hepatotoxicity signal; listed once, not duplicated)
     "ticrynafen", "selacryn",
-    # Antihypertensive withdrawn 1983 for hepatotoxicity
-    "ticrynafen",  # dedup-safe
-    # 5-HT agonist withdrawn 2003 for cardiac valvulopathy
-    "fenfluramine",  # already above; kept for safety on dedup
     # Antipsychotic withdrawn for QT prolongation (serevent-related)
     "sertindole", "serdolect",
     # Dopamine agonist withdrawn for fibrotic complications
     "pergolide", "permax",
     # H1 antihistamine withdrawn for hepatotoxicity (second-generation)
     "nefazodone", "serzone",
-    # Antibiotic withdrawn for cholestatic hepatitis
-    "trovafloxacin",  # already above; kept for safety on dedup
-    # GI motility agent withdrawn for cardiac risks
-    "cisapride",  # already above; kept for safety on dedup
-    # Antidepressant / smoking cessation withdrawn for neuropsychiatric SAEs
-    "rimonabant",  # already above; kept for safety on dedup
+    # P1-059 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+    #   The audit found that the previous code had DUPLICATE entries
+    #   for ``cerivastatin``, ``fenfluramine``, ``trovafloxacin``,
+    #   ``cisapride``, ``rimonabant``, and ``ticrynafen`` (listed twice).
+    #   Each duplicate had a misleading comment like "already above;
+    #   kept for safety on dedup" or "dedup-safe". The comments were
+    #   FALSE: ``frozenset`` deduplicates automatically, so the
+    #   duplicates had ZERO behavioral effect — they were pure noise
+    #   that misled readers into thinking the dedup was a manual
+    #   safety mechanism when in fact it was an automatic property of
+    #   the ``frozenset`` constructor. The duplicates have been
+    #   REMOVED and the misleading comments DELETED. The set's
+    #   membership is UNCHANGED (frozenset already deduplicated them).
 })
 
 # ---------------------------------------------------------------------------
@@ -2055,6 +2058,246 @@ def _merge_group(group: pd.DataFrame) -> pd.Series:
 # ===========================================================================
 
 
+# P1-050 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+#   Bisection helper for bulk_upsert_drugs. When a batch INSERT fails,
+#   this function splits the batch into 2 halves and retries each. When
+#   a single-row "batch" fails, THAT row is the bad row — it is dead-
+#   lettered. This is O(log N) retries per bad row, NOT O(N) row-by-row.
+#
+#   The helper is module-level (not nested in bulk_upsert_drugs) so it
+#   can be unit-tested directly. It updates the passed-in ``result``
+#   UpsertResult in place (inserted, updated, failed, quarantined).
+#
+#   Recursion depth is bounded by ``_MAX_BISECT_DEPTH`` (default 14,
+#   which handles batches up to 2^14 = 16384 rows — larger than the
+#   default ``DEFAULT_BATCH_SIZE`` of 1000). At depth 0, the function
+#   tries the FULL chunk. If it fails, it splits and recurses to depth
+#   1, etc. At max depth, single-row failures are dead-lettered.
+_BISECT_MAX_DEPTH: int = 14
+
+
+def _upsert_drug_batch_with_bisect(
+    session: Session,
+    chunk: list[dict],
+    updatable_cols: list[str],
+    dialect_insert,
+    result: UpsertResult,
+    chunk_idx: int,
+    depth: int,
+) -> None:
+    """INSERT a chunk of drug records with bisection fallback.
+
+    Tries the full chunk first. If the INSERT fails, splits the chunk
+    into 2 halves and recurses on each. At max depth (or chunk size 1),
+    a failure is dead-lettered as a single bad row.
+
+    Updates ``result`` in place. Does NOT raise — all failures are
+    caught and recorded via ``result.failed`` + dead-letter queue.
+
+    P1-050 ROOT FIX: this replaces the previous row-by-row fallback
+    which was O(N) per bad row AND silently broken (PendingRollbackError
+    poisoned the session, dead-lettering ALL rows in the failed chunk).
+    """
+    if not chunk:
+        return
+
+    # Base case: single row. Try to INSERT it. If it fails, this IS
+    # the bad row — dead-letter it.
+    if len(chunk) == 1 or depth >= _BISECT_MAX_DEPTH:
+        if len(chunk) == 1:
+            _try_insert_drug_records(
+                session=session,
+                chunk=chunk,
+                updatable_cols=updatable_cols,
+                dialect_insert=dialect_insert,
+                result=result,
+                chunk_idx=chunk_idx,
+                depth=depth,
+                on_failure_dead_letter=True,
+            )
+        else:
+            # Max depth reached with a multi-row chunk — fall back to
+            # single-row attempts to identify the bad row(s). This is
+            # the "last resort" path; under normal operation (depth
+            # bounded by log2(chunk_size)), we never reach here. The
+            # single-row attempts are O(N) but only for the SMALL
+            # remaining chunk (<= 2^_BISECT_MAX_DEPTH rows after
+            # halving), not the original 10,000-row batch.
+            logger.warning(
+                "bulk_upsert_drugs: bisection reached max depth %d "
+                "with %d rows remaining. Falling back to single-row "
+                "INSERT for this small remainder. (P1-050 root fix)",
+                depth, len(chunk),
+            )
+            for record in chunk:
+                _try_insert_drug_records(
+                    session=session,
+                    chunk=[record],
+                    updatable_cols=updatable_cols,
+                    dialect_insert=dialect_insert,
+                    result=result,
+                    chunk_idx=chunk_idx,
+                    depth=depth,
+                    on_failure_dead_letter=True,
+                )
+        return
+
+    # Recursive case: try the full chunk. If it succeeds, return. If
+    # it fails, split into 2 halves and recurse.
+    inserted = _try_insert_drug_records(
+        session=session,
+        chunk=chunk,
+        updatable_cols=updatable_cols,
+        dialect_insert=dialect_insert,
+        result=result,
+        chunk_idx=chunk_idx,
+        depth=depth,
+        on_failure_dead_letter=False,  # don't dead-letter yet — bisect
+    )
+    if inserted:
+        return
+
+    # The full chunk failed. Rollback to clear the poisoned session
+    # state, then split and recurse.
+    try:
+        session.rollback()
+    except Exception as rb_exc:  # noqa: BLE001
+        logger.warning(
+            "bulk_upsert_drugs: session.rollback() at bisection depth "
+            "%d raised %s. Subsequent INSERTs may fail. (P1-050 root fix)",
+            depth, rb_exc,
+        )
+
+    mid = len(chunk) // 2
+    left_half = chunk[:mid]
+    right_half = chunk[mid:]
+    logger.info(
+        "bulk_upsert_drugs: bisection depth %d — splitting chunk %d "
+        "(size=%d) into left=%d + right=%d. (P1-050 root fix)",
+        depth, chunk_idx, len(chunk), len(left_half), len(right_half),
+    )
+    _upsert_drug_batch_with_bisect(
+        session=session,
+        chunk=left_half,
+        updatable_cols=updatable_cols,
+        dialect_insert=dialect_insert,
+        result=result,
+        chunk_idx=chunk_idx,
+        depth=depth + 1,
+    )
+    _upsert_drug_batch_with_bisect(
+        session=session,
+        chunk=right_half,
+        updatable_cols=updatable_cols,
+        dialect_insert=dialect_insert,
+        result=result,
+        chunk_idx=chunk_idx,
+        depth=depth + 1,
+    )
+
+
+def _try_insert_drug_records(
+    session: Session,
+    chunk: list[dict],
+    updatable_cols: list[str],
+    dialect_insert,
+    result: UpsertResult,
+    chunk_idx: int,
+    depth: int,
+    on_failure_dead_letter: bool,
+) -> bool:
+    """Try to INSERT a chunk of drug records. Return True on success.
+
+    On success: updates ``result.inserted`` / ``result.updated`` (via
+    ``_count_upsert_inserts_updates``) and returns True.
+
+    On failure:
+      - If ``on_failure_dead_letter`` is True (single-row path): dead-
+        letters each failed record, updates ``result.failed``, rolls
+        back the session, returns False.
+      - If ``on_failure_dead_letter`` is False (bisection path): rolls
+        back the session, returns False WITHOUT updating ``result.failed``
+        (the caller — bisection — will retry with smaller batches and
+        update ``result`` on the eventual success or single-row failure).
+
+    P1-050 ROOT FIX: this helper exists so the bisection logic and the
+    single-row path share the SAME INSERT + count + rollback logic.
+    """
+    if not chunk:
+        return True
+    try:
+        # Column alignment (same logic as the original batch INSERT).
+        valid_drug_columns: set[str] = set(Drug.__table__.columns.keys())
+        filtered_chunk = [
+            {k: v for k, v in record.items() if k in valid_drug_columns}
+            for record in chunk
+        ]
+        if not filtered_chunk:
+            return True
+        all_keys: set[str] = set().union(*[r.keys() for r in filtered_chunk])
+
+        stmt = dialect_insert(Drug.__table__).values(filtered_chunk)
+        update_dict = {
+            col: stmt.excluded[col]
+            for col in updatable_cols
+            if col in all_keys
+        }
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["inchikey"],
+            set_=update_dict,
+        )
+        _ins, _upd = _count_upsert_inserts_updates(
+            session, stmt, len(filtered_chunk),
+            conflict_keys=["inchikey"],
+            chunk_records=filtered_chunk,
+            target_table=Drug.__table__,
+        )
+        result.inserted += _ins
+        result.updated += _upd
+        return True
+    except Exception as exc:
+        if on_failure_dead_letter:
+            # Single-row path: this row IS the bad row. Dead-letter it.
+            logger.warning(
+                "bulk_upsert_drugs: single-row INSERT failed at "
+                "bisection depth %d (inchikey=%s): %s. Dead-lettering. "
+                "(P1-050 root fix)",
+                depth,
+                chunk[0].get("inchikey", "UNKNOWN") if chunk else "UNKNOWN",
+                exc,
+            )
+            for record in chunk:
+                _add_to_dead_letter(
+                    record,
+                    f"{type(exc).__name__}: {exc} (P1-050 bisection "
+                    f"isolated this row as the bad row at depth {depth})",
+                    "bulk_upsert_drugs",
+                )
+                result.failed += 1
+        else:
+            # Bisection path: don't dead-letter yet — the caller will
+            # split and retry. Just log at debug so the operator can
+            # trace the bisection if needed.
+            logger.debug(
+                "bulk_upsert_drugs: batch INSERT failed at bisection "
+                "depth %d (size=%d): %s. Will split and retry. "
+                "(P1-050 root fix)",
+                depth, len(chunk), exc,
+            )
+        # Rollback to clear the poisoned session state so the next
+        # INSERT (in the bisection recursion or the next chunk) can
+        # auto-begin a fresh transaction.
+        try:
+            session.rollback()
+        except Exception as rb_exc:  # noqa: BLE001
+            logger.warning(
+                "bulk_upsert_drugs: session.rollback() after INSERT "
+                "failure at depth %d raised %s. (P1-050 root fix)",
+                depth, rb_exc,
+            )
+        return False
+
+
 def bulk_upsert_drugs(
     session: Session,
     df: pd.DataFrame,
@@ -2334,35 +2577,93 @@ def bulk_upsert_drugs(
                 result.updated += _upd
 
             except Exception as exc:
+                # P1-050 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+                #   The audit found that the previous code fell back to
+                #   ROW-BY-ROW INSERT on batch failure. For a 10,000-row
+                #   batch, this is 10,000 individual INSERTs — 100-1000x
+                #   slower than the batch INSERT. Worse, the row-by-row
+                #   fallback was SILENTLY BROKEN: when a batch INSERT
+                #   raises IntegrityError, the SQLAlchemy session enters
+                #   a "poisoned" state (PendingRollbackError). Every
+                #   subsequent ``session.execute()`` in the row-by-row
+                #   fallback would raise ``PendingRollbackError`` — so
+                #   EVERY row in the fallback was dead-lettered with a
+                #   confusing error message, NOT just the actually-bad
+                #   row. The operator saw "10,000 rows failed" when only
+                #   1 row was actually bad. The 9,999 good rows were
+                #   silently dropped.
+                #
+                #   ROOT FIX (master-grade, no sugar-coating):
+                #     1. Call ``session.rollback()`` IMMEDIATELY after
+                #        the batch failure to clear the poisoned session
+                #        state. Without this, ALL subsequent executes
+                #        in this function would raise PendingRollbackError.
+                #        The rollback only affects the CURRENT auto-begun
+                #        transaction (SQLAlchemy 2.0 auto-begins a
+                #        transaction per execute() if one isn't active);
+                #        it does NOT rollback work done by the caller in
+                #        an outer transaction (the caller's begin() is
+                #        unaffected by an inner rollback() — savepoints
+                #        would be needed for that, but this function
+                #        does not use savepoints and the caller does not
+                #        expect them).
+                #     2. Replace the row-by-row fallback with a
+                #        BISECTION strategy: split the failed chunk into
+                #        2 halves and retry each. If a half fails, split
+                #        again. When a single-row "batch" fails, THAT
+                #        row is the bad row — dead-letter it. This is
+                #        O(log N) retries per bad row, NOT O(N). For a
+                #        10,000-row batch with 1 bad row, bisection does
+                #        ~14 INSERT attempts (log2(10000) ≈ 14); the
+                #        previous row-by-row did 10,000 INSERT attempts.
+                #     3. The bisection correctly identifies and
+                #        quarantines ONLY the bad row(s). Good rows in
+                #        the same chunk are still inserted (via the
+                #        successful half-batches). The previous code
+                #        dead-lettered ALL rows in the failed chunk,
+                #        losing good data.
+                #     4. Each bisection half-batch goes through the SAME
+                #        column-alignment + on_conflict_do_update logic
+                #        as the original batch (via a helper function),
+                #        so the upsert semantics are preserved exactly.
+                #        The helper is defined below as
+                #        ``_upsert_drug_batch`` for testability.
                 logger.error(
-                    "bulk_upsert_drugs: chunk %d failed: %s", chunk_idx, exc
+                    "bulk_upsert_drugs: chunk %d failed (size=%d): %s. "
+                    "Rolling back session and falling back to BISECTION "
+                    "(not row-by-row) to identify the bad row(s). "
+                    "(P1-050 root fix)",
+                    chunk_idx, len(valid_chunk), exc,
                 )
-                result.failed += len(valid_chunk)
-                # Row-by-row fallback (REL-01)
-                for record in valid_chunk:
-                    try:
-                        stmt = dialect_insert(Drug.__table__).values([record])
-                        update_dict = {
-                            col: stmt.excluded[col]
-                            for col in updatable_cols
-                            if col in record
-                        }
-                        stmt = stmt.on_conflict_do_update(
-                            index_elements=["inchikey"],
-                            set_=update_dict,
-                        )
-                        session.execute(stmt)
-                        result.inserted += 1
-                        result.failed -= 1
-                    except Exception as row_exc:
-                        logger.warning(
-                            "bulk_upsert_drugs: row failed (inchikey=%s): %s",
-                            record.get("inchikey", "UNKNOWN"),
-                            row_exc,
-                        )
-                        _add_to_dead_letter(
-                            record, str(row_exc), "bulk_upsert_drugs"
-                        )
+                # Step 1: rollback to clear the poisoned session state.
+                # Without this, every subsequent execute() raises
+                # PendingRollbackError. The rollback is safe because the
+                # batch INSERT was atomic (it either fully committed or
+                # fully rolled back at the DB level); the rollback here
+                # only clears the SESSION state, not the DB state.
+                try:
+                    session.rollback()
+                except Exception as rb_exc:  # noqa: BLE001
+                    logger.warning(
+                        "bulk_upsert_drugs: session.rollback() after "
+                        "batch failure raised %s. The session may be in "
+                        "an inconsistent state. Subsequent bisection "
+                        "INSERTs may fail. (P1-050 root fix)",
+                        rb_exc,
+                    )
+                # Step 2: bisection. The helper does the actual INSERT
+                # retry with halving. It updates ``result`` in place
+                # (inserted, updated, failed, quarantined) and dead-
+                # letters the bad row(s).
+                _upsert_drug_batch_with_bisect(
+                    session=session,
+                    chunk=valid_chunk,
+                    updatable_cols=updatable_cols,
+                    dialect_insert=dialect_insert,
+                    result=result,
+                    chunk_idx=chunk_idx,
+                    depth=0,
+                )
 
             processed = result.inserted + result.quarantined + result.failed
             if (chunk_idx + 1) % log_interval == 0 or processed >= total:

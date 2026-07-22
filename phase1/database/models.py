@@ -313,16 +313,37 @@ _SEQUENCE_RE: re.Pattern[str] = re.compile(
 #: P1-ER-3 ROOT FIX: pattern synchronized with normalizer.py / base.py /
 #: models.py -- DO NOT diverge (audit P1-ER-3).
 try:
+    # P1-055 FORENSIC ROOT FIX (Teammate 4 — hostile-auditor pass):
+    #   The audit found that ``CANONICAL_INCHIKEY_REGEX`` was imported
+    #   under the alias ``_STANDARD_INCHIKEY_RE``. The alias created
+    #   naming confusion: the SAME regex was referenced under different
+    #   names across the codebase (``CANONICAL_INCHIKEY_REGEX`` in
+    #   _constants, ``_INCHIKEY_PATTERN`` in normalizer, ``_STANDARD_INCHIKEY_RE``
+    #   here in models). This is exactly the kind of "schema drift" the
+    #   audit flags as a silent-data-loss risk: if a future edit changes
+    #   the canonical regex but misses this alias, the alias becomes a
+    #   STALE copy that validates against the OLD pattern.
+    #
+    #   ROOT FIX: import under the CANONICAL name ``CANONICAL_INCHIKEY_REGEX``
+    #   directly (no alias). The internal reference at line 369 has been
+    #   updated to use the canonical name. The deprecated ``_STANDARD_INCHIKEY_RE``
+    #   alias is KEPT as a backward-compat shim (assigned to the canonical
+    #   regex) so any external caller that imports it continues to work,
+    #   but it is NOT part of the public API and will be removed in a
+    #   future version after all callers are migrated.
     from cleaning._constants import (
-        CANONICAL_INCHIKEY_REGEX as _STANDARD_INCHIKEY_RE,  # noqa: F401
+        CANONICAL_INCHIKEY_REGEX,  # canonical name — use this directly
     )
 except ImportError:
     # Fallback (test isolation / partial install): replicate the canonical
     # pattern EXACTLY. See the docstring of ``CANONICAL_INCHIKEY_REGEX``
     # in cleaning/_constants.py for the full rationale.
-    _STANDARD_INCHIKEY_RE: re.Pattern[str] = re.compile(
+    CANONICAL_INCHIKEY_REGEX: re.Pattern[str] = re.compile(
         r"^[A-Z]{14}-[A-Z]{10}-[A-Z]$"
     )
+# P1-055: backward-compat alias — DEPRECATED. Use ``CANONICAL_INCHIKEY_REGEX``
+# directly. This alias will be removed in a future version.
+_STANDARD_INCHIKEY_RE: re.Pattern[str] = CANONICAL_INCHIKEY_REGEX  # noqa: F401  # DEPRECATED
 
 # ===========================================================================
 # Internal validation helpers (SCI-04, SCI-05, SCI-08, SCI-01, SCI-02)
@@ -363,10 +384,12 @@ def _validate_inchikey(value: Optional[str]) -> Optional[str]:
         # the fallback branch -- it must mirror the canonical validator.
         # P1-ER-3 ROOT FIX: pattern synchronized with normalizer.py /
         # base.py / models.py -- DO NOT diverge.
-        # v35 ROOT FIX (issue 28): ``_STANDARD_INCHIKEY_RE`` is now
+        # v35 ROOT FIX (issue 28): ``CANONICAL_INCHIKEY_REGEX`` is now
         # imported from ``cleaning._constants`` (single source of truth).
+        # P1-055 ROOT FIX: use the canonical name directly (the
+        # ``_STANDARD_INCHIKEY_RE`` alias is DEPRECATED).
         upper = value.upper()
-        if _STANDARD_INCHIKEY_RE.match(value):
+        if CANONICAL_INCHIKEY_REGEX.match(value):
             return value
         if upper.startswith("SYNTH"):
             # P1-063/068 ROOT FIX: normalize SYNTH keys to uppercase.
