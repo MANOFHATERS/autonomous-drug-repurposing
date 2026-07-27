@@ -11,7 +11,7 @@
 # Dev / CI dependencies (NOT needed for production runtime).
 pytest>=7.4.0,<9.0
 pytest-cov>=4.1.0,<6.0
-pytest-mock>=3.10.0,<4.0
+pytest-mock>=3.15.1,<4.0
 responses>=0.24.0,<1.0  # for mocking HTTP requests in tests
 
 # v129 TM16 ROOT FIX (Tasks 16.1 + 16.4): CI security + type-checking deps.
