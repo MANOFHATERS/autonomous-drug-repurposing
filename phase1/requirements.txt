@@ -154,7 +154,7 @@ pandas>=2.1.4,<3.0
 # FastAPI already pulls pydantic as a transitive dep, but pinning it
 # explicitly here ensures the v2 API (field_validator, ConfigDict) is
 # available.
-pydantic>=2.5,<3.0
+pydantic>=2.13.4,<3.0
 
 # v39 ROOT FIX (P1 #66): added filelock and pyarrow. base_pipeline.py
 # imports filelock with a try/except fallback, but the fallback sets
