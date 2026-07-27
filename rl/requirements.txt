@@ -113,7 +113,7 @@ prometheus-client>=0.20,<1.0
 # psutil: imported by rl/rl_drug_ranker.py for system metrics in the
 # scientific_validation report. Without it, the report's memory/CPU
 # fields are silently omitted.
-psutil>=5.9,<7.0
+psutil>=7.2.2,<8.0
 
 # certifi: required by Bio.Entrez HTTPS calls to PubMed. Without it,
 # biopython uses the system CA bundle (which may be missing in slim
