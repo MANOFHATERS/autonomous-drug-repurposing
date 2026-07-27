@@ -89,7 +89,7 @@ pyyaml>=6.0,<7.0
 # The previous `fastapi>=0.139.2` was a future version (latest stable
 # fastapi is 0.115.x as of 2024-12) — `pip install` would fail.
 fastapi>=0.110,<1.0
-uvicorn[standard]>=0.27,<1.0
+uvicorn[standard]>=0.51.0,<1.0
 
 # ─── Indirect but explicitly pinned for reproducibility ────────────────────
 # prometheus-client: imported by rl/rl_drug_ranker.py for the
