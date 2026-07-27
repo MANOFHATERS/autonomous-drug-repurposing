@@ -1501,7 +1501,7 @@ jobs:
           echo "=== Coverage gate PASSED (>= 70%) ==="
       - name: Upload coverage to Codecov
         if: always()
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: coverage.xml
           fail_ci_if_error: false   # codecov upload failure should NOT fail CI
