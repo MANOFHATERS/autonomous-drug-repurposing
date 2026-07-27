@@ -51,7 +51,7 @@ numpy>=2.0,<3.0
 # would fail with `No matching distribution found for scikit-learn>=1.9.0`.
 # Root cause: someone bumped the major version assuming semver increments
 # without checking PyPI. ROOT FIX: pin to a real version range.
-scikit-learn>=1.3,<2.0
+scikit-learn>=1.9.0,<2.0
 
 # ─── Deep learning (CPU-only by default; GPU via Dockerfile.gpu) ──────────
 # v122 IN-080 FIX: pin torch to a version that ACTUALLY EXISTS on PyPI.
