@@ -44,7 +44,7 @@ pandas>=2.1.4,<3.0
 # version that did not exist (latest as of 2024-12 is 2.1.x; latest as of
 # 2026-07 is 2.3.x). pip install failed.
 # ROOT FIX: pin to `>=2.0,<3.0` (the issue-spec conservative range).
-numpy>=2.0,<3.0
+numpy>=2.2.6,<3.0
 # v122 IN-080 FIX: pin scikit-learn to a version that ACTUALLY EXISTS on
 # PyPI. The previous `scikit-learn>=1.9.0` was a future version that does
 # not exist (latest is 1.5.x as of 2024-12) — `pip install -r rl/requirements.txt`
