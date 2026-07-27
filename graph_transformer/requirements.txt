@@ -69,9 +69,9 @@ rapidfuzz>=3.14.5,<4.0
 # P3-001 ROOT FIX: rdkit pin corrected. The previous `rdkit>=2026.3.4`
 # was a future calendar version that does NOT exist on PyPI. RDKit uses
 # calendar versioning (YYYY.M.x); 2024.3.x / 2024.9.x are the latest
-# stable releases. The lock file uses `rdkit>=2024.3.1,<2025.0` -- we
+# stable releases. The lock file uses `rdkit>=2026.3.4,<2027.0` -- we
 # match it here so dev and lock installs produce the same environment.
-rdkit>=2024.3.1,<2025.0
+rdkit>=2026.3.4,<2027.0
 # P3-025 ROOT FIX (v113 forensic): scipy.sparse is required for the
 # pathway_score computation in gt_rl_bridge.py. The previous code
 # allocated two dense (num_pathways, num_diseases) and (num_drugs,
