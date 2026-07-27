@@ -44,7 +44,7 @@
 # so `pip install -r graph_transformer/requirements.txt` produces the
 # SAME environment as `pip install -r requirements.txt`. Bounds are
 # validated against PyPI as of 2024-12.
-torch>=2.2.0,<2.6.0
+torch>=2.13.0,<2.14.0
 torch-geometric>=2.5.0,<2.7.0
 torch-scatter>=2.1.2,<2.2.0
 torch-sparse>=0.6.18,<0.7.0
