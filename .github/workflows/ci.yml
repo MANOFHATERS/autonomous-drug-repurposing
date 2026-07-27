@@ -1064,7 +1064,7 @@ jobs:
           ls -la ../sbom-npm.cdx.json
 
       - name: Upload SBOM artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-cyclonedx
           path: |
@@ -1104,7 +1104,7 @@ jobs:
 
       - name: Upload Trivy report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trivy-report
           path: trivy-report.txt
@@ -1154,7 +1154,7 @@ jobs:
           fi
           echo "OK: .next/standalone/server.js exists ($(stat -c%s .next/standalone/server.js) bytes)"
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-standalone-build
           path: frontend/.next/standalone/
@@ -1253,7 +1253,7 @@ jobs:
           echo "=== Frontend Playwright E2E PASSED ==="
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: frontend/playwright-report/
@@ -1426,7 +1426,7 @@ jobs:
           echo "=== bandit PASSED — no HIGH+ security issues ==="
       - name: Upload bandit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bandit-report
           path: bandit-report.json
@@ -1508,7 +1508,7 @@ jobs:
           verbose: true
       - name: Upload coverage HTML report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-html
           path: coverage-html/
